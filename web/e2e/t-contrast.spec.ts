@@ -1,11 +1,15 @@
 /** UI-02（R2/R3）对比度与排版地板回归锁 + U-1 review 加固项。
  *
  *  锁（暗/亮两主题各一遍）：
- *  1. 会话元数据（.session-item-meta）与行尾会话 id（.session-item-id，#1370）
- *     ≥12px 且对比度 ≥4.5:1
- *  2. 时间线序号（.tl-seq）≥12px 且对比度 ≥4.5:1
+ *  1. 会话元数据（.session-item-meta）与 meta 行会话 id（.session-item-id，#1399）
+ *     ≥12px 且对比度 ≥4.5:1；id 色 == --text-tertiary（等值断言）
+ *  2. （原「时间线序号 .tl-seq ≥12px + ≥4.5」）#1419（`20668238`）删除了 `.tl-seq` /
+ *     `.tl-type` 两个独立节点，事件序号与类型名合并进 `.tl-meta-text`
+ *     （`StepDetail.tsx:2357`，色 `var(--fx-ghost)`，`app.css:6833`）——该条地板锁随元素
+ *     消失作废（陈旧列表项由 #1465/PR #1475 摘除，本文件不动那处）；它的墨色来源改由
+ *     第 4 条的等值断言继续钉住。
  *  3. composer placeholder 对比度 ≥4.5:1
- *  4. 时间线事件类型名（.tl-type）== 解析后的 --color-muted-foreground（R1，等值断言）
+ *  4. 时间线 meta 行墨色（.tl-meta-text）== 解析后的 --fx-ghost（R1，等值断言）
  *  5. U-1 review 新增 ink 元素：.approval-chip / .approval-deny .approval-kbd /
  *     .composer-locked-hint 对比度 ≥4.5:1（写 UI 时新立的三处，不许回退）
  *  6. #1030 / #1136 的 ink-mix 使用点：.run-pulse.pulse-awaiting-decision、恢复冲突条，
@@ -34,6 +38,7 @@ import {
   PERMISSION_MODES,
   REASONING_EFFORTS,
   SID,
+  clickTopBarMenuItem,
   criterion,
   evidenceRecord,
   fulfillSse,
@@ -205,10 +210,10 @@ function contrast(fg: [number, number, number, number], bg: [number, number, num
  *  三个夹具各自走一条**真实渲染路径**（不是 createElement 影子元素），因此把字色
  *  改回纯 --danger #cf4a46 / --info #4a6fd6 / --warning #b07a10 时对应用例必然变红。 */
 
-/** `.app-error`（分叉失败横幅，App.tsx:1433 forkError）夹具：两轮已完成会话。
+/** `.app-error`（分叉失败横幅，App.tsx:1997 forkError）夹具：两轮已完成会话。
  *  为什么是这个夹具：只有「第 2 轮的 .fork-btn + 后端 422」才经 handleFork 的
  *  catch 走到 `setForkError`，渲染出 className="app-error" role="alert"
- *  （App.tsx:1434）——真实路径。user/message 的 seq 与 turn 序号刻意错开
+ *  （App.tsx:1998）——真实路径。user/message 的 seq 与 turn 序号刻意错开
  *  （2 / 30，照 b-fork.spec.ts 同型夹具），避免「锚点误用 turn 序号」的回归把
  *  本用例干扰成另一种失败。 */
 const FORK_SID = 's-contrast-fork';
@@ -237,7 +242,7 @@ function forkTwoTurnEvents(): FrameSpec[] {
   ];
 }
 
-/** `.app-notice`（worktree 隔离横幅，App.tsx:1419 worktreeNotice）夹具：
+/** `.app-notice`（worktree 隔离横幅，App.tsx:1982 worktreeNotice）夹具：
  *  alpha 空项目 + beta 一条会话（照 u-project-task.spec.ts 的 baseMock），创建会话
  *  的响应带 `X-Worktree-Path` 头。为什么是这个夹具：只有「项目内新建任务」这条
  *  路径经 handleStartTaskInProject 传 onWorktreeCreated 回调，才把该横幅
@@ -263,7 +268,7 @@ function worktreeStartFrames(task: string): FrameSpec[] {
   ];
 }
 
-/** `.recover-btn`（App.tsx:1447「恢复会话」按钮）夹具：崩溃会话（run 无终态 +
+/** `.recover-btn`（App.tsx:2017「恢复会话」按钮）夹具：崩溃会话（run 无终态 +
  *  一条未配对 tool/call，isRecoverableRun 为真），照 recovery-w13.spec.ts 的
  *  crashedEvents 同型。为什么是这个夹具：只有 canRecover 为真才渲染该按钮，
  *  它的正文色是 --warning、底色 14% 染色（hover 22%）——两个态都要量，因为 hover
@@ -345,25 +350,25 @@ async function openTaskReview(
 for (const theme of ['dark', 'light'] as const) {
   test(`[${theme}] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3）`, async ({ page }) => {
     await openWorkspace(page, theme);
-    for (const selector of ['.session-item-meta', '.session-item-id', '.tl-seq']) {
+    for (const selector of ['.session-item-meta', '.session-item-id']) {
       const m = await measure(page, selector);
       expect(m.fontSize, `${selector} font-size`).toBe('12px');
       const ratio = contrast(m.color, m.bg);
       expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
     }
-    // #1370 P0-7：id 的提升是「第三级 → 第二级」；只量 ≥4.5 时回退到 tertiary
-    // （暗 5.7 / 亮 5.4）仍然绿，锁不住本票的语义。等值断言与 `.tl-type` 同法。
-    const [idColor, secondary] = await page.evaluate(() => {
+    // #1399 定版（#1465 仲裁）：ID 下移到 meta 行后是**第三级**文字，与 meta 同色；
+    // 只量 ≥4.5 时换成任一更亮的 token 也仍然绿，锁不住语义。等值断言与 `.tl-type` 同法。
+    const [idColor, tertiary] = await page.evaluate(() => {
       const el = document.querySelector('.session-item-id');
       if (!el) throw new Error('no .session-item-id');
       const probe = document.createElement('div');
-      probe.style.color = 'var(--text-secondary)';
+      probe.style.color = 'var(--text-tertiary)';
       document.body.appendChild(probe);
       const v = getComputedStyle(probe).color;
       probe.remove();
       return [getComputedStyle(el).color, v];
     });
-    expect(idColor).toBe(secondary);
+    expect(idColor).toBe(tertiary);
   });
 
   /* #1269：项目语境武装提示（.rail-project-armed-hint）——本轮新立的行内 ink，按本轮
@@ -467,20 +472,23 @@ for (const theme of ['dark', 'light'] as const) {
     expect(ratio).toBeGreaterThanOrEqual(4.5);
   });
 
-  test(`[${theme}] .tl-type == 解析后的 --color-muted-foreground（R1 等值断言）`, async ({ page }) => {
+  /* #1419（`20668238`）把时间线行改成 `.tl-meta-text` 单节点（序号 + 类型 + 时刻），
+     旧的 `.tl-type` / `.tl-seq` 已删。等值断言的判别力原样保留：被测节点仍必须逐值
+     等于它声明的 token 的解析值——有人把它换成硬编码色或别的 token 照样会红。 */
+  test(`[${theme}] .tl-meta-text == 解析后的 --fx-ghost（R1 等值断言）`, async ({ page }) => {
     await openWorkspace(page, theme);
-    const [typeColor, expected] = await page.evaluate(() => {
-      const el = document.querySelector('.tl-type');
-      if (!el) throw new Error('no .tl-type');
+    const [metaColor, expected] = await page.evaluate(() => {
+      const el = document.querySelector('.tl-meta-text');
+      if (!el) throw new Error('no .tl-meta-text');
       // 用探针元素解析 token 的实际计算值（getPropertyValue 只回 var 引用）
       const probe = document.createElement('div');
-      probe.style.color = 'var(--color-muted-foreground)';
+      probe.style.color = 'var(--fx-ghost)';
       document.body.appendChild(probe);
       const v = getComputedStyle(probe).color;
       probe.remove();
       return [getComputedStyle(el).color, v];
     });
-    expect(typeColor).toBe(expected);
+    expect(metaColor).toBe(expected);
   });
 
   test(`[${theme}] U-1 新增 ink 元素（chip / deny kbd / locked-hint）对比度 ≥4.5`, async ({ page }) => {
@@ -1016,7 +1024,7 @@ for (const theme of ['dark', 'light'] as const) {
   });
 
   /* #1136 P3-2：`.auth-banner`（后端 401 引导横幅）把 --warning 当正文色，压在 10% 底上。
-     渲染条件是 `authRequired=true`（App.tsx:1401，后端 401 广播触发）——夹具同
+     渲染条件是 `authRequired=true`（App.tsx:1939，后端 401 广播触发）——夹具同
      l-auth-banner.spec.ts（共享 mockAuthRequired）。 */
   test(`[${theme}] #1136 .auth-banner（401 引导横幅）对比度 ≥4.5`, async ({ page }) => {
     await mockAuthRequired(page);
@@ -1114,7 +1122,7 @@ for (const theme of ['dark', 'light'] as const) {
   });
 
   /* #1172：白字压 --danger 实心底。与上面两处方向相反——要压深的是**底**。
-     夹具走 failure-guard 的 hard 事件条（Conversation.tsx:735），真渲染路径。 */
+     夹具走 failure-guard 的 hard 事件条（Conversation.tsx:1024-1025），真渲染路径。 */
   test(`[${theme}] #1172 .notice-strip-hard 徽标（白字压实底）对比度 ≥4.5`, async ({ page }) => {
     const sid = 's-contrast-guard';
     const events: FrameSpec[] = [
@@ -1154,7 +1162,8 @@ for (const theme of ['dark', 'light'] as const) {
 
 /** 恢复列表错误态夹具：`GET /api/recovery/interrupted` 返回 500（`listInterruptedRecoveries`
  *  非 2xx 抛错）→ `state.kind='error'` → `.recovery-list-error`（role=alert）落屏。
- *  入口是顶栏「恢复列表」按钮（TopBar aria-label="恢复列表"）。 */
+ *  入口是顶栏「更多工具」菜单项「恢复列表」（#1396 把原顶栏独立按钮收进菜单，
+ *  `TopBar.tsx:408-411`（文本行 `:410`）；菜单项是 `menuitem`，每次调用都要先开菜单）。 */
 test(`[${theme}] #1208 .recovery-list-error（恢复列表拉取失败条）对比度 ≥4.5`, async ({ page }) => {
   await routeApi(page, {
     sessions: [], events: [], models: MODELS,
@@ -1166,7 +1175,7 @@ test(`[${theme}] #1208 .recovery-list-error（恢复列表拉取失败条）对�
   await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
-  await page.getByRole('button', { name: '恢复列表' }).click();
+  await clickTopBarMenuItem(page, '恢复列表');
 
   const err = page.locator('.recovery-list-error');
   await expect(err).toBeVisible();
@@ -1348,7 +1357,22 @@ for (const theme of ['dark', 'light'] as const) {
       { type: 'run/interrupted', data: { reason: 'process_restart' }, seq: 4, session_id: sid, run_id: 'ri', step_id: 1, time: T },
     ];
     await openContrastSession(page, theme, sid, frames, '被打断了');
-    await expectEachContrast(page, theme, ['.interrupt-banner']);
+    // F-06（#1449）：横幅新增两个动作按钮——主动作（.interrupt-action-primary）与
+    // 次级动作（.interrupt-dismiss）都量静态态；helper 不驱动 hover，下面各自
+    // hover 后再量一次（P3-3 的 hover 底色不是推断值）。
+    await expectEachContrast(page, theme, [
+      '.interrupt-banner',
+      '.interrupt-action-primary',
+      '.interrupt-dismiss',
+    ]);
+    for (const sel of ['.interrupt-action-primary', '.interrupt-dismiss']) {
+      await page.locator(sel).hover();
+      const m = await measure(page, sel);
+      const ratio = contrast(m.color, m.bg);
+      // eslint-disable-next-line no-console
+      console.log(`[${theme}] #1449 ${sel}:hover color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+      expect(ratio, `${sel}:hover contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   /* 熔断条 soft 徽标（.notice-strip-soft .notice-strip-badge）：soft failure-guard 事件。 */
@@ -1397,6 +1421,15 @@ for (const theme of ['dark', 'light'] as const) {
     /* .model-fallback-val 在 Inspector 的 Overview（id=chat）页 MODEL 区块里；默认 tab 是
        timeline，先切页再量（否则元素不在 DOM，属夹具问题而非样式问题）。 */
     await page.getByRole('tablist', { name: '运行详情视图' }).getByRole('tab', { name: '概览' }).click();
+    /* #1419（`a0a902d3`）把 Overview 各区块改成手风琴，`id="model"` 没有 defaultOpen
+       ⇒ 元素在 DOM 里但 `.ov-acc-body` 是 `visibility: hidden`（grid-template-rows: 0fr），
+       `expectEachContrast` 的 toBeVisible 预检会红。先展开模型区块再量——判据本身不变。 */
+    const modelSection = page.locator('[data-ov-section="model"]');
+    const modelHead = modelSection.locator('.ov-acc-head');
+    await expect(modelHead).toHaveAttribute('aria-expanded', 'false');
+    await modelHead.click();
+    await expect(modelHead).toHaveAttribute('aria-expanded', 'true');
+    await expect(modelSection.locator('.model-fallback-val')).toBeVisible();
     await expectEachContrast(page, theme, ['.model-fallback-val']);
   });
 

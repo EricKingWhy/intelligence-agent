@@ -66,7 +66,7 @@ from agent_harness.memory.v2.roles import (
 )
 from agent_harness.memory.v2.runner import ChatModelInvoker, MemoryJobRunner
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
-from agent_harness.memory.v2.write_approval import StagedWriteStore
+from agent_harness.memory.v2.write_approval import BlockedWriteStore, StagedWriteStore
 from agent_harness.observability import get_observability_sink
 from agent_harness.session.store import JsonlSessionStore
 
@@ -89,15 +89,27 @@ async def build_memory_v2_service(settings: Settings) -> MemoryV2Service:
     relay = MemoryV2IndexRelay(store, index)
     # #1353 §2：markdown 是权威面（`<workspace_dir>/memories/MEMORY.md` / `USER.md`），
     # SQLite 降为派生/历史层。注入后 create/update/invalidate 先落 markdown 再投影。
+    # #1441 §1（F-09）：容量预算从部署配置来（上游同名字段），缺省 2200/1375；
+    # 构造参数仍可覆盖，既有测试路径不变。
     markdown = MarkdownMemoryStore(
         Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME,
+        memory_char_limit=settings.memory_char_limit,
+        user_char_limit=settings.user_char_limit,
         notification_mode=settings.memory_notification_mode,
     )
     markdown.load_from_disk()
     # #1353 M6：待审区与 job/record 同一个库文件（决定二）；与 markdown 同生共死。
-    staged = StagedWriteStore(database, markdown)
+    # #1437：注入 store 后，审批重放的写入也投影进派生层（与工具直写同一入口）。
+    staged = StagedWriteStore(database, markdown, store=store)
     await staged.initialize()
-    return MemoryV2Service(store, index, relay=relay, markdown=markdown, staged=staged)
+    # #1461：被审批门拦下的后台写入。同一库文件（与 staged 同生共死），writer 就是本
+    # service——promote 用 executor 那套 `*_in` 在它自己的事务里重放。
+    service = MemoryV2Service(store, index, relay=relay, markdown=markdown, staged=staged)
+    blocked = BlockedWriteStore(database, service)
+    await blocked.initialize()
+    # 先有 service 才能给它自己当 writer，所以接在构造之后（`blocked` 只读一次）。
+    service.attach_blocked(blocked)
+    return service
 
 
 async def build_memory_formation(
@@ -141,6 +153,7 @@ async def build_memory_formation(
         jobs=jobs, writer=service, searcher=service, invoker=ChatModelInvoker(),
         session_store=sessions,
         observer=(observability.memory_observation if observability.enabled else None),
+        blocked=service.blocked,
     )
     # 默认值仅作为无 V2 service 调用方的兼容回退。生产 runner 在每个 job 执行时从
     # SQLite 读取可信用户的 extraction_enabled（入队资格）与 fallback_enabled（#1039

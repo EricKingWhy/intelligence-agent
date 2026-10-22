@@ -13,6 +13,7 @@
  * 的公共语义。
  */
 import { EventType } from '../types';
+import { interpretToolResult, type ToolResultInterpretation } from './toolShapes';
 import type { AgentEvent, ToolCall } from '../types';
 
 /** 标题里的文件只留 basename：效果图是短名，完整路径在展开区可见。 */
@@ -104,19 +105,10 @@ function toolCallTitle(name: string, args: Record<string, unknown>): string {
  *  以及 `ok` 缺席的信封一律返回 null——"结果里有文字"不等于"结果失败了"，把首行
  *  文本当失败原因会让每条成功的纯文本输出都显示成「失败：<stdout 首行>」。真失败
  *  但信封没有 `ok` 时，调用方按 `call.status === 'failed'` 取内容首行兜底。 */
-function failureReason(content: unknown): string | null {
-  if (typeof content !== 'string') return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    return null;
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const envelope = parsed as Record<string, unknown>;
-  if (envelope.ok !== false) return null;
-  const code = typeof envelope.error_code === 'string' ? envelope.error_code : null;
-  const message = typeof envelope.message === 'string' ? envelope.message : null;
+function failureReason(result: ToolResultInterpretation): string | null {
+  if (result.outcome !== 'failure') return null;
+  const code = result.error?.errorCode ?? null;
+  const message = typeof result.envelope?.message === 'string' ? result.envelope.message : null;
   if (code && message) return `${code} · ${firstLine(message, 28)}`;
   if (code) return code;
   if (message) return firstLine(message, 36);
@@ -155,7 +147,11 @@ export function timelineHeadline(event: AgentEvent, call?: ToolCall | null): Tim
       const callName = call?.name ?? (typeof data.tool_name === 'string' ? data.tool_name : '');
       const callArgs = call?.args ?? {};
       const base = callName ? toolCallTitle(callName, callArgs) : '工具返回';
-      const reason = failureReason(data.content);
+      const result = interpretToolResult(data.content);
+      const reason = failureReason(result);
+      if (result.outcome === 'cancelled') {
+        return { title: `${base} · 已中断`, note: null };
+      }
       if (reason !== null || call?.status === 'failed') {
         const exitCode = resultExitCode(call);
         const detail = reason ?? (typeof data.content === 'string' ? firstLine(data.content, 36) : '');

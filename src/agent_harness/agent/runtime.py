@@ -1794,6 +1794,14 @@ class AgentRuntime:
                 run_id = launch_budget.run_id
                 turn_index = launch_budget.turn_index or 1
             else:
+                # 轮次边界（#1439 F-03）：记忆侧的 per-run 状态（consolidation 失败
+                # 预算）在新 run 开始时归零。上游 Hermes 把这个重置放在 turn 边界
+                # （`turn_context._reset_per_turn_agent_state`），本仓的对应边界是
+                # run 开始（一个 run 可以有多轮）。必须在 `resuming` 判定之后且只在
+                # 非续跑分支：同 run 续跑不重置计数器（`#312` 不变量），否则续跑会
+                # 重新获得 3 次自纠机会。此处还没有可终结的 run，故障由通知方法自己
+                # 吞掉（与 `_notify_memory_formation` 同一条旁路纪律）。
+                self._notify_memory_run_started()
                 run_id, turn_index = session.begin_run(
                     agent_id=self._agent_id, agent_profile=self._agent_profile,
                     # #226：请求侧模型标识落 durable 事件（同一 run 内只在 fallback 时换
@@ -4234,6 +4242,28 @@ class AgentRuntime:
                 [e for e in session.since(start)
                  if e.type not in _MEMORY_EXCLUDED_EVENT_TYPES],
             )
+
+    def _notify_memory_run_started(self) -> None:
+        """新 run 开始边界把记忆侧的 per-turn 状态归零（#1439 F-03）。
+
+        只在新 run 调用（`resuming` 为假）：同 run 续跑不重置计数器（`#312` 不变量）。
+
+        端口用 `getattr` 而不是硬调用：`MemoryFormationNotifier` 只要求
+        `notify_run_finished`（终结接缝），轮次预算重置是**可选**能力；测试与集成
+        替身不实现它。缺席即没有可重置的东西——与 `_notify_memory_formation` 的
+        `notifier is None` 同一判据，而不是给每个替身补一个空方法。
+
+        **失败隔离**：本调用在 `begin_run` 之前，此刻抛异常等于"run 还没开始就失败"，
+        而记忆是旁路——坏了只落日志。
+        """
+        notifier = self._memory_formation
+        reset = getattr(notifier, "notify_run_started", None)
+        if not callable(reset):
+            return
+        try:
+            reset()
+        except Exception:
+            logger.exception("run 开始时的记忆侧重置失败（旁路，不影响本轮）")
 
     async def _notify_memory_formation(
         self, arms: _TerminalArms, *, terminal_status: str,

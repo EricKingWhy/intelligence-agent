@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 import aiosqlite
 
+from agent_harness.memory.v2 import reprojection
 from agent_harness.memory.v2.index import MemoryV2IndexRelay, MemoryV2VectorIndex
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
 from agent_harness.memory.v2.policy import find_secret
@@ -49,7 +50,7 @@ from agent_harness.memory.v2.types import (
     SourceType,
     TrustedMemoryIdentity,
 )
-from agent_harness.memory.v2.write_approval import StagedWriteStore
+from agent_harness.memory.v2.write_approval import BlockedWriteStore, StagedWriteStore
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ class MemoryV2Service:
         *, relay: MemoryV2IndexRelay | None = None,
         markdown: MarkdownMemoryStore | None = None,
         staged: StagedWriteStore | None = None,
+        blocked: BlockedWriteStore | None = None,
     ) -> None:
         self._store = store
         self._index = index
@@ -106,6 +108,9 @@ class MemoryV2Service:
         #: #1353 M6：`write_approval` 门开时的待审区。跟着 markdown 走——没有权威面就没有
         #: 可审批的写入，工具也不会注册。
         self._staged = staged
+        #: #1461：后台 formation 被拦下的写入（第二段处置通道）。executor 的 gate 开路径
+        #: 往里落行，CLI/Web 从里面 promote/discard。
+        self._blocked = blocked
         self._tombstone_purger: asyncio.Task | None = None
 
     def start_tombstone_purger(self, *, interval_seconds: float = 3600) -> None:
@@ -153,6 +158,47 @@ class MemoryV2Service:
         return await self._store.invalidate(memory_id, trusted)
 
     # ----------------------------------------------------------------------------------
+    # 工具写入 → 派生层投影（#1437 F-01 甲案 / F-06 / F-06b）
+    # ----------------------------------------------------------------------------------
+    #
+    # 刻意**不**复用 `create()`：它第一步就是 `_mirror_markdown`，而这里的 markdown 写入
+    # 已经由 `MemoryTool` 提交过了，再镜像一遍会把 replace/batch 的内容写第二次。
+    # 这一节只读 markdown、只写 SQLite。
+
+    async def project_tool_write(
+        self, target: str, response: dict[str, Any], trusted: TrustedMemoryIdentity, *,
+        session_id: str | None = None, event_id: str | None = None,
+        operations: Sequence[dict[str, Any]] | None = None, content: str | None = None,
+    ) -> dict[str, Any]:
+        """把一次已落盘的 markdown 写入投影到派生层；失败只留 pending 账本，不抛。
+
+        写入成功后顺带 drain 一次历史账本（设计稿 §4.2 的重试触发点 1）：派生层此刻是
+        健康的，之前积压的行可以在同一轮收敛。本次写入自己失败时跳过——那时派生层正
+        不可用，重试只会再失败一次并抬高 `attempts`。
+        """
+        markdown = self._markdown
+        if markdown is None:
+            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+        summary = await reprojection.apply_write(
+            self._store, markdown, target, response, trusted,
+            operations=operations, content=content,
+            session_id=session_id, event_id=event_id,
+        )
+        if not summary["pending"]:
+            await reprojection.drain_pending(self._store, markdown, trusted)
+        return summary
+
+    async def reproject(
+        self, trusted: TrustedMemoryIdentity, target: str,
+    ) -> dict[str, Any]:
+        """F-06b 运维/漂移入口：先把 pending 账本排空，再全量对账该 target。"""
+        markdown = self._markdown
+        if markdown is None:
+            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+        await reprojection.drain_pending(self._store, markdown, trusted)
+        return await reprojection.reproject_target(self._store, markdown, trusted, target)
+
+    # ----------------------------------------------------------------------------------
     # markdown 权威面（#1353 §2）
     # ----------------------------------------------------------------------------------
     #
@@ -172,6 +218,16 @@ class MemoryV2Service:
     def staged(self) -> StagedWriteStore | None:
         """#1353 M6 待审区；`None` = 这个部署没有审批面（门恒关）。"""
         return self._staged
+
+    @property
+    def blocked(self) -> BlockedWriteStore | None:
+        """#1461 被拦下的后台写入；`None` = 装配没接处置通道（gate 开时 executor 会响亮失败）。"""
+        return self._blocked
+
+    def attach_blocked(self, blocked: BlockedWriteStore) -> None:
+        """装配期接线：`BlockedWriteStore` 要拿本 service 当 writer（promote 重放），
+        所以它只能在 service 构造**之后**建——构造参数接不了这个先有鸡还是先有蛋。"""
+        self._blocked = blocked
 
     @staticmethod
     def markdown_target(record: MemoryDraftV2 | MemoryRecordV2) -> str:

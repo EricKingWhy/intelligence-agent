@@ -33,6 +33,29 @@ function twoRunConversation(): ConversationState {
   return s;
 }
 
+function filteredWindowConversation(): ConversationState {
+  let s = initConversation('filtered-window');
+  s = applyEvent(s, {
+    type: EventType.MODEL_DELTA,
+    data: { delta: 'keep' },
+    seq: 1,
+    run_id: 'r1',
+    step_id: 1,
+    session_id: 'filtered-window',
+  });
+  for (let i = 0; i < TIMELINE_WINDOW_DEFAULT + 50; i++) {
+    s = applyEvent(s, {
+      type: EventType.USER_MESSAGE,
+      data: { content: `drop-${i}` },
+      seq: i + 2,
+      run_id: 'r1',
+      step_id: 1,
+      session_id: 'filtered-window',
+    });
+  }
+  return s;
+}
+
 const noop = () => {};
 /** #183：StepDetail 新增面板视图状态 + 动作入口（状态归 App）。本文件的用例不关心
  *  面板几何，给一份缺省（未钉住/未整页/320px/预览开）。 */
@@ -74,6 +97,19 @@ describe('TimelineTab 尾窗裁剪', () => {
   it(`步长常量：${TIMELINE_WINDOW_DEFAULT} / ${TIMELINE_WINDOW_STEP}`, () => {
     expect(TIMELINE_WINDOW_DEFAULT).toBe(200);
     expect(TIMELINE_WINDOW_STEP).toBe(500);
+  });
+
+  it('standalone rendering uses the shared derivation and filters before windowing', () => {
+    const html = renderToString(createElement(TimelineTab, {
+      conversation: filteredWindowConversation(),
+      onFocusEvent: noop,
+      filter: 'model',
+    })).replaceAll('<!-- -->', '');
+
+    expect(rowCount(html)).toBe(1);
+    expect(html).toContain('model/delta');
+    expect(html).not.toContain('timeline-window-bar');
+    expect(html).toContain('1 / 1 事件');
   });
 });
 

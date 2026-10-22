@@ -32,6 +32,7 @@ from agent_harness.memory.v2.commands import (
 )
 from agent_harness.memory.v2.formation import MemoryPayload
 from agent_harness.memory.v2.memory_tool import _grounded_in_user_message
+from agent_harness.memory.v2.origin import FOREGROUND, reset_origin, set_origin
 from agent_harness.memory.v2.policy import find_secret
 from agent_harness.memory.v2.types import (
     EpisodicPayload,
@@ -309,7 +310,12 @@ class RememberMemoryV2Tool(Tool):
                     hash=hashlib.sha256(event_text.encode("utf-8")).hexdigest(),
                 )],
             )
-            record = await self._service.create(draft, trusted)
+            # #1438：垫片是显式前台指令，自己钉住来源（环境里可能残留后台标）。
+            token = set_origin(FOREGROUND)
+            try:
+                record = await self._service.create(draft, trusted)
+            finally:
+                reset_origin(token)
             record_memory_change(
                 entry_point=ENTRY_TOOL, action="explicit_remember",
                 memory_ids=(record.id,), affected_count=1,
@@ -404,6 +410,14 @@ class ForgetMemoryV2Tool(Tool):
             suggested_action="用 retrieve_memory 核对删除状态；未知结果时不要盲目重复删除。",
         )
 
+    async def _delete(self, memory_id: str, trusted: Any) -> Any:
+        """#1438：删除落盘前钉 FOREGROUND（垫片是显式前台指令），退出即还原。"""
+        token = set_origin(FOREGROUND)
+        try:
+            return await self._service.delete(memory_id, trusted)
+        finally:
+            reset_origin(token)
+
     async def execute(self, args: _ForgetV2Args) -> ToolResult:
         session_id = memory_session_var.get() or ""
         try:
@@ -427,7 +441,7 @@ class ForgetMemoryV2Tool(Tool):
                         message="用户必须在本轮消息中明确选择该 memory_id；没有删除。",
                         error_code=ErrorCode.PERMISSION_DENIED,
                     )
-                receipt = await self._service.delete(args.memory_id, trusted)
+                receipt = await self._delete(args.memory_id, trusted)
                 record_forget(
                     entry_point=ENTRY_TOOL, memory_id=args.memory_id,
                     outcome=OUTCOME_FORGOTTEN if receipt.deleted else OUTCOME_ABSENT,
@@ -452,7 +466,7 @@ class ForgetMemoryV2Tool(Tool):
                     ]},
                 )
             record = matches[0]
-            receipt = await self._service.delete(record.id, trusted)
+            receipt = await self._delete(record.id, trusted)
             record_forget(
                 entry_point=ENTRY_TOOL, memory_id=record.id,
                 outcome=OUTCOME_FORGOTTEN if receipt.deleted else OUTCOME_ABSENT,

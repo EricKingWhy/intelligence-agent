@@ -136,8 +136,16 @@ def test_gold_gate_passes_all_27_cases_with_ticket_denominators(gold_run):
     assert metrics["secret_path_coverage"]["numerator"] == 5
 
 
-def test_seed_memory_tool_skips_fts_while_service_create_hits_it(tmp_path):
-    """AC2: seeds written through `MemoryTool` never reach `memory_v2_fts`; `create` does."""
+def test_seed_memory_tool_reaches_fts_like_service_create(tmp_path):
+    """AC2（#1437 **有意推翻**）：seeds written through `MemoryTool` now reach `memory_v2_fts`.
+
+    被推翻的是原 `:163` 的 `== 0`（原测试名
+    `test_seed_memory_tool_skips_fts_while_service_create_hits_it`），它固化了
+    「工具写入不投影」这一分叉。依据：#1437 用户裁决（2026-10-21 19:16，票内评论）
+    F-01 选**甲案：补投影**——工具写入也要进派生层，分叉本身已被裁决为缺陷。
+    其余断言（base `:178` 的 `> 0` 与 `keyword_search` 返回 `[record.id]`）原样保留。
+    docstring 里的行号都是 **base 387bdcc8 的行号**，不是本树的行号。
+    """
     async def fts_match_count(db_path: Path, term: str) -> int:
         async with connect(db_path) as connection, connection.execute(
             "SELECT count(*) AS n FROM memory_v2_fts WHERE memory_v2_fts MATCH ?",
@@ -154,13 +162,13 @@ def test_seed_memory_tool_skips_fts_while_service_create_hits_it(tmp_path):
         trusted = TrustedMemoryIdentity("gold-tenant", "gold-user", "gold-project")
         term = "quokka"
 
-        tool = MemoryTool(markdown)
+        tool = MemoryTool(markdown, service=service)
         result = await tool.execute(_MemoryArgs(
             action="add", target="user",
             content=f"The synthetic {term} prefers concise summaries.",
         ))
         assert result.ok is True
-        assert await fts_match_count(store.database_path, term) == 0
+        assert await fts_match_count(store.database_path, term) >= 1
 
         record = await service.create(MemoryDraftV2(
             kind=MemoryKind.SEMANTIC,

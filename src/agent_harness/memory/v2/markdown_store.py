@@ -184,9 +184,11 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 class MarkdownMemoryStore:
-    """有界、文件支撑的 curated memory；一次会话一个实例。
+    """有界、文件支撑的 curated memory；**进程级单例**，跨 run / session 复用。
 
-    ``_snapshot`` 在会话开始渲染一次并冻结（前缀缓存稳定，M9）；
+    ``_snapshot`` 按 session 冻结：首次渲染后，同一 session 内逐字节不变（前缀缓存稳定，
+    M9）；缓存按插入序 FIFO 淘汰最早的 session（上限 ``SNAPSHOT_CACHE_LIMIT``），被淘汰
+    的 session 下次渲染**重新读盘**——长寿进程里注入内容可能因此在会话中途变更。
     ``memory_entries`` / ``user_entries`` 是活状态，写即落盘。
     """
 
@@ -210,7 +212,9 @@ class MarkdownMemoryStore:
         #: #1440 P3-3：漂移通知也遵守 `memory_notification_mode`（部署级档位）。
         #: 默认 `on` 保持其它构造点（测试 / migration）行为不变。
         self.notification_mode = str(notification_mode or "on").lower()
-        #: session_id → {target: rendered}；会话开始渲染一次，会话结束才失效（M9）。
+        #: session_id → {target: rendered}；首次渲染后冻结，不随写入失效（M9/AC8）。
+        #: 没有会话结束钩子：回收只靠 `SNAPSHOT_CACHE_LIMIT` 的插入序 FIFO 淘汰，
+        #: 被淘汰的 session 下次渲染重新读盘。
         self._snapshot: dict[str, dict[str, str]] = {}
         self._consolidation_failures = 0
         # ponytail: 一把进程内互斥覆盖整个 `_mutate`；文件锁管跨进程，这把锁管
@@ -233,7 +237,17 @@ class MarkdownMemoryStore:
     # ------------------------------------------------------------------ 熔断
 
     def reset_consolidation_failures(self) -> None:
-        """轮次边界调用（新 run 开始）。"""
+        """轮次边界调用：每个新 run 开始时由记忆宿主归零（#1439 F-03）。
+
+        调用链：`AgentRuntime._drive` 的 run-start → `MemoryJobRunner.notify_run_started`
+        → 本方法。目标是让「连续失败数」回到 `MAX_CONSOLIDATION_FAILURES_PER_TURN`
+        所描述的 per-run 口径；不重置时它会跨 run 累积，长进程里后续 run 的自纠机会
+        被提前掐断。
+
+        **这是尽力而为的 per-run 预算，不是硬保证**：计数器是本进程单例上的裸 int，
+        没有 session/run 维度。并发 run 的 run-start 会互相把对方的计数清零，正在累计
+        的那一侧会被中途续满额度。单用户部署里并发 run 罕见，影响小。
+        """
         self._consolidation_failures = 0
 
     def _consolidation_failure(self, response: dict[str, Any]) -> dict[str, Any]:
@@ -271,6 +285,18 @@ class MarkdownMemoryStore:
             return path.read_text(encoding="utf-8-sig"), True
         except (OSError, UnicodeDecodeError):
             return "", False
+
+    def disk_entries(self, target: str) -> list[str] | None:
+        """**磁盘**上的活条目（去重）；文件存在但读不出来时返回 ``None``。
+
+        返回 ``None`` 而不是空列表，是因为调用方要区分"文件确实空了"与"这次没读到"：
+        对账拿后者当空集合会把派生层整片删掉。进程内 ``entries()`` 是会话快照，
+        另一个文件在整场会话里都不会刷新，不能替代这个读法。
+        """
+        raw, read_ok = self.read_raw_checked(self.path_for(target))
+        if not read_ok:
+            return None
+        return list(dict.fromkeys(self._parse_entries(raw)))
 
     def load_from_disk(self) -> None:
         """读入两个文件并把**当前会话**的快照冻住。

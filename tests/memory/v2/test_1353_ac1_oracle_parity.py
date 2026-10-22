@@ -1,6 +1,9 @@
 """#1353 AC1 的 oracle 补全：上游 `tests/tools/test_memory_tool.py` 里还没迁过来的行为。
 
-AC1 的 oracle 是 Hermes 对应用例"逐条对齐（随迁为本仓用例）"。
+AC1 的口径是「按行为契约对齐」，不是机械逐条搬迁：上游 `test_memory_tool.py` 有 57 个
+test 方法，本仓 AC1 两份文件共 24 条（本文件 11 + `test_1353_ac1_memory_tool.py` 13）。
+条数差来自合并同判据用例与不适用项（上游 agent-fork 编排相关），行为覆盖已由审查确认
+在位；口径修订留痕见 #1353 的「偏差清单追认」记录（#1441 §6 / F-16）。
 `test_1353_ac1_memory_tool.py` 覆盖 add/replace/remove/batch 的主契约；
 本文件补上游同一 oracle 中**判据不同**的那几类：
 

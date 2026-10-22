@@ -49,7 +49,7 @@ function terminalStatusOf(e: AgentEvent): RunGroupStatus | null {
   return null;
 }
 
-export function groupEventsByRun(events: AgentEvent[]): RunGroup[] {
+export function groupEventsByRun(events: readonly AgentEvent[]): RunGroup[] {
   const groups: RunGroup[] = [];
   // 序数 = run 在会话中**首次出现**的次序（跨交错段稳定：r1,r2,r1 都叫 Run 1）。
   const ordinalOfRun = new Map<string, number>();
