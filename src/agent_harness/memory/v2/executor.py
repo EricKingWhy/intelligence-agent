@@ -55,10 +55,10 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field
@@ -93,6 +93,7 @@ from agent_harness.memory.v2.jobs import (
     ProtectedFactExtractionState,
     SqliteMemoryV2JobStore,
 )
+from agent_harness.memory.v2.origin import BACKGROUND_REVIEW, reset_origin, set_origin
 from agent_harness.memory.v2.policy import select_candidates
 from agent_harness.memory.v2.projection import (
     MAX_SIMILAR_MEMORIES,
@@ -127,6 +128,8 @@ from agent_harness.session.event import MEMORY_DEGRADED, MEMORY_UPDATED
 from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 def _observation_hash(value: Any) -> str:
@@ -571,6 +574,26 @@ class _Degraded(Exception):
     def __init__(self, reason: DegradedReason) -> None:
         super().__init__(reason.value)
         self.reason = reason
+
+
+def _tagged(
+    work: Callable[[aiosqlite.Connection], Awaitable[T]],
+) -> Callable[[aiosqlite.Connection], Awaitable[T]]:
+    """给写入事务包一层 ``BACKGROUND_REVIEW`` 打标（#1438 F-02）。
+
+    打在 ``work`` 而不是整个 ``run``：模型调用与检索是**读**，标的是"这次写入是谁发起的"；
+    范围收在事务内也保证退出即还原（异常路径同样走 `finally`），不会漏到同 task 的
+    后续前台调用上。
+    """
+
+    async def tagged(connection: aiosqlite.Connection) -> T:
+        token = set_origin(BACKGROUND_REVIEW)
+        try:
+            return await work(connection)
+        finally:
+            reset_origin(token)
+
+    return tagged
 
 
 class _NothingToApply(Exception):
@@ -1230,7 +1253,7 @@ class MemoryJobExecutor:
         try:
             committed = await self._jobs.commit_with_outcome(
                 job_id=job.job_id, worker_id=worker_id, outcome=MemoryJobOutcome.COMMITTED,
-                state=state.as_dict, work=work)
+                state=state.as_dict, work=_tagged(work))
         except _NothingToApply:
             # 事务已回滚（零写入）⇒ 改记安静成功：没有任何变更，就不是 COMMITTED。
             return await self._complete_quietly(

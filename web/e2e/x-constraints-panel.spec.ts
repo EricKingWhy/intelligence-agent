@@ -123,9 +123,10 @@ test('AC2：类型 chip 按 type 过滤（纯展示层，不重拉）', async ({
   await expect(panel(page)).toContainText('证据：pytest 全绿');
 
   // #1419 R-2：类型筛选由原生 `<select>` 换成 chip 组（`aria-pressed` 表达选中）。
+  // #1445：chip 的**显示名**是中文类型名；原始枚举只作筛选值，不再出现在可访问名里。
   await panel(page)
     .getByRole('group', { name: '按类型筛选' })
-    .getByRole('button', { name: 'evidence_ref' })
+    .getByRole('button', { name: '证据引用' })
     .click();
   await expect(panel(page)).toContainText('证据：pytest 全绿');
   await expect(panel(page)).not.toContainText('不要改动生产环境配置');

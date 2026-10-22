@@ -317,7 +317,7 @@ test('#1372 AC2：重放弹窗 Esc 后焦点回到行内 ⋯ 触发按钮', asyn
 
 test('#1372 AC3：tooltip 全覆盖（顶栏 / rail / 会话行 / Inspector / composer / 会话名）', async ({ page }) => {
   test.setTimeout(60_000);
-  // 新会话态：预算 chip 只在启动 run 前渲染，先把 5 个 composer chip 量全。
+  // 新会话态：先把 5 个 composer chip 量全（#1444 后预算 chip 两态都在，这里取新建态）。
   await openApp(page, false);
   const chips: Array<[string, string]> = [
     ['button[aria-label="模型选择"]', '默认链'],
