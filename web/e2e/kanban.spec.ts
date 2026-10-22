@@ -15,7 +15,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { routeApi, sessionRow, type ApiMock } from './fixtures';
+import { clickTopBarMenuItem, routeApi, sessionRow, type ApiMock } from './fixtures';
 
 const T = '2026-10-17T00:00:00Z';
 
@@ -36,11 +36,18 @@ function boardRow(
   });
 }
 
-/** 打开看板（顶栏「看板」按钮 -> 浮层）。 */
+/** #1396：看板入口已收进顶栏「更多工具」菜单（`menuitem`，不是 `button`）。
+ *  打开动作单独成函数：「关掉再开、不刷新」那条用例复用的是同一条入口路径。
+ *  本仓惯例：各看板 spec 各自定义自己的 `openBoardPanel`（`kanban-subagents.spec.ts`
+ *  同款），不做跨 spec import、不搬进 fixtures。 */
+async function openBoardPanel(page: Page): Promise<void> {
+  await clickTopBarMenuItem(page, 'Agent 看板');
+  await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+}
+
 async function openBoard(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByLabel('看板').click();
-  await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+  await openBoardPanel(page);
 }
 
 /** 某列的卡片计数（列容器由 `data-testid` 锚定，slug 见 `lib/kanban.ts`）。 */
@@ -87,7 +94,7 @@ test.describe('#1304 看板：四列投影与开关', () => {
 
     // 刷新后仍可见（持久化的是**开关**，不是列）。
     await page.reload();
-    await page.getByLabel('看板').click();
+    await openBoardPanel(page);
     await expect(page.getByTestId('kanban-col-accepted')).toBeVisible();
 
     // 再点一次 -> 隐藏，aria-pressed 翻假，存储写 'false'。
@@ -465,9 +472,14 @@ test.describe('#1304 看板：搜索与入口', () => {
     await routeApi(page, { sessions: [boardRow('s-a', 'accepted')] });
 
     await page.goto('/');
-    const entry = page.getByLabel('看板');
+    // #1396：入口收进「更多工具」菜单——触发器常驻顶栏，菜单项只在菜单打开时挂载。
+    // 判别力保持：触发器可见 + 菜单项可见（入口确实在界面上可达）+ 点得开。
+    const entry = page.getByRole('button', { name: '更多工具' });
     await expect(entry).toBeVisible();
     await entry.click();
+    const menuEntry = page.getByRole('menuitem', { name: 'Agent 看板' });
+    await expect(menuEntry).toBeVisible();
+    await menuEntry.click();
     const dialog = page.getByRole('dialog', { name: 'Agent 看板' });
     await expect(dialog).toBeVisible();
 
@@ -476,7 +488,7 @@ test.describe('#1304 看板：搜索与入口', () => {
     await expect(page.getByTestId('kanban-col-accepted')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
-    await page.getByLabel('看板').click();
+    await openBoardPanel(page);
     await expect(page.getByTestId('kanban-col-accepted')).toBeVisible();
   });
 });
@@ -495,14 +507,16 @@ test.describe('#1304 看板：AC-18 不新增 core surface', () => {
     // 记下基线，再开板比增量——否则这条断言量的是"App 会不会拉 capabilities"，
     // 而那件事早在看板存在之前就定了。
     await page.goto('/');
-    await expect(page.getByLabel('看板')).toBeVisible();
+    // 就绪锚点：应用外壳已渲染（顶栏「更多工具」触发器常驻）——入口形态随 #1396 变化，
+    // 语义不变：等外壳落定再记基线，避免把挂载期请求算进「开板」增量。
+    await expect(page.getByRole('button', { name: '更多工具' })).toBeVisible();
     await expect(page.locator('.session-item').first()).toBeVisible();
     // 等挂载那次拉取真的落地再记基线——`page.on('request')` 是异步投递的，
     // 不等就可能把"挂载那次"算进开板增量里（假红）。
     await expect.poll(() => capabilitiesGets).toBeGreaterThan(0);
     const baseline = capabilitiesGets;
 
-    await page.getByLabel('看板').click();
+    await openBoardPanel(page);
     await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
     await expect(cardsIn(page, 'backlog')).toHaveCount(1);
     // 看板不是 core surface：开板不消费能力声明（§4.1 的三条判据之一）。
@@ -552,7 +566,7 @@ test.describe('#1306 看板未读 / ack（AC-7）', () => {
     await expect(page.locator('.session-item.selected')).toContainText('s-unread');
 
     // ③ 重开看板：未读标记消失。
-    await page.getByLabel('看板').click();
+    await openBoardPanel(page);
     await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
     await expect(card).toHaveAttribute('data-unread', 'false');
     await expect(title).not.toHaveCSS('font-weight', '600');
