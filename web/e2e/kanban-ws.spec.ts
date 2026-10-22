@@ -169,6 +169,11 @@ test.describe('#1305 看板 WS 推送', () => {
     expect(boardSubscribes.length).toBe(1);
 
     // 关板（Esc，与既有 AC-15 同一条关闭路径）。
+    // 协调员裁定一（issuecomment-6338942786）：指针点菜单项后「更多工具」触发器保持聚焦、
+    // 其 Radix tooltip instant-open 常开，首记 Esc 被 tooltip 的 DismissableLayer 认领并
+    // preventDefault（KanbanPanel.tsx:148 让位）⇒ 先移开指针并 blur 触发器，再按 Esc。
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toHaveCount(0);
 
