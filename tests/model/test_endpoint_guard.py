@@ -199,6 +199,39 @@ class TestSaveTimeRejection:
             store.create({"id": "other", "base_url": "http://[fe80::1]/v1",
                           "models": [{"model_id": "m"}]})
 
+    def test_allowlist_port_matches_url_default_port(self):
+        """``host:443`` 必须能放行 ``https://host``（URL 里没写端口 ≠ 端口不同）。"""
+        assert url_rejection("https://169.254.169.254/v1",
+                             allow=("169.254.169.254:443",)) is None
+        assert url_rejection("http://169.254.169.254/v1",
+                             allow=("169.254.169.254:80",)) is None
+        # 默认端口只在同 scheme 下等价：http 上的 :443 例外不成立。
+        assert url_rejection("http://169.254.169.254/v1",
+                             allow=("169.254.169.254:443",)) is not None
+
+    def test_preexisting_blocked_entry_can_still_write_last_test(self, tmp_path):
+        """守卫上线前已存的元数据地址：不改 base_url 的 update 不能被拦。
+
+        否则「测试连接」写回 last_test 时抛 ProviderStoreError ⇒ 500，正好把
+        AC(c) 要给的「被误配置拒绝」结论盖成内部错误。拦不拦由请求期 hook 定。
+        """
+        path = tmp_path / "p.json"
+        path.write_text(json.dumps({"version": 1, "providers": [{
+            "id": "legacy", "label": "旧配置",
+            "base_url": f"http://{_METADATA_IP}/latest",
+            "models": [{"model_id": "m"}],
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }]}), encoding="utf-8")
+        store = ProviderStore(path, MemoryCredentialStore())
+
+        store.update("legacy", {"last_test": {"ok": False, "reason": "endpoint_blocked"}})
+
+        assert store.get_entry("legacy")["last_test"]["reason"] == "endpoint_blocked"
+        # 守卫没被绕过：显式改 base_url 仍拒绝。
+        with pytest.raises(ProviderStoreError, match="误配置守卫"):
+            store.update("legacy", {"base_url": f"http://{_METADATA_IP}/v1"})
+
 
 # ── 请求期：逐跳、零请求、零凭据 ─────────────────────────────────────
 

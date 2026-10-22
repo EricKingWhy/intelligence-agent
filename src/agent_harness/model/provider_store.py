@@ -329,7 +329,12 @@ class ProviderStore:
                 continue
             merged = {**entry, **self._sanitize_patch(patch)}
             self._require_id(merged)
-            self._require_valid_base_url(merged["base_url"])
+            # #1485：只在**这次真的要改** base_url 时判守卫。否则守卫上线前已存的
+            # 元数据地址会让任何 update 都抛——典型是连接测试写回 last_test，把
+            # "地址被拦"报成 500，正好盖掉本票要给的结论。拦不拦由请求期 hook
+            # 说了算，保存期只是提前告知。
+            if "base_url" in patch:
+                self._require_valid_base_url(merged["base_url"])
             api_key = patch.get("api_key")
             if isinstance(api_key, str) and api_key == "":
                 # 显式清除（独立动作，不是"顺手清"）。

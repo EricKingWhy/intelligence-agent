@@ -115,14 +115,24 @@ def _split_entry(entry: str) -> tuple[str, int | None]:
     return host.rstrip(".").lower(), port
 
 
-def _is_allowed(host: str, port: int | None, allow: Iterable[str]) -> bool:
+def _effective_port(port: int | None, scheme: str | None) -> int | None:
+    """URL 未写端口时补默认端口——否则 ``host:443`` 例外在 https 上永不命中。"""
+    if port is not None:
+        return port
+    return {"http": 80, "https": 443}.get((scheme or "").lower())
+
+
+def _is_allowed(
+    host: str, port: int | None, allow: Iterable[str], scheme: str | None = None,
+) -> bool:
     """所有者例外：host 相同且（条目无端口 或 端口相同）。"""
     wanted = host.strip().strip("[]").rstrip(".").lower()
+    effective = _effective_port(port, scheme)
     for entry in allow:
         entry_host, entry_port = _split_entry(entry)
         if entry_host != wanted:
             continue
-        if entry_port is None or entry_port == port:
+        if entry_port is None or entry_port == effective:
             return True
     return False
 
@@ -173,7 +183,7 @@ def url_rejection(url: str, *, allow: Iterable[str] = ()) -> str | None:
         return None
     if not host:
         return None
-    if _is_allowed(host, port, allow):
+    if _is_allowed(host, port, allow, parts.scheme):
         return None
     return _host_rejection(host)
 
@@ -211,7 +221,7 @@ def _check_request(request: httpx2.Request, allow: frozenset[str]) -> str | None
     """单跳请求的判据；返回拒绝原因（None = 放行）。"""
     host = request.url.host
     port = request.url.port
-    if not host or _is_allowed(host, port, allow):
+    if not host or _is_allowed(host, port, allow, request.url.scheme):
         return None
     literal = _host_rejection(host)
     if literal is not None:
@@ -227,7 +237,7 @@ def _check_request(request: httpx2.Request, allow: frozenset[str]) -> str | None
 async def _acheck_request(request: httpx2.Request, allow: frozenset[str]) -> str | None:
     host = request.url.host
     port = request.url.port
-    if not host or _is_allowed(host, port, allow):
+    if not host or _is_allowed(host, port, allow, request.url.scheme):
         return None
     literal = _host_rejection(host)
     if literal is not None:
