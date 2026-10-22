@@ -1,8 +1,8 @@
 /** UI-02（R2/R3）对比度与排版地板回归锁 + U-1 review 加固项。
  *
  *  锁（暗/亮两主题各一遍）：
- *  1. 会话元数据（.session-item-meta）与行尾会话 id（.session-item-id，#1370）
- *     ≥12px 且对比度 ≥4.5:1
+ *  1. 会话元数据（.session-item-meta）与 meta 行会话 id（.session-item-id，#1399）
+ *     ≥12px 且对比度 ≥4.5:1；id 色 == --text-tertiary（等值断言）
  *  2. 时间线序号（.tl-seq）≥12px 且对比度 ≥4.5:1
  *  3. composer placeholder 对比度 ≥4.5:1
  *  4. 时间线事件类型名（.tl-type）== 解析后的 --color-muted-foreground（R1，等值断言）
@@ -345,25 +345,25 @@ async function openTaskReview(
 for (const theme of ['dark', 'light'] as const) {
   test(`[${theme}] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3）`, async ({ page }) => {
     await openWorkspace(page, theme);
-    for (const selector of ['.session-item-meta', '.session-item-id', '.tl-seq']) {
+    for (const selector of ['.session-item-meta', '.session-item-id']) {
       const m = await measure(page, selector);
       expect(m.fontSize, `${selector} font-size`).toBe('12px');
       const ratio = contrast(m.color, m.bg);
       expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
     }
-    // #1370 P0-7：id 的提升是「第三级 → 第二级」；只量 ≥4.5 时回退到 tertiary
-    // （暗 5.7 / 亮 5.4）仍然绿，锁不住本票的语义。等值断言与 `.tl-type` 同法。
-    const [idColor, secondary] = await page.evaluate(() => {
+    // #1399 定版（#1465 仲裁）：ID 下移到 meta 行后是**第三级**文字，与 meta 同色；
+    // 只量 ≥4.5 时换成任一更亮的 token 也仍然绿，锁不住语义。等值断言与 `.tl-type` 同法。
+    const [idColor, tertiary] = await page.evaluate(() => {
       const el = document.querySelector('.session-item-id');
       if (!el) throw new Error('no .session-item-id');
       const probe = document.createElement('div');
-      probe.style.color = 'var(--text-secondary)';
+      probe.style.color = 'var(--text-tertiary)';
       document.body.appendChild(probe);
       const v = getComputedStyle(probe).color;
       probe.remove();
       return [getComputedStyle(el).color, v];
     });
-    expect(idColor).toBe(secondary);
+    expect(idColor).toBe(tertiary);
   });
 
   /* #1269：项目语境武装提示（.rail-project-armed-hint）——本轮新立的行内 ink，按本轮
