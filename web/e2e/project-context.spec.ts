@@ -71,7 +71,7 @@ test('AC1/AC2 点中项目行 → 通用新建继承项目 cwd、会话落组、
   // 走**通用**「新建会话」入口（不是项目菜单里的入口）
   await page.getByRole('button', { name: '新建会话' }).click();
   // 新建态下 chip 已经预告"将在哪个项目里新建"
-  await expect(page.locator('.composer-owner-chip')).toContainText('项目「项目 alpha」');
+  await expect(page.locator('.composer-ownership')).toContainText('项目「项目 alpha」');
   await submitTask(page, '给登录接口加上限流');
 
   // AC1：请求带 cwd = 项目路径
@@ -82,8 +82,8 @@ test('AC1/AC2 点中项目行 → 通用新建继承项目 cwd、会话落组、
   await expect(alpha.locator('.session-item-id')).toHaveCount(1, { timeout: 10_000 });
 
   // AC2：composer 归属 chip 同时显示项目名与 cwd
-  await expect(page.locator('.composer-owner-chip')).toContainText('项目「项目 alpha」');
-  await expect(page.locator('.composer-owner-chip')).toContainText(ALPHA);
+  await expect(page.locator('.composer-ownership')).toContainText('项目「项目 alpha」');
+  await expect(page.locator('.composer-ownership')).toContainText(ALPHA);
 });
 
 test('AC1 对照：未选中项目时通用新建**不**带 cwd（回归基线，证明继承不是恒发）', async ({
@@ -143,7 +143,7 @@ test('AC3 未归属会话：composer 与列表行都明示「未分组（cwd: �
   // 列表行就地标注 cwd（AC3 的归属警示载体）
   await expect(page.locator('.session-item-owner')).toContainText('未分组（cwd: /home/hatch）');
   // composer chip 同步显形
-  await expect(page.locator('.composer-owner-chip')).toContainText('未分组（cwd: /home/hatch）');
+  await expect(page.locator('.composer-ownership')).toContainText('未分组（cwd: /home/hatch）');
 });
 
 test('P3 修回：再次点击已 active 的项目行取消语境 → 通用新建不再带 cwd（可逆）', async ({

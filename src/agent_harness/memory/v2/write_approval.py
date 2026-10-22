@@ -22,7 +22,12 @@ allow / stage——``blocked`` 是**审批结果**（用户明确拒绝）而不
   `tooling/approval_queue.py` 的会话队列——而那个队列按 tool_call 作用域登记、
   由 ToolExecutor 消费，``memory`` 工具拿不到它。票面给的兜底正是本仓的答案：
   **拿不到通道 → stage，绝不静默拒绝**。所以门开时 memory 写入一律 stage，审批走
-  ``/memory pending|approve|reject``。
+  ``agent-harness memory pending|approve|reject`` 或 ``/api/memory-pending*``。
+
+  **审批回调不接 `approval_queue`（追认偏离）**：#1438 已就此项作出裁决（用户
+  2026-10-21 评论，issue #1438）——不强接队列，理由是上面那条作用域约束仍然成立，
+  且 M6 自建的 ``memory_v2_staged`` 表已经承载了审批态与 pinning。该偏离已登记于
+  #1353 `issuecomment-6315586413`。
 
 # entry pinning（堵 TOCTOU）
 
@@ -37,6 +42,7 @@ batch 是**一个** pending record：整批的 pin 按 operations 顺序存成�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -45,10 +51,22 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import aiosqlite
+
 from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
-from agent_harness.memory.v2.store import STAGED_SCHEMA, MemorySettingsV2
-from agent_harness.memory.v2.types import TrustedMemoryIdentity
+from agent_harness.memory.v2.origin import BACKGROUND_REVIEW, ORIGINS, current_origin
+from agent_harness.memory.v2.store import (
+    BLOCKED_SCHEMA,
+    STAGED_SCHEMA,
+    MemorySettingsV2,
+    _to_record,
+)
+from agent_harness.memory.v2.types import (
+    MemoryDraftV2,
+    MemoryStatus,
+    TrustedMemoryIdentity,
+)
 from agent_harness.storage.sqlite import retry_on_busy
 
 logger = logging.getLogger(__name__)
@@ -81,7 +99,6 @@ def _identity(trusted: TrustedMemoryIdentity) -> str:
     )
 
 
-
 @dataclass(frozen=True)
 class GateDecision:
     """门的三态：``allow`` / ``blocked`` / ``stage``，恰好一个为真。"""
@@ -96,21 +113,41 @@ class GateDecision:
             raise ValueError("exactly one of allow / blocked / stage must be true")
 
 
-def evaluate_gate(settings: MemorySettingsV2) -> GateDecision:
-    """``memory`` 写入的门。开 → stage；关 → allow。
+def evaluate_gate(settings: MemorySettingsV2, origin: str | None = None) -> GateDecision:
+    """``memory`` 写入的门：gate 关 → allow；gate 开 → 按写入来源分流（#1438）。
 
-    门开时**总是** stage：本仓没有可用的行内审批通道（见模块 docstring），而票面
-    明确"拿不到审批通道 → stage，绝不静默拒绝"。
+    分流矩阵（票面 §5.1；``origin`` 省略时取 `origin.current_origin()`）：
 
-    消费者只有一个：``MemoryTool._gate``（前台 ``memory`` 工具）。**后台 formation
-    不经过这里**——``executor`` 在 ``commit_with_outcome`` 的同一事务里直接
-    ``create_in/update_in/invalidate_in``，把其中一条改成 stage 会让 job 终态与
-    记录落地分属两个事务（AC6/AC7 要的"终态与副作用一起落地"正是那条事务）。
-    后台写入的开关是 ``extraction_enabled``：关掉它就不形成，而不是形成后再逐条问。
+    ==================  ==================  =======
+    write_approval      origin              decision
+    ==================  ==================  =======
+    关                  任一                allow
+    开                  ``foreground``      stage
+    开                  ``background_review``  stage
+    ==================  ==================  =======
+
+    两格同值不是抄漏：本仓没有可问的通道（见模块 docstring），前台与后台都只能
+    stage。矩阵留在这里是因为「按 origin 分流」是票面 M6 的语义契约——将来真有
+    可问通道时，改的只是 ``foreground`` 那一格。``blocked`` **永远不由这里产出**：
+    它是审批结果（人工 approve/reject），把"没人问过"和"用户说不"混在一起就分不清了。
+
+    消费者只有 ``MemoryTool._gate``（前台 ``memory`` 工具）。后台 formation 走
+    executor 自己的分流层（``executor._apply_blocked``，``#1461``）：那一层只读
+    ``settings.write_approval`` 这个**布尔**、**不调用**本函数，gate 开时在同一笔
+    ``commit_with_outcome`` 事务里落 blocked 行 + job ``outcome=BLOCKED``——所以
+    "job 终态与副作用一起落地"（AC6/AC7）仍然成立，只是副作用从记录行换成了待办行。
+    后台仍然**打标**（``BACKGROUND_REVIEW``）：标是给软校验和将来策略用的。
+
+    本函数永不产出 ``blocked`` 的契约不变——那是**审批结果**（人工 promote/discard），
+    与"没人问过"是两件事。
     """
-    if settings.write_approval:
-        return GateDecision(stage=True, message=_staged_message())
-    return GateDecision(allow=True)
+    source = current_origin() if origin is None else origin
+    if source not in ORIGINS:
+        # 打标写错字必须响亮：静默 stage 会把"来源不明"伪装成"来源合法"。
+        raise ValueError(f"unknown memory write origin {source!r}")
+    if not settings.write_approval:
+        return GateDecision(allow=True)
+    return GateDecision(stage=True, message=_staged_message())
 
 
 def _staged_message() -> str:
@@ -390,8 +427,341 @@ def _to_staged(row: Any) -> StagedWrite:
     )
 
 
+# --------------------------------------------------------------------------------------
+# #1461：后台 formation 被拦下的写入（第二段处置通道）
+# --------------------------------------------------------------------------------------
+
+#: `memory_v2_blocked.status` 的取值。`blocked` 是唯一可处置态，另两个是终态。
+BLOCKED = "blocked"
+PROMOTED = "promoted"
+DISCARDED = "discarded"
+
+#: 行上的固定原因码；同时也是 job 终态的 `reason`（两处同值，便于对账）。
+BLOCKED_REASON = "write_approval_blocked"
+
+#: promote 时 pin 失配写进 `disposition_note` 的前缀（行保持 blocked）。
+DRIFT_PREFIX = "target_drift:"
+
+
+@dataclass(frozen=True)
+class BlockedWrite:
+    """一条被拦下的写入。`payload` 是 §3 的形状：`{"actions": [...]}`。"""
+
+    id: str
+    job_id: str
+    identity: str
+    project_id: str | None
+    origin: str
+    reason: str
+    payload: dict[str, Any]
+    status: str
+    disposition_note: str | None
+    created_at: str
+    disposed_at: str | None
+
+
+@dataclass(frozen=True)
+class BlockedDecision:
+    """处置结果：`applied` 为真时 `records` 是这次真正落盘的记录。
+
+    `reason` 是**给用户看的**业务结论（已处置 / pin 冲突），不是异常：promote/discard
+    的拒绝和 approve/reject 一样是业务结果，入口照常打印并退 0。行不存在（或不是本
+    身份的行）**不**走这里，而是 `KeyError`——那是"这条 id 不存在"的语义，入口转 404。
+    """
+
+    applied: bool
+    reason: str
+    records: tuple[Any, ...] = ()
+    invalidated: tuple[Any, ...] = ()
+    superseded: tuple[Any, ...] = ()
+
+
+class BlockedWriteStore:
+    """``memory_v2_blocked`` 的读写与 promote/discard。
+
+    `writer` 就是 executor 用的同一个 `MemoryRecordWriter`（`MemoryV2Service` 实现）。
+    这里刻意**不** import `executor`：`executor` 要 import 本模块的 `_identity` 做分组，
+    反向 import 会成环，所以参数按结构类型标注而不是那个 Protocol。
+    """
+
+    def __init__(self, database_path: Path, writer: Any) -> None:
+        self.database_path = Path(database_path)
+        self.writer = writer
+
+    async def initialize(self) -> None:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        async with connect(self.database_path) as connection:
+            await connection.executescript(BLOCKED_SCHEMA)
+            await connection.commit()
+
+    # ------------------------------------------------------------------ 第一段：落行
+
+    async def insert_in(
+        self, connection: aiosqlite.Connection, *,
+        job_id: str, identity: str, project_id: str | None, payload: dict[str, Any],
+        now_stamp: str | None = None,
+    ) -> str | None:
+        """在**调用方的事务里**插一行；同一 identity 已有同内容 ⇒ 返回 `None`（不插）。
+
+        查重不分 status：promoted / discarded 过的同内容已经有人下过结论，再插一行只会
+        让同一个决定被重新问一遍（票面 §4.3）。
+        """
+        canonical = _canonical_payload(payload)
+        digest = hashlib.sha256(canonical.encode()).hexdigest()
+        async with connection.execute(
+            "SELECT 1 FROM memory_v2_blocked WHERE identity=? AND content_hash=? LIMIT 1",
+            (identity, digest),
+        ) as cursor:
+            if await cursor.fetchone() is not None:
+                return None
+        blocked_id = f"blk_{uuid4().hex}"
+        await connection.execute(
+            "INSERT INTO memory_v2_blocked "
+            "(id, job_id, identity, project_id, origin, reason, payload, content_hash, "
+            " status, disposition_note, created_at, disposed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)",
+            (blocked_id, job_id, identity, project_id, BACKGROUND_REVIEW, BLOCKED_REASON,
+             canonical, digest, BLOCKED, now_stamp or stamp()),
+        )
+        return blocked_id
+
+    # ------------------------------------------------------------------ 查询
+
+    async def list_for(
+        self, tenant_id: str, user_id: str, *, project_id: str | None = None,
+    ) -> list[BlockedWrite]:
+        """本体身份可见的行。identity 的解析只在这一处（串格式由 `_identity` 独占）。"""
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT * FROM memory_v2_blocked ORDER BY created_at, id") as cursor,
+        ):
+            rows = await cursor.fetchall()
+        wanted = (tenant_id, user_id, project_id)
+        return [
+            _to_blocked(row) for row in rows
+            if _identity_owner(row["identity"])[:2] == wanted[:2]
+            and (project_id is None or row["project_id"] == project_id)
+        ]
+
+    async def get(self, blocked_id: str) -> BlockedWrite | None:
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT * FROM memory_v2_blocked WHERE id=?", (blocked_id,)) as cursor,
+        ):
+            row = await cursor.fetchone()
+        return None if row is None else _to_blocked(row)
+
+    # ------------------------------------------------------------------ 第二段：处置
+
+    async def promote(
+        self, blocked_id: str, trusted: TrustedMemoryIdentity,
+    ) -> BlockedDecision:
+        """按 payload 重放一条被拦下的写入。
+
+        三步都在**一笔**事务里：pin 复核（读库内**当前**行，不看 block 时的快照）→
+        逐条落盘 → 行转 promoted。任一 pin 失配 ⇒ 整条拒绝（不逐条跳过：payload 是一组
+        同 identity 的动作，只放行其中一部分会造出 block 时从未存在过的混合状态）。
+        """
+        row = await self._owned(blocked_id, trusted)
+        if isinstance(row, BlockedDecision):
+            return row
+        payload = json.loads(row["payload"])
+        actions = payload.get("actions") or []
+        owner = _identity_trusted(row["identity"])
+        async with connect(self.database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                drift = await _pin_drift(connection, actions)
+                if drift is None:
+                    # CAS：`_owned` 在事务外读状态，两个并发 promote 都能看到 blocked。
+                    # 转状态这一步必须自己判 rowcount，否则两边都会重放整批动作，落出
+                    # 一对重复记录 + 重复 markdown 条目。与 `discard` 同一口径。
+                    cursor = await connection.execute(
+                        "UPDATE memory_v2_blocked SET status=?, disposed_at=?, "
+                        "disposition_note=NULL WHERE id=? AND status=?",
+                        (PROMOTED, stamp(), blocked_id, BLOCKED),
+                    )
+                    if cursor.rowcount != 1:
+                        # 并发窗口里对方先落了：回滚掉本笔，按"已处置"收口（与顺序
+                        # 二次 promote 的返回同形）。`BEGIN IMMEDIATE` 保证对方已提交，
+                        # 所以重读一定看到非 blocked 的结论。
+                        await connection.rollback()
+                        return await self._owned(blocked_id, trusted)
+                    records, superseded, invalidated = await self._replay_in(
+                        connection, actions, owner)
+                    await connection.commit()
+                else:
+                    await connection.rollback()
+            except BaseException:
+                await connection.rollback()
+                raise
+        if drift is not None:
+            await self._note(blocked_id, f"{DRIFT_PREFIX}{drift}")
+            return BlockedDecision(
+                applied=False,
+                reason=f"目标已漂移（{drift}），整条拒绝；记录保持 blocked。",
+            )
+        # 提交后再补 markdown 权威面：与 executor 的 `_apply` 提交后镜像同一语义。
+        # `records` 只给 ACTIVE——INVALIDATED 的 record 在两个列表里都出现时，
+        # `mirror_committed` 会先删后加，把刚撤回的内容写回权威面（`_apply` 同口径过滤）。
+        await self.writer.mirror_committed(
+            tuple(record for record in records if record.status is MemoryStatus.ACTIVE),
+            invalidated=(*invalidated, *superseded),
+        )
+        return BlockedDecision(
+            applied=True, reason="已放行并落盘。", records=records,
+            invalidated=invalidated, superseded=superseded)
+
+    async def discard(
+        self, blocked_id: str, trusted: TrustedMemoryIdentity,
+    ) -> BlockedDecision:
+        """明确丢弃：只改状态，零记录写入。"""
+        row = await self._owned(blocked_id, trusted)
+        if isinstance(row, BlockedDecision):
+            return row
+        async with connect(self.database_path) as connection:
+            cursor = await connection.execute(
+                "UPDATE memory_v2_blocked SET status=?, disposed_at=? "
+                "WHERE id=? AND status=?",
+                (DISCARDED, stamp(), blocked_id, BLOCKED),
+            )
+            await connection.commit()
+            if cursor.rowcount != 1:
+                return BlockedDecision(applied=False, reason="这条写入已被处置。")
+        return BlockedDecision(applied=True, reason="已丢弃，未写入任何记忆。")
+
+    async def _owned(
+        self, blocked_id: str, trusted: TrustedMemoryIdentity,
+    ) -> Any | BlockedDecision:
+        """取行并核对身份；返回行，或一个"不能处置"的结论。
+
+        行不存在与"不是你的"都抛 `KeyError`（入口转 404）：两者必须同形，否则
+        404/403 的差别会泄露别人的 id 是否存在。**已处置**是另一个结论——行在、
+        只是没有待办可做（入口 409）。
+        """
+        row = await self._row(blocked_id)
+        if row is None:
+            raise KeyError(blocked_id)
+        owner = _identity_trusted(row["identity"])
+        if (owner.tenant_id, owner.user_id) != (trusted.tenant_id, trusted.user_id):
+            raise KeyError(blocked_id)
+        if row["status"] != BLOCKED:
+            return BlockedDecision(
+                applied=False, reason=f"这条写入已被处置（{row['status']}）。")
+        return row
+
+    async def _row(self, blocked_id: str) -> Any | None:
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT * FROM memory_v2_blocked WHERE id=?", (blocked_id,)) as cursor,
+        ):
+            return await cursor.fetchone()
+
+    @retry_on_busy
+    async def _note(self, blocked_id: str, note: str) -> None:
+        async with connect(self.database_path) as connection:
+            await connection.execute(
+                "UPDATE memory_v2_blocked SET disposition_note=? WHERE id=?",
+                (note, blocked_id),
+            )
+            await connection.commit()
+
+    async def _replay_in(
+        self, connection: aiosqlite.Connection, actions: list[dict[str, Any]],
+        owner: TrustedMemoryIdentity,
+    ) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]]:
+        """逐条重放 payload；`(新记录, 被取代旧行, 被撤回行)`。"""
+        records: list[Any] = []
+        superseded: list[Any] = []
+        invalidated: list[Any] = []
+        for item in actions:
+            action = item["action"]
+            if action == "invalidate":
+                record = await self.writer.invalidate_in(
+                    connection, item["pin"]["memory_id"], owner)
+                invalidated.append(record)
+                records.append(record)
+                continue
+            draft = MemoryDraftV2.model_validate(item["draft"])
+            if action == "add":
+                records.append(await self.writer.create_in(connection, draft, owner))
+                continue
+            previous_id = item["pin"]["memory_id"]
+            previous = await _current_row(connection, previous_id)
+            if previous is None:
+                raise KeyError(previous_id)
+            superseded.append(
+                _to_record(previous).model_copy(
+                    update={"status": MemoryStatus.SUPERSEDED}))
+            records.append(
+                await self.writer.update_in(connection, previous_id, draft, owner))
+        return tuple(records), tuple(superseded), tuple(invalidated)
+
+
+async def _pin_drift(
+    connection: aiosqlite.Connection, actions: list[dict[str, Any]],
+) -> str | None:
+    """逐条比对 pin 与库内**当前**行；返回失配的 memory_id，全合返回 `None`。"""
+    for item in actions:
+        pin = item.get("pin")
+        if pin is None:
+            continue
+        current = await _current_row(connection, pin["memory_id"])
+        if current is None:
+            return pin["memory_id"]
+        if (current["root_id"] != pin["root_id"]
+                or current["version"] != pin["version"]
+                or current["updated_at"] != pin["updated_at"]):
+            return pin["memory_id"]
+    return None
+
+
+async def _current_row(connection: aiosqlite.Connection, memory_id: str) -> Any | None:
+    """事务内按 id 读当前记录行（promote 的 pin 复核只认库内现状，不认快照）。"""
+    async with connection.execute(
+        "SELECT * FROM memory_v2_records WHERE memory_id=?", (memory_id,)) as cursor:
+        return await cursor.fetchone()
+
+
+def _canonical_payload(payload: dict[str, Any]) -> str:
+    """规范 JSON（`sort_keys`，紧凑分隔符）——`content_hash` 与入库文本共用它。"""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _identity_owner(identity: str) -> tuple[str, str, str | None]:
+    """`_identity` 的逆：只在本模块解析那个串格式。"""
+    raw = json.loads(identity)
+    return raw["tenant_id"], raw["user_id"], raw["project_id"]
+
+
+def _identity_trusted(identity: str) -> TrustedMemoryIdentity:
+    tenant_id, user_id, project_id = _identity_owner(identity)
+    return TrustedMemoryIdentity(tenant_id, user_id, project_id)
+
+
+def _to_blocked(row: Any) -> BlockedWrite:
+    return BlockedWrite(
+        id=row["id"], job_id=row["job_id"], identity=row["identity"],
+        project_id=row["project_id"], origin=row["origin"], reason=row["reason"],
+        payload=json.loads(row["payload"]), status=row["status"],
+        disposition_note=row["disposition_note"], created_at=row["created_at"],
+        disposed_at=row["disposed_at"],
+    )
+
+
 __all__ = [
+    "BLOCKED",
+    "BLOCKED_REASON",
     "CONFIG_KEY",
+    "DISCARDED",
+    "DRIFT_PREFIX",
+    "PROMOTED",
+    "BlockedDecision",
+    "BlockedWrite",
+    "BlockedWriteStore",
     "GateDecision",
     "StagedWrite",
     "StagedWriteStore",

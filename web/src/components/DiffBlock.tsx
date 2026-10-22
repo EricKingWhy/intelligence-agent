@@ -33,7 +33,7 @@ export function DiffBlock({
           <div className="diff-archived-text">
             <div className="diff-archived-title">Diff 内容已归档（超过 2000 字符）</div>
             <div className="diff-archived-hint">
-              原始变更已存为 artifact；模型侧可用 <code>{tool}</code> 读取
+              原始改动已存为产出文件；AI 可以用 <code>{tool}</code> 读取
             </div>
           </div>
           <code className="diff-archived-id">{diff.artifactId.slice(0, 16)}…</code>

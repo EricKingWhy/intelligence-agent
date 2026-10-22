@@ -11,7 +11,7 @@ import { EventType } from '../types';
 import { addDecimalTexts } from './runBudget';
 import { isCancelledRunFailure } from './runCancel';
 import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget';
-import { parseArtifactMarker } from './toolShapes';
+import { parseArtifactMarker, parseErrorShape } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
 import { parseImageRefs, type ImageAttachmentRef } from './attachmentRefs';
 
@@ -212,6 +212,7 @@ export function initConversation(session_id: string): ConversationState {
     pending_plan_approval: null,
     run_failure: null,
     turn_index: null,
+    resumed_turn_index: null,
     requested_model: null,
     model_run_id: null,
       seenSeqs: new Set(),
@@ -278,6 +279,15 @@ function withTurnAt(state: ConversationState, step: number, fn: (turn: Turn) => 
   const idx = state.turns.findIndex((t) => t.step_id === step);
   if (idx === -1) {
     const turn = newTurn(step);
+    // #1429 F6 / 复审 P2：恢复续轮（`run/resumed` 之后的新执行按 step_base+1 建轮）继承
+    // 同一 run 的轮次号。**只交给该 run 的首个续轮**：继承槽消费即清空，且该号已被
+    // 现有轮占用时不再打标（一次恢复连开多个 step 曾得到 [1,1,1]——同一 run 出现重复
+    // 「第 N 轮」，导航目标被后写覆盖）。`turnNav` 的首写守卫是第二道保险。
+    const inherited = state.resumed_turn_index;
+    state.resumed_turn_index = null;
+    if (inherited !== null && !state.turns.some((t) => t.turn_index === inherited)) {
+      turn.turn_index = inherited;
+    }
     state.turns = [...state.turns, turn];
     fn(turn);
     return;
@@ -405,7 +415,7 @@ function unknownSummary(_event: AgentEvent): string {
 
 /** UI-04：forked / 审批族的单行语义（此前落「未知事件」）。 */
 function summarizeForked(_event: AgentEvent): string {
-  return '已分叉';
+  return '已另开一条';
 }
 
 function summarizeApprovalRequested(event: AgentEvent): string {
@@ -481,7 +491,7 @@ function summarizeSuperseded(event: AgentEvent): string {
 function summarizeError(event: AgentEvent): string {
   const message = event.data.message;
   const detail = typeof message === 'string' ? message.trim() : '';
-  return detail ? `运行失败 · ${detail}` : '运行失败';
+  return detail ? `任务失败 · ${detail}` : '任务失败';
 }
 
 /** 队列条/摘要共用的 1 行截断（§5.2：内容摘要 1 行截断）。 */
@@ -492,6 +502,9 @@ function truncateQueueSummary(content: string, max = 40): string {
 // ── applyEvent 的 per-type 投影 ──
 
 function projectUserMessage(state: ConversationState, event: AgentEvent): void {
+  // #1429 F6：用户新输入 = 新 run 的前奏，本轮轮次号由随后的 run/started 决定——
+  // 不能继承恢复续轮的号（否则新轮带着上一轮的 turn_index，导航会出现重复药丸）。
+  state.resumed_turn_index = null;
   const step = resolveStep(event, state);
   withTurnAt(state, step, (turn) => {
     touchTurn(turn, event);
@@ -804,6 +817,8 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   const idx = event.data.turn_index;
   const hasIdx = typeof idx === 'number' && Number.isFinite(idx);
   if (hasIdx) state.turn_index = idx; // 会话级镜像（Langfuse / turn 元数据消费）
+  // #1429 F6：新 run 自带轮次号，恢复续轮的继承意图到此作废（无论本事件有没有带值）。
+  state.resumed_turn_index = null;
   // 当轮 = 最后一个 turn：生产时序为 user/message（建轮）→ run/started，
   // 故 RUN_STARTED 到达时本轮 turn 已存在。不调用 withTurnAt——它在无匹配时
   // 会新建空 turn，而 RUN_STARTED 本身不携带 step（在途 run 的 step 无法解析），
@@ -971,6 +986,12 @@ function projectToolResult(state: ConversationState, event: AgentEvent): void {
       tool.status = ok ? 'success' : 'failed';
     }
     tool.result = parsedData ?? parsed?.message ?? data.content;
+    // #1429 F1：失败分类只在**信封**里（`data` 为空时 result 退化成 message 字符串，
+    // error_code 已在上面那行丢掉）。这里解析一次落成 per-tool 事实，视图不再
+    // 回头拆 `result`/`raw_result`。ok=true / 无信封 ⇒ 无 error 字段（零伪造）。
+    const errorShape = tool.status === 'failed' ? parseErrorShape(parsed) : null;
+    if (errorShape) tool.error = errorShape;
+    else delete tool.error;
     // Backend edit/write/apply_patch tools spread diff fields (before/after/truncated)
     // directly into ToolResult.data — not nested under data.diff. Detect them here.
     // >2000 字符的 before/after 变为截断摘要并内嵌 "use <读回工具>(<id>)" marker
@@ -1282,6 +1303,9 @@ function projectRunResumed(state: ConversationState, event: AgentEvent): void {
   state.run_paused = null;
   clearPendingUserInput(state, event.run_id ?? null, 'for-run');
   state.run_status = 'running';
+  // #1429 F6：恢复沿用同一逻辑 run（同一 run_id、同一 turn_index），续轮没有自己的
+  // run/started 可回填 ⇒ 把会话镜像里的轮次号交给下一条新建的轮继承。
+  state.resumed_turn_index = state.turn_index;
   // #537：恢复后的 ceilings 用**恢复事件自带的新快照**更新（run/resumed 载荷的
   // data.limits.run 与 run/paused 同形，值是恢复生效后的 effective limits）——
   // 徽标与暂停面板消费同一条恢复链，不 fetch 第二份。载荷没带 limits（旧会话
@@ -1667,16 +1691,64 @@ function summarizeModelCompleted(event: AgentEvent): string {
   // 逐维可空（C6）：total_tokens 未知 ⇒ 该维不展示（绝不打印 "null tok"）；
   // 模型与 tokens 全都拿不到时回落内容长度，避免产出空摘要。
   const tokens =
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null;
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null;
   if (model || tokens) {
     return [model, tokens].filter((p): p is string => p !== null).join(' · ');
   }
   return `${String(d.content ?? '').length} 字符`;
 }
 
+/** #1416：工具参数的可读化摘要——不再 `JSON.stringify(...).slice()`（裸 JSON 被
+ *  硬切在引号/转义中间等同乱码）。已知语义键优先，其余按键值行拼接；嵌套值只报
+ *  形状（`N 项` / `N 字段`），摘要行因此永不出现裸 JSON。 */
+const TOOL_SUMMARY_DETAIL_MAX = 60;
+const TOOL_SUMMARY_MAX_PAIRS = 3;
+const TOOL_PATH_KEYS = ['path', 'file_path', 'file'] as const;
+
+function singleLine(text: string, max = TOOL_SUMMARY_DETAIL_MAX): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+function argValueText(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return value.trim() ? singleLine(value) : null;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    const scalars = value.filter(
+      (item): item is string | number | boolean =>
+        typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean',
+    );
+    return scalars.length === value.length
+      ? singleLine(scalars.map(String).join(', '))
+      : `${value.length} 项`;
+  }
+  if (isRecord(value)) return `${Object.keys(value).length} 字段`;
+  return null;
+}
+
+function toolCallDetail(args: Record<string, unknown>): string {
+  if (typeof args.command === 'string' && args.command.trim()) return singleLine(args.command);
+  for (const key of TOOL_PATH_KEYS) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) return singleLine(value);
+  }
+  const pairs: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    const text = argValueText(value);
+    if (text === null) continue;
+    pairs.push(`${key}: ${text}`);
+    if (pairs.length === TOOL_SUMMARY_MAX_PAIRS) break;
+  }
+  return pairs.join(' · ');
+}
+
 function summarizeToolCall(event: AgentEvent): string {
   const d = event.data;
-  return `${String(d.tool_name ?? '?')} ${JSON.stringify(d.args ?? {}).slice(0, 40)}`;
+  const name = typeof d.tool_name === 'string' && d.tool_name ? d.tool_name : '—';
+  const detail = isRecord(d.args) ? toolCallDetail(d.args) : '';
+  return detail ? `${name} · ${detail}` : name;
 }
 
 function summarizeToolResult(event: AgentEvent): string {
@@ -1694,7 +1766,7 @@ function summarizeArtifactCreated(event: AgentEvent): string {
 
 function summarizeContextCompacted(event: AgentEvent): string {
   const d = event.data;
-  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok`;
+  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} 字`;
 }
 
 function summarizeOperationReconcileRequired(event: AgentEvent): string {
@@ -1704,13 +1776,14 @@ function summarizeOperationReconcileRequired(event: AgentEvent): string {
 function summarizeDelegationStarted(event: AgentEvent): string {
   // Phase 13（ADR-0015）：`委派 → {target}`——编排节点单行语义；
   // child_session_id 在节点 UI 可见可复制，单行不塞长 ID。
+  // #1417：target 缺失按空态约定显示 `—`，不用 `?`（那是调试残留的形状）。
   const target = event.data.target;
-  return `委派 → ${typeof target === 'string' && target ? target : '?'}`;
+  return `委派 → ${typeof target === 'string' && target ? target : '—'}`;
 }
 
 function summarizeDelegationFinished(event: AgentEvent): string {
   const d = event.data;
-  const target = typeof d.target === 'string' && d.target ? d.target : '?';
+  const target = typeof d.target === 'string' && d.target ? d.target : '—';
   const outcome = d.status === 'failed' ? '失败' : '完成';
   const summary = typeof d.summary === 'string' && d.summary ? ` · ${d.summary.slice(0, 40)}` : '';
   return `${target} ${outcome}${summary}`;
@@ -1739,7 +1812,7 @@ function summarizeRunCompleted(event: AgentEvent): string {
   const d = event.data;
   const usage = parseUsage(d.usage_total);
   const parts = [
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null,
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null,
     typeof d.cost_usd === 'number' && Number.isFinite(d.cost_usd) ? `$${d.cost_usd}` : null,
   ].filter((p): p is string => p !== null);
   return parts.join(' · ');
@@ -1759,7 +1832,7 @@ function summarizeReasoningInterrupted(): string {
 
 function summarizeRunInterrupted(event: AgentEvent): string {
   const step = event.step_id;
-  return step !== null && step !== undefined ? `第 ${step} 步中断` : '运行中断';
+  return step !== null && step !== undefined ? `第 ${step} 步中断` : '任务中断';
 }
 
 /** `#312`：`run/paused` 行摘要 = 命中的维度 + consumed/ceiling 两个数。
@@ -1787,14 +1860,14 @@ function summarizeRunPaused(event: AgentEvent): string {
     const calls = table === null || table === undefined ? undefined : (table[tool] ?? 0);
     const ceiling = info.run_limits?.tool_call_limits?.[tool];
     return `${dimension} · ${calls === undefined ? '未知' : calls} 次调用/${
-      ceiling === undefined ? '无 ceiling' : `上限 ${ceiling}`
+      ceiling === undefined ? '无上限' : `上限 ${ceiling}`
     }`;
   }
   if (isDeadlinePause(info)) {
     const instant = deadlineInstant(info);
     return `${dimension} · 截止 ${instant ?? 'unavailable'}`;
   }
-  const ceiling = info.run_limit === null ? '无 ceiling' : String(info.run_limit);
+  const ceiling = info.run_limit === null ? '无上限' : String(info.run_limit);
   return `${dimension} · ${info.consumed_agent_turns}/${ceiling}`;
 }
 
@@ -1827,10 +1900,10 @@ function summarizeModelChanged(event: AgentEvent): string {
 // #1192：委派约束继承快照的单行语义（子会话事件流的独立审计事件）。
 function summarizeConstraintInheritance(event: AgentEvent): string {
   const d = event.data as Record<string, unknown>;
-  if (d.omit_constraints === true) return '干净启动：不继承任何约束';
+  if (d.omit_constraints === true) return '干净启动：不沿用任何要求';
   const inherited = Array.isArray(d.inherited) ? d.inherited.length : 0;
   const notInherited = Array.isArray(d.not_inherited) ? d.not_inherited.length : 0;
-  return `继承 ${inherited} 条 · 未继承 ${notInherited} 条`;
+  return `沿用 ${inherited} 条 · 未沿用 ${notInherited} 条`;
 }
 
 // ── 注册表（穷尽 EventTypeValue：生成物新增类型时 tsc 失败直到登记）──
@@ -1937,6 +2010,11 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // （不变量 #22：内容预览只走日志通道）。登记为 no-op ⇒ 已知类型、不进
   // `unknown_events`；不登记则 `Record<EventTypeValue, EventSemantics>` 穷尽性被破坏。
   [EventType.MEMORY_HUMAN_UPDATED]: { apply: noopProjection, summarize: emptySummary },
+  // #1461：`memory/human_blocked` 与 MEMORY_HUMAN_UPDATED 同形——写路径被审批门拦下时
+  // 的人面向通知事件，载荷只有 count / blocked IDs / job ID，**不带内容**（不变量 #22）。
+  // 登记为 no-op ⇒ 已知类型、不进 `unknown_events`；不登记则
+  // `Record<EventTypeValue, EventSemantics>` 穷尽性被破坏，`tsc` 直接红。
+  [EventType.MEMORY_HUMAN_BLOCKED]: { apply: noopProjection, summarize: emptySummary },
   // #1017：不再是无归属的 no-op——按「事件到达时的最后一轮」verbatim 归位（呈现层
   // 与轮次锚定，消灭尾部游离卡），事件本体照旧留在 events 日志（Inspector Timeline）。
   [EventType.MEMORY_RECALLED]: { apply: projectMemoryRecalled, summarize: emptySummary },
@@ -2487,7 +2565,7 @@ export function deriveRunFailedBeforePlan(events: AgentEvent[]): {
       const hint = e.data.hint;
       return {
         message:
-          typeof message === 'string' && message ? message : '运行失败（原因见后端日志）',
+          typeof message === 'string' && message ? message : '任务失败（原因见后端日志）',
         hint: typeof hint === 'string' ? hint : '',
       };
     }

@@ -2,13 +2,21 @@
  *
  * Left: product identity. Center: current session title + Run Pulse
  * (signature #1 — icon + color + text, never color-only). Right:
- * trace density selector (four tiers, localStorage-persisted — frozen
- * decision), inspector collapse toggle + theme toggle.
+ * one density dropdown (shows the current tier) + the「更多工具」menu.
+ *
+ * #1396：右簇只保留 2 个可见动作——密度下拉与「更多」。记忆 / 看板 / 恢复 /
+ * 主题与既有管理项都收进同一个菜单，入口零丢失；图标按钮静止态是 ghost
+ * （透明、无边框），hover/focus 才出现 surface。
  */
 
-import { Activity, Brain, Columns3, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import { Brain, ChartNoAxesColumn, Check, ChevronDown, Columns3, Ellipsis, Gauge, History, KeyRound, Moon, PanelRight, ShieldCheck, SlidersHorizontal, Sun, Timer } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Theme } from '../lib/theme';
+import { formatDateTime } from '../lib/format';
+import type { SessionSummary } from '../types';
+import { Tip } from './Tooltip';
+import { OwletMark } from './OwletMark';
 import { DENSITIES, type TraceDensity } from '../lib/density';
 import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runState';
 import { BUDGET_BADGE_UNITS, budgetBadgeFacts } from '../lib/runBudget';
@@ -27,7 +35,7 @@ interface Props {
   /** 主题状态归 App（Command Palette Toggle Theme 与本按钮共享同一状态源）。 */
   theme: Theme;
   onToggleTheme: () => void;
-  /** 401 已发生（App 广播）——钥匙图标加提示点，引导配置 token。 */
+  /** 401 已发生（App 广播）——「更多工具」触发按钮加提示点，引导配置 token。 */
   authRequired: boolean;
   /** 打开记忆管理浮层（MEM-5 / #160）。低频管理动作，放在 App Bar 右簇。 */
   onOpenMemories: () => void;
@@ -48,6 +56,9 @@ interface Props {
   /** #1197 项 5B：打开「上下文窗口」挡位选择器。可选——未提供时不渲染入口
    *  （同 `onOpenRecoveryList` 的先例：既有测试夹具零迁移）。 */
   onOpenContextWindow?: (sessionId: string) => void;
+  /** #1420：打开当前会话的上下文洞察页（上下文 / Fleet）。可选——能力未声明
+   *  或测试夹具未提供时不渲染入口。 */
+  onOpenSessionInsights?: (sessionId: string) => void;
   /** #1030：后端待裁决清单非空（`GET /api/sessions/{id}/recovery` 或 409 载荷）。
    *  可选 + 缺省 false——既有测试夹具零迁移（同 `onOpenRecoveryList` 的先例）。
    *  为真时徽标显示一等态「待裁决」而非「思考中」：坏死 run 的 `run_status` 停在
@@ -56,10 +67,39 @@ interface Props {
   /** #1256：子智能体 roster 入口（会话区旁）。调用方（App）按"当前会话有无委派"
    *  决定渲染与否——无委派传 null/undefined，本组件不自行取数。 */
   rosterSlot?: ReactNode;
+  /** #1372 改动 8：会话名 = 纯文本 + 下拉箭头（与状态 pill 区分）。会话列表与
+   *  切换回调都是可选的——没传时退化为纯文本，既有测试夹具零迁移。 */
+  sessions?: SessionSummary[];
+  titlesById?: Record<string, string>;
+  onSelectSession?: (sessionId: string) => void;
 }
 
-export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, awaitingDecision = false, rosterSlot }: Props) {
+/** #1410：密度四档的菜单体。桌面档挂在独立的密度下拉里，≤560px 时同一个
+ *  组件也挂进「更多工具」——顶栏只留一个菜单入口。两侧共用同一份受控状态
+ *  （`density` / `onDensityChange`），不存在第二套密度真相。 */
+function DensityRadioGroup({ density, onDensityChange }: Pick<Props, 'density' | 'onDensityChange'>) {
+  return (
+    <DropdownMenu.RadioGroup
+      value={density}
+      onValueChange={(value) => onDensityChange(value as TraceDensity)}
+    >
+      {DENSITIES.map((d) => (
+        <DropdownMenu.RadioItem
+          key={d}
+          value={d}
+          className="rail-menu-item appbar-density-item"
+        >
+          <span>{DENSITY_LABEL[d]}</span>
+          <DropdownMenu.ItemIndicator>
+            <Check size={14} aria-hidden="true" />
+          </DropdownMenu.ItemIndicator>
+        </DropdownMenu.RadioItem>
+      ))}
+    </DropdownMenu.RadioGroup>
+  );
+}
 
+export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspector, density, onDensityChange, theme, onToggleTheme, authRequired, onOpenMemories, onOpenApprovePolicy, onOpenRecoveryList, onOpenKanban, onOpenWatchtower, sessionId, onOpenContextUsage, onOpenContextWindow, onOpenSessionInsights, awaitingDecision = false, rosterSlot, sessions, titlesById, onSelectSession }: Props) {
   // 身份 chip：订阅 token 变更（设置面板保存/清除即时反映），解码展示 claims。
   const [token, setTokenLive] = useState(getToken());
   useEffect(() => onTokenChange(() => setTokenLive(getToken())), []);
@@ -69,6 +109,15 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   // 输入框只在面板打开时同步真值——打开 = 读取当前存储，避免陈旧副本。
   const [authPanelOpen, setAuthPanelOpen] = useState(false);
   const [tokenDraft, setTokenDraft] = useState('');
+  const authInputRef = useRef<HTMLInputElement>(null);
+  /** 「更多工具」触发器：令牌面板从任何路径关闭时，焦点都回到这里。 */
+  const moreTriggerRef = useRef<HTMLButtonElement>(null);
+  /** 本次菜单关闭是否由「打开 API 身份令牌」引起：只在那一次阻止 Radix 归还焦点。
+   *  不能按「面板此刻是否打开」判断——面板已开时用 Esc/其它菜单项关菜单也会被误吞。 */
+  const authFocusPendingRef = useRef(false);
+  /** 同上：本次菜单关闭由「打开上下文洞察」引起时，别把焦点还给触发器——
+   *  洞察页挂载后要接管焦点（否则 Esc 落在触发器上，页面关不掉）。 */
+  const insightsFocusPendingRef = useRef(false);
 
   // 流式计时（借鉴 ZCode 的"工作中 N 秒"）：进行中状态用真实秒数表达，而非空泛 spinner。
   const [elapsedSec, setElapsedSec] = useState(0);
@@ -87,13 +136,30 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
 
   const openAuthPanel = () => {
     setTokenDraft(getToken());
-    setAuthPanelOpen((v) => !v);
+    const next = !authPanelOpen;
+    authFocusPendingRef.current = next; // 只有「打开」才接管焦点
+    setAuthPanelOpen(next);
   };
+
+  // Radix 菜单关闭时会把焦点还给 trigger；若面板此刻打开，焦点要落到输入框，
+  // 否则 Esc 落在 trigger 上、面板关不掉（键盘用户必须先手动点进来）。
+  useEffect(() => {
+    if (!authPanelOpen) return;
+    const timer = window.setTimeout(() => authInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [authPanelOpen]);
 
   const saveToken = () => {
     setToken(tokenDraft);
-    setAuthPanelOpen(false);
+    closeAuthPanel();
   };
+
+  /** 关闭令牌面板并把焦点还给「更多工具」。面板内控件（输入框 / 保存 / 清除）
+   *  随即卸载；不先移焦，键盘用户会掉回 body，下一次 Tab 从文档首重来。 */
+  function closeAuthPanel() {
+    setAuthPanelOpen(false);
+    moreTriggerRef.current?.focus();
+  }
 
   // #1030：`awaitingDecision` 是唯一不来自 `conversation` 的输入——坏死 run 的
   // run_status 停在 'running'，事件流里根本没有「卡在等人裁决」这个事实（唯一读面
@@ -105,6 +171,25 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   const active = pulse.state === 'thinking' || pulse.state === 'tool';
   // #1313 口径 B：顶栏用量 = 会话累计（S + R），在渲染期派生（不是 effect 里的状态）。
   const sessionUsage = conversation ? displayedSessionUsage(conversation) : null;
+  // #1372 改动 8：会话名（真实标题优先，没有标题时用短 id——不编造名字）。
+  // #1448：派生源必须是**选中身份** `sessionId`（App 的 selectedId，点击时同步变新），
+  // 不能借道 `conversation.session_id`——历史装载是异步的，切换窗口内 `conversation`
+  // 仍是旧会话，按它取标题会读错键、显示上一个会话的名字。
+  const sessionLabel = sessionId
+    ? (titlesById?.[sessionId] || sessionId.slice(0, 8))
+    : '';
+  // 归档会话默认不在侧栏显示；切换器同口径，不能给出一个侧栏里找不到的选项。
+  const switchableSessions = useMemo(() => sessions?.filter((s) => !s.archived), [sessions]);
+  // #1448：可切换判据同样按选中身份，不按可能滞后一整个历史请求的 `conversation`。
+  const canSwitchSession = sessionId !== null && onSelectSession !== undefined && (switchableSessions?.length ?? 0) > 1;
+  // `exp` 来自未验签的 token claims：任何数字都能进来，`toISOString()` 对
+  // 非有限/越界值会抛 RangeError，整条顶栏会跟着崩。无效就不显过期时间。
+  const expDate = identity?.exp != null && Number.isFinite(identity.exp)
+    ? new Date(identity.exp * 1000)
+    : null;
+  const expText = expDate !== null && !Number.isNaN(expDate.getTime())
+    ? formatDateTime(expDate.toISOString())
+    : null;
 
   // 停顿提示（FE-01/#148）：锚**空闲**（距上次新事件），不是流龄——健康的长任务里
   // 流龄一路涨，用它当阈值会把正常慢任务报成停顿。events.length 是投影真值的进度
@@ -144,15 +229,61 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   return (
     <header className="appbar">
       <div className="appbar-left">
-        <Activity size={16} className="appbar-logo" />
-        <span className="appbar-title">Agent Harness Inspector</span>
+        <OwletMark className="appbar-logo" />
+        <span className="appbar-title">Owlet</span>
       </div>
 
       <div className="appbar-center">
-        {conversation && (
-          <span className="appbar-session mono">
-            {conversation.session_id.slice(0, 8)}
-          </span>
+        {/* #1448：会话身份横幅（标题 + 切换器）按**选中身份**渲染，不按 `conversation`——
+            切到新会话 / 空态时 `conversation` 可能还残留旧会话一帧，按它渲染会闪出旧标题。 */}
+        {sessionId !== null && (
+          canSwitchSession ? (
+            <DropdownMenu.Root>
+              <Tip content={`当前会话：${sessionLabel} · 点击切换`}>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    className="appbar-session"
+                    aria-label={`切换会话：${sessionLabel}`}
+                  >
+                    {/* 完整标题由 tooltip 承载，不再叠一层原生 title。 */}
+                    <span className="appbar-session-name">
+                      {sessionLabel}
+                    </span>
+                    <ChevronDown size={12} className="appbar-session-chevron" aria-hidden="true" />
+                  </button>
+                </DropdownMenu.Trigger>
+              </Tip>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                  className="rail-menu appbar-session-menu"
+                  align="start"
+                  sideOffset={6}
+                >
+                  {switchableSessions?.map((s) => {
+                    const label = titlesById?.[s.session_id] || s.session_id.slice(0, 8);
+                    return (
+                      <DropdownMenu.Item
+                        key={s.session_id}
+                        className="rail-menu-item appbar-session-menu-item"
+                        aria-current={s.session_id === sessionId ? 'true' : undefined}
+                        onSelect={() => onSelectSession?.(s.session_id)}
+                      >
+                        <span className="appbar-session-item-title">{label}</span>
+                        <span className="appbar-session-item-id mono num">
+                          {s.session_id.slice(0, 8)}
+                        </span>
+                      </DropdownMenu.Item>
+                    );
+                  })}
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          ) : (
+            <span className="appbar-session appbar-session-static">
+              {sessionLabel}
+            </span>
+          )
         )}
         <span className={`run-pulse ${pulse.className}`}>
           <PulseIcon size={14} aria-hidden="true" />
@@ -163,7 +294,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               `run/completed` 以权威值**替换**本 run 的流式贡献，因此到达前后不出现
               数字变小的覆盖式跳变。无数据不显示（零伪造）。 */}
           {sessionUsage && sessionUsage.total_tokens !== null && (
-            <span className="num"> · {sessionUsage.total_tokens.toLocaleString()} tok</span>
+            <span className="num"> · {sessionUsage.total_tokens.toLocaleString()} 字</span>
           )}
           {/* #537：run 预算徽标「已用 / 上限」——只出设了 ceiling 的维；数据源是
               投影的 run 预算镜像（run/started 回显 + run/resumed 更新），文本经
@@ -186,133 +317,163 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       </div>
 
       <div className="appbar-right">
-        <div className="density-picker" role="radiogroup" aria-label="Trace 密度">
-          {DENSITIES.map((d) => (
-            <button
-              key={d}
-              role="radio"
-              aria-checked={density === d}
-              className={`density-btn ${density === d ? 'sel' : ''}`}
-              onClick={() => onDensityChange(d)}
-              title={DENSITY_LABEL[d]}
+        {/* #1396：四段 segmented 压成单个下拉——触发器显示当前档，展开才出现四档。
+            `RadioGroup` 保留「一组里只有一个选中」的语义（menuitemradio + aria-checked）。 */}
+        <DropdownMenu.Root>
+          <Tip content={`显示密度：${DENSITY_LABEL[density]} · 点击切换`}>
+            <DropdownMenu.Trigger asChild>
+              <button
+                type="button"
+                className="icon-btn appbar-icon-btn appbar-density-trigger"
+                aria-label={`显示密度：${DENSITY_LABEL[density]}`}
+              >
+                <span>{DENSITY_LABEL[density]}</span>
+                <ChevronDown size={12} aria-hidden="true" />
+              </button>
+            </DropdownMenu.Trigger>
+          </Tip>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content
+              className="rail-menu appbar-density-menu"
+              align="end"
+              sideOffset={6}
+              aria-label="显示密度"
             >
-              {DENSITY_LABEL[d]}
-            </button>
-          ))}
-        </div>
+              <DensityRadioGroup density={density} onDensityChange={onDensityChange} />
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
         {/* 身份 chip（da394a9 认证 UX）：token 已配置且可解码时展示 token 声称的身份。
             仅解码不验签——真伪由 401 拦截兜底；无 token / 畸形 token 不渲染。 */}
         {identity && (
-          <span
-            className="auth-chip"
-            title={`tenant: ${identity.tenant_id ?? '—'} · user: ${identity.user_id ?? '—'}${
-              identity.exp ? ` · 过期于 ${new Date(identity.exp * 1000).toLocaleString()}` : ''
+          <Tip
+            content={`tenant: ${identity.tenant_id ?? '—'} · user: ${identity.user_id ?? '—'}${
+              expText ? ` · 过期于 ${expText}` : ''
             }`}
           >
-            {identity.user_id ?? '已配置'}
-          </span>
+            <span className="auth-chip" tabIndex={0}>
+              {identity.user_id ?? '已配置'}
+            </span>
+          </Tip>
         )}
-        <button
-          className={`icon-btn icon-btn-auth${authRequired ? ' attention' : ''}`}
-          onClick={openAuthPanel}
-          aria-label="API 身份令牌设置"
-          aria-expanded={authPanelOpen}
-          title="API 身份令牌（Bearer）——仅配置了 JWT_SECRET 的后端需要"
-        >
-          <KeyRound size={16} />
-        </button>
-        {/* #200：上下文容量看板入口（设计稿 §5）。与记忆管理同簇——同为
-            低频管理动作；无会话时不渲染（看板数据按会话取）。 */}
-        {sessionId && (
-          <button
-            className="icon-btn"
-            onClick={() => onOpenContextUsage(sessionId)}
-            aria-label="上下文容量"
-            title="上下文容量——已用/窗口/分类占比/缓存命中率"
-          >
-            <Gauge size={16} />
-          </button>
-        )}
-        {/* #1197 项 5B：上下文窗口挡位选择器入口。与容量看板同簇——同一件事
-            的读写两面（看板读占用、这里改窗口）；无会话时不渲染。 */}
-        {sessionId && onOpenContextWindow && (
-          <button
-            className="icon-btn"
-            onClick={() => onOpenContextWindow(sessionId)}
-            aria-label="上下文窗口"
-            title="上下文窗口——改本会话的窗口挡位（越大压缩越晚，运行更慢更贵）"
-          >
-            <SlidersHorizontal size={16} />
-          </button>
-        )}
-        <button
-          className="icon-btn"
-          onClick={onOpenMemories}
-          aria-label="记忆管理"
-          title="记忆管理——查看并删除系统记住的长期事实"
-        >
-          <Brain size={16} />
-        </button>
-        {/* #684 Phase 2：持久审批规则管理入口。与记忆管理同簇——同为低频管理动作。 */}
-        <button
-          className="icon-btn"
-          onClick={onOpenApprovePolicy}
-          aria-label="持久审批规则"
-          title="持久审批规则——查看并撤销「以后都允许」的项目级授权"
-        >
-          <ShieldCheck size={16} />
-        </button>
-        {/* #357 W-13：恢复列表入口——列上次运行留下的中断会话（只读、先列后继续）。 */}
-        {onOpenRecoveryList && (
-          <button
-            className="icon-btn"
-            onClick={onOpenRecoveryList}
-            aria-label="恢复列表"
-            title="恢复列表——查看上次运行留下的中断会话（只读）"
-          >
-            <History size={16} />
-          </button>
-        )}
-        {/* #1304：Agent 看板入口（会话四态投影）。与恢复列表同簇——同为"看一眼全局"
-            的低频动作，且都不依赖当前选中会话。 */}
-        {onOpenKanban && (
-          <button
-            className="icon-btn"
-            onClick={onOpenKanban}
-            aria-label="看板"
-            title="Agent 看板——会话四态投影"
-          >
-            <Columns3 size={16} />
-          </button>
-        )}
-        {onOpenWatchtower && (
-          <button
-            className="icon-btn"
-            onClick={onOpenWatchtower}
-            aria-label="自动值班"
-            title="自动值班——安排一次延时执行"
-          >
-            <Timer size={16} />
-          </button>
-        )}
-        <button
-          className="icon-btn"
-          onClick={onToggleInspector}
-          aria-label={inspectorOpen ? '收起 Inspector' : '展开 Inspector'}
-          aria-pressed={inspectorOpen}
-          title={inspectorOpen ? '收起 Inspector' : '展开 Inspector'}
-        >
-          <PanelRight size={16} className={inspectorOpen ? 'appbar-toggle-active' : undefined} />
-        </button>
-        <button className="icon-btn" onClick={onToggleTheme} aria-label="切换主题">
-          {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-        </button>
+        {/* #1372 改动 6 / #1396：低频动作全部进 "…" 菜单。默认可见动作只剩密度下拉
+            与「更多」两个；每一项仍是同一条既有回调，功能零丢失。 */}
+        <DropdownMenu.Root>
+          <Tip content="更多工具——记忆 / 看板 / 恢复 / 主题 / 身份令牌 / 上下文 / 审批 / Inspector">
+            <DropdownMenu.Trigger asChild>
+              <button
+                ref={moreTriggerRef}
+                className={`icon-btn appbar-icon-btn appbar-more-trigger${authRequired ? ' attention' : ''}`}
+                aria-label="更多工具"
+              >
+                <Ellipsis size={16} />
+              </button>
+            </DropdownMenu.Trigger>
+          </Tip>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content
+              className="rail-menu appbar-more-menu"
+              align="end"
+              sideOffset={6}
+              /* 选中「API 身份令牌」/「上下文洞察」后菜单关闭：默认会把焦点还给触发器，
+                 面板 / 页面里的控件就接不到 Esc。阻止这次归还，由目标界面 effect 接管。 */
+              onCloseAutoFocus={(event) => {
+                if (insightsFocusPendingRef.current) {
+                  insightsFocusPendingRef.current = false;
+                  event.preventDefault();
+                  return;
+                }
+                if (!authFocusPendingRef.current) return;
+                authFocusPendingRef.current = false;
+                event.preventDefault();
+              }}
+            >
+              {/* #1410：≤560px 顶栏隐藏独立的密度触发器，四档收进这个菜单
+                  （CSS 控制显隐；桌面档这里 display:none，不产生第二个入口）。 */}
+              <div className="appbar-more-density">
+                <DropdownMenu.Label className="appbar-more-density-label">
+                  显示密度
+                </DropdownMenu.Label>
+                <DensityRadioGroup density={density} onDensityChange={onDensityChange} />
+                <DropdownMenu.Separator className="rail-menu-sep" />
+              </div>
+              <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenMemories}>
+                <Brain size={14} aria-hidden="true" /> 记忆管理
+              </DropdownMenu.Item>
+              {onOpenKanban && (
+                <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenKanban}>
+                  <Columns3 size={14} aria-hidden="true" /> Agent 看板
+                </DropdownMenu.Item>
+              )}
+              {onOpenRecoveryList && (
+                <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenRecoveryList}>
+                  <History size={14} aria-hidden="true" /> 恢复列表
+                </DropdownMenu.Item>
+              )}
+              <DropdownMenu.Item className="rail-menu-item" onSelect={onToggleTheme}>
+                {theme === 'dark' ? (
+                  <Sun size={14} aria-hidden="true" />
+                ) : (
+                  <Moon size={14} aria-hidden="true" />
+                )}
+                切换主题
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator className="rail-menu-sep" />
+              <DropdownMenu.Item className="rail-menu-item" onSelect={openAuthPanel}>
+                <KeyRound size={14} aria-hidden="true" /> API 身份令牌
+                {authRequired && <span className="appbar-menu-warn">需要配置</span>}
+              </DropdownMenu.Item>
+              {sessionId && (
+                <DropdownMenu.Item
+                  className="rail-menu-item"
+                  onSelect={() => onOpenContextUsage(sessionId)}
+                >
+                  <Gauge size={14} aria-hidden="true" /> 上下文容量
+                </DropdownMenu.Item>
+              )}
+              {sessionId && onOpenContextWindow && (
+                <DropdownMenu.Item
+                  className="rail-menu-item"
+                  onSelect={() => onOpenContextWindow(sessionId)}
+                >
+                  <SlidersHorizontal size={14} aria-hidden="true" /> 上下文窗口
+                </DropdownMenu.Item>
+              )}
+              {sessionId && onOpenSessionInsights && (
+                <DropdownMenu.Item
+                  className="rail-menu-item"
+                  onSelect={() => {
+                    // 洞察页挂载后会把焦点落到返回按钮；阻止 Radix 随后抢回触发器。
+                    insightsFocusPendingRef.current = true;
+                    onOpenSessionInsights(sessionId);
+                  }}
+                >
+                  <ChartNoAxesColumn size={14} aria-hidden="true" /> 上下文洞察
+                </DropdownMenu.Item>
+              )}
+              <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenApprovePolicy}>
+                <ShieldCheck size={14} aria-hidden="true" /> 持久审批规则
+              </DropdownMenu.Item>
+              {onOpenWatchtower && (
+                <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenWatchtower}>
+                  <Timer size={14} aria-hidden="true" /> 自动值班
+                </DropdownMenu.Item>
+              )}
+              <DropdownMenu.Separator className="rail-menu-sep" />
+              <DropdownMenu.Item className="rail-menu-item" onSelect={onToggleInspector}>
+                <PanelRight size={14} aria-hidden="true" />
+                {inspectorOpen ? '收起 Inspector' : '展开 Inspector'}
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
 
       {authPanelOpen && (
-        <div className="auth-panel" role="dialog" aria-label="API 身份令牌设置" onKeyDown={(e) => e.key === 'Escape' && setAuthPanelOpen(false)}>
+        <div className="auth-panel" role="dialog" aria-label="API 身份令牌设置" onKeyDown={(e) => e.key === 'Escape' && closeAuthPanel()}>
           <div className="auth-panel-title">API 身份令牌（Bearer）</div>
           <input
+            ref={authInputRef}
             className="auth-panel-input"
             type="password"
             value={tokenDraft}
@@ -332,7 +493,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               className="auth-panel-clear"
               onClick={() => {
                 setToken('');
-                setAuthPanelOpen(false);
+                closeAuthPanel();
               }}
             >
               清除

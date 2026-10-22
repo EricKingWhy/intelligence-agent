@@ -90,9 +90,10 @@ async function openSession(page: import('@playwright/test').Page, frames: FrameS
  *  `tool-card-body` 不存在）。行本身是 L0→L1→L2 的循环按钮，所以点到 `aria-level=2`
  *  为止（不写死点击次数：默认档位不同会差一次）。
  *
- *  `tool-card-body` 是 `.act-node-wrap` 的**兄弟**（工具卡返回的是 fragment，没有共同
- *  父元素），所以不要把它挂在 wrap 下面找——那条选择器永远匹配不到。本 spec 的 fixture
- *  只有一个工具，直接用页面级选择器，读起来也更直白。 */
+ *  `tool-card-body` 是 `.act-card` 的**后代**（`Collapse` 的网格容器，`.disc-in` 在内），
+ *  但它在 `aria-level < 2` 时根本不挂载（挂载门是 `bodyOpen`，即 `effectiveLevel >= 2`；
+ *  `openedOnce` 只是"开过一次就保持挂载、让收起动画跑完"的闩锁），所以断言前必须先点开——
+ *  页面级选择器足够：本 spec 的 fixture 只有一个工具。 */
 async function expandToolToL2(page: import('@playwright/test').Page) {
   const row = page.locator('.act-node').first();
   for (let i = 0; i < 3; i++) {
@@ -106,7 +107,7 @@ async function expandToolToL2(page: import('@playwright/test').Page) {
 /** 打开 Inspector 的 Artifacts 面。 */
 async function openArtifactsTab(page: import('@playwright/test').Page) {
   const aside = page.locator('.step-detail');
-  await aside.getByRole('tab', { name: /Artifacts/ }).click();
+  await aside.getByRole('tab', { name: '产出文件' }).click();
 }
 
 test('AC1：Artifacts 清单 → 点"查看内容" → 内容真的可见（走 #185 端点）', async ({ page }) => {
@@ -239,7 +240,7 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
   await page.getByRole('button', { name: '查看内容' }).click();
   const err = page.locator('.artifact-content-error');
   await expect(err).toBeVisible();
-  await expect(err).toContainText('本部署没有可读取的 artifact 存储');
+  await expect(err).toContainText('本部署没有可读取的产出文件存储');
   // 后端 detail 原文照显
   await expect(page.locator('.artifact-content-detail')).toContainText('artifact_dir 为空');
   // 不是"不存在"——这两件事对用户不同
@@ -256,7 +257,7 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
   await page.getByRole('button', { name: '查看内容' }).click();
   const gone = page.locator('.artifact-content-error');
   await expect(gone).toContainText('不在本会话里');
-  await expect(gone).not.toContainText('本部署没有可读取的 artifact 存储');
+  await expect(gone).not.toContainText('本部署没有可读取的产出文件存储');
 });
 
 test('#227：同一个 503 的**第二个原因**（自带码）不说成"部署没配存储"', async ({ page }) => {
@@ -277,6 +278,6 @@ test('#227：同一个 503 的**第二个原因**（自带码）不说成"部署
   // 后端文案照显（含码本体的诊断信息由它承担）
   await expect(err).toContainText('对象存储鉴权失败');
   // **不能**把它说成"没配存储"——那是修复前的错法
-  await expect(err).not.toContainText('本部署没有可读取的 artifact 存储');
+  await expect(err).not.toContainText('本部署没有可读取的产出文件存储');
   await expect(err).not.toContainText('部署配置问题');
 });

@@ -21,7 +21,7 @@ import {
   scopeEyebrow,
   type InheritanceRowView,
 } from '../lib/constraintInheritance';
-import { FACT_TYPE_DOTS } from '../lib/constraints';
+import { FACT_TYPE_DOTS, factTypeLabel } from '../lib/constraints';
 
 function Row({ row, injected }: { row: InheritanceRowView; injected: boolean }) {
   return (
@@ -35,17 +35,17 @@ function Row({ row, injected }: { row: InheritanceRowView; injected: boolean }) 
               style={{ background: FACT_TYPE_DOTS[row.type] ?? 'var(--cn-type-default)' }}
               aria-hidden="true"
             />
-            {row.type}
+            {factTypeLabel(row.type)}
           </span>
           {row.value}
         </div>
         {!injected && (
-          <div className="ci-why">会话专属事实不自动继承；如需遵守，由父在委派任务描述里转述。</div>
+          <div className="ci-why">本会话专属的要求不会自动沿用；如需遵守，由父任务在委派描述里转述。</div>
         )}
       </div>
       <span className="ci-status">
         <span className="ci-dot" aria-hidden="true" />
-        {injected ? '已注入' : '未注入'}
+        {injected ? '已沿用' : '未沿用'}
       </span>
     </div>
   );
@@ -58,19 +58,19 @@ export function ConstraintInheritance({ events }: { events: AgentEvent[] }) {
   return (
     <div className="detail-section ci-section" data-omit={omitConstraints || undefined}>
       <div className="detail-section-title">
-        <ShieldCheck size={14} /> 约束继承
+        <ShieldCheck size={14} /> 要求沿用
       </div>
       {omitConstraints && (
         <div className="ci-clean-msg" role="note">
-          干净启动已开启 —— 子 agent 不继承任何约束，只按任务描述工作。
+          干净启动已开启——子任务不沿用任何要求，只按任务描述工作。
         </div>
       )}
       <div className={`ci-rows${omitConstraints ? ' ci-dim' : ''}`}>
         <div className="ci-group-label">
-          INHERITED <span className="ci-group-tag">项目 + 全局 active，默认注入</span>
+          已沿用 <span className="ci-group-tag">项目 + 全局生效中的要求，默认会沿用</span>
         </div>
         {inherited.length === 0 ? (
-          <div className="ci-empty">本次委派没有注入任何约束。</div>
+          <div className="ci-empty">本次委派没有沿用任何要求。</div>
         ) : (
           inherited.map((row) => <Row key={row.factId} row={row} injected />)
         )}
@@ -78,7 +78,7 @@ export function ConstraintInheritance({ events }: { events: AgentEvent[] }) {
       {notInherited.length > 0 && (
         <div className="ci-rows">
           <div className="ci-group-label">
-            NOT INHERITED <span className="ci-group-tag">会话专属事实，父按需转述</span>
+            没有沿用 <span className="ci-group-tag">本会话专属要求，父任务按需转述</span>
           </div>
           {notInherited.map((row) => (
             <Row key={row.factId} row={row} injected={false} />

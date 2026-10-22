@@ -47,6 +47,20 @@ const SCOPE_LABELS: Record<MemoryScopeV2, string> = {
 };
 const CONTENT_CLAMP_THRESHOLD = 180;
 
+/** #1477：关闭时把焦点还给谁。经「更多工具」菜单打开时 `activeElement` 是菜单项，
+ *  菜单关闭即卸载 ⇒ `isConnected === false` ⇒ 不归还、焦点掉回 `<body>`。
+ *  按 Radix 的菜单契约在**记录时**上溯到常驻触发器：菜单内容挂
+ *  `aria-labelledby=<触发器 id>`（DropdownMenu 的 Content 固定注入），触发器本身
+ *  常驻。不是菜单项就原样返回——从常驻按钮打开的旧行为不变。 */
+function focusReturnTarget(active: Element | null): HTMLElement | null {
+  if (!(active instanceof HTMLElement)) return null;
+  const menu = active.closest('[role="menu"]');
+  if (!menu) return active;
+  const triggerId = menu.getAttribute('aria-labelledby')?.split(' ')[0];
+  const trigger = triggerId ? document.getElementById(triggerId) : null;
+  return trigger instanceof HTMLElement ? trigger : null;
+}
+
 export function MemoryPanel({ open, onOpenChange }: Props) {
   const openerRef = useRef<HTMLElement | null>(null);
   return (
@@ -75,6 +89,8 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
   const [bulkPreview, setBulkPreview] = useState<{ count: number; exact: boolean; kind: MemoryKind | null; projectId?: string; projectTitle: string | null } | null>(null);
   const [bulkToken, setBulkToken] = useState('');
   const [bulkBusy, setBulkBusy] = useState(false);
+  /** #1372 改动 9：未启用态的中性空态给一个去「记忆设置」的入口（面板内既有设置区）。 */
+  const settingsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let current = true;
@@ -184,7 +200,7 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
     <Dialog.Content
       className="memory-panel memory-v2-panel"
       onOpenAutoFocus={() => {
-        openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        openerRef.current = focusReturnTarget(document.activeElement);
       }}
       onCloseAutoFocus={(event) => {
         if (openerRef.current?.isConnected) {
@@ -205,16 +221,16 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
         管理长期记忆。编辑会生成新版本；删除不可恢复。列表与设置以服务端返回为准。
       </Dialog.Description>
 
-      <div className="memory-v2-settings" aria-label="记忆设置">
+      <div className="memory-v2-settings" aria-label="记忆设置" ref={settingsRef}>
         <span className="memory-v2-section-title">自动化</span>
         {settingsLoading ? <span role="status">正在读取设置…</span> : settings && (
           <>
-            <label><input type="checkbox" checked={settings.extraction_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('extraction_enabled', event.target.checked)} /> 自动提取</label>
-            <label><input type="checkbox" checked={settings.recall_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('recall_enabled', event.target.checked)} /> 自动召回</label>
-            <label><input type="checkbox" checked={settings.fallback_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('fallback_enabled', event.target.checked)} /> 确定性错误时允许降级到备用模型</label>
+            <label><input className="ui-switch" type="checkbox" checked={settings.extraction_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('extraction_enabled', event.target.checked)} /> 自动提取</label>
+            <label><input className="ui-switch" type="checkbox" checked={settings.recall_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('recall_enabled', event.target.checked)} /> 自动召回</label>
+            <label><input className="ui-switch" type="checkbox" checked={settings.fallback_enabled} disabled={settingsBusy} onChange={(event) => void saveSetting('fallback_enabled', event.target.checked)} /> 确定性错误时允许降级到备用模型</label>
           </>
         )}
-        {settingsError && <span className="memory-v2-error" role="alert">{settingsError}<button className="memory-v2-quiet" disabled={settingsLoading} onClick={() => void retrySettings()}>重试</button></span>}
+        {settingsError && <span className="memory-v2-error"><span role="alert">{settingsError}</span><button className="memory-v2-quiet" disabled={settingsLoading} onClick={() => void retrySettings()}>重试</button></span>}
       </div>
 
       <form className="memory-v2-filters" onSubmit={(event) => { event.preventDefault(); applyFilters(); }}>
@@ -249,7 +265,7 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
         <button type="button" className="memory-v2-quiet" onClick={clearFilters}>清除筛选</button>
         <button type="button" className="memory-v2-quiet" onClick={() => void memories.retry()} aria-label="刷新记忆"><RefreshCw size={14} /> 刷新</button>
       </form>
-      {projectsError && <div className="memory-v2-error" role="alert">{projectsError}<button className="memory-v2-quiet" disabled={projectsLoading} onClick={() => void retryProjects()}>重试</button></div>}
+      {projectsError && <div className="memory-v2-error"><span role="alert">{projectsError}</span><button className="memory-v2-quiet" disabled={projectsLoading} onClick={() => void retryProjects()}>重试</button></div>}
       {filters.scope === 'project' && !filters.project_id && <p className="memory-v2-hint">选择项目后查看该项目的记忆。</p>}
 
       <section className="memory-v2-bulk" aria-label="批量删除">
@@ -272,7 +288,34 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
       </section>
 
       <div className="memory-v2-body">
-        {memories.disabled && <div className="memory-degraded" role="status"><strong>记忆未启用</strong><span>{memories.disabled}</span></div>}
+        {memories.disabled && (
+          /* #1372 改动 9：未启用是**配置缺省**，不是故障——中性空态，去红色、去「重试」
+             （重试不会改变服务端配置）。按钮只是把焦点带到面板内既有的设置区。 */
+          <div className="memory-empty memory-disabled">
+            {/* live region 只包状态文案：按钮/详情是交互控件，放进 role=status 会被当状态播报。 */}
+            <div role="status">
+              <p className="memory-empty-title">记忆管理未启用</p>
+              <p className="memory-empty-hint">
+                打开后，agent 会把可复用的操作经验记在这里，下次自动用上。
+              </p>
+            </div>
+            <button
+              type="button"
+              className="memory-v2-quiet memory-disabled-action"
+              onClick={() => {
+                const section = settingsRef.current;
+                section?.scrollIntoView({ block: 'nearest' });
+                section?.querySelector<HTMLElement>('input, button, select')?.focus();
+              }}
+            >
+              查看记忆设置
+            </button>
+            <details className="memory-disabled-detail">
+              <summary>技术详情</summary>
+              <span>{memories.disabled}</span>
+            </details>
+          </div>
+        )}
         {memories.loading && <div className="memory-loading" role="status">正在加载记忆…</div>}
         {!memories.loading && !memories.disabled && memories.visible.length === 0 && !memories.loadError && (
           <div className="memory-empty" role="status">还没有记忆或符合条件的记录。</div>
@@ -288,8 +331,9 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
             onChanged={() => void memories.retry()}
           />)}
         </ul>}
-        {memories.loadError && <div className="memory-error" role="alert"><span>{memories.loadError}</span><button disabled={memories.loadingMore} onClick={() => void memories.retryFailedPage()}>重试</button></div>}
-        {panelError && <div className="memory-v2-error memory-error" role="status">{panelError}<button className="memory-v2-quiet" onClick={() => setPanelError(null)}>知道了</button></div>}
+        {/* live region 只包状态文案：按钮放进 role=alert/status 会被当状态播报。 */}
+        {memories.loadError && <div className="memory-error"><span role="alert">{memories.loadError}</span><button disabled={memories.loadingMore} onClick={() => void memories.retryFailedPage()}>重试</button></div>}
+        {panelError && <div className="memory-v2-error memory-error"><span role="status">{panelError}</span><button className="memory-v2-quiet" onClick={() => setPanelError(null)}>知道了</button></div>}
         {!memories.loading && memories.visible.length > 0 && (memories.hasMore
           ? <button className="memory-more-btn" disabled={memories.loadingMore} onClick={() => void memories.loadMore()}>{memories.loadingMore ? '加载中…' : '加载更多'}</button>
           : <span className="memory-more-end" role="status">{memories.paginationLimitReached
@@ -381,8 +425,14 @@ function MemoryRow({ record, pending, onDelete, onDeleted, onNotice, onChanged }
         <p className={`memory-content${showFullContent ? '' : ' clamped'}`} title={record.status === 'deleted' ? undefined : record.content}>
           {record.status === 'deleted' ? '内容已删除' : record.content}
         </p>
-        {longContent && <button className="memory-expand" aria-expanded={contentExpanded} aria-label={contentExpanded ? '收起全文' : '展开全文'} onClick={() => setContentExpanded((value) => !value)}>{contentExpanded ? '收起' : '展开全文'}</button>}
-        <button className="memory-expand" aria-expanded={detailsOpen} onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}<span>{detailsOpen ? '收起详情' : '详细信息'}</span></button>
+        {/* #1368：操作列是一个**独立的列**（不再让两个按钮直接挤进正文行里）。
+            此前每个按钮固定 22px 宽，「详细信息」四个汉字只能在 16px 的盒子里逐字
+            堆成 5 行（实测 16×72）。列给最小宽度后，正文列与操作列各自稳定：
+            按钮宽度随文案走、文字永不折行；窄屏时这一列改竖排（见 CSS）。 */}
+        <div className="memory-row-actions">
+          {longContent && <button className="memory-expand" aria-expanded={contentExpanded} aria-label={contentExpanded ? '收起全文' : '展开全文'} onClick={() => setContentExpanded((value) => !value)}>{contentExpanded ? '收起' : '展开全文'}</button>}
+          <button className="memory-expand" aria-expanded={detailsOpen} onClick={() => setDetailsOpen((value) => !value)}>{detailsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}<span>{detailsOpen ? '收起详情' : '详细信息'}</span></button>
+        </div>
       </div>
       <div className="memory-v2-meta">
         {record.kind && <span>{KIND_LABELS[record.kind]}</span>}
@@ -420,7 +470,7 @@ function MemoryRow({ record, pending, onDelete, onDeleted, onNotice, onChanged }
         {record.status !== 'deleted' && <button className="memory-v2-quiet" aria-label="删除这条记忆" disabled={pending} onClick={() => { setDeleteError(null); setConfirmDelete((value) => !value); }}><Trash2 size={13} /> 删除</button>}
       </div>
       {historyOpen && <div className="memory-v2-history" aria-label="版本历史">
-        {historyError && <span className="memory-v2-error" role="alert">{historyError}<button onClick={() => void loadHistory()}>重试</button></span>}
+        {historyError && <span className="memory-v2-error"><span role="alert">{historyError}</span><button onClick={() => void loadHistory()}>重试</button></span>}
         {versions === null && !historyError && <span role="status">正在读取版本…</span>}
         {versions?.map((version) => <div className="memory-v2-version" key={version.id}>
           <strong>{version.is_tombstone ? STATUS_LABELS.deleted : `v${version.version ?? '—'} · ${version.status ? STATUS_LABELS[version.status] : '旧版'}`}</strong>

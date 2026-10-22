@@ -82,6 +82,7 @@ def manifest_entry(
     provider_name: str,
     declared_surfaces: dict[str, bool] | None,
     declared_actions: dict[str, bool] | None,
+    declared_insights: bool | None = None,
 ) -> dict[str, Any]:
     """manifest 条目的**唯一形状**：descriptor 与 core 都经这里投影。
 
@@ -90,9 +91,13 @@ def manifest_entry(
     两处迟早漂移（端点、前端、验收文档三边都依赖这个形状）。
 
     `display_name` 缺省回落 `entry_id`（既有口径：插件不填就显示它的 id）。
+
+    `declared_insights`（#1420）：部署级模块开关的**下发位**。只有 core 传它——
+    洞察模块是核心的一部分，不是插件 capability；未传的条目**不带该键**（不写 false），
+    前端按「标志缺失 = 关闭」判定（票面口径），因此插件的缺省与「明确关闭」可区分。
     """
     surfaces = declared_surfaces or {}
-    return {
+    entry: dict[str, Any] = {
         "id": entry_id,
         "display_name": display_name or entry_id,
         "version": version,
@@ -113,12 +118,19 @@ def manifest_entry(
             "resume": False,
         },
     }
+    if declared_insights is not None:
+        entry["insights"] = declared_insights
+    return entry
 
 
-def core_manifest_entry() -> dict[str, Any]:
+def core_manifest_entry(*, insights_enabled: bool = False) -> dict[str, Any]:
     """内置工具集的 manifest 条目——**恒在**，且排在插件条目之前。
 
     前端取并集，所以顺序只影响可读性：core 是基线，插件是增量。
+
+    `insights_enabled`（#1420）：部署级模块开关如实下发（`Settings.insights_enabled`）。
+    缺省 False 只服务"没有部署上下文"的调用点——真实调用点（`web/catalog.py`）总是
+    显式传 `state.settings.insights_enabled`。
     """
     return manifest_entry(
         entry_id=CORE_CAPABILITY_ID,
@@ -127,6 +139,7 @@ def core_manifest_entry() -> dict[str, Any]:
         provider_name="builtin",
         declared_surfaces=CORE_SURFACES,
         declared_actions=CORE_ACTIONS,
+        declared_insights=insights_enabled,
     )
 
 

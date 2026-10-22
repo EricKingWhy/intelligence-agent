@@ -76,9 +76,9 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     await renderPanel();
 
     expect(getContextSettings).toHaveBeenCalledWith('s1');
-    expect(radios().map((r) => r.textContent)).toEqual(['50K', '200K']);
-    expect(checked()).toBe('50K');
-    expect(document.body.querySelector('.ctx-window-badge')?.textContent).toContain('50K 当前生效');
+    expect(radios().map((r) => r.textContent)).toEqual(['50K 字', '200K 字']);
+    expect(checked()).toBe('50K 字');
+    expect(document.body.querySelector('.ctx-window-badge')?.textContent).toContain('50K 字 当前生效');
   });
 
   it('阈值与默认挡位都是后端值原样显示（前端不乘比例、不硬编码 200K）', async () => {
@@ -91,15 +91,15 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     );
     await renderPanel();
 
-    expect(threshold('开始自动压缩')).toBe('210,000');
-    expect(threshold('硬护栏')).toBe('255,000');
+    expect(threshold('开始自动精简')).toBe('210,000 字');
+    expect(threshold('上限')).toBe('255,000 字');
     // 「恢复默认」的落点是 configured_default（256K），不是写死的 200K。
-    expect(document.body.querySelector('.ctx-window-reset')?.textContent).toContain('恢复 256K');
+    expect(document.body.querySelector('.ctx-window-reset')?.textContent).toContain('恢复 256K 字');
   });
 
   it('点另一挡 → PATCH 该 token 数，回执即新选中态', async () => {
     await renderPanel();
-    expect(checked()).toBe('200K');
+    expect(checked()).toBe('200K 字');
 
     await act(async () => {
       radios()[4].click();
@@ -107,8 +107,8 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     });
 
     expect(setContextWindow).toHaveBeenCalledWith('s1', 500_000);
-    expect(checked()).toBe('500K');
-    expect(document.body.querySelector('.ctx-window-badge')?.textContent).toContain('500K 当前生效');
+    expect(checked()).toBe('500K 字');
+    expect(document.body.querySelector('.ctx-window-badge')?.textContent).toContain('500K 字 当前生效');
   });
 
   it('PATCH 失败（422 非法挡位）→ 选中态不动，就地显示后端 detail', async () => {
@@ -123,7 +123,7 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     });
 
     // 零改写：仍停在 200K（后端 422 也是零写入，界面与事实一致）。
-    expect(checked()).toBe('200K');
+    expect(checked()).toBe('200K 字');
     expect(document.body.querySelector('.ctx-window-error')?.textContent).toContain('得到 12345');
   });
 
@@ -138,7 +138,31 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     });
 
     expect(setContextWindow).toHaveBeenCalledWith('s1', 200_000);
-    expect(checked()).toBe('200K');
+    expect(checked()).toBe('200K 字');
+  });
+
+  it('可访问名统一为「上下文窗口」：dialog / 标题 / radiogroup，且面板内无旧名残留', async () => {
+    await renderPanel();
+
+    expect(document.body.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe(
+      '上下文窗口',
+    );
+    // 作用域收进本面板根：`.ctx-usage-title` 是共享 class（ContextUsagePanel / TaskReviewPanel 同用），
+    // 全页多面板渲染时 body 级查询会串味。dialog / radiogroup 仍留 body 级，理由是本用例只渲染本面板、
+    // role 在夹具内唯一——仓内他处亦有同 role（如 TaskCreationDialog 的 radiogroup），不是「整页唯一」，
+    // 将来夹具若同页渲染多面板，这两条也需一并收进 panel。
+    const panel = document.body.querySelector('.ctx-window-panel');
+    expect(panel).not.toBeNull();
+    expect(panel!.querySelector('.ctx-usage-title')?.textContent).toBe('上下文窗口');
+    // 描述句钉全文：票面要求只换主语，措辞漂移必须被捕获。
+    expect(panel!.querySelector('.ctx-window-desc')?.textContent).toBe(
+      '上下文窗口越大，AI 能记住的对话越多；耗时和成本取决于实际使用量。',
+    );
+    expect(document.body.querySelector('[role="radiogroup"]')?.getAttribute('aria-label')).toBe(
+      '上下文窗口',
+    );
+    // 旧名拼字构造：AC 要求本文件对旧名 grep 归零，断言仍要钉住它不再出现。
+    expect(panel!.textContent).not.toContain(['记忆', '容量'].join(''));
   });
 
   it('读设置失败 → 显示错误，不渲染挡位（不编一个假清单）', async () => {

@@ -41,7 +41,7 @@ const OTHER_DETAIL_ITEMS: Array<{ key: string; label: string }> = [
   { key: 'provider_injected', label: 'Provider 注入' },
   { key: 'runtime_context', label: '运行期快照' },
   { key: 'plan_anchor', label: '计划锚块' },
-  { key: 'protected_facts', label: '保护事实' },
+  { key: 'protected_facts', label: '牢记事项' },
   { key: 'modified_paths', label: '修改路径' },
   { key: 'pressure_warning', label: '水位警告' },
   { key: 'progress', label: '进度核对' },
@@ -192,13 +192,13 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
              同样落到这一支。**#212 之后**该会话走的是 usage_only（有总量、
              缺分类），真正落到这里的只剩"两样都没有"。
              归因留给后端（取数口径见设计稿 §3.4），文案不猜。 */
-          <div className="ctx-usage-empty">后端未上报用量数据</div>
+          <div className="ctx-usage-empty">还没有用量数据</div>
         )}
 
         {!error && usage && (usage.state === 'ok' || usage.state === 'usage_only') && (
           <>
             <div className="ctx-usage-total">
-              {usage.used_tokens.toLocaleString()} / {usage.window_tokens.toLocaleString()}
+              {usage.used_tokens.toLocaleString()} / {usage.window_tokens.toLocaleString()} 字
               {'（'}{pctOf(usage.used_tokens, usage.window_tokens).toFixed(1)}%{'）'}
             </div>
 
@@ -223,7 +223,7 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                     key={s.key}
                     className="ctx-usage-seg"
                     style={{ width: `${width}%`, background: s.colorVar }}
-                    title={`${s.label}：${s.value.toLocaleString()} tok（${p.toFixed(1)}%）`}
+                    title={`${s.label}：${s.value.toLocaleString()} 字（${p.toFixed(1)}%）`}
                   />
                 );
               })}
@@ -241,8 +241,8 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                     style={{ left: `${t * 100}%` }}
                     title={
                       i === 0
-                        ? `自动压缩阈值 ${Math.round(t * 100)}%`
-                        : `硬保护阈值 ${Math.round(t * 100)}%`
+                        ? `自动精简阈值 ${Math.round(t * 100)}%`
+                        : `上限 ${Math.round(t * 100)}%`
                     }
                   />
                 ),
@@ -318,13 +318,13 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                 className="ctx-usage-compact-btn"
                 onClick={handleCompact}
                 disabled={compacting || lowWater}
-                title={lowWater ? '没有可压缩的早期内容' : '手动触发一次上下文压缩'}
+                title={lowWater ? '没有可以精简的早期内容' : '手动精简一次早期对话'}
               >
                 {compacting && <span className="ctx-usage-spinner" aria-hidden="true" />}
-                {compacting ? '压缩中…' : '手动压缩'}
+                {compacting ? '精简中…' : '手动精简'}
               </button>
               {lowWater && !compacting && (
-                <span className="ctx-usage-compact-note">没有可压缩的早期内容</span>
+                <span className="ctx-usage-compact-note">没有可以精简的早期内容</span>
               )}
               {compactError && (
                 <div className="ctx-usage-compact-error" role="alert">
@@ -335,11 +335,11 @@ export const ContextUsagePanel = memo(function ContextUsagePanel({
                 <div className="ctx-usage-compact-result">
                   {compactResult.compacted_turn_count > 0 ? (
                     <>
-                      压缩完成：{fmtTokens(compactResult.tokens_before)} →{' '}
-                      {fmtTokens(compactResult.tokens_after)} tok
+                      精简完成：{fmtTokens(compactResult.tokens_before)} →{' '}
+                      {fmtTokens(compactResult.tokens_after)} 字
                     </>
                   ) : (
-                    '没有可压缩的早期内容（未改动）。'
+                    '没有可以精简的早期内容（未改动）。'
                   )}
                 </div>
               )}

@@ -46,7 +46,22 @@ export function RecoveryListPanel({ open, onOpenChange, onResume }: Props) {
 }
 
 /** 「先列后继续」的加载门控文案（说明为什么现在不能继续）。 */
-const GATE_REASON = '加载完成前不能继续——先核对完上次运行的完整状态。';
+const GATE_REASON = '加载完成前不能继续——先核对完上次任务的完整状态。';
+
+/** #1477：关闭时把焦点还给谁。经「更多工具」菜单打开时 `activeElement` 是菜单项，
+ *  菜单关闭即卸载 ⇒ `isConnected === false` ⇒ 不归还、焦点掉回 `<body>`。
+ *  按 Radix 的菜单契约在**记录时**上溯到常驻触发器：菜单内容挂
+ *  `aria-labelledby=<触发器 id>`（DropdownMenu 的 Content 固定注入），触发器本身
+ *  常驻。不是菜单项就原样返回——从常驻按钮打开的旧行为不变。
+ *  （与 `MemoryPanel.tsx` 的同名函数同形；两处各自私有，免得为一处六行引入共享模块。） */
+function focusReturnTarget(active: Element | null): HTMLElement | null {
+  if (!(active instanceof HTMLElement)) return null;
+  const menu = active.closest('[role="menu"]');
+  if (!menu) return active;
+  const triggerId = menu.getAttribute('aria-labelledby')?.split(' ')[0];
+  const trigger = triggerId ? document.getElementById(triggerId) : null;
+  return trigger instanceof HTMLElement ? trigger : null;
+}
 
 function ResumeButton({
   sessionId,
@@ -101,7 +116,7 @@ function RecoveryListBody({
     <Dialog.Content
       className="recovery-list-panel"
       onOpenAutoFocus={() => {
-        openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        openerRef.current = focusReturnTarget(document.activeElement);
       }}
       onCloseAutoFocus={(event) => {
         if (openerRef.current?.isConnected) {
@@ -119,13 +134,13 @@ function RecoveryListBody({
         </Dialog.Close>
       </div>
       <Dialog.Description className="project-dialog-desc">
-        上次运行留下的中断会话。列表只读、来自服务端启动扫描快照；在核对完完整状态之前不会出现可点的「继续」。
+        上次任务留下的中断会话。列表只读、来自服务端启动扫描快照；在核对完完整状态之前不会出现可点的「继续」。
       </Dialog.Description>
 
       <div className="recovery-list-body">
         {state.kind === 'loading' && (
           <div className="recovery-list-loading">
-            <p role="status">正在核对上次运行信息…（事件 → 工作区 → Ledger → 对账 → 工具配对 → 上下文）</p>
+            <p role="status">正在核对上次任务的信息…（事件 → 工作区 → 操作记录 → 结果核对 → 工具结果配对 → 记忆重建）</p>
             <button type="button" className="recovery-resume-btn" disabled aria-disabled="true" aria-describedby="recovery-gate-reason">
               继续
             </button>
@@ -144,7 +159,7 @@ function RecoveryListBody({
 
         {state.kind === 'loaded' && (state.data === undefined || state.data.snapshot_available === false) && (
           <div className="recovery-list-degraded" role="status">
-            <strong>上次运行信息不可用</strong>
+            <strong>上次任务信息不可用</strong>
             <span>服务端启动扫描没有可用的快照，因此无法列出中断会话——不展示任何推测出来的列表。</span>
             <button type="button" className="recovery-resume-btn" disabled aria-disabled="true" aria-describedby="recovery-degraded-reason">
               继续
@@ -168,13 +183,13 @@ function RecoveryListBody({
                 <li className="recovery-list-item" key={item.session_id}>
                   <p className="recovery-list-task">{item.task ?? '—（未记录任务）'}</p>
                   <dl className="recovery-list-facts">
-                    <dt>中断的 run</dt>
+                    <dt>中断的任务</dt>
                     <dd>
                       {item.interrupted_runs.length === 0
                         ? '—'
                         : item.interrupted_runs.map((run, index) => (
                           <span className="recovery-run" key={`${run.run_id ?? 'none'}-${index}`}>
-                            {run.run_id ?? '（无 run id）'} · 中断于事件 #{run.interrupted_seq}
+                            {run.run_id ?? '（无任务编号）'} · 中断于事件 #{run.interrupted_seq}
                             {run.step_id !== null ? ` · 第 ${run.step_id} 步` : ''}
                             {run.agent_id ? ` · ${run.agent_id}` : ''}
                           </span>
@@ -190,7 +205,7 @@ function RecoveryListBody({
                   <div className="recovery-item-actions">
                     {!item.resume_available && (
                       <p className="recovery-gate-reason" id={reasonId}>
-                        该行没有可恢复的中断运行。
+                        该行没有可恢复的中断任务。
                       </p>
                     )}
                     <ResumeButton

@@ -108,7 +108,7 @@ test('续聊 amend 透传：所选 model / agent_profile / reasoning_effort 进 
   await pickControl(page, 'Agent Profile', 2, 'Coding');
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
   await effortTrigger.click();
-  const effortSlider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  const effortSlider = page.getByRole('slider', { name: '推理档位' });
   await expect(effortSlider).toBeVisible();
   await effortSlider.focus();
   await page.keyboard.press('End');

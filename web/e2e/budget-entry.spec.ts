@@ -34,7 +34,7 @@ function pausedFrames(): FrameSpec[] {
         budget_version: 1,
         consumed: { agent_turns: 2, total_tokens: 1234 },
         limits: { run: { max_agent_turns_total: 3, max_total_tokens: 1234 } },
-        resume_requirements: ['抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复'],
+        resume_requirements: ['抬高字数上限后继续这次任务'],
       },
     },
   ];
@@ -82,15 +82,15 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   // ① 纯 UI 设置预算三维（#536 单入口 popover——设计稿 §2.3，替换 #426 三平铺）。
   //    面板内三维控件的 aria-label 沿用 #426 旧名（turns / tokens 自定义 / datetime）。
   await page.locator('.composer-budget-trigger[aria-label="预算"]').click();
-  const turnsInput = page.getByLabel('预算上限（Agent turns，留空为默认）');
+  const turnsInput = page.getByLabel('轮数上限（留空用默认值）');
   const resetButton = page.getByRole('button', { name: '恢复默认' });
   await expect(resetButton).not.toBeVisible();
   await turnsInput.fill('3');
   // tokens 走「自定义」档：点开档位 → 点自定义行（onChange 返回 false，面板不关，
   // 数值输入框出现在 footer）→ 填自定义值。
-  await page.locator('.composer-control[aria-label="预算 tokens 档位"]').click();
+  await page.locator('.composer-control[aria-label="字数档位"]').click();
   await page.locator('[role="listbox"]:visible').last().getByText('自定义', { exact: true }).click();
-  await page.getByLabel('预算上限（总 tokens，留空为默认）').fill('1234');
+  await page.getByLabel('字数上限（留空用默认值）').fill('1234');
   // deadline 走高级路径（datetime-local 直填，#536 §2.2 保留项）。
   const deadlineDetails = page.locator('.budget-picker-advanced');
   const deadlineInput = page.getByLabel('预算截止时间（留空为不设）');
@@ -102,16 +102,16 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   await expect(resetButton).toBeVisible();
   await resetButton.click();
   await expect(turnsInput).toHaveValue('');
-  await expect(page.getByLabel('预算上限（总 tokens，留空为默认）')).not.toBeVisible();
+  await expect(page.getByLabel('字数上限（留空用默认值）')).not.toBeVisible();
   await expect(deadlineInput).toHaveValue('');
   await expect(resetButton).not.toBeVisible();
-  await expect(page.locator('.composer-budget-trigger .composer-trigger-current')).toHaveText('默认');
-  await expect(page.locator('.budget-picker-status-text')).toHaveText('当前：默认（后端默认，全不设限）');
+  await expect(page.locator('.composer-budget-trigger .composer-trigger-current')).toHaveText('预算：默认');
+  await expect(page.locator('.budget-picker-status-text')).toHaveText('当前：默认（都不设限）');
 
   await turnsInput.fill('3');
-  await page.locator('.composer-control[aria-label="预算 tokens 档位"]').click();
+  await page.locator('.composer-control[aria-label="字数档位"]').click();
   await page.locator('[role="listbox"]:visible').last().getByText('自定义', { exact: true }).click();
-  await page.getByLabel('预算上限（总 tokens，留空为默认）').fill('1234');
+  await page.getByLabel('字数上限（留空用默认值）').fill('1234');
   await deadlineInput.fill(deadlineLocal);
   await submitTask(page, '跑一个长任务');
 
@@ -134,12 +134,12 @@ test('#426 纯 UI 全链：预算三项随启动请求提交 → 预算暂停 �
   //    重连退避（500ms×2³）走完需要几秒 ⇒ 放宽这一条 expect 的超时。
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
-  await expect(panel).toContainText('已在预算到顶处暂停');
-  await expect(panel).toContainText('抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复');
+  await expect(panel).toContainText('预算或安全上限已到，任务暂停了');
+  await expect(panel).toContainText('抬高字数上限后继续这次任务');
 
   // ④ UI 抬高卡住的那一维 → 恢复同一 run
-  await panel.getByLabel(/恢复用的绝对 ceiling/).fill('9999');
-  await panel.getByRole('button', { name: '恢复同一 run' }).click();
+  await panel.getByLabel(/恢复用的上限/).fill('9999');
+  await panel.getByRole('button', { name: '继续这次任务' }).click();
 
   // ⑤ 面板收起（run/resumed 清 run_paused）之后，恢复请求体必已发出：同 run CAS
   //    + budget_increase + 抬高的绝对值（字段名由 resumeTarget 从触发维度导出）。
@@ -187,6 +187,65 @@ test('#426 不设置预算：创建载荷不含 budget 键（默认行为不变�
   await expect.poll(() => createBody).not.toBeNull();
   expect(createBody).not.toHaveProperty('budget');
   await expect(page.locator('.model-output').last()).toContainText('完成。');
+});
+
+/** #1444：已选会话态的预算入口 + 生效语义。
+ *
+ *  旧行为（#308 的 UI 隐藏）下这个用例在**第一步**就红：选中会话后
+ *  `.composer-budget-trigger` 根本不在 DOM 里（Composer 的 `!permissionInSession`
+ *  门控）。修好后它同时钉住三件事：入口在场、选择器可打开、选档随下一次
+ *  `/messages` 提交作为 amend 发出（后端 idle→launched 消费；queued / steer 只判定
+ *  丢弃——与 model 等 amend 字段同语义）。 */
+test('#1444 已选会话：预算入口在场，选档随下一次 /messages 作为 amend 发出', async ({ page }) => {
+  const createFrames: FrameSpec[] = [
+    { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
+    { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
+    { type: 'user/message', data: { content: '第一条消息' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'model/started', data: { model: 'e2e-model' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'text/delta', data: { delta: '第一条完成。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
+  ];
+  const followFrames: FrameSpec[] = [
+    { type: 'run/started', seq: 7, session_id: SID, run_id: `${RUN}-2`, time: T },
+    { type: 'user/message', data: { content: '第二条消息' }, seq: 8, session_id: SID, run_id: `${RUN}-2`, step_id: 1, time: T },
+    { type: 'text/delta', data: { delta: '第二条完成。' }, seq: 9, session_id: SID, run_id: `${RUN}-2`, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 10, session_id: SID, run_id: `${RUN}-2`, time: T },
+  ];
+  let messagesBody: Record<string, unknown> | null = null;
+
+  await routeApi(page, {
+    onSessionPost: (route) => fulfillSse(route, createFrames),
+    onMessagesPost: async (route) => {
+      messagesBody = route.request().postDataJSON() as Record<string, unknown>;
+      await fulfillSse(route, followFrames);
+    },
+    events: createFrames,
+  });
+
+  await page.goto('/');
+
+  // ① 新建态选轮数档（草稿留在 App 里，建会话后不清空）。
+  await page.locator('.composer-budget-trigger[aria-label="预算"]').click();
+  await page.getByLabel('轮数上限（留空用默认值）').fill('4');
+  await page.keyboard.press('Escape');
+  await submitTask(page, '第一条消息');
+  await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
+
+  // ② 已选会话态：入口仍在场、摘要带出草稿；选择器可打开（不是只有壳）。
+  const trigger = page.locator('.composer-budget-trigger[aria-label="预算"]');
+  await expect(trigger).toBeVisible();
+  await expect(trigger.locator('.composer-trigger-current')).toHaveText('预算：轮数 4');
+  await trigger.click();
+  await expect(page.getByLabel('轮数上限（留空用默认值）')).toHaveValue('4');
+  await page.keyboard.press('Escape');
+
+  // ③ 续聊提交：budget.run 作为 amend 随 /messages 发出（逐字对齐 RunBudgetRequest）。
+  await submitTask(page, '第二条消息');
+  await expect.poll(() => messagesBody).not.toBeNull();
+  expect((messagesBody as Record<string, unknown>).budget).toEqual({
+    run: { max_agent_turns_total: 4 },
+  });
+  await expect(page.locator('.model-output').last()).toContainText('第二条完成。');
 });
 
 test('#1198 visual: light/dark panel matches the pinned mockup', async ({ page }, testInfo) => {

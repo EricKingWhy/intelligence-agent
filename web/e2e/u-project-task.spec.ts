@@ -298,7 +298,7 @@ test('AC（#1177 §A）「新建会话」：直达空会话、不弹表单、锚
   await expect(dialog(page)).toHaveCount(0);
   // 项目语境已武装：chip 预告"将在这个项目里新建"（复用 #1028 预设项目语境机制）。
   await expect(alpha.locator('.rail-project-toggle')).toHaveClass(/project-active/);
-  await expect(page.locator('.composer-owner-chip')).toContainText('项目「项目 alpha」');
+  await expect(page.locator('.composer-ownership')).toContainText('项目「项目 alpha」');
 
   // 首条消息提交才真正创建（复用侧栏「+」的惰性创建链路）。
   await submitTask(page, '给登录接口加上限流');

@@ -49,10 +49,10 @@ interface Props {
  *  （_CLEANUP_BLOCK_PRIORITY + 在途 run）；execute.not_deleted 另加
  *  not_found / invalid（delete_local_artifacts 的返回分类）。 */
 const BLOCK_REASON_LABEL: Record<string, string> = {
-  active_task: '有在途任务',
-  unreconciled_operation: '有未对账操作',
+  active_task: '有任务还没跑完',
+  unreconciled_operation: '有操作还没核对',
   referenced: '仍被事件引用',
-  fork_child_reference: '被 fork 子会话引用',
+  fork_child_reference: '被另开的子会话引用',
   evidence: '仍有新鲜证据引用',
   not_found: '原件已不存在',
   invalid: '引用格式非法',
@@ -272,7 +272,7 @@ function PreviewBody({
     <>
       <Dialog.Description asChild>
         <div className="project-dialog-desc">
-          将删除下列<strong>可回收原件</strong>（<strong>不可恢复</strong>）。被引用 / 有在途任务的
+          将删除下列<strong>可回收原件</strong>（<strong>不可恢复</strong>）。被引用 / 有任务还没跑完的
           项已被挡下，不在此列。
         </div>
       </Dialog.Description>

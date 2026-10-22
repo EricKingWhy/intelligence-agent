@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { MEMORY_MAX_OFFSET, MEMORY_PAGE_SIZE } from '../src/lib/memory';
-import { T, routeApi, sessionRow, type FrameSpec, type MemoryFixture } from './fixtures';
+import { T, clickTopBarMenuItem, routeApi, sessionRow, type FrameSpec, type MemoryFixture } from './fixtures';
 
 const semantic = (id: string, content: string, over: Partial<MemoryFixture> = {}): MemoryFixture => ({
   id,
@@ -50,7 +50,8 @@ const openPanel = async (page: Page) => {
   // 上限 15s 是给冷启动渲染的余量（正常 <1s；与仓库既有 15s 用例同量级），
   // 且是条件等待（就绪即返回），非 sleep；click 自带 actionability 原样保留。
   await expect(page.locator('.app-frame')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('button', { name: '记忆管理' }).click();
+  // #1396：记忆入口已收进顶栏「更多工具」菜单（`menuitem`，不是常驻 `button`）。
+  await clickTopBarMenuItem(page, '记忆管理');
   await expect(panel(page)).toBeVisible();
 };
 
@@ -95,13 +96,18 @@ test('AC8: browser shows an empty state only after a successful empty response',
   await expect(panel(page).locator('.memory-error')).toHaveCount(0);
 });
 
-test('AC8: browser reports a disabled memory capability as degraded, not empty', async ({ page }) => {
+test('AC8: browser reports a disabled memory capability as a neutral empty state, not a failure', async ({ page }) => {
   await routeApi(page, { memoryDisabled: 'memory capability 未启用' });
   await page.goto('/');
   await openPanel(page);
 
-  await expect(panel(page).locator('.memory-degraded')).toContainText('记忆未启用');
-  await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
+  // #1372 改动 9：未启用 = 配置缺省，不是红色故障态；文案/入口都换成中性的。
+  const disabled = panel(page).locator('.memory-empty.memory-disabled');
+  await expect(disabled).toContainText('记忆管理未启用');
+  await expect(disabled).toContainText('查看记忆设置');
+  await expect(disabled).not.toContainText('还没有记忆');
+  await expect(panel(page).locator('.memory-empty:not(.memory-disabled)')).toHaveCount(0);
+  await expect(panel(page).locator('.memory-degraded')).toHaveCount(0);
   await expect(panel(page).locator('.memory-loading')).toHaveCount(0);
   await expect(panel(page).locator('.memory-error')).toHaveCount(0);
 });
@@ -568,7 +574,12 @@ test('AC9: keyboard-only dialog navigation shows focus and Escape restores the o
     },
   });
   await page.goto('/');
-  const opener = page.getByRole('button', { name: '记忆管理' });
+  /* #1396：记忆入口收进顶栏「更多工具」菜单。Radix 菜单体**关闭时不挂载** ⇒ 纯 Tab
+     永远走不到「记忆管理」菜单项，键盘路径因此变成三段：
+     Tab 到「更多工具」触发器 → Enter 开菜单 → 方向键落到「记忆管理」→ Enter 选它。
+     判别力保持甚至更强：全程零 pointer、零脚本化 focus()，每一跳仍断言焦点环与
+     `:focus-visible`；Esc 之后仍断言焦点回到入口（现在是触发器）。 */
+  const opener = page.getByRole('button', { name: '更多工具' });
 
   // Start at the page and use Tab until the trigger is reached; no pointer or
   // scripted focus is used to enter the management flow.
@@ -578,6 +589,17 @@ test('AC9: keyboard-only dialog navigation shows focus and Escape restores the o
   }
   await expect(opener).toBeFocused();
   await expect.poll(() => opener.evaluate((element) => element.matches(':focus-visible'))).toBe(true);
+
+  // 键盘开菜单（Radix 触发器认 Enter/Space），再把焦点走到「记忆管理」菜单项。
+  await page.keyboard.press('Enter');
+  const menuItem = page.getByRole('menuitem', { name: '记忆管理' });
+  await expect(menuItem).toBeVisible();
+  // 有界轮询兜住 Radix 的初焦策略（桌面档密度分组 display:none ⇒ 首项通常就是它）。
+  for (let index = 0; index < 12; index += 1) {
+    if (await menuItem.evaluate((element) => element === document.activeElement)) break;
+    await page.keyboard.press('ArrowDown');
+  }
+  await expect(menuItem).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(panel(page)).toBeVisible();
   await expect.poll(() => panel(page).evaluate((dialog) => dialog.contains(document.activeElement))).toBe(true);

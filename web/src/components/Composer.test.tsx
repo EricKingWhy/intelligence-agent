@@ -20,6 +20,10 @@ const CATALOG: ModelCatalogEntry[] = [
   { name: 'qwen-max', provider: 'senseaudio', model: 'qwen3.8-max-0902', default: false },
 ];
 
+// #1370 P0-9：权限 chip 的原生 title = 说明段 + 禁用原因段（两段并排保留）。
+// ADR-0041 D4：说明段必须写「下一轮 run 生效」，不得承诺「立即」。
+const PERMISSION_HINT = '权限：工具调用如何批准；改档从下一轮 run 起生效（本轮不受影响）。';
+
 describe('Composer 模型选择器（#103 / Phase 2a）', () => {
   it('端点缺席（models 空）：选择器不渲染——不伪造列表', () => {
     const html = renderToString(createElement(Composer, { ...base, models: [], selectedModel: null, onModelChange: noop }))
@@ -45,6 +49,24 @@ describe('Composer 模型选择器（#103 / Phase 2a）', () => {
     expect(html).toContain('qwen-max');
     // 不应再显示默认链 label（因为切到了具体模型）
     expect(html).not.toContain('>默认链<');
+  });
+});
+
+describe('Composer 输入提示按态切换（#1370 P0-7）', () => {
+  it('空闲态：只说 Enter 发送，不出现排队/打断（没有排队对象）', () => {
+    const html = renderToString(createElement(Composer, { ...base, streaming: false }))
+      .replaceAll('<!-- -->', '');
+    expect(html).toContain('placeholder="描述一个任务…（Enter 发送）"');
+    expect(html).not.toContain('排队');
+    expect(html).not.toContain('打断');
+  });
+
+  it('有 run 在跑：才区分 Enter 排队 / 打断，不再出现「立即」', () => {
+    const html = renderToString(createElement(Composer, { ...base, streaming: true }))
+      .replaceAll('<!-- -->', '');
+    expect(html).toContain('Enter 排队');
+    expect(html).toContain('+Enter 打断');
+    expect(html).not.toContain('立即');
   });
 });
 
@@ -131,8 +153,8 @@ describe('Composer pending constraint input lock', () => {
       ...base,
       constraintInputPending: true,
     })).replaceAll('<!-- -->', '');
-    expect(html).toContain('请先回答当前约束澄清，再发送新消息');
-    expect(html).toContain('等待约束澄清回答…');
+    expect(html).toContain('请先确认当前要求，再发送新消息');
+    expect(html).toContain('等待你确认当前要求…');
     expect(html).toMatch(/<textarea[^>]*disabled=""/);
   });
 });
@@ -155,8 +177,8 @@ describe('Composer pending ask_user lock (#1223)', () => {
       ...base,
       constraintInputPending: true,
     })).replaceAll('<!-- -->', '');
-    expect(html).toContain('请先回答当前约束澄清，再发送新消息');
-    expect(html).toContain('等待约束澄清回答…');
+    expect(html).toContain('请先确认当前要求，再发送新消息');
+    expect(html).toContain('等待你确认当前要求…');
   });
 });
 
@@ -168,8 +190,8 @@ describe('Composer pending plan approval lock (#1356)', () => {
       planApprovalInputPending: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toMatch(/<textarea[^>]*disabled=""/);
-    expect(html).toContain('请先裁决当前计划，再发送新消息');
-    expect(html).toContain('等待计划裁决…');
+    expect(html).toContain('请先决定当前计划怎么处理，再发送新消息');
+    expect(html).toContain('等待你决定计划…');
     // 工具审批是另一回事：计划裁决的文案不得把用户引去找一个不存在的审批。
     expect(html).not.toContain('等待审批决策');
   });
@@ -188,8 +210,9 @@ describe('Composer pending plan approval lock (#1356)', () => {
       onPermissionModeChange: noop,
       permissionInSession: true,
     })).replaceAll('<!-- -->', '');
-    expect(html).toContain('请先裁决当前计划');
-    expect(html).toContain('title="等待计划裁决后再改档"');
+    expect(html).toContain('请先决定当前计划');
+    expect(html).toContain(PERMISSION_HINT);
+    expect(html).toContain('决定计划后再改档"');
   });
 });
 
@@ -227,7 +250,7 @@ describe('Composer 队列条随待回答用户输入锁定 (#1223)', () => {
       onFlush: noop,
       constraintInputPending: true,
     })).replaceAll('<!-- -->', '');
-    expect(buttonTag(html, '立即发送')).toContain('请先回答当前约束澄清');
+    expect(buttonTag(html, '立即发送')).toContain('请先确认当前要求');
     expect(buttonTag(html, '立即发送全部')).toContain('disabled=""');
   });
 
@@ -272,11 +295,13 @@ describe('Composer 队列条随待回答用户输入锁定 (#1223)', () => {
   });
 });
 
-describe('Composer procedural rule signal (#298 R5)', () => {
-  it('offers an explicit opt-in for reusable rules', () => {
+describe('Composer procedural rule signal (#298 R5 / #1405)', () => {
+  it('reusable-rule entry lives in the add menu, never as a persistent dock control', () => {
     const html = renderToString(createElement(Composer, base)).replaceAll('<!-- -->', '');
-    expect(html).toContain('将这条消息作为可复用规则');
-    expect(html).toContain('remember-as-procedural-rule');
+    // 附件「+」入口仍在；规则开关不再是 dock 里的常驻 checkbox（Radix portal 只在打开时渲染）。
+    expect(html).toContain('aria-label="添加图片"');
+    expect(html).not.toContain('将这条消息作为可复用规则');
+    expect(html).not.toContain('remember-as-procedural-rule');
   });
 });
 
@@ -309,7 +334,8 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('title="本轮进行中，等这一轮结束再改档"');
+    expect(html).toContain(PERMISSION_HINT);
+    expect(html).toContain('本轮进行中，等这一轮结束再改档');
     expect(html).not.toContain('权限档在会话创建时确定，会话内不可修改');
   });
 
@@ -319,7 +345,8 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('title="等待审批决策后再改档"');
+    expect(html).toContain(PERMISSION_HINT);
+    expect(html).toContain('等待审批决策后再改档');
   });
 
   // #1283 P1：`locked` 已包含两种「待回答的用户输入」，改档禁用原因必须按**真实**
@@ -330,7 +357,8 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('title="等待回答当前提问后再改档"');
+    expect(html).toContain(PERMISSION_HINT);
+    expect(html).toContain('等待回答当前提问后再改档');
     expect(html).not.toContain('审批');
   });
 
@@ -340,7 +368,9 @@ describe('Composer 权限 pill（#283）', () => {
       onPermissionModeChange: noop, permissionInSession: true,
     })).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-disabled="true"');
-    expect(html).toContain('title="等待约束澄清回答后再改档"');
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain(PERMISSION_HINT);
+    expect(html).toContain('确认当前要求后再改档"');
     expect(html).not.toContain('审批');
   });
 
@@ -355,10 +385,12 @@ describe('Composer 权限 pill（#283）', () => {
 });
 
 // ── #536：预算三项收敛为单入口 popover（替换 #426 三平铺）──
-// 预算属于**启动 run** 的请求（#422 裁决）：仅新建会话态渲染；会话内（续聊
-// /messages 不带 budget，#308）不显示。判形/换算在映射层 toCreateBudget /
-// resolveDeadlineDraft（lib/amend.ts）。面板是 Radix Portal 内容，SSR 不可见
-// （同权限 pill 分工）——面板内三维控件的逐项断言在 BudgetPicker.test.tsx
+// #1444：**两态（新建 / 已选会话）都渲染**。已选态的选择随下一次 `/messages`
+// 提交作为 amend 发出（后端 idle→launched 消费，queued / steer 只判定丢弃）——
+// 与 model 等 amend 字段同语义，不是"会话内不显示"（#308 的真实约束是在途 run
+// 不改写，不是续聊提交不得携带下一 run 的预算声明）。判形/换算在映射层
+// toCreateBudget / resolveDeadlineDraft（lib/amend.ts）。面板是 Radix Portal 内容，
+// SSR 不可见（同权限 pill 分工）——面板内三维控件的逐项断言在 BudgetPicker.test.tsx
 // （Panel 独立渲染）与 e2e/budget-entry.spec.ts（交互+wire）锁。
 
 describe('Composer 预算入口（#536 单入口 popover）', () => {
@@ -376,7 +408,7 @@ describe('Composer 预算入口（#536 单入口 popover）', () => {
       createElement(Composer, { ...base, ...budgetProps }),
     ).replaceAll('<!-- -->', '');
     expect(html).toContain('aria-label="预算"');
-    expect(html).toContain('>默认<');
+    expect(html).toContain('>预算：默认<');
     // 三平铺已收敛：面板外不再有常驻的预算字段行。
     expect(html).not.toContain('composer-budget-label');
   });
@@ -393,14 +425,15 @@ describe('Composer 预算入口（#536 单入口 popover）', () => {
         onBudgetRunDeadlineChange: noop,
       }),
     ).replaceAll('<!-- -->', '');
-    expect(html).toContain('>turns 5 · 500k · 2h<');
+    expect(html).toContain('>预算：轮数 5 · 500k · 2h<');
   });
 
-  it('会话内（permissionInSession）→ 预算入口不渲染（续聊不带 budget，#308）', () => {
+  it('会话内（permissionInSession）→ 入口同样在场，摘要「预算：默认」（#1444 两态同入口）', () => {
     const html = renderToString(
       createElement(Composer, { ...base, permissionInSession: true, ...budgetProps }),
     ).replaceAll('<!-- -->', '');
-    expect(html).not.toContain('aria-label="预算"');
+    expect(html).toContain('aria-label="预算"');
+    expect(html).toContain('>预算：默认<');
   });
 
   it('未接任何预算 onChange → 入口不渲染；只接一维 → 入口在场（面板内只出该维）', () => {

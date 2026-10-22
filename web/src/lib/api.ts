@@ -359,11 +359,13 @@ export interface StartSessionPayload {
 /** createEmptySession 的载荷（#204 裁定 §2）：只建会话、不启动 run。
  *  `task` **刻意不在这个形状里**——launch=false + task 是矛盾组合（给了任务却
  *  静默不执行），后端 422；类型上没有它，编译期就挡住调用方传进来。
+ *  `budget` 同理（#1467）：`budget.run` 只属于启动 run 的请求，launch=false 下
+ *  后端 422（app.py `create_session`）；类型上没有它 + 下方字段表不登记它，
+ *  编译期与运行期两道闸。预算随首条消息的 `/messages` amend 发出。
  *  `permission_mode` 与 startSession 同词汇（弹窗选的档 = 会话级权限）；省略 =
  *  后端默认 workspace-write + auto-approve。 */
 export interface CreateEmptySessionPayload {
   cwd?: string;
-  budget?: BudgetPayload;
   auto_approve?: boolean;
   permission_mode?: string;
   workspace?: string;
@@ -393,7 +395,8 @@ export async function createEmptySession(
       buildBody(payload, {
         workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
         cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
-        budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
+        // #1467：**不登记** `budget`——`budget.run` 与 launch=false 互斥（后端 422）。
+        // 调用方绕过类型塞进来也不会被序列化（字段表就是运行期白名单）。
         auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
         permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
       }),
@@ -524,7 +527,7 @@ async function watchtowerJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await apiFetch(path, init);
   if (!res.ok) {
     const detail = await readErrorDetail(res);
-    throw new Error(detail || `自动值班请求失败（${res.status}）`);
+    throw new Error(detail || `定时任务请求失败（${res.status}）`);
   }
   return res.json() as Promise<T>;
 }
@@ -1161,7 +1164,7 @@ export async function postApproval(
     body: JSON.stringify(body),
   });
   if (res.status === 409) throw new AlreadyResolvedError('审批已决（幂等）');
-  if (res.status === 404) throw new ApprovalGoneError('该审批已失效（运行已中断或服务已重启）');
+  if (res.status === 404) throw new ApprovalGoneError('该审批已失效（任务已中断或服务已重启）');
   if (!res.ok) throw new Error(`审批失败（${res.status}）`);
   return res.json();
 }
@@ -1598,7 +1601,7 @@ function parseArtifactSlice(raw: unknown): ArtifactSlice {
   const totalLines = typeof o.total_lines === 'number' ? o.total_lines : null;
   const returnedLines = typeof o.returned_lines === 'number' ? o.returned_lines : null;
   if (!artifactId || lines === null || totalLines === null || returnedLines === null) {
-    throw new Error('artifact content: 响应形状不符');
+    throw new Error('产出文件内容格式不完整');
   }
   return {
     artifact_id: artifactId,
@@ -2060,12 +2063,12 @@ export async function listProtectedFacts(sessionId: string): Promise<ProtectedFa
   const res = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts`,
   );
-  if (!res.ok) throw await sessionError(res, '加载约束失败');
+  if (!res.ok) throw await sessionError(res, '加载要求失败');
   const raw: unknown = await res.json().catch(() => null);
   const facts = typeof raw === 'object' && raw !== null
     ? (raw as { facts?: unknown }).facts
     : null;
-  if (!Array.isArray(facts)) throw new Error('约束接口回执缺少 facts 数组');
+  if (!Array.isArray(facts)) throw new Error('要求接口返回的数据格式不对');
   return facts as ProtectedFact[];
 }
 
@@ -2082,7 +2085,7 @@ export async function revokeProtectedFact(
     `/api/sessions/${encodeURIComponent(sessionId)}/protected-facts/${encodeURIComponent(factId)}/revoke`,
     { method: 'POST' },
   );
-  if (!res.ok) throw await sessionError(res, '撤销约束失败');
+  if (!res.ok) throw await sessionError(res, '撤销要求失败');
   const raw: unknown = await res.json().catch(() => null);
   const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProtectedFactRevokeReceipt>;
   if (body.status !== 'revoked') {
@@ -2139,11 +2142,11 @@ export async function listEffectiveConstraints(
   const res = await apiFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/effective-constraints`,
   );
-  if (!res.ok) throw await sessionError(res, '加载约束失败');
+  if (!res.ok) throw await sessionError(res, '加载要求失败');
   const raw: unknown = await res.json().catch(() => null);
   const obj = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : null;
   const facts = obj?.facts;
-  if (!Array.isArray(facts)) throw new Error('约束接口回执缺少 facts 数组');
+  if (!Array.isArray(facts)) throw new Error('要求接口返回的数据格式不对');
   const project =
     typeof obj?.project === 'object' && obj.project !== null
       ? (obj.project as EffectiveProjectMeta)
@@ -2170,7 +2173,7 @@ export async function revokeScopedConstraint(
       body: JSON.stringify({ scope: opts.scope, session_id: opts.sessionId }),
     },
   );
-  if (!res.ok) throw await sessionError(res, '撤销约束失败');
+  if (!res.ok) throw await sessionError(res, '撤销要求失败');
   const raw: unknown = await res.json().catch(() => null);
   const body = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<ProtectedFactRevokeReceipt>;
   if (body.status !== 'revoked') {
@@ -2371,7 +2374,7 @@ function buildRecoverBody(decisions?: RecoverDecisionInput[]): string | null {
   for (const decision of decisions) {
     if (decision.source !== undefined && decision.source.length > RECOVER_DECISION_SOURCE_MAX) {
       throw new Error(
-        `裁决来源过长（${decision.source.length} 字符，上限 ${RECOVER_DECISION_SOURCE_MAX}）`,
+        `决定说明过长（${decision.source.length} 字符，上限 ${RECOVER_DECISION_SOURCE_MAX}）`,
       );
     }
   }
@@ -2407,7 +2410,7 @@ export async function recoverSession(
     const errBody = await readErrorBody(res);
     throw new RecoverError(
       409,
-      errBody.message || '存在需要人工裁决的高风险操作',
+      errBody.message || '存在需要你决定的高风险操作',
       errBody.pendingDecisions,
     );
   }
@@ -3248,6 +3251,146 @@ export async function getContextUsage(sessionId: string): Promise<ContextUsage> 
   return res.json();
 }
 
+// ── 上下文洞察模块（#1420）──
+//
+// 三组只读端点（后端 `web/insights.py`），口径全部由后端给：前端不估算、不补数、
+// 不维护第二套真相（不变量 #22）。**只 token 口径，任何视图不出现成本字段**
+// （票面裁决；后端响应本来也没有 cost/$）。
+
+/** 跨会话聚合的时间窗（后端 `range=7d|30d|all`）。 */
+export type InsightsRange = '7d' | '30d' | 'all';
+
+/** 逐请求趋势的两种粒度 / 两种模式（与后端 query 参数同名同义）。 */
+export type ContextGranularity = 'step' | 'turn';
+export type ContextMode = 'total' | 'delta';
+
+export interface InsightsKpi {
+  sessions: number;
+  /** 计费 token := Σ `total_tokens`（票面口径）。 */
+  billed_tokens: number;
+  /** Σ cached ÷ Σ prompt；一次缓存明细都没上报时为 null（不显示 0%）。 */
+  cache_hit_rate: number | null;
+  turns: number;
+  tool_runs: number;
+  active_ms: number;
+}
+
+export interface InsightsDayPoint {
+  date: string;
+  tokens: number;
+}
+
+/** 构成聚合：仅「有快照会话」计入，六桶求和 = 快照总量。 */
+export interface InsightsComposition {
+  system_prompt: number;
+  tools_system: number;
+  tools_mcp: number;
+  messages: number;
+  skills: number;
+  other: number;
+}
+
+export interface InsightsSessionRow {
+  session_id: string;
+  /** 首条用户消息；没有时后端回落 session_id（可读标签，不是伪造标题）。 */
+  title: string;
+  workspace: string | null;
+  billed_tokens: number;
+  turns: number;
+  last_active_at: string | null;
+}
+
+export interface InsightsOverview {
+  kpi: InsightsKpi;
+  daily: InsightsDayPoint[];
+  /** 恒为近 8 周（与 range 无关）。 */
+  heatmap: InsightsDayPoint[];
+  composition: InsightsComposition;
+  coverage: { snapshotted_sessions: number; total_sessions: number };
+  sessions: InsightsSessionRow[];
+}
+
+export interface ContextRequestPoint {
+  seq: number;
+  time: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+}
+
+export interface ContextEventPoint {
+  seq: number;
+  time: string;
+  type: string;
+}
+
+export interface ContextTimeline {
+  /** 与 `GET /context-usage` **同形状同值**（后端共用同一个解析入口）。 */
+  window: ContextUsage;
+  requests: ContextRequestPoint[];
+  events: ContextEventPoint[];
+}
+
+export interface FleetAgentCard {
+  session_id: string;
+  status: string;
+  tokens: number;
+  last_active_at: string | null;
+}
+
+export interface FleetChildCard {
+  session_id: string;
+  status: string;
+  used_tokens: number;
+  last_active_at: string | null;
+}
+
+export interface FleetPayload {
+  self: FleetAgentCard;
+  /** 根会话为空数组 ⇒ UI 隐藏父列（票面）。 */
+  ancestors: FleetAgentCard[];
+  children: FleetChildCard[];
+}
+
+/** GET /api/insights/overview —— 跨会话聚合（只读）。
+ *  `workspace_id` 未注册时后端 404（与 `GET /api/sessions` 同一翻译）。 */
+export async function getInsightsOverview(
+  range: InsightsRange,
+  workspaceId?: string,
+): Promise<InsightsOverview> {
+  const query = new URLSearchParams({ range });
+  if (workspaceId) query.set('workspace_id', workspaceId);
+  const res = await apiFetch(`/api/insights/overview?${query.toString()}`);
+  if (res.status === 404) throw new NotFoundError('工作区不存在');
+  if (!res.ok) throw new Error(`insights overview ${res.status}`);
+  return res.json();
+}
+
+/** GET /api/sessions/{id}/context-timeline —— 单会话窗口 / 逐请求 / 上下文事件（只读）。 */
+export async function getContextTimeline(
+  sessionId: string,
+  granularity: ContextGranularity = 'step',
+  mode: ContextMode = 'total',
+): Promise<ContextTimeline> {
+  const query = new URLSearchParams({ granularity, mode });
+  const res = await apiFetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/context-timeline?${query.toString()}`,
+  );
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`context-timeline ${res.status}`);
+  return res.json();
+}
+
+/** GET /api/sessions/{id}/fleet —— 当前 / 父 / 子 agent 家族（只读）。 */
+export async function getSessionFleet(sessionId: string): Promise<FleetPayload> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/fleet`);
+  if (res.status === 404) throw new NotFoundError('会话不存在');
+  if (!res.ok) throw new Error(`session fleet ${res.status}`);
+  return res.json();
+}
+
 /** 上下文窗口挡位设置（`GET/PATCH /api/sessions/{id}/context-settings`，后端
  *  `web/app.py:3613/3634`）。**形状是后端 DTO 原样透传**——挡位清单以后端为准，
  *  前端不硬编码副本：`tiers` 就是权威列表，选择器只按它渲染。
@@ -3350,11 +3493,11 @@ export async function compactSession(
       `/api/sessions/${encodeURIComponent(sessionId)}/context/compact${query}`,
       { method: 'POST', signal: controller.signal },
     );
-    if (!res.ok) throw await sessionError(res, '压缩会话上下文失败');
+    if (!res.ok) throw await sessionError(res, '精简早期对话失败');
     return res.json();
   } catch (error) {
     if (controller.signal.aborted) {
-      throw new Error('压缩请求超时（180s）——仍可稍后在上下文容量面板查看结果');
+      throw new Error('精简请求超时（180s）——仍可稍后在记忆容量面板查看结果');
     }
     throw error;
   } finally {

@@ -34,7 +34,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | 任何文件 | ⑨ `git diff --check` + ⑧ 覆盖闸门 | Gate-0（自动） |
 | `src/**` 的 `.py` | ① ruff + ② 后端全量 pytest | Gate-0 跑①；②在冻结树 |
 | `session/event.py` 或任一生成物 | ⑦ 的生成物同步守卫（**必跑**；跨 `src`↔`web` 的只有这一条） | Gate-0（自动） |
-| `web/**` | ④ tsc + ⑤ vitest + ⑥ oxlint | Gate-0 跑④⑥；⑤按需 |
+| `web/**` | ④ tsc + ⑥ oxlint + ⑥b stylelint + ⑤ vitest | Gate-0 跑④⑥⑥b；⑤按需 |
 | `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
 | 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
 | `evaluation/live_gate/**` 或票面要求"真模型 + 生产工具"的证据 | ⑮ Live Gate（**需真凭证**；`validate` 复核入库证据） | 人工，冻结树（不进推送前 60s 快车道） |
@@ -103,6 +103,18 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - 期望证据：退出 0；配置在 `web/.oxlintrc.json`（`react` / `typescript` / `oxc` 插件）。
 - 实测：冷 4.4s / 热 0.6s。
 
+### ⑥b 前端样式 lint — `stylelint`（#1364）
+
+- 命令（`web/`）：`node node_modules/stylelint/bin/stylelint.mjs --config stylelint.config.mjs
+  "src/**/*.css"`
+- 规则（**唯一真值**在 `web/stylelint.config.mjs`）：`color-no-hex` + 声明值禁
+  `rgb()/rgba()/hsl()/hsla()` —— 颜色只能来自 `web/src/index.css` 的 token。
+- 放行面（三处，均须在同文件留注释说明）：token 定义块用成对
+  `stylelint-disable color-no-hex, declaration-property-value-disallowed-list`；mask 停止位与
+  `var(--x, #hex)` 兜底用 `stylelint-disable-next-line color-no-hex`；新增颜色先落 token。
+- 期望证据：退出 0、无输出。**验证规则本身有效**：往任一 CSS 塞 `#123456` 必须退出 2（否则
+  规则可能被写成 no-op，全仓仍绿）。
+
 ### ⑦ 机械守卫（生成物同步 + 验证映射 + 索引可执行位）
 
 - 命令：`PYTHONUTF8=1 PYTHONPATH= .venv/Scripts/python.exe -m pytest
@@ -146,9 +158,9 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
        给 `scripts/` 之外的 py 文件新加 shebang 时，`--affected` **不会**跑本守卫。2026-09-27 实测：
        全仓 **9 个带 shebang 的 py 全在 `scripts/`**，而 `scripts/` 行含 `guards`
        ⇒ **现实面全覆盖**，缺口只在理论面。**不承重**：`--affected` 依设计只做**失败后的增量
-       重跑**，推送前与集成前两处真门禁恒跑全量 6 条（§4「`--affected <rev>` 的边界」）。
+       重跑**，推送前与集成前两处真门禁恒跑全量 7 条（§4「`--affected <rev>` 的边界」）。
        **解除条件**：要把 `guards` 升进「每行必列」集合（现为 `diff-check` + `coverage`，见
-       `verification.map.tsv` 表头）需一并改 72 行映射表 + `tests/test_verification_map.py`
+       `verification.map.tsv` 表头）需一并改整张映射表 + `tests/test_verification_map.py`
        的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
 - **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
   `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
@@ -209,15 +221,15 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 
 - 命令：`.venv/Scripts/python.exe scripts/gate0.py`
   （`--since <rev>` 额外查该范围的空白/冲突标记并报告改动面；`--only <lane>` 单条重跑；`--list` 列车道）
-- 内容：⑨ + ① + ⑥ + ④ + ⑦ + ⑧，共 6 条。
-- 期望证据：`Gate-0 PASS：6/6 通过，墙钟 <秒数>` + 首行 `tip=<sha> tree=<tree>`。
+- 内容：⑨ + ① + ⑥ + ⑥b + ④ + ⑦ + ⑧，共 7 条。
+- 期望证据：`Gate-0 PASS：7/7 通过，墙钟 <秒数>` + 首行 `tip=<sha> tree=<tree>`。
 - 实测：**热 20–22s、冷 ≈40s**（预算 60s）。
 - 由 `.githooks/pre-push` 在推送前调用（启用：`git config core.hooksPath .githooks`）。
 
 ### ⑭ 验证映射与 `--affected`（受影响面的机器化；issue #292）
 
 - **产物**：`docs/agents/verification.map.tsv` —— 「代码面 ↔ 必跑车道 / focused 用例」的**机械映射**
-  （**40 行 × 8 列**）。feature 四要素由其中**五列**承载（`Driving it with <harness>` 拆成 `lanes` +
+  （**8 列**；行数随映射面增长，别在此写死）。feature 四要素由其中**五列**承载（`Driving it with <harness>` 拆成 `lanes` +
   `focused`），逐一对齐 `docs/agents/skills/create-verification-skill` §3
   （`Sub-features` → `sub_features`；`How to get to it (user POV)` → `how_to_get_to_it`；
   `Driving it with <harness>` → `lanes` + `focused`；`Gotchas` → `gotchas`），另加三个**机械列**：
@@ -237,7 +249,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   的求值**逐项相同**（map 与 `--affected` 不是两套真相）。⇒ 映射腐烂、或把非 pytest 面接上内联车道
   = **推送前就红**。
 - **命令**：`.venv/Scripts/python.exe scripts/gate0.py --affected <rev>`（`<rev>` 亦可为范围 `A..B`）。
-  只跑受影响车道 + 受影响 focused 用例；**默认行为不变**（不带它恒跑全部 6 车道）。
+  只跑受影响车道 + 受影响 focused 用例；**默认行为不变**（不带它恒跑全部 7 车道）。
 - **⚠ `focused` 的内联范围（2026-09-22 定，两条血证）**：**只有 pytest 子集内联**（`tests/**` 或 `*.py`）。
   前端 / 浏览器类（`vitest` / `e2e` / `live`）与整个 `tests/`（= `pytest-full` **本身**，子集才便宜）
   **一律只登记、不内联**，输出里逐条注明原因。血证 ①（坐标系混用）：`focused` 路径一律**相对仓库根**，
@@ -274,8 +286,8 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - **空改动面必须 fail-closed（2026-09-22 修后重审补的牙）**：`--affected HEAD`（此时
   `git diff --name-only HEAD..HEAD` 恰为空）**修复前**会打印 `Gate-0 PASS：0/0 通过`——一个与真 PASS
   **不可区分**的绿，而这是该参数的**自然用法**。现在空面**不收敛**：打印
-  「⚠ 改动面为空（该范围没有任何改动文件）⇒ **fail-closed：跑全部车道**」并**实跑 6/6**
-  （同树实测 `Gate-0 FAIL：5/6 通过，墙钟 16.8s`，仅 `coverage` 红）。
+  「⚠ 改动面为空（该范围没有任何改动文件）⇒ **fail-closed：跑全部车道**」并**实跑全部车道**
+  （同树实测——当时还是 6 条车道——`Gate-0 FAIL：5/6 通过，墙钟 16.8s`，仅 `coverage` 红）。
 
 - **三元组对账（票面 comment 新增的 AC「map 与 `--affected` 对同一批改动给出同一组车道」）**：
   对上述三个改动面，**三路求值逐项相同**——① map 侧（`tests/test_verification_map.py::_mine_eval`，
@@ -379,17 +391,17 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 
 ## 4. Gate-0 与完整门禁的边界（别把前者当后者）
 
-- Gate-0 **只覆盖机械可判项**（§2 的 ⑨①⑥④⑦⑧）。它**不覆盖**：② 后端全量测试、
+- Gate-0 **只覆盖机械可判项**（§2 的 ⑨①⑥⑥b④⑦⑧）。它**不覆盖**：② 后端全量测试、
   ⑤ vitest 全量、⑩ 构建、⑪ e2e、以及**任何语义 / 规格 / 边界 / 权限**问题。
-- Gate-0 **推送前不做按路径跳过**：全量 6 车道 ≈20–40s，已满足预算；"按改动路径跳过某条车道"属于
+- Gate-0 **推送前不做按路径跳过**：全量 7 车道 ≈20–40s，已满足预算；"按改动路径跳过某条车道"属于
   放松（跨层影响难以穷举），机制上没有必要。改动面只作信息展示。
-- ⚠ **上面那条的适用范围被收紧（2026-09-22，issue #291）**：它**只**对**本节这 6 条机械车道**
-  （`diff-check` / `ruff` / `oxlint` / `tsc` / `guards` / `coverage`）成立——理由是它们耗时已被实测
+- ⚠ **上面那条的适用范围被收紧（2026-09-22，issue #291）**：它**只**对**本节这 7 条机械车道**
+  （`diff-check` / `ruff` / `oxlint` / `tsc` / `stylelint` / `guards` / `coverage`）成立——理由是它们耗时已被实测
   （20–22s 热 / 36–45s 冷）、且判定是机械的。**不得**据此认为"完整门禁与 e2e 也可以按路径跳过"：
   **不在 Gate-0 里的那几条（②③⑤⑩⑪）**是长耗时的那批（② 后端全量 pytest 是分钟级；③⑪ 本文件无耗时读数；⑤ 标注十秒级、⑩ 标注秒到十秒级，两者均未在本批实测；⑫ 真机验收属人工车道，无耗时读数），且它们的受影响面**不由人当场划集合**（那正是放松的入口），只能来自机械可复核的
   映射（协议 **§8.8.2 INV-1 / §8.8.3 边界表 / §8.8.9**；映射**已机器化**，见 §2 ⑭）。
 - **`--affected <rev>` 的边界（issue #292 **已落地**，见 §2 ⑭）**：它**只**用于**失败后的增量重跑**，既不得替代
-  **推送前全量 Gate-0**（推送前恒跑全部 6 条），也不得替代**集成前完整门禁**（协议 §8.8.4 第 1 行）。改动面里出现**未映射路径** ⇒ **fail-closed 退回全量**；**改动面为空**（如 `--affected HEAD`）
+  **推送前全量 Gate-0**（推送前恒跑全部 7 条），也不得替代**集成前完整门禁**（协议 §8.8.4 第 1 行）。改动面里出现**未映射路径** ⇒ **fail-closed 退回全量**；**改动面为空**（如 `--affected HEAD`）
   ⇒ **同样 fail-closed、不收敛成 0 条**（`0/0 通过` 与真 PASS 不可区分）；同时给 `--since` 与
   `--affected` ⇒ **一律以 `--affected` 的范围为准**（并先印说明）；`neg_tier < 4` 的层会被标 **unproven**，**依据 unproven 主张跳过任一条车道必须在台账 / 落点记录里写明**。
 - `pre-push` hook **是本地便利，不是安全边界**：`git push --no-verify` 可绕过；

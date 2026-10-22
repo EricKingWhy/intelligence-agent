@@ -1297,14 +1297,14 @@ describe('getArtifactContent — artifact 切片解析（#185/#186，缺字段�
 
   it('缺 total_lines / returned_lines → 抛错（此前静默填 0，界面会显示"共 0 行"的假空产物）', async () => {
     captureFetch(200, { artifact_id: 'a1b2c3d4e5f60718', lines: [] });
-    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('格式不完整');
   });
 
   it('缺 artifact_id 或 lines → 抛错（形状不符不走"空内容"）', async () => {
     captureFetch(200, { lines: [], total_lines: 0, returned_lines: 0 });
-    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('格式不完整');
     captureFetch(200, { artifact_id: 'a1b2c3d4e5f60718', total_lines: 0, returned_lines: 0 });
-    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('响应形状不符');
+    await expect(getArtifactContent('s-1', 'a1b2c3d4e5f60718')).rejects.toThrow('格式不完整');
   });
 
   /* #227：非 2xx 的 kind **只按机读码判**，不按状态码猜原因。
@@ -1500,6 +1500,23 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     );
     await expect(createEmptySession({ cwd: 'D:/x', auto_approve: true }))
       .rejects.toThrow('task 与 launch=false 互斥');
+  });
+
+  /* #1467：`budget.run` 与 launch=false 后端 422 互斥（app.py `create_session`），
+     所以 `createEmptySession` 的字段表不再登记 `budget`。类型上已无该键——这里
+     刻意绕过类型锁（`as never`，仓库测试既有的绕过写法），钉的是**运行期**字段表：
+     旧实现的表里有 `budget` 构造器，调用方塞进来就会原样上线；现在构造器根本不
+     读这个键。类型锁与字段表是两道独立的闸，缺一道都能把 422 放出去。 */
+  it('调用方绕过类型塞 budget → 请求体仍不含 budget 键（#1467 运行期双保险）', async () => {
+    const cap = captureFetchWithHeaders(200, { session_id: 'sid-4' });
+    await createEmptySession({
+      cwd: 'D:/repos/alpha',
+      auto_approve: true,
+      budget: { run: { max_agent_turns_total: 5 } },
+    } as never);
+    expect(cap.calls[0].url).toBe('/api/sessions?launch=false');
+    expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', auto_approve: true });
+    expect(cap.calls[0].body).not.toHaveProperty('budget');
   });
 });
 

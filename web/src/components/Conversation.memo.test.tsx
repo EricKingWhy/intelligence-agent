@@ -37,23 +37,49 @@ vi.mock('@tanstack/react-virtual', async (importOriginal) => {
     ...actual,
     // 假实现必须**自包含**（`vi.mock` 工厂被提升，不能引用模块级变量）。本文件不测虚拟化，
     // 只借它的调用次数当"Conversation 渲染了几次"的计数器。
-    useVirtualizer: vi.fn(() => ({
-      getVirtualItems: () => [],
-      getTotalSize: () => 0,
+    // 但 F8（#1429）要数**子组件**的渲染次数，所以这里把窗口内的行全部吐出来
+    // （真实虚拟化在 jsdom 下没有滚动容器 ⇒ 恒空树，数不到任何 TurnView）。
+    useVirtualizer: vi.fn((opts: { count: number }) => ({
+      getVirtualItems: () =>
+        Array.from({ length: opts.count }, (_, i) => ({
+          index: i,
+          key: i,
+          start: i * 240,
+          end: i * 240 + 240,
+          size: 240,
+          lane: 0,
+        })),
+      getTotalSize: () => opts.count * 240,
       measureElement: () => {},
       scrollToIndex: () => {},
     })),
   };
 });
 
+// F8（#1429）：`formatShortDuration` 是「组头渲染了几次」的唯一无条件调用
+// （`GroupDuration` 每次渲染算一次跨度）；`formatDuration` 同理服务 `TurnView`。
+// 两者都透传真实实现，只是记下调用参数——断言数的是渲染次数，不是格式。
+vi.mock('../lib/format', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/format')>();
+  return {
+    ...actual,
+    formatDuration: vi.fn(actual.formatDuration),
+    formatShortDuration: vi.fn(actual.formatShortDuration),
+  };
+});
+
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { initConversation } from '../lib/projection';
+import { formatDuration, formatShortDuration } from '../lib/format';
+import { applyEvent, initConversation, projectHistory } from '../lib/projection';
 import { useDisclosure, useReasoningDisclosure } from '../lib/disclosure';
 import type { TraceDensity } from '../lib/density';
-import type { ConversationState, ToolCall } from '../types';
+import { EventType } from '../types';
+import type { AgentEvent, ConversationState, ToolCall } from '../types';
 import { Conversation } from './Conversation';
 
 const virtSpy = vi.mocked(useVirtualizer);
+const durSpy = vi.mocked(formatDuration);
+const shortSpy = vi.mocked(formatShortDuration);
 
 const CONV: ConversationState = initConversation('s1');
 
@@ -191,5 +217,124 @@ describe('F2 — 反例守卫（票面 Risks 点名的三个 prop 逐个钉住�
     const base = renders();
     render(<CenterHost conversation={CONV} tick={1} />);
     expect(renders()).toBeGreaterThan(base);
+  });
+});
+
+// ── F8（#1429）：细粒度重渲染证据 ──────────────────────────────────────────
+//
+// 票面要求两条可测事实：
+//  1. 同一 turn 追加 delta ⇒ **已完成**的 TurnView 不重渲染；
+//  2. 分组开合只重渲染**被点的那一组**（其余组 memo 命中）。
+//
+// 计数口径：`TurnView` 每次渲染都无条件算一次 `formatDuration(started_at,
+// completed_at)`（逐轮渲染计数），`GroupDuration` 每次渲染都算一次
+// `formatShortDuration(span)`（逐组渲染计数）。两个 spy 都透传真实实现，
+// 断言按**参数**把调用归属到具体轮 / 具体组——数的是渲染，不是格式。
+
+function ev(partial: Partial<AgentEvent> & { type: string }): AgentEvent {
+  return { data: {}, seq: null, run_id: 'run-1', step_id: null, time: null, ...partial } as AgentEvent;
+}
+
+/** 三轮会话：前两轮已收口，第三轮停在流式（可继续吃 delta）。 */
+function threeTurns(): ConversationState {
+  const events: AgentEvent[] = [
+    ev({ type: EventType.USER_MESSAGE, seq: 1, step_id: 1, time: '2026-10-20T00:00:00Z', data: { content: '一' } }),
+    ev({ type: EventType.RUN_STARTED, seq: 2, time: '2026-10-20T00:00:00Z', data: { turn_index: 1 } }),
+    ev({ type: EventType.MODEL_STARTED, seq: 3, step_id: 1, data: { step: 1 } }),
+    ev({ type: EventType.MODEL_COMPLETED, seq: 4, step_id: 1, data: { content: 'A' } }),
+    ev({ type: EventType.RUN_COMPLETED, seq: 5, time: '2026-10-20T00:00:02Z', data: {} }),
+    ev({ type: EventType.USER_MESSAGE, seq: 6, step_id: 2, time: '2026-10-20T00:01:00Z', data: { content: '二' } }),
+    ev({ type: EventType.RUN_STARTED, seq: 7, time: '2026-10-20T00:01:00Z', data: { turn_index: 2 } }),
+    ev({ type: EventType.MODEL_STARTED, seq: 8, step_id: 2, data: { step: 2 } }),
+    ev({ type: EventType.MODEL_COMPLETED, seq: 9, step_id: 2, data: { content: 'B' } }),
+    ev({ type: EventType.RUN_COMPLETED, seq: 10, time: '2026-10-20T00:01:02Z', data: {} }),
+    ev({ type: EventType.USER_MESSAGE, seq: 11, step_id: 3, time: '2026-10-20T00:02:00Z', data: { content: '三' } }),
+    ev({ type: EventType.RUN_STARTED, seq: 12, time: '2026-10-20T00:02:00Z', data: { turn_index: 3 } }),
+    ev({ type: EventType.MODEL_STARTED, seq: 13, step_id: 3, data: { step: 3 } }),
+    ev({ type: EventType.MODEL_DELTA, seq: 14, step_id: 3, data: { delta: 'C' } }),
+  ];
+  return projectHistory('s-memo', events);
+}
+
+/** 按 `formatDuration` 的首参（该轮 started_at）数渲染次数。 */
+const rendersOfTurn = (startedAt: string) =>
+  durSpy.mock.calls.filter(([s]) => s === startedAt).length;
+
+describe('F8 — delta 只重渲染活跃轮', () => {
+  it('第三轮追加 delta：前两轮（已完成）TurnView 渲染次数不增', () => {
+    const conv = threeTurns();
+    expect(conv.turns).toHaveLength(3);
+    const [t1, t2] = conv.turns;
+    expect(t1.completed_at).toBeDefined();
+    expect(t2.completed_at).toBeDefined();
+
+    render(<CenterHost conversation={conv} tick={0} />);
+    const base1 = rendersOfTurn(t1.started_at!);
+    const base2 = rendersOfTurn(t2.started_at!);
+    const base3 = rendersOfTurn(conv.turns[2].started_at!);
+    expect(base1).toBeGreaterThan(0); // 前提：这些轮真的渲染过
+    expect(base2).toBeGreaterThan(0);
+    expect(base3).toBeGreaterThan(0);
+
+    const next = applyEvent(conv, ev({
+      type: EventType.MODEL_DELTA, seq: 15, step_id: 3, data: { delta: 'D' },
+    }));
+    render(<CenterHost conversation={next} tick={1} />);
+
+    expect(rendersOfTurn(t1.started_at!)).toBe(base1);
+    expect(rendersOfTurn(t2.started_at!)).toBe(base2);
+    expect(rendersOfTurn(conv.turns[2].started_at!)).toBeGreaterThan(base3);
+  });
+});
+
+describe('F8 — 分组开合只重渲染被点组', () => {
+  /** 一轮里两个组：3 个 bash（span 2s）+ 3 个 read（span 5s）。 */
+  function twoGroups(): ConversationState {
+    const T = '2026-10-20T00:00:00Z';
+    const at = (s: number) => new Date(Date.parse(T) + s * 1000).toISOString();
+    const tool = (id: string, name: string, s: number, e: number): ToolCall => ({
+      tool_call_id: id, name, args: { command: 'ls' }, status: 'success', result: 'ok',
+      started_at: at(s), completed_at: at(e),
+    });
+    const tools = [
+      tool('b1', 'bash', 0, 1), tool('b2', 'bash', 0, 1), tool('b3', 'bash', 0, 2),
+      tool('r1', 'read', 10, 12), tool('r2', 'read', 10, 14), tool('r3', 'read', 10, 15),
+    ];
+    const conv = initConversation('s-groups');
+    return {
+      ...conv,
+      turns: [{
+        step_id: 1,
+        user_message: 'hi',
+        model: { text: 'ok', status: 'done' },
+        segments: [{ text: 'ok', status: 'done' }],
+        tools,
+        activities: tools.map((t) => ({ kind: 'tool' as const, tool_call_id: t.tool_call_id })),
+        status: 'done',
+        turn_index: 1,
+        user_message_seq: 1,
+        started_at: at(0),
+        completed_at: at(16),
+      }],
+    };
+  }
+
+  const groupRenders = (spanMs: number) =>
+    shortSpy.mock.calls.filter(([ms]) => ms === spanMs).length;
+
+  it('点开第一组：第一组重渲染，第二组（memo 命中）不重渲染', () => {
+    render(<CenterHost conversation={twoGroups()} tick={0} />);
+    const heads = container!.querySelectorAll('.act-group-head');
+    expect(heads).toHaveLength(2);
+
+    const baseA = groupRenders(2000);
+    const baseB = groupRenders(5000);
+    expect(baseA).toBeGreaterThan(0);
+    expect(baseB).toBeGreaterThan(0);
+
+    act(() => (heads[0] as HTMLElement).click());
+
+    expect(groupRenders(2000)).toBeGreaterThan(baseA);
+    expect(groupRenders(5000)).toBe(baseB);
   });
 });

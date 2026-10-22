@@ -27,8 +27,8 @@ describe('ToolCard 内联明细字段标签（C3）', () => {
     const html = renderCard('detailed');
     expect(html).toContain('act-detail-inline');
     expect(html).toContain('act-field-label');
-    expect(html).toContain('>Input<');
-    expect(html).toContain('>Output<');
+    expect(html).toContain('>输入<');
+    expect(html).toContain('>输出<');
     expect(html).toContain('act-detail-args');
     expect(html).toContain('act-detail-result');
   });

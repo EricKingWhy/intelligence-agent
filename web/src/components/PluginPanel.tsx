@@ -509,7 +509,7 @@ function ServerDetail({
         <label className="switch-row">
           <input
             type="checkbox"
-            className="plugin-switch"
+            className="ui-switch"
             checked={server.enabled && !configOff}
             disabled={enabledBusy || configOff}
             onChange={(e) => onToggleEnabled(e.target.checked)}
@@ -524,7 +524,7 @@ function ServerDetail({
         <label className="switch-row">
           <input
             type="checkbox"
-            className="plugin-switch"
+            className="ui-switch"
             checked={server.require_confirm}
             disabled={confirmBusy}
             onChange={(e) => onToggleRequireConfirm(e.target.checked)}
@@ -589,7 +589,7 @@ function SkillDetail({
         <label className="switch-row">
           <input
             type="checkbox"
-            className="plugin-switch"
+            className="ui-switch"
             checked={skill.enabled}
             disabled={busy}
             onChange={(e) => onToggleEnabled(e.target.checked)}

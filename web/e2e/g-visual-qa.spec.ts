@@ -9,6 +9,7 @@ import {
   PERMISSION_MODES,
   REASONING_EFFORTS,
   fulfillSse,
+  openMore,
   routeApi,
 } from './fixtures';
 
@@ -58,8 +59,10 @@ for (const width of WIDTHS) {
     expect(controlsBox!.x).toBeGreaterThanOrEqual(dockBox!.x);
     expect(controlsBox!.x + controlsBox!.width).toBeLessThanOrEqual(dockBox!.x + dockBox!.width + 1);
 
-    // 该宽度下 Reasoning Effort trigger 与其他控件同在；行内计数防止成员静默变化。
-    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(4);
+    // #1405：默认只露权限 + 更多（+ 预算）；Agent / 推理在「更多」展开后才在场。
+    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(3);
+    await openMore(page);
+    await expect(page.locator('.composer-controls .composer-control')).toHaveCount(5);
     const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
     await expect(effortTrigger).toBeVisible();
     await expect(page.locator('.composer-budget-trigger')).toHaveCount(1);
@@ -86,6 +89,7 @@ test('Reasoning Effort 在模型未声明能力时隐藏', async ({ page }) => {
   });
 
   await page.goto('/');
+  await openMore(page);
   await expect(page.locator('.composer-control[aria-label="Reasoning Effort"]')).toHaveCount(0);
 });
 
@@ -144,18 +148,18 @@ test('Inspector 时间线 run 分组头 + 头标对齐（UI-03）', async ({ pag
   await page.locator('.session-item').first().click();
 
   // Timeline tab → 两个分组头：序数、状态徽章、计数
-  await page.locator('.detail-tab[title="Timeline"]').click();
+  await page.locator('.detail-tab[aria-label="时间线"]').click();
   const headers = page.locator('.tl-run-header');
   await expect(headers).toHaveCount(2);
-  await expect(headers.first()).toContainText('Run 1');
+  await expect(headers.first()).toContainText('第 1 轮执行');
   await expect(headers.first()).toContainText('已完成');
   await expect(headers.first()).toContainText('4 事件');
-  await expect(headers.nth(1)).toContainText('Run 2');
+  await expect(headers.nth(1)).toContainText('第 2 轮执行');
   await expect(headers.nth(1)).toContainText('进行中');
 
   // 头标对齐：描述全会话范围，不再显示单个 run_id 短码
-  await expect(page.locator('.detail-run-id')).toHaveText('2 runs · 7 事件');
+  await expect(page.locator('.detail-run-id')).toHaveText('共 2 轮 · 7 事件');
 
   // tab 计数徽章（识别而非回忆）
-  await expect(page.locator('.detail-tab[title="Timeline"] .detail-tab-count')).toHaveText('7');
+  await expect(page.locator('.detail-tab[aria-label="时间线"] .detail-tab-count')).toHaveText('7');
 });

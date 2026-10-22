@@ -4,7 +4,7 @@
  * 车道归属：Playwright e2e（同 multiturn-queue.spec.ts 约定）。 */
 
 import { expect, test, type Page } from '@playwright/test';
-import { fulfillSse, routeApi, submitTask } from './fixtures';
+import { clickTopBarMenuItem, fulfillSse, routeApi, submitTask } from './fixtures';
 
 const FIRST_FRAMES = [
   { type: 'session/started', seq: 1, session_id: 'ctx-session-1', run_id: 'ctx-run-1', time: '2026-09-15T00:00:00Z' },
@@ -19,7 +19,7 @@ async function openIdleSession(page: Page): Promise<void> {
   await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
 }
 
-test('T6a：空数据 → 「后端未上报用量数据」，不出现 0% 假话', async ({ page }) => {
+test('T6a：空数据 → 「还没有用量数据」，不出现 0% 假话', async ({ page }) => {
   await routeApi(page, {
     sessions: [],
     events: [],
@@ -31,13 +31,13 @@ test('T6a：空数据 → 「后端未上报用量数据」，不出现 0% 假�
   await openIdleSession(page);
 
   // TopBar Gauge 入口
-  await page.getByRole('button', { name: '上下文容量' }).click();
+  await clickTopBarMenuItem(page, '上下文容量');
   const dialog = page.getByRole('dialog', { name: '上下文容量' });
   await expect(dialog).toBeVisible();
   // 文案只陈述本面板能知道的事实（后端没给数据）。**不得**出现
   // 「会话还没有任何运行」这类归因：no_data 与 run 数量无关——实测
   // 2a2d03f1（16 个 run / 3865 事件）同样落到这一支。
-  await expect(dialog).toContainText('后端未上报用量数据');
+  await expect(dialog).toContainText('还没有用量数据');
   await expect(dialog).not.toContainText('还没有任何运行');
   // 不出现 0% 假话（诚实约束）
   await expect(dialog).not.toContainText('0.0%');
@@ -75,7 +75,7 @@ test('T6b：有数据 → 六桶图例 + 分段条 + 阈值标记 + 缓存命中
   await page.goto('/');
   await openIdleSession(page);
 
-  await page.getByRole('button', { name: '上下文容量' }).click();
+  await clickTopBarMenuItem(page, '上下文容量');
   const dialog = page.getByRole('dialog', { name: '上下文容量' });
   await expect(dialog).toBeVisible();
 
@@ -121,7 +121,7 @@ test('T6c：未采集 → 「未采集（提供商未返回缓存明细）」，
   await page.goto('/');
   await openIdleSession(page);
 
-  await page.getByRole('button', { name: '上下文容量' }).click();
+  await clickTopBarMenuItem(page, '上下文容量');
   const dialog = page.getByRole('dialog', { name: '上下文容量' });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText('未采集');
@@ -167,7 +167,7 @@ test('T6e：usage_only → 报出真实窗口占用 + 说明分类缺席（不�
   await page.goto('/');
   await openIdleSession(page);
 
-  await page.getByRole('button', { name: '上下文容量' }).click();
+  await clickTopBarMenuItem(page, '上下文容量');
   const dialog = page.getByRole('dialog', { name: '上下文容量' });
   await expect(dialog).toBeVisible();
 
@@ -175,7 +175,7 @@ test('T6e：usage_only → 报出真实窗口占用 + 说明分类缺席（不�
   await expect(dialog).toContainText('54,841 / 200,000');
   await expect(dialog).toContainText('27.4%');
   // 2) **不得**把 usage_only 说成 no_data——这两句对用户是不同的意思
-  await expect(dialog).not.toContainText('后端未上报用量数据');
+  await expect(dialog).not.toContainText('还没有用量数据');
   // 3) 分类如实缺席：只有一段「未分类」，不得冒出六桶中任何一桶
   await expect(dialog).toContainText('未分类');
   for (const label of ['消息', '系统提示词', '技能', '系统工具', 'MCP 工具']) {
@@ -205,7 +205,7 @@ test('T6d：Esc 关闭看板（与既有 picker 一致）', async ({ page }) => 
   await page.goto('/');
   await openIdleSession(page);
 
-  await page.getByRole('button', { name: '上下文容量' }).click();
+  await clickTopBarMenuItem(page, '上下文容量');
   await expect(page.getByRole('dialog', { name: '上下文容量' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog', { name: '上下文容量' })).toHaveCount(0);

@@ -10,6 +10,8 @@ vi.mock('../hooks/useMemories', () => ({ useMemories: vi.fn() }));
 
 let host: HTMLDivElement;
 let root: Root;
+/** #1477：菜单夹具挂在 host 之外（模拟 Radix Portal 落在 body），逐个清掉。 */
+let fixtures: HTMLElement[] = [];
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -25,6 +27,8 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
+  fixtures.forEach((node) => node.remove());
+  fixtures = [];
   vi.mocked(useMemories).mockReset();
   vi.unstubAllGlobals();
 });
@@ -61,6 +65,39 @@ async function renderPanel(state: MemoriesState): Promise<void> {
   });
 }
 
+/** 切到关闭态，并等 Radix FocusScope 的 0ms 归还回调真正跑完。 */
+async function closePanel(): Promise<void> {
+  await act(async () => {
+    root.render(<MemoryPanel open={false} onOpenChange={() => {}} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+/** #1477：造一个 TopBar「更多工具」形状的菜单——常驻触发器 + 菜单内容。
+ *  与 Radix DropdownMenu.Content 一致：内容挂 `role="menu"` 与
+ *  `aria-labelledby=<触发器 id>`；菜单关闭时整段内容（含菜单项）卸载。 */
+function mountMoreMenu(): { trigger: HTMLButtonElement; menu: HTMLDivElement; item: HTMLDivElement } {
+  const trigger = document.createElement('button');
+  trigger.id = `more-trigger-${Math.random().toString(36).slice(2)}`;
+  trigger.setAttribute('aria-haspopup', 'menu');
+  trigger.setAttribute('aria-label', '更多工具');
+  document.body.appendChild(trigger);
+  const menu = document.createElement('div');
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-labelledby', trigger.id);
+  const item = document.createElement('div');
+  item.setAttribute('role', 'menuitem');
+  item.tabIndex = -1;
+  item.textContent = '记忆管理';
+  menu.appendChild(item);
+  document.body.appendChild(menu);
+  fixtures.push(trigger, menu);
+  return { trigger, menu, item };
+}
+
 describe('MemoryPanel list states', () => {
   it('shows loading without presenting an empty state', async () => {
     await renderPanel(memoriesState({ loading: true }));
@@ -77,13 +114,17 @@ describe('MemoryPanel list states', () => {
     expect(document.body.querySelector('.memory-error')).toBeNull();
   });
 
-  it('shows degraded capability separately from empty and error states', async () => {
+  it('shows degraded capability as a neutral empty state (no red failure, no retry)', async () => {
     await renderPanel(memoriesState({ disabled: 'memory capability 未启用' }));
 
-    expect(document.body.querySelector('.memory-degraded')?.textContent).toContain('记忆未启用');
-    expect(document.body.querySelector('.memory-empty')).toBeNull();
+    // #1372 改动 9：未启用 = 配置缺省，不是故障——中性空态 + 去设置入口。
+    const empty = document.body.querySelector('.memory-empty.memory-disabled');
+    expect(empty?.textContent).toContain('记忆管理未启用');
     expect(document.body.querySelector('.memory-error')).toBeNull();
-    expect(document.body.querySelector('.memory-degraded')?.querySelector('button')).toBeNull();
+    expect(document.body.querySelector('.memory-degraded')).toBeNull();
+    const action = empty?.querySelector('button');
+    expect(action?.textContent).toBe('查看记忆设置');
+    expect(empty?.textContent).not.toContain('重试');
   });
 
   it('keeps retryable read errors visible and retries the failed page', async () => {
@@ -193,5 +234,51 @@ describe('MemoryPanel fallback switch', () => {
     const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
     expect(patchCall).toBeDefined();
     expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({ fallback_enabled: true });
+  });
+});
+
+describe('#1477 面板关闭后焦点回到常驻控件', () => {
+  it('经「更多工具」菜单打开：关闭后焦点回到菜单触发器（菜单项已随菜单卸载）', async () => {
+    const { trigger, menu, item } = mountMoreMenu();
+    item.focus();
+    expect(document.activeElement).toBe(item);
+
+    await renderPanel(memoriesState());
+    // 菜单在面板打开的同时关闭（Radix 在 onSelect 之后卸载内容）——记下的 opener 成了死节点。
+    menu.remove();
+    expect(item.isConnected).toBe(false);
+
+    await closePanel();
+
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('菜单解析不出触发器：不归焦（交回 Radix 默认，不乱归焦）', async () => {
+    const { trigger, menu, item } = mountMoreMenu();
+    // 有 [role=menu] 祖先但 aria-labelledby 缺失 ⇒ 解析不出常驻触发器。
+    menu.removeAttribute('aria-labelledby');
+    item.focus();
+
+    await renderPanel(memoriesState());
+    menu.remove();
+
+    await closePanel();
+
+    // fail-safe：不把焦点送给「更多工具」触发器，也不造一个新的落点。
+    expect(document.activeElement).not.toBe(trigger);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('入口本身是常驻按钮：关闭后焦点仍回到该按钮（旧行为不回归）', async () => {
+    const button = document.createElement('button');
+    button.textContent = '记忆管理';
+    document.body.appendChild(button);
+    fixtures.push(button);
+    button.focus();
+
+    await renderPanel(memoriesState());
+    await closePanel();
+
+    expect(document.activeElement).toBe(button);
   });
 });

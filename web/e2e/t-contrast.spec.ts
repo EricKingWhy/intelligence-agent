@@ -1,10 +1,15 @@
 /** UI-02（R2/R3）对比度与排版地板回归锁 + U-1 review 加固项。
  *
  *  锁（暗/亮两主题各一遍）：
- *  1. 会话元数据（.session-item-meta）≥12px 且对比度 ≥4.5:1
- *  2. 时间线序号（.tl-seq）≥12px 且对比度 ≥4.5:1
+ *  1. 会话元数据（.session-item-meta）与 meta 行会话 id（.session-item-id，#1399）
+ *     ≥12px 且对比度 ≥4.5:1；id 色 == --text-tertiary（等值断言）
+ *  2. （原「时间线序号 .tl-seq ≥12px + ≥4.5」）#1419（`20668238`）删除了 `.tl-seq` /
+ *     `.tl-type` 两个独立节点，事件序号与类型名合并进 `.tl-meta-text`
+ *     （`StepDetail.tsx:2357`，色 `var(--fx-ghost)`，`app.css:6833`）——该条地板锁随元素
+ *     消失作废（陈旧列表项由 #1465/PR #1475 摘除，本文件不动那处）；它的墨色来源改由
+ *     第 4 条的等值断言继续钉住。
  *  3. composer placeholder 对比度 ≥4.5:1
- *  4. 时间线事件类型名（.tl-type）== 解析后的 --color-muted-foreground（R1，等值断言）
+ *  4. 时间线 meta 行墨色（.tl-meta-text）== 解析后的 --fx-ghost（R1，等值断言）
  *  5. U-1 review 新增 ink 元素：.approval-chip / .approval-deny .approval-kbd /
  *     .composer-locked-hint 对比度 ≥4.5:1（写 UI 时新立的三处，不许回退）
  *  6. #1030 / #1136 的 ink-mix 使用点：.run-pulse.pulse-awaiting-decision、恢复冲突条，
@@ -33,6 +38,7 @@ import {
   PERMISSION_MODES,
   REASONING_EFFORTS,
   SID,
+  clickTopBarMenuItem,
   criterion,
   evidenceRecord,
   fulfillSse,
@@ -204,10 +210,10 @@ function contrast(fg: [number, number, number, number], bg: [number, number, num
  *  三个夹具各自走一条**真实渲染路径**（不是 createElement 影子元素），因此把字色
  *  改回纯 --danger #cf4a46 / --info #4a6fd6 / --warning #b07a10 时对应用例必然变红。 */
 
-/** `.app-error`（分叉失败横幅，App.tsx:1433 forkError）夹具：两轮已完成会话。
+/** `.app-error`（分叉失败横幅，App.tsx:1997 forkError）夹具：两轮已完成会话。
  *  为什么是这个夹具：只有「第 2 轮的 .fork-btn + 后端 422」才经 handleFork 的
  *  catch 走到 `setForkError`，渲染出 className="app-error" role="alert"
- *  （App.tsx:1434）——真实路径。user/message 的 seq 与 turn 序号刻意错开
+ *  （App.tsx:1998）——真实路径。user/message 的 seq 与 turn 序号刻意错开
  *  （2 / 30，照 b-fork.spec.ts 同型夹具），避免「锚点误用 turn 序号」的回归把
  *  本用例干扰成另一种失败。 */
 const FORK_SID = 's-contrast-fork';
@@ -236,7 +242,7 @@ function forkTwoTurnEvents(): FrameSpec[] {
   ];
 }
 
-/** `.app-notice`（worktree 隔离横幅，App.tsx:1419 worktreeNotice）夹具：
+/** `.app-notice`（worktree 隔离横幅，App.tsx:1982 worktreeNotice）夹具：
  *  alpha 空项目 + beta 一条会话（照 u-project-task.spec.ts 的 baseMock），创建会话
  *  的响应带 `X-Worktree-Path` 头。为什么是这个夹具：只有「项目内新建任务」这条
  *  路径经 handleStartTaskInProject 传 onWorktreeCreated 回调，才把该横幅
@@ -262,7 +268,7 @@ function worktreeStartFrames(task: string): FrameSpec[] {
   ];
 }
 
-/** `.recover-btn`（App.tsx:1447「恢复会话」按钮）夹具：崩溃会话（run 无终态 +
+/** `.recover-btn`（App.tsx:2017「恢复会话」按钮）夹具：崩溃会话（run 无终态 +
  *  一条未配对 tool/call，isRecoverableRun 为真），照 recovery-w13.spec.ts 的
  *  crashedEvents 同型。为什么是这个夹具：只有 canRecover 为真才渲染该按钮，
  *  它的正文色是 --warning、底色 14% 染色（hover 22%）——两个态都要量，因为 hover
@@ -344,12 +350,25 @@ async function openTaskReview(
 for (const theme of ['dark', 'light'] as const) {
   test(`[${theme}] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3）`, async ({ page }) => {
     await openWorkspace(page, theme);
-    for (const selector of ['.session-item-meta', '.tl-seq']) {
+    for (const selector of ['.session-item-meta', '.session-item-id']) {
       const m = await measure(page, selector);
       expect(m.fontSize, `${selector} font-size`).toBe('12px');
       const ratio = contrast(m.color, m.bg);
       expect(ratio, `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
     }
+    // #1399 定版（#1465 仲裁）：ID 下移到 meta 行后是**第三级**文字，与 meta 同色；
+    // 只量 ≥4.5 时换成任一更亮的 token 也仍然绿，锁不住语义。等值断言与 `.tl-type` 同法。
+    const [idColor, tertiary] = await page.evaluate(() => {
+      const el = document.querySelector('.session-item-id');
+      if (!el) throw new Error('no .session-item-id');
+      const probe = document.createElement('div');
+      probe.style.color = 'var(--text-tertiary)';
+      document.body.appendChild(probe);
+      const v = getComputedStyle(probe).color;
+      probe.remove();
+      return [getComputedStyle(el).color, v];
+    });
+    expect(idColor).toBe(tertiary);
   });
 
   /* #1269：项目语境武装提示（.rail-project-armed-hint）——本轮新立的行内 ink，按本轮
@@ -453,20 +472,23 @@ for (const theme of ['dark', 'light'] as const) {
     expect(ratio).toBeGreaterThanOrEqual(4.5);
   });
 
-  test(`[${theme}] .tl-type == 解析后的 --color-muted-foreground（R1 等值断言）`, async ({ page }) => {
+  /* #1419（`20668238`）把时间线行改成 `.tl-meta-text` 单节点（序号 + 类型 + 时刻），
+     旧的 `.tl-type` / `.tl-seq` 已删。等值断言的判别力原样保留：被测节点仍必须逐值
+     等于它声明的 token 的解析值——有人把它换成硬编码色或别的 token 照样会红。 */
+  test(`[${theme}] .tl-meta-text == 解析后的 --fx-ghost（R1 等值断言）`, async ({ page }) => {
     await openWorkspace(page, theme);
-    const [typeColor, expected] = await page.evaluate(() => {
-      const el = document.querySelector('.tl-type');
-      if (!el) throw new Error('no .tl-type');
+    const [metaColor, expected] = await page.evaluate(() => {
+      const el = document.querySelector('.tl-meta-text');
+      if (!el) throw new Error('no .tl-meta-text');
       // 用探针元素解析 token 的实际计算值（getPropertyValue 只回 var 引用）
       const probe = document.createElement('div');
-      probe.style.color = 'var(--color-muted-foreground)';
+      probe.style.color = 'var(--fx-ghost)';
       document.body.appendChild(probe);
       const v = getComputedStyle(probe).color;
       probe.remove();
       return [getComputedStyle(el).color, v];
     });
-    expect(typeColor).toBe(expected);
+    expect(metaColor).toBe(expected);
   });
 
   test(`[${theme}] U-1 新增 ink 元素（chip / deny kbd / locked-hint）对比度 ≥4.5`, async ({ page }) => {
@@ -507,13 +529,56 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
+  /* #1372 改动 5：thinking 与 running 拆分后新增 `.run-badge-thinking`（info 色域）。
+     夹具走真实投影：run/started + model started、无终态 ⇒ run_status='running'，
+     Inspector 头徽章渲染 thinking。 */
+  test(`[${theme}] #1372 思考中徽标（.run-badge-thinking）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [ROW],
+      events: [
+        { type: 'session/started', seq: 1, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'run/started', seq: 2, session_id: ROW.session_id, run_id: 'r1', time: T },
+        { type: 'model/started', data: { model: 'e2e-model' }, seq: 3, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T },
+      ],
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    await expect(page.locator('.run-badge-thinking')).toBeVisible();
+    // 同一 thinking 状态的两个表面：Inspector 徽章 + 顶栏 run pulse。
+    for (const selector of ['.run-badge-thinking', '.run-pulse.pulse-thinking']) {
+      const m = await measure(page, selector);
+      expect(contrast(m.color, m.bg), `${selector} contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  /* #1372 改动 6：401 时「更多工具」触发器的提示点新增 `.appbar-menu-warn`（warning ink）。
+     走真实 401 路径（同 #1136 auth-banner 夹具），打开菜单后量。 */
+  test(`[${theme}] #1372 「更多工具」需要配置徽标（.appbar-menu-warn）对比度 ≥4.5`, async ({ page }) => {
+    await mockAuthRequired(page);
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.getByRole('button', { name: '更多工具' }).click();
+    const warn = page.locator('.appbar-menu-warn');
+    await expect(warn).toBeVisible();
+    const m = await measure(page, '.appbar-menu-warn');
+    expect(contrast(m.color, m.bg), '.appbar-menu-warn contrast').toBeGreaterThanOrEqual(4.5);
+  });
+
   /* #1030：新增的「待裁决」态必须与其余状态同标准——它恰恰是最需要被看清的一态
      （`#1327` 起它是"有欠账、等自动处理"的如实呈现；看不清等于把状态藏起来）。
-     这里**真量**而不是信注释里的算术：
-     `.pulse-awaiting-decision` 的文字色是 `color-mix(--warning 45%, --text-primary)`
-     压在 12% warning 底上。纯 `--warning` 在这个底上亮色实测 **2.91:1**（不达 AA），
-     混入 ink 后才够——本用例把这两个读数都现量出来：谁把 ink-mix 改回纯 --warning，
-     「≥4.5」那条立刻变红；谁把注释里的数字写成别的值，「<4.5」那条会替我们说话。 */
+     #1372 改动 5 把它从 warning 移到 danger 色域（与 tool 的 warning 分开），
+     底色随之变成 10% danger。这里**真量**而不是信注释里的算术：
+     `.pulse-awaiting-decision` 的文字色是 `color-mix(--danger 45%, --text-primary)`
+     压在 10% danger 底上。纯 `--danger` 在这个底上亮色不达 AA，混入 ink 后才够——
+     本用例把这两个读数都现量出来：谁把 ink-mix 改回纯 --danger，「≥4.5」那条立刻
+     变红；谁把注释里的结论写成别的值，「<4.5」那条会替我们说话。 */
   test(`[${theme}] #1030 待裁决徽标对比度 ≥4.5（亮/暗两主题）`, async ({ page }) => {
     await routeApi(page, {
       sessions: [ROW],
@@ -546,7 +611,7 @@ for (const theme of ['dark', 'light'] as const) {
     await page.locator('.session-item').first().click();
 
     const pulse = page.locator('.run-pulse');
-    await expect(pulse).toContainText('待裁决');
+    await expect(pulse).toContainText('等你决定');
     await expect(pulse).toHaveClass(/pulse-awaiting-decision/);
 
     const m = await measure(page, '.run-pulse.pulse-awaiting-decision');
@@ -555,28 +620,28 @@ for (const theme of ['dark', 'light'] as const) {
     console.log(`[${theme}] pulse-awaiting-decision color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
     expect(ratio, `.pulse-awaiting-decision contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
 
-    // 注释里引用的"纯 --warning 不达标"那个读数也在这里**实测**，不靠算术：克隆同一个
-    // 真实节点、只把文字色改回纯 --warning，仍用**同一个 measure 解析器**量它在同一个
+    // 注释里引用的"纯 --danger 不达标"那个读数也在这里**实测**，不靠算术：克隆同一个
+    // 真实节点、只把文字色改回纯 --danger，仍用**同一个 measure 解析器**量它在同一个
     // 底上的比值（不能拿 getComputedStyle 的原始串直接喂 contrast——color-mix 的计算值
     // 可能是 color(srgb …) 形式，只有 measure 内部的解析器认它，直接喂会得到 NaN）。
-    // 这样注释里的数字与代码、测试三者同源（审查 P2-2：此前三处写了 2.96 / 3.26 / ~2.8）。
-    // 只在亮色主题断言——暗色下 --warning 本身就够亮，那正是"为什么暗色看不出问题、
+    // 这样注释里的结论与代码、测试三者同源（审查 P2-2：此前三处写了 2.96 / 3.26 / ~2.8）。
+    // 只在亮色主题断言——暗色下 --danger 本身就够亮，那正是"为什么暗色看不出问题、
     // 而 ink-mix 是亮色必需"的对照臂。
     if (theme === 'light') {
       await page.evaluate(() => {
         const src = document.querySelector('.run-pulse.pulse-awaiting-decision') as HTMLElement;
         const probe = src.cloneNode(true) as HTMLElement;
-        probe.id = 'tmp-plain-warning';
-        probe.style.color = 'var(--warning)';
+        probe.id = 'tmp-plain-danger';
+        probe.style.color = 'var(--danger)';
         src.parentElement!.appendChild(probe);
       });
-      const pm = await measure(page, '#tmp-plain-warning');
+      const pm = await measure(page, '#tmp-plain-danger');
       const plainRatio = contrast(pm.color, pm.bg);
       // eslint-disable-next-line no-console
-      console.log(`[light] plain --warning on same tint ratio=${plainRatio.toFixed(4)}`);
+      console.log(`[light] plain --danger on same tint ratio=${plainRatio.toFixed(4)}`);
       expect(
         plainRatio,
-        '纯 --warning 在亮色下必须不达 AA（这正是 ink-mix 的理由）',
+        '纯 --danger 在亮色下必须不达 AA（这正是 ink-mix 的理由）',
       ).toBeLessThan(4.5);
     }
 
@@ -679,7 +744,7 @@ for (const theme of ['dark', 'light'] as const) {
 
     const banner = page.locator('.app-error[role="alert"]');
     await expect(banner).toBeVisible();
-    await expect(banner).toContainText('分叉失败');
+    await expect(banner).toContainText('另开会话失败');
     const m = await measure(page, '.app-error[role="alert"]');
     const ratio = contrast(m.color, m.bg);
     // eslint-disable-next-line no-console
@@ -815,10 +880,11 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
-  /* #1136 P3-1②：交付态 chip 两态（executing=--info / pending_verification=--warning）。
-     chip 底是 `--surface-2`（不染色），但字色本身在亮色下仍 <4.5。product_state 单值，
-     故关面板（hook 置 null 清态）改状态后再开重拉，一个用例量两态。 */
-  test(`[${theme}] #1136 task-review 交付态 chip（executing / pending_verification）对比度 ≥4.5`, async ({ page }) => {
+  /* #1136 P3-1②：交付态 chip 三态（executing=--info / pending_verification=--warning /
+     accepted=--accent-text，第三态为 #1364 补）。chip 底是 `--surface-2`（不染色），
+     但字色本身在亮色下仍 <4.5。product_state 单值，故关面板（hook 置 null 清态）改状态后
+     再开重拉，一个用例量三态。 */
+  test(`[${theme}] #1136 task-review 交付态 chip（executing / pending_verification / accepted）对比度 ≥4.5`, async ({ page }) => {
     const state: TaskReviewFixture = {
       task: {
         defined: true, task_text: 'chip 对比度', read_write_intent: null, cwd: '/repo',
@@ -849,6 +915,20 @@ for (const theme of ['dark', 'light'] as const) {
     // eslint-disable-next-line no-console
     console.log(`[${theme}] .task-review-chip.state-pending_verification color=${pm.color} bg=${pm.bg} ratio=${pr.toFixed(4)}`);
     expect(pr, `.task-review-chip.state-pending_verification contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+
+    // #1364：accepted 态是四态里优先级最高者（`--accent` 换色后最容易掉到 <4.5 的一格），
+    // 必须同批量——`#533afd` 在暗底只有 2.5:1，字色走 `--accent-text` 提亮档。
+    await page.locator('.task-review-panel .ctx-usage-close').click();
+    await expect(page.getByRole('dialog', { name: '详细审阅' })).toBeHidden();
+    state.task.product_state = 'accepted';
+    await page.locator('.task-review-summary').getByRole('button', { name: '详细审阅' }).click();
+    const accepted = page.locator('.task-review-chip.state-accepted');
+    await expect(accepted).toBeVisible();
+    const am = await measure(page, '.task-review-chip.state-accepted');
+    const ar = contrast(am.color, am.bg);
+    // eslint-disable-next-line no-console
+    console.log(`[${theme}] .task-review-chip.state-accepted color=${am.color} bg=${am.bg} ratio=${ar.toFixed(4)}`);
+    expect(ar, `.task-review-chip.state-accepted contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
   });
 
   /* #1136 P3-1③：`.task-review-evidence-unavailable`（证据不可得条，--danger 压 12% 底）。
@@ -944,7 +1024,7 @@ for (const theme of ['dark', 'light'] as const) {
   });
 
   /* #1136 P3-2：`.auth-banner`（后端 401 引导横幅）把 --warning 当正文色，压在 10% 底上。
-     渲染条件是 `authRequired=true`（App.tsx:1401，后端 401 广播触发）——夹具同
+     渲染条件是 `authRequired=true`（App.tsx:1939，后端 401 广播触发）——夹具同
      l-auth-banner.spec.ts（共享 mockAuthRequired）。 */
   test(`[${theme}] #1136 .auth-banner（401 引导横幅）对比度 ≥4.5`, async ({ page }) => {
     await mockAuthRequired(page);
@@ -1042,7 +1122,7 @@ for (const theme of ['dark', 'light'] as const) {
   });
 
   /* #1172：白字压 --danger 实心底。与上面两处方向相反——要压深的是**底**。
-     夹具走 failure-guard 的 hard 事件条（Conversation.tsx:735），真渲染路径。 */
+     夹具走 failure-guard 的 hard 事件条（Conversation.tsx:1024-1025），真渲染路径。 */
   test(`[${theme}] #1172 .notice-strip-hard 徽标（白字压实底）对比度 ≥4.5`, async ({ page }) => {
     const sid = 's-contrast-guard';
     const events: FrameSpec[] = [
@@ -1082,7 +1162,8 @@ for (const theme of ['dark', 'light'] as const) {
 
 /** 恢复列表错误态夹具：`GET /api/recovery/interrupted` 返回 500（`listInterruptedRecoveries`
  *  非 2xx 抛错）→ `state.kind='error'` → `.recovery-list-error`（role=alert）落屏。
- *  入口是顶栏「恢复列表」按钮（TopBar aria-label="恢复列表"）。 */
+ *  入口是顶栏「更多工具」菜单项「恢复列表」（#1396 把原顶栏独立按钮收进菜单，
+ *  `TopBar.tsx:408-411`（文本行 `:410`）；菜单项是 `menuitem`，每次调用都要先开菜单）。 */
 test(`[${theme}] #1208 .recovery-list-error（恢复列表拉取失败条）对比度 ≥4.5`, async ({ page }) => {
   await routeApi(page, {
     sessions: [], events: [], models: MODELS,
@@ -1094,7 +1175,7 @@ test(`[${theme}] #1208 .recovery-list-error（恢复列表拉取失败条）对�
   await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
-  await page.getByRole('button', { name: '恢复列表' }).click();
+  await clickTopBarMenuItem(page, '恢复列表');
 
   const err = page.locator('.recovery-list-error');
   await expect(err).toBeVisible();
@@ -1188,6 +1269,60 @@ for (const theme of ['dark', 'light'] as const) {
     await expectEachContrast(page, theme, ['.run-pulse.pulse-failed', '.detail-header .run-badge-failed']);
   });
 
+  /* #1367（审查 P1-4）：run 失败的内联错误条。字色继承 `.approval-error`
+   * （ink-mix(--danger 45%, --text-primary)），复用的 marker 底是 danger 8% 淡染；
+   * 纯 `--color-destructive` 在亮色只有 3.88:1 —— 改回 token 这条必然变红。
+   * 两个类都量：`approval-error` 是共享 token（审批失败条也用它），
+   * `conversation-error` 是本条自己的布局类，同一元素两处口径都要达标。 */
+  test(`[${theme}] #1367 内联错误条（conversation-error / approval-error）对比度 ≥4.5`, async ({ page }) => {
+    const sid = 's-contrast-errorbar';
+    const frames: FrameSpec[] = [
+      { type: 'session/started', seq: 1, session_id: sid, run_id: 're', time: T },
+      { type: 'run/started', seq: 2, session_id: sid, run_id: 're', step_id: 1, time: T },
+      { type: 'user/message', data: { content: '跑到失败' }, seq: 3, session_id: sid, run_id: 're', step_id: 1, time: T },
+      { type: 'run/failed', data: { reason: 'APIConnectionError', message: '运行失败（APIConnectionError）：无法连接模型供应商（网络或网关不可达）' }, seq: 4, session_id: sid, run_id: 're', step_id: 1, time: T },
+    ];
+    await openContrastSession(page, theme, sid, frames, '跑到失败');
+    await expectEachContrast(page, theme, [
+      '.conversation-error',
+      '.conversation-error .conversation-error-title',
+      '.conversation-error .conversation-error-hint',
+      '.approval-error.conversation-error',
+    ]);
+  });
+
+  /* #1367（审查 P1-4）/ #1356 OBS-015：审批错误条**单独量**。它与对话区那条共用
+   * `.approval-error` 的字色/底规则，但父容器底色不同（卡片面 vs 对话面），
+   * 有效对比度必须各自达标；`.approval-error-text` 与重试按钮都继承该字色。 */
+  test(`[${theme}] #1367 审批错误条（approval-error 族）对比度 ≥4.5`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [ROW],
+      events: EVENTS,
+      models: MODELS,
+      permissionModes: PERMISSION_MODES,
+      agentProfiles: AGENT_PROFILES,
+      reasoningEfforts: REASONING_EFFORTS,
+      onApprovePost: (route) => route.fulfill({
+        status: 500,
+        body: JSON.stringify({ detail: 'Internal Server Error' }),
+        contentType: 'application/json',
+      }),
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await page.locator('.session-item').first().click();
+    const card = page.locator('.approval-card');
+    await card.waitFor();
+    await card.locator('.approval-approve').click();
+    await expect(card.locator('.approval-error')).toBeVisible();
+    await expectEachContrast(page, theme, [
+      '.approval-error',
+      '.approval-error .approval-error-text',
+      '.approval-error .approval-error-retry',
+    ]);
+  });
+
   /* pulse-paused + 暂停面板（.pause-panel-head / .pause-resume-btn）：预算到顶暂停（非终态）。 */
   test(`[${theme}] #1175 预算暂停态（pulse-paused / pause-panel / pause-resume-btn）对比度 ≥4.5`, async ({ page }) => {
     const sid = 's-contrast-paused';
@@ -1201,7 +1336,7 @@ for (const theme of ['dark', 'light'] as const) {
           reason: 'budget_exhausted', trigger_dimension: 'run.max_total_tokens', budget_version: 1,
           consumed: { agent_turns: 2, total_tokens: 1234 },
           limits: { run: { max_agent_turns_total: 3, max_total_tokens: 1234 } },
-          resume_requirements: ['抬高 run.max_total_tokens 的绝对 ceiling 后同 run 恢复'],
+          resume_requirements: ['抬高字数上限后继续这次任务'],
         },
       },
     ];
@@ -1222,7 +1357,22 @@ for (const theme of ['dark', 'light'] as const) {
       { type: 'run/interrupted', data: { reason: 'process_restart' }, seq: 4, session_id: sid, run_id: 'ri', step_id: 1, time: T },
     ];
     await openContrastSession(page, theme, sid, frames, '被打断了');
-    await expectEachContrast(page, theme, ['.interrupt-banner']);
+    // F-06（#1449）：横幅新增两个动作按钮——主动作（.interrupt-action-primary）与
+    // 次级动作（.interrupt-dismiss）都量静态态；helper 不驱动 hover，下面各自
+    // hover 后再量一次（P3-3 的 hover 底色不是推断值）。
+    await expectEachContrast(page, theme, [
+      '.interrupt-banner',
+      '.interrupt-action-primary',
+      '.interrupt-dismiss',
+    ]);
+    for (const sel of ['.interrupt-action-primary', '.interrupt-dismiss']) {
+      await page.locator(sel).hover();
+      const m = await measure(page, sel);
+      const ratio = contrast(m.color, m.bg);
+      // eslint-disable-next-line no-console
+      console.log(`[${theme}] #1449 ${sel}:hover color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+      expect(ratio, `${sel}:hover contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   /* 熔断条 soft 徽标（.notice-strip-soft .notice-strip-badge）：soft failure-guard 事件。 */
@@ -1247,10 +1397,10 @@ for (const theme of ['dark', 'light'] as const) {
       { type: 'run/started', seq: 2, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'user/message', data: { content: '跑失败的工具' }, seq: 3, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'tool/call', data: { tool_call_id: 'tc-e', tool_name: 'bash', args: { command: 'false' } }, seq: 4, session_id: sid, run_id: 're', step_id: 1, time: T },
-      /* 错误信封要嵌在 data 里：投影把 tool.result 落成 parsed.data（projection.ts
-         `tool.result = parsedData ?? message`），而 ToolCard 的 parseErrorShape 只认
-         {ok:false,error_code} 对象——扁平放顶层会被落成 message 字符串、摘要行不渲染。 */
-      { type: 'tool/result', data: { tool_call_id: 'tc-e', content: JSON.stringify({ ok: false, message: '命令超时', data: { ok: false, error_code: 'TIMEOUT', message: '命令超时' } }) }, seq: 5, session_id: sid, run_id: 're', step_id: 1, time: T },
+      /* 生产序列化形状：`ToolResult.failure()` 只写 ok/message/error_code（无 data），
+         `model_dump_json()` 因此输出顶层 `error_code` + `"data": null`；投影只解析顶层
+         信封（`projection.ts` `parseErrorShape(parsed)`）。 */
+      { type: 'tool/result', data: { tool_call_id: 'tc-e', content: JSON.stringify({ ok: false, message: '命令超时', error_code: 'TIMEOUT', data: null }) }, seq: 5, session_id: sid, run_id: 're', step_id: 1, time: T },
       { type: 'run/completed', data: {}, seq: 6, session_id: sid, run_id: 're', time: T },
     ];
     await openContrastSession(page, theme, sid, frames, '跑失败的工具');
@@ -1270,7 +1420,16 @@ for (const theme of ['dark', 'light'] as const) {
     await openContrastSession(page, theme, sid, frames, '触发回退');
     /* .model-fallback-val 在 Inspector 的 Overview（id=chat）页 MODEL 区块里；默认 tab 是
        timeline，先切页再量（否则元素不在 DOM，属夹具问题而非样式问题）。 */
-    await page.getByRole('tablist', { name: 'Inspector 视图' }).getByRole('tab', { name: 'Overview' }).click();
+    await page.getByRole('tablist', { name: '运行详情视图' }).getByRole('tab', { name: '概览' }).click();
+    /* #1419（`a0a902d3`）把 Overview 各区块改成手风琴，`id="model"` 没有 defaultOpen
+       ⇒ 元素在 DOM 里但 `.ov-acc-body` 是 `visibility: hidden`（grid-template-rows: 0fr），
+       `expectEachContrast` 的 toBeVisible 预检会红。先展开模型区块再量——判据本身不变。 */
+    const modelSection = page.locator('[data-ov-section="model"]');
+    const modelHead = modelSection.locator('.ov-acc-head');
+    await expect(modelHead).toHaveAttribute('aria-expanded', 'false');
+    await modelHead.click();
+    await expect(modelHead).toHaveAttribute('aria-expanded', 'true');
+    await expect(modelSection.locator('.model-fallback-val')).toBeVisible();
     await expectEachContrast(page, theme, ['.model-fallback-val']);
   });
 
@@ -1351,8 +1510,8 @@ for (const theme of ['dark', 'light'] as const) {
     await page.goto('/');
     await page.locator('.session-item').first().click();
     await page
-      .getByRole('tablist', { name: 'Inspector 视图' })
-      .getByRole('tab', { name: 'Constraints' })
+      .getByRole('tablist', { name: '运行详情视图' })
+      .getByRole('tab', { name: '我的要求' })
       .click();
     await expect(page.getByTestId('constraints-panel')).toBeVisible();
     await expectEachContrast(page, theme, ['.cn-value', '.cn-type', '.cn-meta', '.cn-pill', '.cn-revoke']);

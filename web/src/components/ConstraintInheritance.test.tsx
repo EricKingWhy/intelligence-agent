@@ -82,15 +82,18 @@ describe('ConstraintInheritance', () => {
     const rows = [...c.querySelectorAll('.ci-row')];
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain('PROJECT · 本项目');
-    expect(rows[0].textContent).toContain('constraint');
+    // #1445：行内类型显示中文名（`constraint` 机器码不进界面）。
+    expect(rows[0].querySelector('.ci-type')?.textContent).toBe('约束');
     expect(rows[0].textContent).toContain('所有 Python 改动必须先写 failing test');
-    expect(rows[0].textContent).toContain('已注入');
+    expect(rows[0].textContent).toContain('已沿用');
     expect(rows[1].textContent).toContain('SESSION · 本会话');
-    expect(rows[1].textContent).toContain('authorization');
-    expect(rows[1].textContent).toContain('已注入');
+    expect(rows[1].querySelector('.ci-type')?.textContent).toBe('授权');
+    expect(rows[1].textContent).toContain('已沿用');
+    expect(c.textContent).not.toContain('constraint');
+    expect(c.textContent).not.toContain('authorization');
     expect(c.querySelector('.ci-clean-msg')).toBeNull();
     // 无 NOT INHERITED 条目 → 该组不渲染
-    expect(c.textContent).not.toContain('NOT INHERITED');
+    expect(c.textContent).not.toContain('没有沿用');
     cleanup();
   });
 
@@ -102,9 +105,9 @@ describe('ConstraintInheritance', () => {
     );
     const skip = c.querySelectorAll('.ci-row.ci-skip');
     expect(skip).toHaveLength(1);
-    expect(skip[0].textContent).toContain('未注入');
-    expect(skip[0].textContent).toContain('由父在委派任务描述里转述');
-    expect(c.textContent).toContain('NOT INHERITED');
+    expect(skip[0].textContent).toContain('未沿用');
+    expect(skip[0].textContent).toContain('由父任务在委派描述里转述');
+    expect(c.textContent).toContain('没有沿用');
     cleanup();
   });
 
@@ -118,7 +121,7 @@ describe('ConstraintInheritance', () => {
     expect(section.getAttribute('data-omit')).toBe('true');
     expect(c.querySelector('.ci-clean-msg')!.textContent).toContain('干净启动已开启');
     expect(c.querySelector('.ci-rows.ci-dim')).not.toBeNull();
-    expect(c.querySelector('.ci-empty')!.textContent).toContain('没有注入任何约束');
+    expect(c.querySelector('.ci-empty')!.textContent).toContain('没有沿用任何要求');
     cleanup();
   });
 });

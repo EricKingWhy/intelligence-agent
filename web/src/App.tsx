@@ -15,15 +15,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { KeyRound, RotateCcw, X } from 'lucide-react';
-import { isUnknownModelError, useSession } from './hooks/useSession';
+import { describeFailure, isUnknownModelError, useSession } from './hooks/useSession';
 import { useProjects } from './hooks/useProjects';
 import { useDelegations } from './hooks/useDelegations';
 import { useChildConversation } from './hooks/useChildConversation';
 import { TopBar } from './components/TopBar';
 import { SessionList } from './components/SessionList';
+import { SkipLinks } from './components/SkipLinks';
 import { Conversation } from './components/Conversation';
 import { SubagentRoster, SubagentSplitPane, type SplitChild } from './components/SubagentRoster';
-import { Composer, type SubmitResult } from './components/Composer';
+import { Composer, lockReasonOf, type ComposerHandle, type SubmitResult } from './components/Composer';
 import { CommandPalette } from './components/CommandPalette';
 import { MemoryPanel } from './components/MemoryPanel';
 import { ApprovePolicyPanel } from './components/ApprovePolicyPanel';
@@ -46,10 +47,13 @@ import { changedFiles, hasSuccessfulBashCall } from './lib/changedFiles';
 import {
   centerTabs,
   deriveSurfaces,
+  insightsAvailable,
   resolveActiveTab,
   type CapabilityDescriptor,
   type SurfaceKey,
 } from './lib/capabilities';
+import { InsightsPage } from './insights/InsightsPage';
+import { SessionInsightsPage } from './insights/SessionInsightsPage';
 import { applyDensity, initDensity, type TraceDensity } from './lib/density';
 import { useDisclosure, useReasoningDisclosure } from './lib/disclosure';
 import { streamKeyFromEvent } from './lib/eventKind';
@@ -85,14 +89,15 @@ import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from '
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type {
-  AskUserAnswer,
-  ConstraintInputAnswer,
-  PlanApprovalAnswer,
-  ToolCall,
-  PresetTask,
-  AgentEvent,
-  UndeliveredInput,
+import {
+  EventType,
+  type AskUserAnswer,
+  type ConstraintInputAnswer,
+  type PlanApprovalAnswer,
+  type ToolCall,
+  type PresetTask,
+  type AgentEvent,
+  type UndeliveredInput,
 } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
@@ -130,15 +135,29 @@ export default function App() {
   // #367 P3：目录冲突自动建 worktree 时的一次性提示（后端 X-Worktree-Path 头，
   // 前端在响应可得的两条路径消费；用户关闭后不再出现）。
   const [worktreeNotice, setWorktreeNotice] = useState<string | null>(null);
+  // #1367（P0-3）：断网重试 = 重发**失败的那一次** submit。动作由 `handleSubmit`
+  // 在发起时把本次入参绑进闭包（`SendFailure.onRetry`），不存在跨入口/跨会话共享的
+  // 「上一次提交」槽位——审查 P0 的根因正是那种槽位（steer / 编辑轮次 / 队列项
+  // 失败后点重试会重发无关旧任务）。
+  // 条内重试在途闸门（审查 P1-2）：Composer 的 sendingRef 挡不住这条通道，
+  // 新会话路径连点会发出多个 POST /api/sessions。
+  const retryInFlightRef = useRef(false);
+  const [retryPending, setRetryPending] = useState(false);
+  const composerRef = useRef<ComposerHandle>(null);
 
   const {
     sessions,
+    sessionsLoading,
     selectedId,
     conversation,
-    loadingHistory,
+    historySkeleton,
     streaming,
     reconnecting,
     error,
+    // #1367（审查 S-P2-2）：不设缺省。`useSession` 漏返回键时宁可在这里崩掉
+    // （显式报警），也不让整条内联错误通道静默消失。测试替身由各 `App.*.test.tsx`
+    // 的 mock 显式补全这两个键。
+    sendFailure,
     runFailedBeforePlan,
     sessionsError,
     titlesById,
@@ -285,6 +304,8 @@ export default function App() {
     }
   }, []);
   const surfaces = useMemo(() => deriveSurfaces(capabilities), [capabilities]);
+  /** #1420：洞察入口只在能力显式声明 `insights: true` 时出现；缺键 / 拉取失败 = 隐藏。 */
+  const insightsEnabled = useMemo(() => insightsAvailable(capabilities), [capabilities]);
   const tabs = useMemo(() => centerTabs(surfaces), [surfaces]);
   /** 用户选中的面。渲染用 `activeTab`（下面一轮 `resolveActiveTab`）：能力翻假时
    *  那个面会从 `tabs` 里消失，**渲染必须当场落到仍可见的面**，而不是先渲染一个
@@ -557,6 +578,66 @@ export default function App() {
     setInspectorOpen((v) => !v);
   };
 
+  /* F-06（#1449）：中断横幅的两个纯前端动作（看缺口 / 忽略）。
+   *
+   * 落点 = **最后一个** `run/interrupted` 事件本体：投影 `run_interrupted` 只留
+   * step/seq/reason，不含 run_id，也不含 `focusEvent` 需要的完整事件。`run/started`
+   * 会清空投影，所以投影非 null 时事件必然在 `conversation.events` 里（投影由它派生）；
+   * 找不到时按钮仍渲染，退回 run 级 focus 再打开右栏，不抛错。
+   *
+   * 「忽略」照抄既有 dismiss 模式（`contextFullDismissedRunId`）：App 级
+   * `useState<string|null>` 存被忽略对象的标识，渲染时比对；视图状态不持久化。
+   * 标识首选事件 `run_id`（同一次中断唯一）；匿名 run（后端 `detect_unterminated_runs`
+   * 允许 run_id 为 None）退到该事件的 seq / 该次中断的 `interrupted_seq`。 */
+  const interruptedEvent = useMemo(() => {
+    // 常见路径（没有中断的会话）不扫全表：流式期间每个 delta 都会产生新
+    // conversation（projection 的 copy-on-write），O(N) 反向扫描会累计成 O(N²)。
+    if (!conversation?.run_interrupted) return null;
+    const events = conversation.events;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      // quarantine 帧（eventValidate 拒收）保留 type 但 seq/run_id 归一成 null；
+      // 持久化的 run/interrupted 必有 seq，跳过它们才与投影事实同源（P4-2）。
+      if (event.type === EventType.RUN_INTERRUPTED && event.seq !== null) return event;
+    }
+    return null;
+  }, [conversation]);
+  /* 标识 = 会话前缀 + 该次中断的身份。run_id 用**真值**判断（`||` 而不是 `??`）：
+   * 后端允许匿名 run（run_id=None），旧数据还可能出现空串——空串必须继续回退到
+   * seq，否则同一会话的两次匿名/空串中断会共用一个标识，第二次被静默吞掉。
+   * seq 是每会话单调（契约 C5），不是全局唯一，所以必须带 `conversation.session_id`
+   * 前缀：在 A 会话点「忽略」不能连 B 会话同 seq 的中断一起隐藏。
+   * 不再保留第三级 `'unknown'` 常量兜底：投影非 null 时事件必然在场（投影由它
+   * 派生）；即使事件被 quarantine 跳过，投影的 `interrupted_seq` 也是后端
+   * `InterruptedRun.interrupted_seq: int` 的契约字段，可直接作为该次中断的序号
+   * （只有形状合法却缺 seq 的非持久化帧才可能落到它，仍比常量兜底可区分）。 */
+  const interruptedIdentity = (() => {
+    if (!conversation?.run_interrupted) return null;
+    const prefix = conversation.session_id;
+    if (interruptedEvent) {
+      return `${prefix}:${interruptedEvent.run_id || `seq:${interruptedEvent.seq}`}`;
+    }
+    return `${prefix}:interrupted:${conversation.run_interrupted.interrupted_seq}`;
+  })();
+  const [dismissedInterruptedIdentity, setDismissedInterruptedIdentity] = useState<string | null>(null);
+  const handleInspectInterruption = useCallback(() => {
+    // 正常数据：定位到中断事件本体。事件缺失（防御性边界）：退回 run 级 focus，
+    // 不把上一次无关的 focus 留在右栏（P4-1）。
+    if (interruptedEvent) focusEvent(interruptedEvent);
+    else focusRun();
+    setInspectorOpen(true);
+    // `setInspectorOpen` 是 useState 的稳定 setter，引用在组件生命周期内恒定；
+    // 列进 deps 不改变行为，但与 oxlint 推断的依赖一致（复审 R-2）。相邻
+    // `focusChild` 省略 setter 是既有体例差异，不复制它的 lint 债。
+  }, [interruptedEvent, focusEvent, focusRun, setInspectorOpen]);
+  const handleDismissInterruption = useCallback(() => {
+    setDismissedInterruptedIdentity(interruptedIdentity);
+    // 横幅整块卸载后，被点击的按钮消失，浏览器会把焦点丢到 body。落到主工作区
+    // 容器（`#region-main` 带 tabIndex=-1，SkipLinks 的既有落点），下一次 Tab
+    // 从会话区内部继续，而不是从页面开头重来。
+    document.getElementById('region-main')?.focus();
+  }, [interruptedIdentity]);
+
   /** #183 面板动作的唯一入口（pin/expand/resize/peek 开关/关闭）。
    *
    *  `close` 单独一条路而不是塞进 `setPanel` 的 updater：它要同时改另一个 state
@@ -727,8 +808,11 @@ export default function App() {
    *  只有显式 `false` 才用于标注/禁用：后端沉默不等于不支持。 */
   const currentModelSupportsVision = effectiveModelEntry(selectedModel, models)?.supportsVision ?? null;
 
-  // #426：新建会话的预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
-  // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。
+  // #426/#1444：预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
+  // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。新建态随
+  // create 请求发出，已选态随下一次 `/messages` 作为 amend 发出（handleSubmit）。
+  // #1467：懒建本身（launch=false）不带它（后端 422 互斥）；懒建出的会话
+  // 走首条消息的 amend 发出。
   const [budgetRunTurnsDraft, setBudgetRunTurnsDraft] = useState('');
   const [budgetRunTokensDraft, setBudgetRunTokensDraft] = useState('');
   const [budgetRunDeadlineDraft, setBudgetRunDeadlineDraft] = useState('');
@@ -817,21 +901,17 @@ export default function App() {
     const pending = (async (): Promise<string | null> => {
       try {
         // #204 口径：只建会话、不启动 run。载荷与「发文本新建」分支同形——
-        // `auto_approve: true` 恒送 + 项目 cwd + 用户在新建态选的权限档 + 预算
-        // 草稿（F1：否则懒建出的会话静默回落到后端默认档，与发文本建出的会话
-        // 语义不同——权限档是 Runtime 边界（不变量 #11），不能静默丢）。空值丢
-        // 弃由 `api.ts buildBody` 单一执行（见 amend.ts 顶部契约说明）。
-        // `model` / `agent_profile` / `reasoning_effort` 不在这里：它们随随后
-        // 首条消息的 amend 面发出（`handleSubmit` 的 `toAmendFields`），懒建只
-        // 负责把会话身份先建出来。
+        // `auto_approve: true` 恒送 + 项目 cwd + 用户在新建态选的权限档（F1：否则
+        // 懒建出的会话静默回落到后端默认档，与发文本建出的会话语义不同——权限档是
+        // Runtime 边界（不变量 #11），不能静默丢）。空值丢弃由 `api.ts buildBody`
+        // 单一执行（见 amend.ts 顶部契约说明）。
+        // `model` / `agent_profile` / `reasoning_effort` / `budget` 不在这里：它们随
+        // 随后首条消息的 amend 面发出（`handleSubmit` 的 `toAmendFields` +
+        // `toCreateBudget`），懒建只负责把会话身份先建出来。#1467：`budget.run` 与
+        // launch=false 互斥（后端 422），带上它这个入口恒失败。
         const created = await createEmptySession({
           auto_approve: true,
           permission_mode: composerControls.permissionMode ?? undefined,
-          budget: toCreateBudget({
-            turns: budgetRunTurnsDraft,
-            totalTokens: budgetRunTokensDraft,
-            deadlineAt: budgetRunDeadlineDraft,
-          }),
           ...(activeProject ? { cwd: activeProject.path } : {}),
         });
         ensuredIdRef.current = created.sessionId;
@@ -846,7 +926,7 @@ export default function App() {
     })();
     ensuringRef.current = pending;
     return pending;
-  }, [selectedId, selectSession, refreshSessions, activeProject, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft]);
+  }, [selectedId, selectSession, refreshSessions, activeProject, composerControls]);
 
   const handleSubmit = useCallback(
     /** 返回值 = 这次发送是否已被受理（#1029），原样透传给 Composer：
@@ -892,6 +972,16 @@ export default function App() {
         ...toAmendFields(composerControls),
         ...ruleSignal,
         ...scopedFacts,
+        // #1444：已选会话的预算草稿随下一次 `/messages` 作为 amend 发出（后端
+        // idle→launched 新 run 消费；queued / steer 只判定丢弃）。全空草稿在
+        // `toCreateBudget` 返回 undefined，api 层「有值才带键」⇒ 载荷逐字不变。
+        // 与 create 路径同一映射点（toCreateBudget），不另造构造器。
+        // #1467：懒建（`ensureSession`）不再带 budget——首条消息走的就是这里。
+        budget: toCreateBudget({
+          turns: budgetRunTurnsDraft,
+          totalTokens: budgetRunTokensDraft,
+          deadlineAt: budgetRunDeadlineDraft,
+        }),
         // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
         // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
         ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
@@ -918,7 +1008,11 @@ export default function App() {
         // 无 `attachments`）。#1015 之后这条分支上 `attachmentIds` 仍恒为空——
         // 有附件 ⇒ 懒建已出会话 ⇒ 不会走到这里。此处不写丢弃逻辑：
         // 真非空意味着上游门禁被绕过，那时该修的是门禁，不是在这里补一条静默丢件的通路。
-        const failure = await submitTask({
+        /* #1367 审查 P0/P1-3：重试动作在**这里**绑定本次的 payload（闭包），
+           并负责受理成功后的草稿消费——Composer 自己的清空链不会为这条重试跑。
+           重发的是**这一份** payload，不是重读控件状态：预算 / 项目 / 模型在失败后
+           可能已被改动，而「重试」的意思是再把失败那次发一遍。 */
+        const payload: StartSessionPayload = {
           task,
           auto_approve: true,
           ...ruleSignal,
@@ -934,7 +1028,16 @@ export default function App() {
             totalTokens: budgetRunTokensDraft,
             deadlineAt: budgetRunDeadlineDraft,
           }),
-        });
+        };
+        /** 重发 `payload`。再失败时同一条回执仍带本函数（可继续重试）。 */
+        const resubmit = async (): Promise<boolean> => {
+          focusRun();
+          const resendFailure = await submitTask(payload, { onRetry: resubmit });
+          if (resendFailure !== null) return false;
+          composerRef.current?.acceptSubmitted(task, attachmentIds);
+          return true;
+        };
+        const failure = await submitTask(payload, { onRetry: resubmit });
         // 新会话创建失败 ⇒ 未受理（`submitTask` 返回失败文案；成功返回 null）
         // ——同一条「失败不清空」契约，不因走的是创建路径就丢文本。
         return failure === null;
@@ -942,6 +1045,41 @@ export default function App() {
     },
     [submitTask, sendMessage, ensureSession, focusRun, selectedId, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft, activeProject],
   );
+
+  /** #1367（P0-3）：条内「重试」入口。动作本身由失败回执携带
+   *  （`sendFailure.onRetry`，绑死失败那次的入参），这里只做在途闸门
+   *  （审查 P1-2）与「是否渲染按钮」的判定。 */
+  const handleRetrySubmit = useCallback(() => {
+    const retry = sendFailure?.onRetry;
+    if (retry === undefined || retryInFlightRef.current) return;
+    /* 同步闸（ref）而不是只靠 state：同一 tick 的第二次点击读不到刚 set 的
+       `retryPending`，而新会话路径下每一下都是一个 POST /api/sessions。 */
+    retryInFlightRef.current = true;
+    setRetryPending(true);
+    void Promise.resolve(retry()).finally(() => {
+      retryInFlightRef.current = false;
+      setRetryPending(false);
+    });
+  }, [sendFailure]);
+
+  /** #1367：断网这一类改在对话区内联呈现（带重试）；其余错误保持原横幅。
+   *  `sendFailure` 由 useSession 在**发送失败分支**写入（不是单槽 `error` 的
+   *  推断）⇒ 内联条只呈现这一次失败的原文，不会被「加载历史失败」之类无关错误
+   *  劫持。重试按钮只在这条回执确实带着动作时出现（非 Composer 入口不给按钮）。 */
+  const submitFailure = useMemo(() => {
+    if (sendFailure === null) return null;
+    /* 文案里的「点重试」与按钮同一个判据：`retryable` 为真但调用方没给动作时
+       （hook 契约允许）不要许诺一个不存在的按钮。 */
+    const canRetry = sendFailure.retryable && sendFailure.onRetry !== undefined;
+    const copy = describeFailure(sendFailure.message, { retryable: canRetry });
+    return copy.kind === 'network' ? copy : null;
+  }, [sendFailure]);
+
+  /** 内联条与全局横幅是**同一句**错误的两处呈现：只在原文一致时抑制横幅。
+   *  （审查 C-P2-2：原先按 `submitFailure === null` 抑制，窗口期内后到的无关错误
+   *  ——取消失败 / 恢复失败 / 投递失败——会被这条陈旧回执一起吞掉。） */
+  const bannerHiddenByInlineFailure =
+    submitFailure !== null && sendFailure !== null && error === sendFailure.message;
 
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A；#1177 §A.3 改名，现名「新建任务…」）：统一创建入口——
    *  `TaskCreationDialog` 组装好的 `StartSessionPayload`（prompt 唯一必填 +
@@ -1000,7 +1138,7 @@ export default function App() {
       const origin = selectedId;
       setForkError(null);
       try {
-        const result = await withTimeout(fork(origin, fromSeq), FORK_TIMEOUT_MS, '分叉请求');
+        const result = await withTimeout(fork(origin, fromSeq), FORK_TIMEOUT_MS, '另开一条会话');
         if (selectedIdRef.current !== origin) return;
         // 跳转到 child session（同步镜像，见 selectedIdRef 注释）
         selectedIdRef.current = result.session_id;
@@ -1009,7 +1147,7 @@ export default function App() {
       } catch (e) {
         if (selectedIdRef.current !== origin) return;
         // BUG-001 fix：分叉失败不再静默——展示后端 detail。
-        setForkError({ sessionId: origin, message: `分叉失败：${(e as Error).message}` });
+        setForkError({ sessionId: origin, message: `另开会话失败：${(e as Error).message}` });
       } finally {
         // 只清自己那一格：期间可能已有另一个会话的分叉在途
         if (forkInFlightRef.current === origin) forkInFlightRef.current = null;
@@ -1181,10 +1319,10 @@ export default function App() {
     () =>
       selectedId !== null &&
       !streaming &&
-      !loadingHistory &&
+      !historySkeleton &&
       conversation !== null &&
       isRecoverableRun(conversation.events),
-    [selectedId, streaming, loadingHistory, conversation],
+    [selectedId, streaming, historySkeleton, conversation],
   );
 
   // ── 预算暂停的恢复入口（`#312`）──
@@ -1300,7 +1438,7 @@ export default function App() {
   const constraintDialogOpen =
     constraintRequest !== null &&
     selectedId !== null &&
-    !loadingHistory &&
+    !historySkeleton &&
     dismissedConstraintRequestId !== constraintRequest.request_id;
 
   const handleConstraintInputAnswer = useCallback((answer: ConstraintInputAnswer) => {
@@ -1399,6 +1537,33 @@ export default function App() {
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   // #1296：值班是独立工作区页面，开合状态只属于当前界面，不持久化。
   const [watchtowerOpen, setWatchtowerOpen] = useState(false);
+  // #1420：洞察也是独立工作区页面。`insightsOpen` = 跨会话页；
+  // `sessionInsightsId` = 单会话页。两者互斥，且都受能力开关闸门。
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  const [sessionInsightsId, setSessionInsightsId] = useState<string | null>(null);
+  const insightsViewOpen = insightsEnabled && (insightsOpen || sessionInsightsId !== null);
+  const handleOpenInsights = useCallback(() => {
+    setSessionInsightsId(null);
+    setInsightsOpen(true);
+  }, []);
+  const handleOpenSessionInsights = useCallback((sessionId: string) => {
+    setInsightsOpen(false);
+    setSessionInsightsId(sessionId);
+  }, []);
+  const handleCloseInsights = useCallback(() => setInsightsOpen(false), []);
+  const handleCloseSessionInsights = useCallback(() => setSessionInsightsId(null), []);
+  const handleOpenSessionFromInsights = useCallback((sessionId: string) => {
+    setInsightsOpen(false);
+    setSessionInsightsId(null);
+    handleSelect(sessionId);
+  }, [handleSelect]);
+  // 能力翻假（部署关模块 / 旧后端）时立刻收起页面，不让一个已打开的页面悬空。
+  useEffect(() => {
+    if (!insightsEnabled) {
+      setInsightsOpen(false);
+      setSessionInsightsId(null);
+    }
+  }, [insightsEnabled]);
   // #684 Phase 2：持久审批规则管理浮层（顶栏 Shield 按钮与命令面板共用同一入口）。
   const [approvePolicyOpen, setApprovePolicyOpen] = useState(false);
   // #357 W-13：恢复列表浮层（顶栏 历史 按钮入口；只读，先列后继续）。
@@ -1441,14 +1606,14 @@ export default function App() {
        依赖变化 ⇒ 立刻用最新 `conversation` 重建，故「打开即最新」不变（PRD §15 只要求
        打开那一刻最新，不要求关闭期间逐帧维护）。 */
     if (!paletteOpen) return CLOSED_PALETTE_ITEMS;
-    // label 用中文（与工具栏/空态/提示文案一致——此前只有 label 是英文、hint 已是
+    // label 用中文（与工具栏/空态/提示文案一致——此前只有 label 是英文、meta 已是
     // 中文，属本地化做了一半），英文说法放进 keywords 继续可搜（BUG-007）。
     const items: CommandItem[] = [
       {
         id: 'toggle-inspector',
-        label: '切换 Run Inspector',
-        keywords: 'toggle run inspector 右栏',
-        hint: '右栏',
+        label: '切换运行详情',
+        keywords: 'toggle run inspector 右栏 运行详情',
+        meta: '右栏',
         group: 'actions',
         run: () => {
           userToggledRef.current = true;
@@ -1460,9 +1625,9 @@ export default function App() {
            那一处就是这里——命令面板不占浏览器快捷键，长 trace / 大 diff 宽读不用
            先找到那个 ⤢ 图标。 */
         id: 'toggle-inspector-fullpage',
-        label: panel.expanded ? '退出 Inspector 整页' : '整页打开 Inspector',
+        label: panel.expanded ? '退出运行详情整页' : '整页打开运行详情',
         keywords: 'full page inspector maximize 整页 宽读',
-        hint: '面板',
+        meta: '面板',
         group: 'actions',
         run: () => {
           setInspectorOpen(true);
@@ -1487,7 +1652,7 @@ export default function App() {
         id: 'jump-latest',
         label: '跳到最新事件',
         keywords: 'jump to latest event 定位',
-        hint: '定位',
+        meta: '定位',
         group: 'actions',
         run: () => {
           if (!conversation || conversation.events.length === 0) return;
@@ -1502,9 +1667,9 @@ export default function App() {
       ...(conversation?.run_id
         ? [{
             id: 'copy-run-id',
-            label: '复制 Run ID',
-            keywords: 'copy run id',
-            hint: conversation.run_id.slice(0, 12),
+            label: '复制任务编号',
+            keywords: 'copy run id 任务编号',
+            meta: conversation.run_id.slice(0, 12),
             group: 'actions' as const,
             run: () => copyText(conversation.run_id!),
           }]
@@ -1513,7 +1678,7 @@ export default function App() {
         id: 'copy-trace-id',
         label: '复制 Trace ID',
         keywords: 'copy trace id langfuse',
-        hint: conversation?.trace_id ? 'Langfuse' : undefined,
+        meta: conversation?.trace_id ? 'Langfuse' : undefined,
         group: 'actions',
         run: () => {
           // PRD §15 "Copy Trace ID（若存在）"：不存在不出现该命令。
@@ -1523,7 +1688,7 @@ export default function App() {
         id: 'open-trace',
         label: '打开 Trace',
         keywords: 'open trace langfuse',
-        hint: conversation?.trace_url ? 'Langfuse ↗' : undefined,
+        meta: conversation?.trace_url ? 'Langfuse ↗' : undefined,
         group: 'actions',
         run: () => {
           // 契约 2d7f87a：trace_url 缺则该命令不出现（splice 移除）。
@@ -1533,9 +1698,9 @@ export default function App() {
         id: 'toggle-theme',
         label: '切换主题',
         keywords: 'toggle theme dark light 暗色 亮色',
-        // hint 也走中文：它是**显示文本**，langfuse 那种专有名词才保留英文（BUG-007 同一类）。
-        // UI-06：箭头是方向装饰不是信息——「当前是什么、将切成什么」由 label+hint 联合表达。
-        hint: theme === 'dark' ? '亮色' : '暗色',
+        // meta 也走中文：它是**显示文本**，langfuse 那种专有名词才保留英文（BUG-007 同一类）。
+        // UI-06：箭头是方向装饰不是信息——「当前是什么、将切成什么」由 label+meta 联合表达。
+        meta: theme === 'dark' ? '亮色' : '暗色',
         group: 'actions',
         run: toggleTheme,
       },
@@ -1543,7 +1708,7 @@ export default function App() {
         id: 'focus-composer',
         label: '聚焦输入框',
         keywords: 'focus composer',
-        hint: '输入框',
+        meta: '输入框',
         group: 'actions',
         // 不在命令里直接 focus()：命令跑的时候面板还开着，Radix 关闭时的焦点恢复会紧接着
         // 把焦点抢回 body（键盘打开的浮层没有触发器，恢复目标就是 body）——真机实测
@@ -1557,7 +1722,7 @@ export default function App() {
         id: 'manage-memories',
         label: '管理记忆',
         keywords: 'memory memories forget delete 记忆 遗忘 删除 忘记',
-        hint: '记忆库',
+        meta: '记忆库',
         group: 'actions',
         run: () => setMemoriesOpen(true),
       },
@@ -1565,7 +1730,7 @@ export default function App() {
         id: 'manage-approve-policy',
         label: '管理持久审批规则',
         keywords: 'approval approve policy always allow persistent 审批 授权 持久 规则 撤销',
-        hint: '持久授权',
+        meta: '持久授权',
         group: 'actions',
         run: () => setApprovePolicyOpen(true),
       },
@@ -1593,7 +1758,7 @@ export default function App() {
         // 末尾不再重复一次 ${d}：实测「重复的尾 token」会让大量无意义的 3 字符
         // query（如 aac/aca）只靠这层重复命中，纯增噪，而正当匹配一次都不受益。
         keywords: `switch to ${d} density 密度`,
-        hint: d === density ? '当前' : undefined,
+        meta: d === density ? '当前' : undefined,
         group: 'density',
         run: () => changeDensity(d),
       });
@@ -1606,7 +1771,7 @@ export default function App() {
         items.push({
           id: `event-${conversation.events.length - 1 - i}`,
           label: `${e.type}${summary ? ` · ${summary}` : ''}`,
-          hint: e.seq !== null ? `#${e.seq}` : undefined,
+          meta: e.seq !== null ? `#${e.seq}` : undefined,
           group: 'events',
           run: () => {
             focusEvent(e);
@@ -1622,8 +1787,36 @@ export default function App() {
     return items;
   }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction, handleNew]);
 
+  // UI-01 / APR-01：待决审批 > 0 → composer 锁定；失效审批不算（与 Composer 同一
+  // projection 状态，无第二真相源）。`lockReasonOf` 与 Composer 共用同一优先级，
+  // composer 禁用时「跳到输入框」也必须隐藏——disabled 表单控件不可聚焦，
+  // 链接会变成死路（#1372 r3 P3）。
+  const approvalPending = awaitingApproval(
+    (conversation?.pending_approvals ?? []).filter(
+      (a) => !goneApprovalIds.has(a.approval_id),
+    ),
+  );
+  const composerLocked =
+    lockReasonOf({
+      constraintInputPending,
+      askUserInputPending,
+      planApprovalInputPending,
+      approvalPending,
+    }) !== null;
+
   return (
     <div className="app-frame">
+      <SkipLinks
+        inspectorVisible={!watchtowerOpen && !insightsViewOpen && inspectorOpen}
+        regionsVisible={!watchtowerOpen && !insightsViewOpen && !(panel.expanded && inspectorOpen)}
+        composerVisible={
+          !watchtowerOpen &&
+          !insightsViewOpen &&
+          !(panel.expanded && inspectorOpen) &&
+          activeTab === 'chat' &&
+          !composerLocked
+        }
+      />
       <TopBar
         conversation={conversation}
         streaming={streaming}
@@ -1642,7 +1835,11 @@ export default function App() {
         sessionId={selectedId}
         onOpenContextUsage={(sid) => setContextUsageOpen(sid)}
         onOpenContextWindow={(sid) => setContextWindowOpen(sid)}
+        onOpenSessionInsights={insightsEnabled ? handleOpenSessionInsights : undefined}
         awaitingDecision={hasPendingDecisions}
+        sessions={sessions}
+        titlesById={titlesById}
+        onSelectSession={handleSelect}
         rosterSlot={
           <SubagentRoster
             delegations={delegations}
@@ -1667,11 +1864,27 @@ export default function App() {
         />
       )}
 
+      {insightsViewOpen && insightsOpen && (
+        <InsightsPage
+          onClose={handleCloseInsights}
+          onOpenSession={handleOpenSessionFromInsights}
+        />
+      )}
+
+      {insightsViewOpen && sessionInsightsId !== null && (
+        <SessionInsightsPage
+          sessionId={sessionInsightsId}
+          onClose={handleCloseSessionInsights}
+          onOpenSession={handleOpenSessionFromInsights}
+        />
+      )}
+
       <main
-        hidden={watchtowerOpen}
+        hidden={watchtowerOpen || insightsViewOpen}
         className={
           `app-regions ${inspectorOpen ? '' : 'inspector-closed'}` +
-          (panel.expanded && inspectorOpen ? ' inspector-fullpage' : '')
+          (panel.expanded && inspectorOpen ? ' inspector-fullpage' : '') +
+          (insightsViewOpen ? ' app-regions-insights-hidden' : '')
         }
         /* #183 AC6：面板宽度是**视图状态**（不持久化）——用 CSS 变量喂给栅格，
            `.app-regions` 的第三列读它。窄屏（<1200px）仍由既有断点接管。 */
@@ -1679,6 +1892,7 @@ export default function App() {
       >
         <SessionList
           sessions={sessions}
+          sessionsLoading={sessionsLoading}
           projects={projects}
           selectedId={selectedId}
           liveSessionId={streaming ? selectedId : null}
@@ -1707,9 +1921,17 @@ export default function App() {
           onSetArchived={handleSetArchived}
           /* #1200：侧栏一级常驻入口——插件管理窗口（MCP + Skills 启停）。 */
           onOpenPlugins={handleOpenPlugins}
+          /* #1420：能力显式声明 insights:true 才给入口；缺键 = 隐藏。 */
+          onOpenInsights={insightsEnabled ? handleOpenInsights : undefined}
         />
 
-        <section className={`app-workspace${splitChild ? ' with-split' : ''}`}>
+        <section
+          className={`app-workspace${splitChild ? ' with-split' : ''}`}
+          id="region-main"
+          role="region"
+          aria-label="主工作区"
+          tabIndex={-1}
+        >
           {/* #1256：主工作区（父会话 + 各面）。分栏打开时它是左列、子会话是右列——
               父会话 DOM 原样保持（不重挂、不丢滚动/局部状态）。 */}
           <div className="workspace-main">
@@ -1717,7 +1939,7 @@ export default function App() {
             <div className="auth-banner" role="alert">
               <KeyRound size={14} />
               <span>
-                后端要求身份令牌（401）：点击顶栏 <strong>钥匙图标</strong> 配置 Bearer Token
+                后端要求身份令牌（401）：打开顶栏「<strong>更多工具</strong>」→「API 身份令牌」配置 Bearer Token
                 即自动重试——本地开发环境（未配置 JWT_SECRET）不应出现此提示。
               </span>
               <button
@@ -1729,7 +1951,8 @@ export default function App() {
               </button>
             </div>
           )}
-          {error && <div className="app-error">{error}</div>}
+          {/* #1367：断网这一类已下沉到对话区内联条（带重试），不再重复打横幅。 */}
+          {error && !bannerHiddenByInlineFailure && <div className="app-error">{error}</div>}
           {/* #1193：run 致命异常且**计划从未生成**——服务端刻意不回滚 mode
               （fail-closed），会话停在 plan 档（只读、无计划）。横幅给出可读
               原因 + **显式**退出 plan 的入口（不自动回滚）；与 forkError 同形：
@@ -1787,7 +2010,7 @@ export default function App() {
                 className="recover-btn"
                 onClick={() => selectedId && void recover(selectedId)}
                 disabled={recoverState.status === 'pending'}
-                title="修复中断会话：按 Operation Ledger 回填工具结果、标记 dangling 调用（幂等）"
+                title="修复中断会话：按操作记录补回工具结果、标出没有结果的工具调用（重复执行不会重复生效）"
               >
                 <RotateCcw size={14} />
                 {recoverState.status === 'pending' ? '恢复中…' : '恢复会话'}
@@ -1802,7 +2025,7 @@ export default function App() {
                 </div>
               )}
               {recoverState.status === 'idle' && (
-                <span className="recover-hint">该会话缺少 run 终态或有未配对工具调用——可尝试恢复</span>
+                <span className="recover-hint">该会话缺少任务的结束状态，或有没配上结果的工具调用——可以尝试恢复</span>
               )}
             </div>
           )}
@@ -1840,7 +2063,9 @@ export default function App() {
               <AdjudicationTechDetail message={recoverState.message} />
             </div>
           )}
-          {conversation?.run_interrupted && !streaming && (
+          {conversation?.run_interrupted &&
+            !streaming &&
+            interruptedIdentity !== dismissedInterruptedIdentity && (
             <div className="interrupt-banner" role="status" aria-live="polite">
               {/* step_id 可能缺失/null，且这是**真值不是缺失**：进程在该 run 的第一个
                   带步号事件之前就死了（run/started 本身不带 step，检测器只能
@@ -1848,15 +2073,39 @@ export default function App() {
                   run/interrupted 里有 2 条信封整个不带 step_id（run/started 后
                   紧接 interrupted，如 c63ce4d3-3b26-40bb-8e8c-e3af8dd33035）——
                   渲染成「第 ? 步」等于把「还没开始就断了」说成一个未知数字。*/}
-              {conversation.run_interrupted.step_id !== null
-                ? `上次运行在第 ${conversation.run_interrupted.step_id} 步中断`
-                : '上次运行在首个步骤开始前中断'}
-              （原因：{conversation.run_interrupted.reason}）
+              <span className="interrupt-banner-text">
+                {conversation.run_interrupted.step_id !== null
+                  ? `上次任务在第 ${conversation.run_interrupted.step_id} 步中断`
+                  : '上次任务在首个步骤开始前中断'}
+                （原因：{conversation.run_interrupted.reason}）
+              </span>
+              {/* F-06（#1449）：两个动作都是纯前端视图操作——「看缺口」把中断事件
+                  本身定位到右栏（复用 focusEvent 的 peek 语义），「忽略」按中断
+                  标识收起这一屏。后端没有部分重跑能力，这里**不**造重跑入口。
+                  按钮走专用类（`.interrupt-action`），不裸用全局 `.recover-btn`：
+                  崩溃恢复面板与本横幅可能同屏，全局选择器保持单一含义。 */}
+              <button
+                type="button"
+                className="interrupt-action interrupt-action-primary"
+                onClick={handleInspectInterruption}
+                title="在右栏 Inspector 定位到这次中断的事件"
+              >
+                在右栏看缺口
+              </button>
+              <button
+                type="button"
+                className="interrupt-action interrupt-dismiss"
+                onClick={handleDismissInterruption}
+                title="收起这条中断提示（不改变会话事实）"
+              >
+                忽略
+              </button>
             </div>
           )}
           {/* 预算暂停面板（#312）：与 interrupt-banner **互斥**（暂停非终态、不会同时
-              出现 run/interrupted），但两者刻意不是同一个组件——中断没有可执行动作，
-              预算暂停有（抬高绝对 ceiling → 同 run 恢复）。
+              出现 run/interrupted），但两者刻意不是同一个组件——中断只有两个纯前端
+              视图动作（F-06：右栏定位 / 忽略），预算暂停有恢复动作（抬高绝对 ceiling
+              → 同 run 恢复）。
               #968：stuck 暂停没有这个动作——后端对 stuck 的 budget_increase 一律 409
               （恢复前置是相关 steer / 环境 / policy 变更），走单独的引导面板
               （`11 §6.1`：MUST NOT 提供一键重试）；Composer 不被禁用/遮挡，steer
@@ -1886,7 +2135,7 @@ export default function App() {
               />
             )
           )}
-          {constraintRequest && selectedId !== null && !loadingHistory && (
+          {constraintRequest && selectedId !== null && !historySkeleton && (
             <ConstraintResolutionDialog
               key={constraintRequest.request_id}
               request={constraintRequest}
@@ -1921,9 +2170,11 @@ export default function App() {
             >
               {tab.key === 'chat' ? (
                 <>
+                  {/* `historySkeleton` 是渲染期派生（含 `loadingHistory`）：effect
+                      落地前的那一帧也不能落进空态 / 上一会话内容。 */}
                   <Conversation
                     conversation={conversation}
-                    loadingHistory={loadingHistory}
+                    loadingHistory={historySkeleton}
                     density={density}
                     disclosure={disclosure}
                     reasoningDisclosure={reasoningDisclosure}
@@ -1957,8 +2208,20 @@ export default function App() {
                     onApprovalDecided={resyncAfterDecision}
                     /* #825（MM-04）AC7：非视觉模型的「图已被省略」标注依据（三态）。 */
                     supportsVision={currentModelSupportsVision}
+                    /* #1367（P0-3）：断网失败的内联条 + 条内重试。
+                       `submitFailure` 由 useMemo 持有，身份稳定，不破坏 memo。
+                       重试动作随失败回执走（`sendFailure.onRetry`）；没有动作的失败
+                       （续聊 / steer / 编辑轮次）只呈现不渲染按钮。 */
+                    submitFailure={submitFailure}
+                    onRetrySubmit={sendFailure?.onRetry === undefined ? undefined : handleRetrySubmit}
+                    retryPending={retryPending}
+                    /* #1193 的 plan-stuck 横幅已带同一句失败原因 + 退出 plan 的
+                       动作；内联条再报一次就是同一事实两份 UI。 */
+                    suppressRunFailure={runFailedBeforePlan !== null
+                      && runFailedBeforePlan.sessionId === selectedId}
                   />
                   <Composer
+                    ref={composerRef}
                     streaming={streaming}
                     /* #1028 AC2：常驻归属 chip（项目名 + cwd；未归属明示「未分组」）。 */
                     ownership={ownership}
@@ -1983,11 +2246,7 @@ export default function App() {
                     /* UI-01：待决审批 > 0 → composer 锁定（同一 projection 状态，无第二真相源）。
                        APR-01：失效审批不算——投影判定的孤儿（run 已终结）与后端实证的 404
                        都不欠用户任何决策；算进去就是永久死锁（卡只读 + 输入框禁用）。 */
-                    approvalPending={awaitingApproval(
-                      (conversation?.pending_approvals ?? []).filter(
-                        (a) => !goneApprovalIds.has(a.approval_id),
-                      ),
-                    )}
+                    approvalPending={approvalPending}
                     onSubmit={handleSubmit}
                     onSteer={handleSteer}
                     /* #1191：项目级登记是否可选——真值来自后端（见上方 effect），
@@ -2021,7 +2280,9 @@ export default function App() {
                     selectedReasoningEffort={selectedReasoningEffort}
                     reasoningEffortProjection={reasoningEffortProjection}
                     onReasoningEffortChange={setSelectedReasoningEffort}
-                    /* #426：新建会话的预算入口（会话内 Composer 不显示，见组件注释） */
+                    /* #426/#1444：预算入口两态都在——新建态随 create 请求发
+                       `budget.run`；已选态随下一次 `/messages` 作为 amend 发出
+                       （见 handleSubmit 的 amend 构造） */
                     budgetRunTurns={budgetRunTurnsDraft}
                     onBudgetRunTurnsChange={setBudgetRunTurnsDraft}
                     budgetRunTokens={budgetRunTokensDraft}
@@ -2076,8 +2337,12 @@ export default function App() {
           onJumpToStream={jumpToStream}
           onJumpToApproval={jumpToApproval}
           panel={panel}
+          open={inspectorOpen}
           onPanelAction={onPanelAction}
           awaitingDecision={hasPendingDecisions}
+          goneApprovalIds={goneApprovalIds}
+          onApprovalGone={onApprovalGone}
+          onApprovalDecided={resyncAfterDecision}
         />
       </main>
 

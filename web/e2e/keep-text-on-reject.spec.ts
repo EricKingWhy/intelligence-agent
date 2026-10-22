@@ -162,7 +162,7 @@ test('#1148 窗外落定的 409：先按已受理清空，迟到失败后原文�
   await expect(composer).toHaveValue(DRAFT, { timeout: 10_000 });
   // ③ 失败呈现照旧（人话横幅，不透传协议原文）——回填是**附加**通道，不取代横幅。
   const banner = page.locator('.app-error');
-  await expect(banner).toContainText('待人工裁决');
+  await expect(banner).toContainText('需要你来决定');
   await expect(banner).not.toContainText('tool_call_id');
 });
 

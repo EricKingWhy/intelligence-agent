@@ -97,7 +97,7 @@ export const KIND_LABEL: Record<RuntimeEventKind, string> = {
   model: '输出',
   error: '失败',
   skill: '技能',
-  subagent: '子智能体',
+  subagent: '子任务',
   todo: '待办',
   'final-answer': '',
 };

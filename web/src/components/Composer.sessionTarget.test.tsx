@@ -137,7 +137,7 @@ describe('Composer 会话级目标状态行（#1312）', () => {
     });
 
     const statusLine = target();
-    const chip = container.querySelector<HTMLElement>('.composer-owner-chip');
+    const chip = container.querySelector<HTMLElement>('.composer-ownership');
     expect(statusLine).not.toBeNull();
     expect(chip).not.toBeNull();
     expect(statusLine!.contains(chip)).toBe(false);

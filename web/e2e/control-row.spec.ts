@@ -22,6 +22,7 @@ import {
   T,
   fulfillSse,
   longCatalog,
+  openMore,
   pickControl,
   routeApi,
 } from './fixtures';
@@ -78,6 +79,10 @@ test('Composer control row：三档位控件渲染 + 键盘选档 + Esc 关闭',
   await expect(modelTrigger).toHaveCount(0);
   // Controls without per-model capability metadata stay hidden.
   await expect(permTrigger).toBeVisible();
+  // #1405：Agent / 推理默认收在「更多」里——折叠态不渲染，展开后 Agent 才在场。
+  await expect(agentTrigger).toHaveCount(0);
+  await expect(effortTrigger).toHaveCount(0);
+  await openMore(page);
   await expect(agentTrigger).toBeVisible();
   await expect(effortTrigger).toHaveCount(0);
 
@@ -272,8 +277,9 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
 
   const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await openMore(page);
   await effortTrigger.click();
-  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  const slider = page.getByRole('slider', { name: '推理档位' });
   await expect(slider).toBeVisible();
   await expect(slider).toHaveValue('0');
   await expect(slider).toHaveAttribute('aria-valuetext', /Minimal/);
@@ -296,7 +302,7 @@ test('Composer control row：提交 payload 字段名对齐后端契约', async 
   await permissionTrigger.click();
   await page.locator('.picker-item', { hasText: readOnlyMode!.display_name }).first().click();
   await expect(permissionTrigger).toContainText(readOnlyMode!.display_name);
-  const agentTrigger = page.locator('.composer-control').nth(1);
+  const agentTrigger = page.locator('.composer-control[aria-label="Agent Profile"]');
   const codingProfile = AGENT_PROFILES.find((profile) => profile.id === 'coding');
   await agentTrigger.click();
   await page.locator('.picker-item', { hasText: codingProfile!.display_name }).first().click();
@@ -361,6 +367,7 @@ test('Reasoning Effort refresh keeps a value supported by the selected model', a
   const modelTrigger = page.locator('.composer-model[aria-label="模型选择"]');
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
   await expect(modelTrigger).toBeVisible();
+  await openMore(page);
 
   await modelTrigger.click();
   const openaiProvider = page.locator('[role="menuitem"][aria-haspopup="menu"]', { hasText: 'openai' }).first();
@@ -369,7 +376,7 @@ test('Reasoning Effort refresh keeps a value supported by the selected model', a
   await expect(modelTrigger).toContainText('effort-model');
 
   await effortTrigger.click();
-  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  const slider = page.getByRole('slider', { name: '推理档位' });
   await expect(slider).toBeVisible();
   await expect(slider).toBeFocused();
   await page.keyboard.press('ArrowRight');
@@ -441,14 +448,18 @@ test('active fallback projects its own default without replacing the primary pre
 
   await page.goto('/');
   const effortTrigger = page.locator('.composer-control[aria-label="Reasoning Effort"]');
+  await openMore(page);
   await expect(effortTrigger).toBeVisible();
   await effortTrigger.click();
-  const slider = page.getByRole('slider', { name: 'Reasoning Effort slider' });
+  const slider = page.getByRole('slider', { name: '推理档位' });
   await expect(slider).toBeFocused();
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');
   await expect(effortTrigger).toContainText('Deep');
   await page.keyboard.press('Escape');
+  // picker 有 160ms 退场动画（.picker-content[data-state=closed]）；不等到卸载就
+  // 点下一次，locator 会先命中**上一份**正在退场的 slider（实测 value 仍是 Deep）。
+  await expect(page.locator('.picker-content')).toHaveCount(0);
 
   await page.locator('.session-item').first().click();
   await expect(effortTrigger).toContainText('Minimal');
@@ -457,8 +468,14 @@ test('active fallback projects its own default without replacing the primary pre
   await expect(slider).toHaveAttribute('aria-valuetext', /Minimal/);
   const fallbackTrack = page.locator('.reasoning-effort-slider__track');
   await expect(fallbackTrack).toHaveAttribute('data-energy', 'off');
+  // #1364：颜色只来自 token —— 内联值是 `var(--effort-track-start)`（不再是 `#4d93f8` 字面量），
+  // 落屏值由 fill 的 computed `background-image` 钉住：默认档 progress=0，两端都是 rgb(77, 147, 248)。
   expect(await fallbackTrack.evaluate((track) => (track as HTMLElement).style.getPropertyValue('--effort-color')))
-    .toBe('#4d93f8');
+    .toBe('var(--effort-track-start)');
+  const fillBackground = await page.locator('.reasoning-effort-slider__fill')
+    .evaluate((el) => getComputedStyle(el).backgroundImage);
+  expect(fillBackground).toContain('rgb(77, 147, 248)');
+  expect(fillBackground).not.toContain('rgba(0, 0, 0');
   await expect(slider).toBeEnabled();
   await expect(effortTrigger).toContainText('Deep');
   await expect(slider).toHaveAttribute('aria-valuetext', /Deep/);
@@ -479,6 +496,7 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   });
   await page.goto('/');
 
+  await openMore(page);
   const trigger = page.locator('.composer-control[aria-label="Agent Profile"]');
   const foot = page.locator('.picker-foot');
   const openPicker = async () => {
@@ -498,19 +516,24 @@ test('#201 档位收窄提示：只在真的被收窄时出现，且逐字给出
   await expect(foot).toHaveCount(0);
   await closePicker();
 
-  // ② 被收窄的档位（编程 = coding，13/18）⇒ 逐字给出那句话（**声明**口径）。
+  // ② 被收窄的档位（编程 = coding，14/19）⇒ 逐字给出那句话（**声明**口径）。
   //    数字与 `agentProfileScope.test.ts:47` 同源（be73a2d0 同步了单测、漏了这里）。
   await pickControl(page, 'Agent Profile', 2, 'Coding');
   await openPicker();
   await expect(foot).toBeVisible();
   await expect(foot).toHaveText('该档位声明开放 14 个工具（全部档位声明 19 个）');
   // hover 提示只列名字、不解释原因（设计稿：「只说事实，不解释原因」）。
-  // `title` 挂在文案 span 上（`.picker-foot` 是容器槽位——调用方可能放别的东西，
-  // 那个槽位本身不该被强行赋予一个 title 语义）。
-  const note = foot.locator('span[title]');
-  await expect(note).toHaveAttribute('title', /^Coding未声明开放：/);
-  await expect(note).toHaveAttribute('title', /delegate/);
-  await expect(note).toHaveAttribute('title', /web_search/);
+  // #1372：原生 title 迁到 radix tooltip，提示内容仍在可访问名（aria-label）里，
+  // 且**以可见文字开头**（WCAG 2.5.3 Label in Name）。
+  const note = foot.locator('span[aria-label]');
+  await expect(note).toHaveAttribute('aria-label', /^该档位声明开放 14 个工具（全部档位声明 19 个）；Coding未声明开放：/);
+  await expect(note).toHaveAttribute('aria-label', /delegate/);
+  await expect(note).toHaveAttribute('aria-label', /web_search/);
+  // #1372：title 迁到 radix tooltip 后必须真的能挂载（不是只剩 aria-label）。
+  await note.hover();
+  await expect(page.locator('.tip-content')).toContainText('未声明开放：');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.tip-content')).toHaveCount(0);
   await closePicker();
 
   // ③ 换回未被收窄的档位（通用 = main）⇒ 提示消失（跟着当前生效档位走，不是一次性的）
@@ -613,6 +636,7 @@ test('#214 AC4：三条 Composer picker 的内置条目都真的画出了字形'
   });
   await page.goto('/');
 
+  await openMore(page);
   const cases = [
     { label: '权限模式', title: '只读' },
     { label: 'Agent Profile', title: 'Main' },
@@ -677,7 +701,7 @@ test('#283 AC3：会话内权限 pill 可改、读会话真值，旧「不可修
   // 留着就是死胡同）；底部如实披露生效时机（ADR-0041 D4：不得承诺「立即生效」）。
   await trigger.click();
   await expect(page.locator('[role="listbox"]:visible').last()).toBeVisible();
-  await expect(page.locator('.picker-foot')).toContainText('改档从下一轮 run 起生效');
+  await expect(page.locator('.picker-foot')).toContainText('改档从下一轮执行起生效');
   await expect(page.locator('.picker-item', { hasText: '默认（未选）' })).toHaveCount(0);
   await expect(page.locator('[role="listbox"]:visible .picker-item')).toHaveCount(PERMISSION_MODES.length);
   await page.keyboard.press('Escape');

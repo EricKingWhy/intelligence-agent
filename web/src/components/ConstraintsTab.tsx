@@ -18,6 +18,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import type {
   ConstraintScope,
@@ -31,7 +32,7 @@ import {
   revokeProtectedFact,
   revokeScopedConstraint,
 } from '../lib/api';
-import { FACT_TYPE_DOTS, SCOPE_LABELS, formatFactTime, operatorLabel } from '../lib/constraints';
+import { FACT_TYPE_DOTS, SCOPE_LABELS, factTypeLabel, formatFactTime, operatorLabel } from '../lib/constraints';
 import '../styles/constraints.css';
 
 /** 状态筛选 tab：`revoked` 覆盖 revoked + superseded（issue §四.3）。 */
@@ -56,8 +57,8 @@ const STATUS_TABS: readonly { id: StatusFilter; label: string }[] = [
 
 /** 顶部优先级条文案（#1191 §五.1，逐字）。`overridden_by` 用等宽字体呈现，
  *  与票面用反引号标注代码标识符的意图一致。 */
-const PRIORITY_BAR = '同文约束生效优先级：会话＞项目＞全局 —— 不同内容全部注入，由模型裁决。';
-const PRIORITY_BAR_TAIL = ' 非 null 的条目不注入。撤销走历史保留链。';
+const PRIORITY_BAR = '同样内容的要求，生效优先级：会话＞项目＞全局——不同内容会全部提供给 AI，由它决定怎么处理。';
+const PRIORITY_BAR_TAIL = ' 标记的条目不生效。撤销后仍保留历史记录。';
 
 /** 三组眉标（#1191 §五.2）。 */
 const GROUPS: readonly {
@@ -136,18 +137,22 @@ function FactRow({
   const superseded = fact.status === 'superseded';
   const inactive = revoked || superseded;
   const dot = FACT_TYPE_DOTS[fact.type] ?? 'var(--cn-type-default)';
+  /* #1419 R-3/R-4：状态色边框（`data-status` 驱动）+ 内容主字 + 类型灰后缀 +
+   * 右上状态徽标 + 元信息行右端 mono 编号。卡片结构照效果图 `.rq-item`。 */
   return (
-    <div className={`cn-row${inactive ? ' revoked' : ''}`} data-status={fact.status}>
+    <div className="cn-row" data-status={fact.status}>
       <div className="cn-row-main">
-        <div className="cn-kicker">
-          <span className="cn-type">
-            <span className="cn-tdot" style={{ background: dot }} aria-hidden="true" />
-            {fact.type}
-          </span>
-        </div>
         <CollapsibleValue text={renderValue(fact.value)} />
         <div className="cn-meta">
-          <code className="cn-fact-id">{fact.fact_id}</code>
+          <span className="cn-type">
+            <span className="cn-tdot" style={{ background: dot }} aria-hidden="true" />
+            {factTypeLabel(fact.type)}
+          </span>
+          {/* #1419 R-4 继承胶囊：非本会话来源即「继承」（scope 是后端真字段，
+              不是效果图里的编造名）。分组眉标仍保留——胶囊让单条卡自证来源。 */}
+          {fact.scope !== 'session' && (
+            <span className="cn-inherit">继承 · {SCOPE_LABELS[fact.scope]}</span>
+          )}
           {fact.registered_at && <span>{formatFactTime(fact.registered_at)} 登记</span>}
           {fact.source_seq !== null && <span>来源事件 #seq {fact.source_seq}</span>}
           {fact.revoked_at && (
@@ -156,20 +161,24 @@ function FactRow({
               {fact.revoked_by ? ` · ${operatorLabel(fact.revoked_by)}` : ''}
             </span>
           )}
+          <span className="cn-grow" />
+          <code className="cn-fact-id">{fact.fact_id}</code>
         </div>
       </div>
       <div className="cn-row-side">
         {fact.overridden_by !== null && <span className="cn-ov">被本会话覆盖</span>}
-        <span className="cn-pill">
+        <span className="cn-pill" data-s={inactive ? 'off' : 'on'}>
           <span className="cn-pill-dot" style={{ background: statusDot(fact.status) }} aria-hidden="true" />
           {statusLabel(fact.status)}
         </span>
+        {/* #1419 R-6：幽灵钮（✕ + 文案），点击仍走二次确认弹窗。 */}
         <button
           type="button"
           className="cn-revoke"
           disabled={inactive}
           onClick={() => onRequestRevoke(fact)}
         >
+          <X size={11} aria-hidden="true" />
           {inactive ? statusLabel(fact.status) : '撤销'}
         </button>
       </div>
@@ -241,6 +250,11 @@ export function ConstraintsView({
   );
   const countFor = (filter: StatusFilter) =>
     facts.filter((fact) => matchesStatus(fact.status, filter)).length;
+  /* #1419 R-1：汇总行的三个数都是真事实。效果图第三个是「待确认」——后端没有
+   * pending 这个状态（`active | revoked | superseded`），也不存在「确认生效」端点，
+   * 故第三个数是「已撤销」（= revoked + superseded，与「已撤销」筛同一判据）。 */
+  const activeTotal = facts.filter((fact) => fact.status === 'active').length;
+  const offTotal = facts.length - activeTotal;
   /** 组计数 = 该组**生效中**条数（票面 §五.2 的「N 条生效中」）。
    *
    *  生效判据与注入侧同源（§五.1）：`status==='active'` **且** `overridden_by===null`
@@ -255,7 +269,7 @@ export function ConstraintsView({
   if (forbidden) {
     body = (
       <div className="cn-state" role="alert">
-        无权限查看约束
+        无权限查看要求
       </div>
     );
   } else if (error) {
@@ -269,9 +283,9 @@ export function ConstraintsView({
       </div>
     );
   } else if (loading && facts.length === 0) {
-    body = <div className="cn-state">正在加载约束…</div>;
+    body = <div className="cn-state">正在加载要求…</div>;
   } else if (visible.length === 0) {
-    body = <div className="cn-state">没有符合条件的约束</div>;
+    body = <div className="cn-state">没有符合条件的要求</div>;
   } else {
     // 非 git 目录的会话无项目键（`project === null`）→ 不渲染 PROJECT 组（票面 §五.5）。
     const groups = GROUPS.filter((g) => g.scope !== 'project' || project !== null);
@@ -294,12 +308,12 @@ export function ConstraintsView({
 
   return (
     <div className="cn-panel" data-testid="constraints-panel">
-      <div className="cn-eyebrow">CONSTRAINTS</div>
-      <h2 className="cn-title">约束管理</h2>
+      <div className="cn-eyebrow">我的要求</div>
+      <h2 className="cn-title">我的要求</h2>
       <div className="cn-session-line">
         <span className="cn-livedot" aria-hidden="true" />
         当前会话 <code className="cn-session-id">{sessionId}</code>
-        <span>数据来自后端实时查询，前端不存第二份状态</span>
+        <span>当前生效的要求</span>
       </div>
 
       <div className="cn-prio" data-testid="constraints-priority">
@@ -308,8 +322,16 @@ export function ConstraintsView({
         {PRIORITY_BAR_TAIL}
       </div>
 
+      {/* #1419 R-1：汇总行（效果图 `.pane-head` 的位置与形态）。 */}
+      <div className="cn-summary">
+        <span className="cn-summary-lbl">要求清单</span>
+        <span className="cn-summary-n">
+          {facts.length} 条 · {activeTotal} 生效 · {offTotal} 已撤销
+        </span>
+      </div>
+
       <div className="cn-toolbar">
-        <div className="cn-tabs" role="tablist" aria-label="约束状态筛选">
+        <div className="cn-tabs" role="tablist" aria-label="要求状态筛选">
           {STATUS_TABS.map((tab) => (
             <button
               key={tab.id}
@@ -324,24 +346,34 @@ export function ConstraintsView({
             </button>
           ))}
         </div>
-        <select
-          className="cn-type-select"
-          aria-label="按类型筛选"
-          value={typeFilter}
-          onChange={(e) => onTypeFilter(e.target.value)}
-        >
-          <option value="">全部类型</option>
+        {/* #1419 R-2：类型筛选从原生 `<select>` 换成效果图的 chip 组（`aria-pressed`
+            表达选中；真实类型 6 个 + 「全部类型」，520px 面板内自然换行）。 */}
+        <div className="cn-type-chips" role="group" aria-label="按类型筛选">
+          <button
+            type="button"
+            className={`cn-chip${typeFilter === '' ? ' on' : ''}`}
+            aria-pressed={typeFilter === ''}
+            onClick={() => onTypeFilter('')}
+          >
+            全部类型
+          </button>
           {TYPE_OPTIONS.map((type) => (
-            <option key={type} value={type}>
-              {type}
-            </option>
+            <button
+              key={type}
+              type="button"
+              className={`cn-chip${typeFilter === type ? ' on' : ''}`}
+              aria-pressed={typeFilter === type}
+              onClick={() => onTypeFilter(type)}
+            >
+              {factTypeLabel(type)}
+            </button>
           ))}
-        </select>
+        </div>
       </div>
 
       <div className="cn-list">{body}</div>
 
-      <div className="cn-footer">撤销走 superseded 历史链 —— 来源记录保留，可审计、可追溯。</div>
+      <div className="cn-footer">撤销后会标记为「已被取代」并保留来源记录，可审计、可追溯。</div>
     </div>
   );
 }
@@ -354,7 +386,7 @@ function revokeImpact(scope: ConstraintScope): string {
   if (scope === 'global') {
     return '撤销后，将影响所有项目的新会话。来源记录保留，可审计。';
   }
-  return '撤销后，新的会话将不再注入该条约束。来源记录保留，可审计。';
+  return '撤销后，新的会话将不再带上这条要求。来源记录保留，可审计。';
 }
 
 /** 有状态外壳：负责请求生命周期 + 撤销二次确认。 */
@@ -470,7 +502,7 @@ export function ConstraintsTab({ sessionId }: { sessionId: string }) {
         <Dialog.Portal>
           <Dialog.Overlay className="palette-overlay" />
           <Dialog.Content className="cn-modal" aria-describedby="cn-modal-desc">
-            <Dialog.Title className="cn-modal-title">撤销这条约束？</Dialog.Title>
+            <Dialog.Title className="cn-modal-title">撤销这条要求？</Dialog.Title>
             <p className="cn-modal-desc" id="cn-modal-desc">
               {pendingRevoke ? revokeImpact(pendingRevoke.scope) : ''}
             </p>

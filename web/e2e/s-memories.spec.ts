@@ -9,7 +9,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { T, routeApi, type MemoryFixture } from './fixtures';
+import { T, clickTopBarMenuItem, routeApi, type MemoryFixture } from './fixtures';
 
 /** 记忆 fixture（时间戳统一用 fixtures 的 T，方便断言 datetime 原值透传）。 */
 const mem = (id: string, content: string, over: Partial<MemoryFixture> = {}): MemoryFixture => ({
@@ -29,9 +29,10 @@ const LONG = mem('m-3', `用户详细偏好：${'细节'.repeat(120)}`);
 const panel = (page: Page) => page.locator('.memory-panel');
 const row = (page: Page, text: string) => page.locator('.memory-row', { hasText: text });
 
-/** 从顶栏入口打开记忆面板（两次点击之间有请求，等列表稳定由调用方断言）。 */
+/** 从顶栏入口打开记忆面板（两次点击之间有请求，等列表稳定由调用方断言）。
+ *  #1396：入口已收进顶栏「更多工具」菜单（`menuitem`，不是常驻 `button`）。 */
 async function openMemories(page: Page): Promise<void> {
-  await page.getByRole('button', { name: '记忆管理' }).click();
+  await clickTopBarMenuItem(page, '记忆管理');
   await expect(panel(page)).toBeVisible();
 }
 
@@ -173,23 +174,25 @@ test('AC3：这条在别处已被删（DELETE 404）→ 行随之消失，但失
   await expect(panelError).toHaveCount(0);
 });
 
-test('AC4：记忆未装配（503）→ 如实说"记忆未启用"，不伪造空列表、不给无意义的重试', async ({ page }) => {
+test('AC4：记忆未装配（503）→ 如实说"记忆管理未启用"，不伪造空列表、不给无意义的重试', async ({ page }) => {
   const detail = 'memory capability 未启用：请在 CAPABILITIES 中配置 memory。';
   await routeApi(page, { memories: [SHORT], memoryDisabled: detail });
   await page.goto('/');
   await openMemories(page);
 
-  const degraded = panel(page).locator('.memory-degraded');
-  await expect(degraded).toBeVisible();
-  await expect(degraded).toContainText('记忆未启用');
-  await expect(degraded).toContainText(detail); // 后端原话
-  await expect(degraded).toContainText('CAPABILITIES');
-  // 降级态与空态是两件事：不能显示"还没有记忆"，也不能给"重试"（配置状态重试无用）。
-  await expect(panel(page).locator('.memory-empty')).toHaveCount(0);
+  // #1372 改动 9：中性空态（不是红色故障），后端原话收进「技术详情」折叠区。
+  const disabled = panel(page).locator('.memory-empty.memory-disabled');
+  await expect(disabled).toBeVisible();
+  await expect(disabled).toContainText('记忆管理未启用');
+  await expect(disabled).toContainText(detail); // 后端原话
+  await expect(disabled).toContainText('CAPABILITIES');
+  // 未启用 ≠ 空列表：不能显示"还没有记忆"，也不能给"重试"（配置状态重试无用）。
+  await expect(disabled).not.toContainText('还没有记忆');
+  await expect(panel(page).locator('.memory-empty:not(.memory-disabled)')).toHaveCount(0);
   await expect(panel(page).getByRole('button', { name: '重试' })).toHaveCount(0);
   await expect(panel(page).locator('.memory-loading')).toHaveCount(0);
   // #225：前端不再自己附会一句"这是配置状态而非故障"——那是它对后端状态的断言。
-  await expect(degraded).not.toContainText('非故障');
+  await expect(disabled).not.toContainText('非故障');
 });
 
 test('#225：记忆装配失败（503 + init_failed）→ 说"故障" + 可重试，不得说成"未启用"', async ({
