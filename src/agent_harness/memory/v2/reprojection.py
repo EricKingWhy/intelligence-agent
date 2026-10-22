@@ -101,16 +101,15 @@ def _skip_reason(content: str) -> str | None:
     return None
 
 
-def _disk_entries(markdown: MarkdownMemoryStore, target: str) -> list[str]:
-    """读**磁盘**上的活条目——markdown 是权威面，进程内列表可能落后于别的进程。
-
-    读不出来（文件存在但不可读）时退回活条目列表：宁可少删，也不要把一次读失败
-    当成"文件已经空了"而误删派生行。
-    """
-    raw, read_ok = markdown.read_raw_checked(markdown.path_for(target))
-    if not read_ok:
-        return markdown.entries(target)
-    return list(dict.fromkeys(MarkdownMemoryStore._parse_entries(raw)))
+def _known_entries(markdown: MarkdownMemoryStore) -> list[list[str]] | None:
+    """两个文件的磁盘条目；任一文件读不出来就整体返回 ``None``（不能拿半边做判定）。"""
+    files: list[list[str]] = []
+    for name in ("memory", "user"):
+        entries = markdown.disk_entries(name)
+        if entries is None:
+            return None
+        files.append(entries)
+    return files
 
 
 async def project_entry(
@@ -123,15 +122,19 @@ async def project_entry(
     ``existing`` 覆盖两种情形：已投影过（幂等），以及同一文本已在**另一个** target 上
     投影过（跨文件去重——两行会让 `retrieve_memory` 返回两句一模一样的话）。
 
-    去重域是「目标可见范围内的任何来源」（设计 §5.3 第 2 条，审查 Corr N2）：服务行
-    本身就是这句话的派生态，再建工具行会让检索命中两次。但只算 `USER_GLOBAL`——
-    工具行恒为该 scope，一条 PROJECT 服务行不该挡住投影（审查 Corr P2-3）。
+    去重域是「**目标可见范围内**的任何来源」（设计 §5.3 第 2 条，审查 Corr N2）：服务行
+    本身就是这句话的派生态，再建工具行会让检索命中两次。可见性谓词必须与
+    `keyword_search` 一致，否则会拿一条检索永远看不见的行去抑制投影：只算
+    `USER_GLOBAL`（工具行恒为该 scope，PROJECT 行不该挡住，审查 Corr P2-3），且只算
+    `collection`（`keyword_search` 硬过滤 `tier='collection'`，profile 行在检索侧不存在，
+    让它抑制投影等于这条文本彻底搜不到，审查 Corr C1）。
     """
     content = normalize_entry(content)
     if not content or _skip_reason(content) is not None:
         return "skipped"
     if await store.find_active_by_digest(
-        trusted, entry_digest(content), scope=MemoryScope.USER_GLOBAL,
+        trusted, entry_digest(content),
+        scope=MemoryScope.USER_GLOBAL, tier=MemoryTier.COLLECTION,
     ) is not None:
         return "existing"
     await store.create(
@@ -177,15 +180,18 @@ async def _retract(
     文件），所以查找也不看 target——否则从"没有那行"的文件里删会找不到共享行，
     另一个文件清空后它就成了孤儿（审查 Corr P2-1 / P2-2 的统一口径）。
 
-    两个文件的判定**直读磁盘**（`_disk_entries`），不读活条目列表：`_mutate` 只重读
+    两个文件的判定**直读磁盘**（`markdown.disk_entries`），不读活条目列表：`_mutate` 只重读
     被写的那一个 target，另一个文件在整场会话里都是陈旧快照——别的进程写进去的文本
     会被判成"已经没了"而误删共享行，且本会话内不自愈（审查 Corr N3）。
+    任一文件读不出来就整体判"未知"并跳过删除（审查 Corr C2）。
     ``present`` 是调用方已经算好的两文件摘要并集（批量路径复用，避免 O(n·m)，审查 N7）。
     """
     digest = entry_digest(content)
     if present is None:
-        present = {entry_digest(entry)
-                   for name in ("memory", "user") for entry in _disk_entries(markdown, name)}
+        files = _known_entries(markdown)
+        if files is None:
+            return "kept", None
+        present = {entry_digest(entry) for entries in files for entry in entries}
     if digest in present:
         return "kept", None
     record = await store.find_tool_by_digest(trusted, digest)
@@ -324,21 +330,30 @@ async def drain_pending(
     drained = 0
     errors: list[list[str]] = []
     # 摘要集合按 target 预先算一次：逐行重算是 O(n·m)（审查 Std P3-2）。
-    present = {target: {entry_digest(entry) for entry in _disk_entries(markdown, target)}
-               for target in ("memory", "user")}
+    # 读不出来就是 `None`：那一侧的行这一轮不判定（保留账本，审查 Corr C2）。
+    present: dict[str, set[str] | None] = {}
+    for target in ("memory", "user"):
+        entries = markdown.disk_entries(target)
+        present[target] = None if entries is None else {entry_digest(e) for e in entries}
+    # 两文件并集也算一次：删除侧的 `_retract` 要它判"另一个文件还有没有"（审查 N7）。
+    both = None if None in present.values() else set().union(*present.values())
     for row in await store.pending_projections(trusted):
         target = str(row["target"])
         content = str(row["content"])
         digest = str(row["content_digest"])
+        known = present[target]
+        if known is None:
+            continue
         try:
-            if digest in present[target]:
+            if digest in known:
                 await project_entry(
                     store, target, content, trusted,
                     session_id=row["session_id"], event_id=row["event_id"],
                 )
             else:
                 outcome, error_type = await _retract(
-                    store, markdown, target, content, trusted, reason="markdown_removed",
+                    store, markdown, target, content, trusted,
+                    reason="markdown_removed", present=both,
                 )
                 if outcome == "pending":
                     # 失败留痕（attempts/last_error）已在 `_retract` 里写过，这里只记错误。
@@ -371,12 +386,20 @@ async def reproject_target(
     做全量对账时它既不在 `entries` 里也删不掉，成了对账看不见的孤儿（审查 Corr N5）。
     """
     summary = _Summary()
-    entries = {entry_digest(entry): entry for entry in _disk_entries(markdown, target)}
+    disk = markdown.disk_entries(target)
+    if disk is None:
+        # 读不出来就别对账：拿空集合当"markdown 空了"会把派生层整片删掉（审查 Corr C2）。
+        logger.warning("memory reprojection skipped: %s is unreadable", target)
+        return summary
+    entries = {entry_digest(entry): entry for entry in disk}
     summary["desired"] = len(entries)
     actual = await store.tool_projection_digests(trusted)
     # 两文件摘要并集只算一次：删除循环里逐条重算是 O(n·m)（审查 Corr N7）。
-    present = {entry_digest(entry)
-               for name in ("memory", "user") for entry in _disk_entries(markdown, name)}
+    files = _known_entries(markdown)
+    present = (
+        None if files is None
+        else {entry_digest(entry) for entries in files for entry in entries}
+    )
 
     for digest, entry in entries.items():
         if digest in actual:
@@ -390,7 +413,9 @@ async def reproject_target(
         outcome, _ = await _retract(
             store, markdown, target, content, trusted,
             reason="markdown_removed", present=present)
-        if outcome != "pending":
+        if outcome in ("deleted", "absent"):
+            # `kept`/`pending` 都不清账本，口径与 `retract_entry`、`drain_pending` 一致：
+            # `kept` 只说明「这次别删」，不说明「已经一致」（审查 Corr N4 / C3）。
             await store.clear_projection(trusted, target, digest)
         summary.count_retraction(outcome)
     return summary

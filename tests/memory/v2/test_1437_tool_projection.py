@@ -19,6 +19,7 @@ from agent_harness.identity import (
 )
 from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.v2 import origin, reprojection
+from agent_harness.memory.v2 import store as store_module
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, entry_digest
@@ -624,7 +625,7 @@ async def test_legacy_database_without_projection_columns_still_initializes(tmp_
 
 async def test_legacy_duplicate_tool_rows_degrade_to_a_plain_index(tmp_path) -> None:
     """审查 Corr N1b 回归：撞过 P2-2 竞态的旧库要能启动（降级为普通索引），不丢行。"""
-    store, _markdown, _service = await build(tmp_path)
+    store, markdown, _service = await build(tmp_path)
     db_path = store.database_path
     with sqlite3.connect(db_path) as connection:
         connection.execute("DROP INDEX memory_v2_one_tool_projection")
@@ -637,6 +638,33 @@ async def test_legacy_duplicate_tool_rows_degrade_to_a_plain_index(tmp_path) -> 
 
     assert _index_names(db_path)["memory_v2_one_tool_projection"] is False
     assert len(await restarted.list_active(TRUSTED, limit=10)) == 2
+
+    # 审查 Std R3-1：warning 里"跑一次 reproject 就收敛"是假的——文本还在 markdown 里
+    # 时一条也清不掉（`tool_projection_digests` 按摘要建字典，两条同文本塌成一条，
+    # 差集为空）。钉死这个行为，免得文案再漂回"能自愈"。
+    await markdown.add("memory", "历史重复行")
+    for _ in range(3):
+        await reprojection.reproject_target(restarted, markdown, TRUSTED, "memory")
+        assert len(await restarted.list_active(TRUSTED, limit=10)) == 2
+
+
+async def test_failed_index_rebuild_restores_a_plain_index(tmp_path, monkeypatch) -> None:
+    """审查 Corr C5 回归：`DROP` 之后重建失败，必须补回普通索引再抛。
+
+    只捕获 `IntegrityError` 的话，其它失败会让这个库连查询索引都没有——比降级态更差。
+    """
+    store, _markdown, _service = await build(tmp_path)
+    db_path = store.database_path
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP INDEX memory_v2_one_tool_projection")
+    monkeypatch.setattr(
+        store_module, "_TOOL_PROJECTION_INDEX",
+        "CREATE UNIQUE INDEX memory_v2_one_tool_projection ON memory_v2_records(no_such_col)")
+
+    with pytest.raises(sqlite3.OperationalError):
+        await SqliteMemoryV2Store(db_path).initialize()
+
+    assert _index_names(db_path)["memory_v2_one_tool_projection"] is False
 
 
 async def test_service_row_with_the_same_text_does_not_duplicate_the_projection(tmp_path) -> None:
@@ -664,6 +692,35 @@ async def test_service_row_with_the_same_text_does_not_duplicate_the_projection(
     assert [hit.record.content for hit in hits] == ["用户喜欢喝乌龙茶"]
 
 
+async def test_profile_service_row_does_not_suppress_the_projection(tmp_path) -> None:
+    """审查 Corr C1 回归：profile 行在 `keyword_search` 的可见域之外，不得抑制工具投影。
+
+    它满足 `scope=USER_GLOBAL` 却被 `tier='collection'` 硬过滤——让它抑制就等于这段
+    文本在派生层彻底搜不到，而工具还报 `projection: done`。
+    """
+    store, markdown, service = await build(tmp_path)
+    await service.create(MemoryDraftV2(
+        kind=MemoryKind.SEMANTIC, tier=MemoryTier.PROFILE, scope=MemoryScope.USER_GLOBAL,
+        content="用户偏好深色主题", payload=SemanticPayload(
+            subject="s", fact="用户偏好深色主题", category=SemanticCategory.PREFERENCE),
+        importance=0.8, strength=0.8, source_type=SourceType.AUTOMATIC,
+        source_session_id="s-1", source_event_ids=["e-1"],
+        evidence=[EvidenceItem(role="user", excerpt="深色主题", hash="0" * 64)],
+    ), TRUSTED)
+
+    result = await MemoryTool(markdown, service=service).execute(_MemoryArgs(
+        action="add", target="user", content="用户偏好深色主题"))
+
+    assert result.ok is True, result
+    assert result.data["projection"] == "done"
+    assert sorted(record.content for record in await store.list_active(TRUSTED, limit=10)) == [
+        "用户偏好深色主题", "用户偏好深色主题"]
+    hits = await service.hybrid_search(
+        "深色主题", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
+    )
+    assert [hit.record.content for hit in hits] == ["用户偏好深色主题"]
+
+
 async def test_retraction_reads_the_other_file_from_disk_not_the_stale_snapshot(tmp_path) -> None:
     """审查 Corr N3 回归：另一进程写进另一个文件的同文本，本会话撤回时不得被误删。"""
     store, markdown, service = await build(tmp_path)
@@ -684,6 +741,61 @@ async def test_retraction_reads_the_other_file_from_disk_not_the_stale_snapshot(
         "两个进程", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
     )
     assert len(hits) == 1
+
+
+async def test_unreadable_other_file_blocks_retraction_instead_of_trusting_the_snapshot(
+    tmp_path, monkeypatch,
+) -> None:
+    """审查 Corr C2 回归：另一个文件读不出来时判"未知"并跳过删除，不得退回本会话快照。
+
+    快照只刷新被写的 target，另一个文件可能还是空列表——拿它当"文件已经空了"会删掉
+    另一个进程刚写进去的文本，方向与"宁可少删"相反。
+    """
+    store, markdown, service = await build(tmp_path)
+    tool = MemoryTool(markdown, service=service)
+    assert (await tool.execute(_MemoryArgs(
+        action="add", target="memory", content="不可读时的句子"))).ok is True
+    other = MarkdownMemoryStore(markdown.directory)
+    await other.add("user", "不可读时的句子")
+    assert markdown.entries("user") == []  # 本会话快照里没有（另一进程写的）
+
+    user_path = markdown.path_for("user")
+    real = MarkdownMemoryStore.read_raw_checked
+
+    def flaky(path):
+        return ("", False) if Path(path) == user_path else real(path)
+
+    monkeypatch.setattr(MarkdownMemoryStore, "read_raw_checked", staticmethod(flaky))
+
+    assert (await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="不可读时的句子"))).ok is True
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "不可读时的句子"]
+
+    # 全量对账同理：读不出来就别删。
+    assert await reprojection.reproject_target(store, markdown, TRUSTED, "user") == {
+        "created": 0, "deleted": 0, "skipped": [], "pending": False, "desired": 0}
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "不可读时的句子"]
+
+
+async def test_reproject_kept_does_not_clear_the_pending_row(tmp_path) -> None:
+    """审查 Corr C3 / Std R3-2 回归：`reproject_target` 的 `kept` 也不得清账本。
+
+    与 `retract_entry`、`drain_pending` 同口径——`kept` 只说明"这次别删"。
+    """
+    store, markdown, _service = await build(tmp_path)
+    await store.create(
+        reprojection.draft_for("memory", "跨文件条目"), TRUSTED,
+        projection_source="tool", projection_target="memory")
+    await store.enqueue_projection(TRUSTED, "memory", "跨文件条目")
+    # 文本只还在 USER.md 里：memory 侧对账会判 `kept`（不是"已经一致"）。
+    await markdown.add("user", "跨文件条目")
+
+    summary = await reprojection.reproject_target(store, markdown, TRUSTED, "memory")
+
+    assert summary["deleted"] == 0, summary
+    assert [row[0] for row in _pending_rows(store.database_path)] == ["memory"]
 
 
 async def test_kept_retraction_keeps_the_pending_row(tmp_path, monkeypatch) -> None:

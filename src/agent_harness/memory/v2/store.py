@@ -168,6 +168,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS memory_v2_one_tool_projection
     WHERE status = 'active' AND projection_source = 'tool';
 """
 
+#: 降级形态：同一个名字、同一组列，只是不带唯一性。单独拎出来是因为 `DROP` 之后
+#: 任何失败路径都要能补回它（审查 Corr C5）。
+_TOOL_PROJECTION_PLAIN_INDEX = """
+CREATE INDEX IF NOT EXISTS memory_v2_one_tool_projection
+    ON memory_v2_records(tenant_id, user_id, content)
+    WHERE status = 'active' AND projection_source = 'tool';
+"""
+
 #: FTS5 的 `unicode61` 分词器把连续 CJK 当成**一个** token（实测 `用户喜欢冰美式咖啡` 是一个
 #: token），于是"咖啡"永远匹配不到。索引侧按**单字**切 CJK、查询侧把词也切成单字短语，
 #: 两边就对齐了：`"冰 美 式"` 命中 `冰美式` 且不乱序。英文仍按空白/标点分词，不受影响。
@@ -317,11 +325,14 @@ async def _ensure_tool_projection_index(connection) -> None:
     """建 `_TOOL_PROJECTION_INDEX`；撞上历史重复行就降级为普通索引（审查 Corr N1b）。
 
     重复行只可能来自 P2-2 竞态存在的那段时间，且它们本就是同一个逻辑事实——删掉
-    后来的那条不丢信息（markdown 才是权威，下一轮 `reproject` 会按需重建）。但**不在
-    迁移里删数据**：升级路径不该悄悄丢行，降级 + 一条 warning 让人看得见。
-    普通索引仍覆盖查询（唯一性退化为代码层去重，与 P2-2 修复前的行为一致）。
+    后来的那条不丢信息（markdown 才是权威）。但**不在迁移里删数据**：升级路径不该
+    悄悄丢行，降级 + 一条 warning 让人看得见。
 
-    降级不是永久的：每轮启动重试一次升级，重复行被 `reproject` 清掉之后自动回到唯一索引。
+    降级态的代价要说清（审查 Std R3-1 / Corr C4）：普通索引不带唯一性，并发写入的
+    竞态会原样复现（实测 8 并发 ⇒ 8 行），代码层没有第二道闸——`project_entry` 是
+    read-then-write，正是竞态本身。而且 `reproject` **清不掉**还在 markdown 里的重复行
+    （它按摘要去重，三条同文本只会看见一条）；只有当这段文本从两个文件里都移除之后，
+    每轮 `reproject` 才删掉一条，删空后的**下一次 `initialize`** 才会升级回唯一索引。
     """
     async with connection.execute("PRAGMA index_list(memory_v2_records)") as cursor:
         existing = {row["name"]: bool(row["unique"]) for row in await cursor.fetchall()}
@@ -331,15 +342,18 @@ async def _ensure_tool_projection_index(connection) -> None:
         await connection.execute("DROP INDEX IF EXISTS memory_v2_one_tool_projection")
     try:
         await connection.executescript(_TOOL_PROJECTION_INDEX)
-    except aiosqlite.IntegrityError:
+    except Exception as error:
+        # DROP 已经执行过了：任何失败都先补回普通索引，否则这个库连查询索引都没有，
+        # 比降级态更差（审查 Corr C5）。
+        await connection.execute(_TOOL_PROJECTION_PLAIN_INDEX)
+        if not isinstance(error, aiosqlite.IntegrityError):
+            raise
         logger.warning(
             "memory_v2_one_tool_projection could not be created (duplicate tool rows from "
-            "an older build); falling back to a non-unique index. Run a full reprojection "
-            "to collapse the duplicates.")
-        await connection.execute(
-            "CREATE INDEX IF NOT EXISTS memory_v2_one_tool_projection "
-            "ON memory_v2_records(tenant_id, user_id, content) "
-            "WHERE status = 'active' AND projection_source = 'tool'")
+            "an older build); falling back to a non-unique index. Uniqueness is NOT enforced "
+            "until the duplicates are gone: remove the duplicated text from both markdown "
+            "files, then run a reprojection once per duplicate (each pass deletes one row); "
+            "the unique index is restored on the next start after the last one is gone.")
 
 
 class SqliteMemoryV2Store:
@@ -931,10 +945,11 @@ class SqliteMemoryV2Store:
     # 投影对账（#1437 F-06 / F-06b）
     # ----------------------------------------------------------------------------------
     #
-    # 两个查询都把来源写进 WHERE，只回退到该身份的工具行；`tool_projection_digests`
-    # 另按 target 收窄，`find_active_by_digest` **刻意不按 target 过滤**（一条工具行可
-    # 同时服务两个文件）。正文摘要仍在 Python 侧比对：`entry_digest` 是 sha256，
-    # SQLite 没有内置函数，
+    # 来源过滤按用途分：`tool_projection_digests` 写死 `projection_source='tool'`（对账
+    # 只认工具行，服务行永不参与），`find_active_by_digest` 则**不过滤来源**——投影去重
+    # 要把同文本的服务行也算进来（审查 Corr N2）。前者可按 target 收窄，后者**刻意不按
+    # target 过滤**（一条工具行可同时服务两个文件）。正文摘要仍在 Python 侧比对：
+    # `entry_digest` 是 sha256，SQLite 没有内置函数，
     # 想下推就得另存一列摘要。当前规模（单用户数百条）下这几次扫描是常数级开销，
     # 不值得为此加列 + 回填迁移；真到万级再按 `ponytail` 的口径加 `content_digest`
     # 列与索引（与 `memory_v2_one_tool_projection` 合并建设）。
@@ -974,18 +989,21 @@ class SqliteMemoryV2Store:
     async def find_active_by_digest(
         self, trusted: TrustedMemoryIdentity, digest: str, *,
         scope: MemoryScope | None = None, project_id: str | None = None,
+        tier: MemoryTier | None = None,
     ) -> MemoryRecordV2 | None:
         """按正文摘要找一条 active 行，用于「这条要不要再投影」的去重判定。
 
-        两个调用方的去重域不同，所以来源过滤是**参数**而不是写死的：
+        唯一调用方是 `project_entry`：去重域是「**目标可见范围内**的任何来源」（设计
+        §5.3 第 2 条，审查 Corr N2）——服务行本身就是这句话的派生态，再建工具行会让
+        检索命中两次。撤回不走这里，`_retract` 用 `find_tool_by_digest`（只认工具来源，
+        服务行不得被撤回删掉）。
 
-        - 投影去重（`project_entry`）：任何来源都算，含 service——设计 §5.3 第 2 条
-          要求「同一文本只投影一条」，否则 `retrieve_memory` 会把同一句话返回两次
-          （审查 Corr N2）。服务行本身就是这句话的派生态，再建工具行就是重复。
-        - 撤回（`_retract`）：只认工具来源——服务行是独立的逻辑记忆，撤回不得删它。
-
-        ``scope``/``project_id`` 限定可见性：工具行恒为 `user_global`，一条 PROJECT
-        服务行不该挡住 `USER_GLOBAL` 的投影（审查 Corr P2-3）。
+        ``scope``/``project_id``/``tier`` 是**可见性**参数，调用方必须传成与
+        `keyword_search` 相同的谓词，否则会拿一条检索永远看不见的行去抑制投影：
+        工具行恒为 `user_global` + `collection`，所以 PROJECT 行不该挡 `USER_GLOBAL`
+        （审查 Corr P2-3），`profile` 行也不该挡 `collection`（审查 Corr C1：它满足
+        scope 判定但被 `keyword_search` 的 `tier='collection'` 硬过滤，抑制了就等于
+        这条文本在派生层彻底检索不到）。
 
         不按 target 过滤：一条工具行可以同时服务两个文件（见 `project_entry` 的
         跨文件去重语义与 `memory_v2_one_tool_projection` 的键形状）。
@@ -999,6 +1017,9 @@ class SqliteMemoryV2Store:
             if scope is MemoryScope.PROJECT:
                 sql += " AND project_id=?"
                 params.append(project_id)
+        if tier is not None:
+            sql += " AND tier=?"
+            params.append(tier.value)
         async with (
             connect(self.database_path) as connection,
             connection.execute(sql, params) as cursor,
