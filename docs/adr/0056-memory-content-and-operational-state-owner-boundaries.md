@@ -167,7 +167,7 @@ ID/root/version/状态/来源、staged 审批 payload 与 pin、outbox 派生动
 | 审批 | staged + pin + 显式批准 | **#1494** AC1（可信用户动作不被无依据二次审批、模型/自动写仍守批准策略）、AC2 |
 | 来源（provenance） | 记录来源事件/Session；旧身份标签 | **#1493** AC1（逐行 hash/旧 ID/provenance 可核）+ **#1494** AC4 |
 | 幂等 | formation idempotency key + lease | **#1494** AC4（同 key 只一次逻辑更新、lease 丢失零 commit） |
-| 墓碑 | tombstone 拒绝旧输入重放 | **#1494** AC2（tombstone 有非 SQLite owner）+ **#1495** AC3 + **#1496** AC3 |
+| 墓碑 | tombstone 拒绝旧输入重放 | **#1494** AC2（tombstone 有非 SQLite owner）+ **#1495** AC4（墓碑重放拒绝）+ **#1496** AC3（墓碑抑制） |
 
 横向不变量（不新增 AC，只约束上述票不得破线）：
 
