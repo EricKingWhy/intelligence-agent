@@ -9,7 +9,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { T, routeApi, type MemoryFixture } from './fixtures';
+import { T, clickTopBarMenuItem, routeApi, type MemoryFixture } from './fixtures';
 
 /** 记忆 fixture（时间戳统一用 fixtures 的 T，方便断言 datetime 原值透传）。 */
 const mem = (id: string, content: string, over: Partial<MemoryFixture> = {}): MemoryFixture => ({
@@ -29,9 +29,10 @@ const LONG = mem('m-3', `用户详细偏好：${'细节'.repeat(120)}`);
 const panel = (page: Page) => page.locator('.memory-panel');
 const row = (page: Page, text: string) => page.locator('.memory-row', { hasText: text });
 
-/** 从顶栏入口打开记忆面板（两次点击之间有请求，等列表稳定由调用方断言）。 */
+/** 从顶栏入口打开记忆面板（两次点击之间有请求，等列表稳定由调用方断言）。
+ *  #1396：入口已收进顶栏「更多工具」菜单（`menuitem`，不是常驻 `button`）。 */
 async function openMemories(page: Page): Promise<void> {
-  await page.getByRole('button', { name: '记忆管理' }).click();
+  await clickTopBarMenuItem(page, '记忆管理');
   await expect(panel(page)).toBeVisible();
 }
 
