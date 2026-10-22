@@ -1,0 +1,1 @@
+2026-10-23	#1484 施工后 fresh correctness/spec 与 standards/security 审查：按 review-debug-playbook 核对 allowlist、find 动作、路径/展开、deny 优先、ToolExecutor 审批闭环与范围；P0-P4=0；未改 executor/container 设计。	c451eafe3b35328cb37fcf9cb2101f7cd7c27a7b..b6f061e2b07ee59b84e7155a3503d43a70320e41
