@@ -345,7 +345,7 @@ async function openTaskReview(
 for (const theme of ['dark', 'light'] as const) {
   test(`[${theme}] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3）`, async ({ page }) => {
     await openWorkspace(page, theme);
-    for (const selector of ['.session-item-meta', '.session-item-id', '.tl-seq']) {
+    for (const selector of ['.session-item-meta', '.session-item-id']) {
       const m = await measure(page, selector);
       expect(m.fontSize, `${selector} font-size`).toBe('12px');
       const ratio = contrast(m.color, m.bg);

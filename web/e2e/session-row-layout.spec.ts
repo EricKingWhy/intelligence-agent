@@ -2,8 +2,9 @@
  *
  *  **仲裁（#1465，2026-10-22）**：会话行布局以 #1399 定版为准 —— 标题独占首行、
  *  12 位会话 ID 在第二行 meta（ID · 事件数 · 时间）；#1370 P0-7 的「id 移到标题行尾」
- *  共行要求作废。依据 = 已合入 main 的产品实现（`857f9245`：`SessionList.tsx` 把 ID
- *  移进 `.session-item-meta`）+ 用户 2026-10-22 全清令。本文件此前锁的是共行布局
+ *  共行要求作废。依据 = 协调员 2026-10-22 仲裁（#1465 issuecomment-6332704502）
+ *  + 已合入 main 的 #1399 定版实现（`857f9245`：`SessionList.tsx` 把 ID 移进
+ *  `.session-item-meta`）。本文件此前锁的是共行布局
  *  （spec 末改 `c6a9dfd8` 早于 `857f9245`），故基线红在「id 与标题纵向重叠」。
  *
  *  此前这些改动只有截图：把 `SessionList` 改回"标题 / id / 徽标"三行、删掉
@@ -51,12 +52,9 @@ test('#1399 会话行：标题独占首行、id 在 meta 行、行高 ≥44、�
     const it = item.getBoundingClientRect();
     const m = meta.getBoundingClientRect();
     return {
-      titleTop: t.top,
       titleBottom: t.bottom,
-      titleLeft: t.left,
       idTop: i.top,
       idBottom: i.bottom,
-      idLeft: i.left,
       metaTop: m.top,
       metaBottom: m.bottom,
       idParent: id.parentElement?.className ?? '',
