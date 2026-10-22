@@ -242,6 +242,7 @@ ID/root/version/状态/来源、staged 审批 payload 与 pin、outbox 派生动
   不由模型选权限/来源、optional failure 不拖垮 Core、Phase 历史不改写、SessionEvent/Operation/
   Artifact 各自 owner、类型/来源/审批/删除抑制语义、receipt 与 failure/recovery 证据），修订时
   不得一并删除。本 ADR 与 #1490 均不改这些文档。
+  逐条清单见 #1543 正文（该票已逐行照录八组保留项）。
 - **C 卷宗 §4.2 的条件项（只登记，不处置）**：① **ADR-0013 条件重开**——RAG 用单租户 partition
   与 SQLite source registry；只有所有者要求全产品去掉 tenant 列时才单列 RAG 数据映射，本转向只移除
   Memory 路由、不动其数据，也不把 Knowledge 专属协议/collection 与 Memory 合并；② **ADR-0020b
