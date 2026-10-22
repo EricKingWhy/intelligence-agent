@@ -1,0 +1,181 @@
+"""#1438 F-13a：审批面的端到端验收（CLI `agent-harness memory pending|approve|reject`）。
+
+票面 §4.3 点名两段，这里都覆盖：
+
+- `_memory_command`（`:3532` 起，领域路径与渲染）：装配用生产同一个
+  `build_memory_v2_service`——CLI 与 web 是同一条领域路径，判据也应是同一组：
+  列表形状、批准落盘、拒绝丢弃、pin 失效拒绝且保留、不存在的 id 拒绝；
+- `_main_memory`（`:3499` 起，argparse + 打印 + 退出码）：见文件末尾一节。
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from agent_harness import cli
+from agent_harness.cli import _main_memory, _memory_command
+from agent_harness.config import Settings
+from agent_harness.memory.v2.assembly import build_memory_v2_service
+from agent_harness.memory.v2.commands import trusted_identity_for_session
+
+
+def _settings(tmp_path: Path) -> Settings:
+    return Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
+
+
+def _args(command: str, staged_id: str | None = None) -> argparse.Namespace:
+    return argparse.Namespace(command=command, staged_id=staged_id)
+
+
+async def _stage(settings: Settings, payload: dict) -> str:
+    service = await build_memory_v2_service(settings)
+    assert service.staged is not None
+    pins, error = await service.staged.resolve_pins(payload)
+    assert error is None, error
+    staged = await service.staged.stage(
+        payload, pins, trusted_identity_for_session("", None))
+    return staged.id
+
+
+def _memory_file(settings: Settings) -> Path:
+    return Path(settings.workspace_dir) / "memories" / "MEMORY.md"
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+@pytest.mark.asyncio
+async def test_pending_renders_id_target_action_and_body(tmp_path):
+    settings = _settings(tmp_path)
+    staged_id = await _stage(settings, {
+        "target": "memory", "action": "add", "content": "用户喜欢冰美式", "old_text": None})
+
+    output, failed = await _memory_command(settings, _args("pending"))
+
+    assert failed is False
+    assert f"id={staged_id}" in output
+    assert "target=memory" in output and "action=add" in output
+    assert "用户喜欢冰美式" in output
+
+
+@pytest.mark.asyncio
+async def test_pending_is_empty_when_nothing_is_staged(tmp_path):
+    output, failed = await _memory_command(_settings(tmp_path), _args("pending"))
+    assert (output, failed) == ("（暂无待审写入）", False)
+
+
+@pytest.mark.asyncio
+async def test_approve_writes_through_to_markdown(tmp_path):
+    settings = _settings(tmp_path)
+    staged_id = await _stage(settings, {
+        "target": "memory", "action": "add", "content": "用户喜欢冰美式", "old_text": None})
+
+    output, failed = await _memory_command(settings, _args("approve", staged_id))
+
+    assert failed is False and output.startswith(f"已批准 {staged_id}")
+    assert "用户喜欢冰美式" in _read(_memory_file(settings))
+
+
+@pytest.mark.asyncio
+async def test_reject_discards_without_writing(tmp_path):
+    settings = _settings(tmp_path)
+    staged_id = await _stage(settings, {
+        "target": "memory", "action": "add", "content": "用户喜欢冰美式", "old_text": None})
+
+    output, failed = await _memory_command(settings, _args("reject", staged_id))
+
+    assert (output, failed) == ("Memory write rejected.", False)
+    assert "用户喜欢冰美式" not in _read(_memory_file(settings))
+    assert (await _memory_command(settings, _args("pending")))[0] == "（暂无待审写入）"
+
+
+@pytest.mark.asyncio
+async def test_approve_after_external_edit_is_refused_and_keeps_the_record(tmp_path):
+    settings = _settings(tmp_path)
+    memory_file = _memory_file(settings)
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text("用户喜欢手冲咖啡", encoding="utf-8")
+    staged_id = await _stage(settings, {
+        "target": "memory", "action": "replace",
+        "content": "用户喜欢冰美式", "old_text": "手冲咖啡"})
+
+    memory_file.write_text("用户喜欢冷萃咖啡", encoding="utf-8")
+    output, failed = await _memory_command(settings, _args("approve", staged_id))
+
+    assert failed is False
+    assert output.startswith("未落盘：")
+    assert memory_file.read_text(encoding="utf-8") == "用户喜欢冷萃咖啡"
+    assert f"id={staged_id}" in (await _memory_command(settings, _args("pending")))[0]
+
+
+@pytest.mark.asyncio
+async def test_approve_and_reject_unknown_ids_are_refused(tmp_path):
+    settings = _settings(tmp_path)
+
+    approve_output, _ = await _memory_command(settings, _args("approve", "stg_never_existed"))
+    reject_output, _ = await _memory_command(settings, _args("reject", "stg_never_existed"))
+
+    assert approve_output == "未落盘：No such pending memory write."
+    assert reject_output == "No such pending memory write."
+
+
+# --------------------------------------------------------------------------------------
+# `_main_memory` 入口层（票面 §4.3 的第二段）：argparse 装配、打印、退出码
+# --------------------------------------------------------------------------------------
+
+
+def _main(monkeypatch, settings: Settings) -> None:
+    """把入口层的外部依赖钉到 tmp 工作区：Settings 与日志落盘。"""
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli, "setup_logging", lambda *args, **kwargs: None)
+
+
+def test_main_memory_pending_prints_the_listing(monkeypatch, tmp_path, capsys):
+    settings = _settings(tmp_path)
+    staged_id = asyncio.run(_stage(settings, {
+        "target": "memory", "action": "add", "content": "用户喜欢冰美式", "old_text": None}))
+    _main(monkeypatch, settings)
+
+    _main_memory(["pending"])  # 成功路径不得抛 SystemExit
+
+    printed = capsys.readouterr().out
+    assert f"id={staged_id}" in printed and "用户喜欢冰美式" in printed
+
+
+def test_main_memory_refused_approve_prints_reason_and_exits_zero(monkeypatch, tmp_path, capsys):
+    """审批被拒是业务结果，不是进程失败：打印原因、退出码 0（见 `_main_memory` docstring）。"""
+    _main(monkeypatch, _settings(tmp_path))
+
+    _main_memory(["approve", "stg_never_existed"])
+
+    assert capsys.readouterr().out.strip() == "未落盘：No such pending memory write."
+
+
+def test_main_memory_raises_exit_code_two_when_the_command_reports_failure(
+    monkeypatch, tmp_path, capsys,
+):
+    """`failed=True` → 打印完整输出后 `SystemExit(2)`（脚本化调用必须看得见失败）。"""
+    _main(monkeypatch, _settings(tmp_path))
+
+    async def _failed(settings, args):
+        return "迁移完成：未导出 1 条", True
+
+    monkeypatch.setattr(cli, "_memory_command", _failed)
+    with pytest.raises(SystemExit) as excinfo:
+        _main_memory(["migrate"])
+
+    assert excinfo.value.code == 2
+    assert "未导出 1 条" in capsys.readouterr().out
+
+
+def test_main_memory_requires_a_subcommand(monkeypatch, tmp_path):
+    """argparse 装配生效：缺子命令 → SystemExit(2)，而不是静默跑空。"""
+    _main(monkeypatch, _settings(tmp_path))
+    with pytest.raises(SystemExit) as excinfo:
+        _main_memory([])
+    assert excinfo.value.code == 2

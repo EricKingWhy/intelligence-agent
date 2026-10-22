@@ -101,6 +101,7 @@ describe('TopBar 会话切换器（#1372 改动 8）', () => {
       createElement(TopBar, {
         ...baseProps,
         conversation: conv,
+        sessionId: 'sess-0000',
         sessions: sessions.slice(0, 1),
         onSelectSession: () => {},
       }),
@@ -113,11 +114,72 @@ describe('TopBar 会话切换器（#1372 改动 8）', () => {
       createElement(TopBar, {
         ...baseProps,
         conversation: conv,
+        sessionId: 'sess-0000',
         sessions,
         onSelectSession: () => {},
       }),
     );
     expect(out).toContain('appbar-session"');
+  });
+});
+
+// ── #1448：切会话后顶栏标题必须立即跟随选中会话。`conversation` 要等异步历史
+//    装载落地才换新，而 `sessionId`（App 的 `selectedId`）在点击时同步变新——标题、
+//    切换器与下拉选中标记都只能按 `sessionId` 派生，不能借道陈旧的 `conversation`。
+describe('TopBar 顶栏标题跟随选中会话（#1448）', () => {
+  const sessions = [
+    { session_id: 'sess-A', archived: false },
+    { session_id: 'sess-B', archived: false },
+    { session_id: 'sess-C', archived: false },
+  ] as never[];
+
+  // 旧会话 A 的投影仍在（历史装载未落地），选中身份已经是 sessionId。
+  const renderBar = (sessionId: string | null, titlesById: Record<string, string>) =>
+    renderToStaticMarkup(
+      createElement(TopBar, {
+        ...baseProps,
+        conversation: initConversation('sess-A'),
+        sessionId,
+        sessions,
+        titlesById,
+        onSelectSession: () => {},
+      }),
+    );
+
+  it('陈旧 conversation：标题与切换器都按选中 sessionId 取，不显示旧会话标题', () => {
+    const out = renderBar('sess-B', {
+      'sess-A': '会话甲的提问',
+      'sess-B': '会话乙的提问',
+    });
+    expect(out).toContain('会话乙的提问');
+    expect(out).not.toContain('会话甲的提问');
+    expect(out).toContain('切换会话：会话乙的提问');
+  });
+
+  it('快速连续切换：只显示终点会话标题，不残留中途会话标题', () => {
+    const out = renderBar('sess-C', {
+      'sess-A': '会话甲的提问',
+      'sess-B': '会话乙的提问',
+      'sess-C': '会话丙的提问',
+    });
+    expect(out).toContain('会话丙的提问');
+    expect(out).not.toContain('会话甲的提问');
+    expect(out).not.toContain('会话乙的提问');
+  });
+
+  it('目标无缓存标题：回退到选中会话的短 id，不借旧会话标题顶上', () => {
+    const out = renderBar('sess-B', { 'sess-A': '会话甲的提问' });
+    expect(out).toContain('sess-B'.slice(0, 8));
+    expect(out).not.toContain('会话甲的提问');
+  });
+
+  it('空态（sessionId=null）：即使 conversation 还残留旧会话一帧，也不渲染旧标题', () => {
+    const out = renderBar(null, {
+      'sess-A': '会话甲的提问',
+      'sess-B': '会话乙的提问',
+    });
+    expect(out).not.toContain('会话甲的提问');
+    expect(out).not.toContain('会话乙的提问');
   });
 });
 

@@ -172,12 +172,16 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   // #1313 口径 B：顶栏用量 = 会话累计（S + R），在渲染期派生（不是 effect 里的状态）。
   const sessionUsage = conversation ? displayedSessionUsage(conversation) : null;
   // #1372 改动 8：会话名（真实标题优先，没有标题时用短 id——不编造名字）。
-  const sessionLabel = conversation
-    ? (titlesById?.[conversation.session_id] || conversation.session_id.slice(0, 8))
+  // #1448：派生源必须是**选中身份** `sessionId`（App 的 selectedId，点击时同步变新），
+  // 不能借道 `conversation.session_id`——历史装载是异步的，切换窗口内 `conversation`
+  // 仍是旧会话，按它取标题会读错键、显示上一个会话的名字。
+  const sessionLabel = sessionId
+    ? (titlesById?.[sessionId] || sessionId.slice(0, 8))
     : '';
   // 归档会话默认不在侧栏显示；切换器同口径，不能给出一个侧栏里找不到的选项。
   const switchableSessions = useMemo(() => sessions?.filter((s) => !s.archived), [sessions]);
-  const canSwitchSession = conversation !== null && onSelectSession !== undefined && (switchableSessions?.length ?? 0) > 1;
+  // #1448：可切换判据同样按选中身份，不按可能滞后一整个历史请求的 `conversation`。
+  const canSwitchSession = sessionId !== null && onSelectSession !== undefined && (switchableSessions?.length ?? 0) > 1;
   // `exp` 来自未验签的 token claims：任何数字都能进来，`toISOString()` 对
   // 非有限/越界值会抛 RangeError，整条顶栏会跟着崩。无效就不显过期时间。
   const expDate = identity?.exp != null && Number.isFinite(identity.exp)
@@ -230,7 +234,9 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
       </div>
 
       <div className="appbar-center">
-        {conversation && (
+        {/* #1448：会话身份横幅（标题 + 切换器）按**选中身份**渲染，不按 `conversation`——
+            切到新会话 / 空态时 `conversation` 可能还残留旧会话一帧，按它渲染会闪出旧标题。 */}
+        {sessionId !== null && (
           canSwitchSession ? (
             <DropdownMenu.Root>
               <Tip content={`当前会话：${sessionLabel} · 点击切换`}>
@@ -260,7 +266,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                       <DropdownMenu.Item
                         key={s.session_id}
                         className="rail-menu-item appbar-session-menu-item"
-                        aria-current={s.session_id === conversation.session_id ? 'true' : undefined}
+                        aria-current={s.session_id === sessionId ? 'true' : undefined}
                         onSelect={() => onSelectSession?.(s.session_id)}
                       >
                         <span className="appbar-session-item-title">{label}</span>
