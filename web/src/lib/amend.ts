@@ -51,9 +51,11 @@ export function toCreateControls(
   };
 }
 
-/** #426：新建会话的预算入口（常用三项）——Composer 的可选草稿 → `budget.run.*`，
+/** #426：预算入口（常用三项）——Composer 的可选草稿 → `budget.run.*`，
  *  随启动 run 的 create 请求提交（#422 裁决：`budget.run` 属于**启动 run** 的请求；
- *  composer 提交恒为 launch=true，无冲突）。
+ *  composer 提交恒为 launch=true，无冲突）。#1444 起已选会话的 `/messages`
+ *  amend 也走本函数（函数名为历史命名）：该次消息 idle→launched 时即为启动
+ *  run；queued / steer 只判定、丢弃。
  *
  *  空白 / 半截 / 非法草稿 → 该维不发键 = 后端按 Deployment 默认——「不设置预算的
  *  默认行为不变」，也不发一个必然被 422 拒掉的请求（turns/tokens 后端 `ge=1`；
