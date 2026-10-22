@@ -105,6 +105,7 @@ from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.session import (
+    MEMORY_HUMAN_BLOCKED,
     MEMORY_HUMAN_UPDATED,
     USER_MESSAGE,
     Session,
@@ -656,31 +657,36 @@ class MemoryJobRunner:
                 # #1039：降级开关**每 job 运行时读**（与 `extraction_enabled` 同链），
                 # 让面板改动对随后执行的 job 立即生效；无 V2 service 时退回构造期默认。
                 fallback_enabled = self._fallback_enabled
+                write_approval = False
                 if self.memory_v2 is not None:
                     trusted = TrustedMemoryIdentity(
                         tenant_id=job.tenant_id, user_id=job.user_id,
                         project_id=job.project_id,
                     )
                     try:
-                        fallback_enabled = (
-                            await self.memory_v2.get_settings(trusted)
-                        ).fallback_enabled
+                        settings = await self.memory_v2.get_settings(trusted)
+                        fallback_enabled = settings.fallback_enabled
+                        write_approval = settings.write_approval
                     except Exception:
                         # 读设置是本 job 的**附加**输入，不是执行的前提：设置存储抖一下不应把
                         # 一轮记忆判成 JOB_FAILED。但也**不能**退回"默认开"——在用户可能已明确
                         # 关掉开关的前提下，一次读取抖动不得把治理选择翻回开（记忆内容可能随之
                         # 外泄到备用 provider）。故 fail-closed：本次不尝试确定性 fallback
                         # （= #1039 之前的保守行为，任务仍以终态收口，下一轮 job 读到设置即恢复）。
+                        # #1461 同一条道理，但保守侧相反：gate 的宽松侧是"关"，所以读失败时
+                        # 按**开**处理（写入落 blocked 等人处置，而不是直落盘）。
                         logger.exception(
                             "Memory V2 job %s: cannot read per-user settings; treating the "
-                            "deterministic fallback switch as disabled for this job",
+                            "deterministic fallback switch as disabled and the write-approval "
+                            "gate as enabled for this job",
                             job.job_id,
                         )
                         fallback_enabled = False
+                        write_approval = True
                 result = await self._executor.run(
                     job, worker_id=self._worker_id, run_events=run_events,
                     history=history, roles=self._roles, sink=self._sink_for(job),
-                    fallback_enabled=fallback_enabled,
+                    fallback_enabled=fallback_enabled, write_approval=write_approval,
                 )
             except Exception:
                 logger.exception("Memory V2 job %s failed outside the executor", job.job_id)
@@ -702,8 +708,30 @@ class MemoryJobRunner:
         - 事件载荷**只带计数与指纹/指针**（不变量 #22）。摘要行本身（verbose 档带
           内容预览）只进日志；
         - `off` 档连日志摘要也不生成（`summarize_*` 自己返回空）。
+
+        #1461 补一条边界：`BLOCKED` 报的是"写入被拦下"这一**事实**（计数 + 行 id），
+        不是内容摘要——没有已提交内容可摘，也刻意不摘（被拦下的内容还没经过人）。
         """
-        if result is None or result.outcome is not MemoryJobOutcome.COMMITTED:
+        if result is None or result.outcome not in (
+            MemoryJobOutcome.COMMITTED, MemoryJobOutcome.BLOCKED,
+        ):
+            return
+        if result.outcome is MemoryJobOutcome.BLOCKED:
+            logger.info(
+                "Memory V2 job %s: %d write(s) blocked for approval (%s)",
+                job.job_id, len(result.blocked_ids), ", ".join(result.blocked_ids),
+            )
+            if self._notification_mode == "off":
+                return
+            self._sink_for(job).emit(
+                MEMORY_HUMAN_BLOCKED,
+                {
+                    "count": len(result.blocked_ids),
+                    "blocked_ids": list(result.blocked_ids),
+                    "job_id": job.job_id,
+                },
+                run_id=job.run_id,
+            )
             return
         if not result.written:
             return

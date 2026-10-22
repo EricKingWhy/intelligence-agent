@@ -95,6 +95,9 @@ class MemoryJobStage(str, Enum):
     ADJUDICATING = "adjudicating"
     APPLYING = "applying"
     #: 跑完且**成功**——含 `NO_MEMORY` / `NOOP` 这类"安静地什么都没写"（AC2）。
+    #: #1461：被审批门拦下的 job 也停在这里——终态 stage 相同，语义由 `outcome` 区分
+    #: COMMITTED / NO_WRITE / BLOCKED。另立一个 stage 会让 `_stage_assignment` 的终态
+    #: 分支（释放 lease、写 outcome）整段跳过，job 就永远终结不了。
     COMPLETED = "completed"
     #: 跑完但失败——不写任何记忆，理由记录在 `reason`。
     DEGRADED = "degraded"
@@ -121,12 +124,16 @@ _OWNED_AND_LIVE = (
 
 
 class MemoryJobOutcome(str, Enum):
-    """成功终态的两种形态（R12：安静成功不能装成错误，也不能装成"写过了"）。"""
+    """成功终态的三种形态（R12：安静成功不能装成错误，也不能装成"写过了"）。"""
 
     #: 至少提交了一次逻辑变更（`memory/updated` 的来源）。
     COMMITTED = "committed"
     #: 明确不写：`NO_MEMORY`、全部 `NOOP`（无 degraded 事件）。
     NO_WRITE = "no_write"
+    #: #1461：审批门开着，写入被拦下并落进 `memory_v2_blocked` 等人处置。
+    #: 它既不是 `COMMITTED`（一条记录都没写）也不是 `NO_WRITE`（有东西被显性拦下、
+    #: 用户可 promote）——三者混在任一侧都会让"发生了什么"读不出来。
+    BLOCKED = "blocked"
 
 
 class ProtectedFactExtractionState(str, Enum):
@@ -394,6 +401,7 @@ class SqliteMemoryV2JobStore:
         work: Callable[[aiosqlite.Connection], Awaitable[T]],
         state: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
         reason: str | None = None, now: datetime | None = None,
+        stage: MemoryJobStage = MemoryJobStage.COMPLETED,
     ) -> T | None:
         """在**一个事务**里执行 `work(connection)` 并写下成功终态（AC6 / AC7）。
 
@@ -428,7 +436,7 @@ class SqliteMemoryV2JobStore:
                     return None
                 result = await work(connection)
                 assignments, values = _stage_assignment(
-                    stage=MemoryJobStage.COMPLETED, state=state() if callable(state) else state,
+                    stage=stage, state=state() if callable(state) else state,
                     outcome=outcome, reason=reason, now_stamp=now_stamp)
                 updated = await connection.execute(
                     f"UPDATE memory_v2_jobs SET {', '.join(assignments)} WHERE job_id=?",
