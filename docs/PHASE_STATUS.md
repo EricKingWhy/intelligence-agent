@@ -1,5 +1,7 @@
 # Phase Status — 实施进度追踪
 
+- 2026-10-22：#1477 面板 Esc 后焦点回到「更多工具」触发器——施工 `1b8f3bc1`（`openerRef` 记录时按 Radix 菜单契约上溯到常驻触发器；两 test 文件各 +2 例），验收段由接手执行器补完：单测两文件全绿、红先在 `f60f5365` 隔离树只见新增两例红、沙箱决定性组（本分支树 + `origin/main` #1478 版 spec）两文件与 `-g AC9` 全绿、旧 spec 回归组与纯 `f60f5365` 对照同形（非本票引入）、纯 main 产品上 AC9 断言 `Expected: focused / Received: inactive` 复现缺陷。台账行落行后覆盖闸门 rc=0。**未做独立双轴审查，如实声明**。分支已 push，未开 PR、未换标签（工单明令）。读数见月档 `docs/phase_status/2026-10.md` 2026-10-22 #1477 节与 Tracker `## #1477`。
+
 - 2026-10-22：#1465 会话行布局回归锁收口（PR 待开）：`t-contrast.spec.ts:348` 摘掉死选择器 `.tl-seq`（#1419 已删该元素，`measure()` 抛错使本票 `:366` 断言在提交树上不可达）、spec 文件头归属订正为「协调员仲裁 + 已合入 main 的 #1399 定版实现」、删死字段。沙箱复跑：`session-row-layout` 整文件全绿，`t-contrast` 整文件仍红但失败数较基线下降、本票断言 4/4 实例转绿（读数见 `/home/agent/1465-logs/fix-d-runs.log`）。两轴：Correctness 首判 REJECT（阻塞点仅验收口径）→ 协调员裁定 `issuecomment-6334846599` + `:348` 修复后转 APPROVE；Standards APPROVE-WITH-FINDINGS（P2×3/P3×3/P4×4）逐条处置。Gate-0 冻结树 `f44fba2f` 收据如实落盘（唯一 ❌ = coverage，§8.2 第 4 条预期）；`a84e4d84` 的 (a) 路线实测 FAIL、改走 (b) 宽限窗口径。残余：t-contrast 剩余票外红与文件头陈旧项归批三。详见 Tracker `## #1465` 与月档。
 
 - 2026-10-21：#1360 本地补修 tip `61ba21c4`（PR #1426 尚未更新；最新 `origin/main` 已是祖先）：修 Npipe recv、补流读取回归，并为 Windows 离线运行时锁补 tzdata 2026.5。两轴复审 PASS；installer lock 5 项与 desktop test/typecheck 通过。后端全量按用户要求未重跑；中断时的红点已由增量复现定位并修复。增量 Gate-0 3/3、裸 Gate-0 6/6，收据 `docs/gate/61ba21c4c78e54ec47aa82deec7d8bca3043ae08.json`；全量 pytest 未完成。详见月档。
