@@ -148,6 +148,13 @@ test.describe('#1368 390：会话抽屉（P1-1 / P1-4）', () => {
     await rowOf(page, 's2').locator('.rail-menu-btn').click();
     const menu = page.locator('.rail-menu-sheet');
     await expect(menu).toBeVisible();
+    // #1466：入场动画 `rail-sheet-in` 是 translateY(12px) → 0（150ms）。`toBeVisible()`
+    // 只保证元素可见，不保证动画落定；未落定时 boundingBox() 会读到下沉的中间态，
+    // 下边距 = 12 − 12·进度 ⇒ 实测 Received 9/10/11（逐帧采样见 #1466 报告）。
+    // 断言判的是**终态**，所以先等动画结束再量，否则测的是动画相位而不是布局。
+    // 只等 sheet 自身的动画（入场动画挂在它身上）；不带 subtree，避免将来某个
+    // 无限循环的子元素动画把这里挂死。
+    await expect.poll(() => menu.evaluate((el) => el.getAnimations().length)).toBe(0);
 
     const box = (await menu.boundingBox())!;
     const vp = page.viewportSize()!;
