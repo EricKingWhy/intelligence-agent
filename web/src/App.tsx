@@ -811,6 +811,8 @@ export default function App() {
   // #426/#1444：预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
   // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。新建态随
   // create 请求发出，已选态随下一次 `/messages` 作为 amend 发出（handleSubmit）。
+  // #1467：懒建本身（launch=false）不带它（后端 422 互斥）；懒建出的会话
+  // 走首条消息的 amend 发出。
   const [budgetRunTurnsDraft, setBudgetRunTurnsDraft] = useState('');
   const [budgetRunTokensDraft, setBudgetRunTokensDraft] = useState('');
   const [budgetRunDeadlineDraft, setBudgetRunDeadlineDraft] = useState('');
@@ -899,21 +901,17 @@ export default function App() {
     const pending = (async (): Promise<string | null> => {
       try {
         // #204 口径：只建会话、不启动 run。载荷与「发文本新建」分支同形——
-        // `auto_approve: true` 恒送 + 项目 cwd + 用户在新建态选的权限档 + 预算
-        // 草稿（F1：否则懒建出的会话静默回落到后端默认档，与发文本建出的会话
-        // 语义不同——权限档是 Runtime 边界（不变量 #11），不能静默丢）。空值丢
-        // 弃由 `api.ts buildBody` 单一执行（见 amend.ts 顶部契约说明）。
-        // `model` / `agent_profile` / `reasoning_effort` 不在这里：它们随随后
-        // 首条消息的 amend 面发出（`handleSubmit` 的 `toAmendFields`），懒建只
-        // 负责把会话身份先建出来。
+        // `auto_approve: true` 恒送 + 项目 cwd + 用户在新建态选的权限档（F1：否则
+        // 懒建出的会话静默回落到后端默认档，与发文本建出的会话语义不同——权限档是
+        // Runtime 边界（不变量 #11），不能静默丢）。空值丢弃由 `api.ts buildBody`
+        // 单一执行（见 amend.ts 顶部契约说明）。
+        // `model` / `agent_profile` / `reasoning_effort` / `budget` 不在这里：它们随
+        // 随后首条消息的 amend 面发出（`handleSubmit` 的 `toAmendFields` +
+        // `toCreateBudget`），懒建只负责把会话身份先建出来。#1467：`budget.run` 与
+        // launch=false 互斥（后端 422），带上它这个入口恒失败。
         const created = await createEmptySession({
           auto_approve: true,
           permission_mode: composerControls.permissionMode ?? undefined,
-          budget: toCreateBudget({
-            turns: budgetRunTurnsDraft,
-            totalTokens: budgetRunTokensDraft,
-            deadlineAt: budgetRunDeadlineDraft,
-          }),
           ...(activeProject ? { cwd: activeProject.path } : {}),
         });
         ensuredIdRef.current = created.sessionId;
@@ -928,7 +926,7 @@ export default function App() {
     })();
     ensuringRef.current = pending;
     return pending;
-  }, [selectedId, selectSession, refreshSessions, activeProject, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft]);
+  }, [selectedId, selectSession, refreshSessions, activeProject, composerControls]);
 
   const handleSubmit = useCallback(
     /** 返回值 = 这次发送是否已被受理（#1029），原样透传给 Composer：
@@ -978,6 +976,7 @@ export default function App() {
         // idle→launched 新 run 消费；queued / steer 只判定丢弃）。全空草稿在
         // `toCreateBudget` 返回 undefined，api 层「有值才带键」⇒ 载荷逐字不变。
         // 与 create 路径同一映射点（toCreateBudget），不另造构造器。
+        // #1467：懒建（`ensureSession`）不再带 budget——首条消息走的就是这里。
         budget: toCreateBudget({
           turns: budgetRunTurnsDraft,
           totalTokens: budgetRunTokensDraft,
