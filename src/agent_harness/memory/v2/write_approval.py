@@ -56,10 +56,14 @@ import aiosqlite
 from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.origin import BACKGROUND_REVIEW, ORIGINS, current_origin
-from agent_harness.memory.v2.store import BLOCKED_SCHEMA, STAGED_SCHEMA, MemorySettingsV2
+from agent_harness.memory.v2.store import (
+    BLOCKED_SCHEMA,
+    STAGED_SCHEMA,
+    MemorySettingsV2,
+    _to_record,
+)
 from agent_harness.memory.v2.types import (
     MemoryDraftV2,
-    MemoryRecordV2,
     MemoryStatus,
     TrustedMemoryIdentity,
 )
@@ -676,7 +680,7 @@ class BlockedWriteStore:
             if previous is None:
                 raise KeyError(previous_id)
             superseded.append(
-                MemoryRecordV2.model_validate(previous).model_copy(
+                _to_record(previous).model_copy(
                     update={"status": MemoryStatus.SUPERSEDED}))
             records.append(
                 await self.writer.update_in(connection, previous_id, draft, owner))
@@ -740,11 +744,11 @@ __all__ = [
     "CONFIG_KEY",
     "DISCARDED",
     "DRIFT_PREFIX",
-    "GateDecision",
     "PROMOTED",
     "BlockedDecision",
     "BlockedWrite",
     "BlockedWriteStore",
+    "GateDecision",
     "StagedWrite",
     "StagedWriteStore",
     "evaluate_gate",
