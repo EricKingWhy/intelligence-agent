@@ -2,7 +2,8 @@
 
 移植自 NousResearch/hermes-agent ``agent/background_review.py``（commit
 b324b1f7ed52369ab4bd3b1a03378729120b0f01，2026-10-02，MIT，Copyright (c) 2025
-Nous Research）。六个常量逐字照搬，只有工具名按本仓替换（见下）。
+Nous Research）。六个常量中四块逐字照搬，`SKILL_REVIEW_PROMPT` /
+`COMBINED_REVIEW_PROMPT` 按本仓机制改写（工具名替换 + Protected skills 段删除，见下）。
 
 # 编排不在这里
 
@@ -21,6 +22,9 @@ formation/adjudication 两阶段（`executor.py`），模型只产出结构化�
   白名单只有 ``memory`` 工具的 add 路径 + 只读文件工具（issue §3 M5 表），**没有**
   技能写入路径，所以它们此刻没有消费者；作为已照搬的文案保留，等技能侧 review job
   落地时直接接上，不再重抄一遍。
+
+「4/6 无消费者」是**有意保留**的存量，已登记在 #1353 的「偏差清单追认」记录里
+（#1441 §5 / F-15）；将来做代码瘦身凭那条记录再议删除，不要当成漏接。
 
 # 不搬 N=10 计数器（有意，非遗漏）
 
