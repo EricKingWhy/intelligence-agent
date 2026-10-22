@@ -450,7 +450,10 @@ def test_live_skill_catalog_rejects_deep_json_without_raising(
 # ── serve_once 优雅停机（审查修复轮 P2-1：此前 finally 清理只被崩溃路径间接覆盖） ──
 
 
-def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(tmp_path: Path) -> None:
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(
+    tmp_path: Path, host: str
+) -> None:
     """进程内走一次完整「就绪 → 停机」闭环（`stop_when` 接缝），钉住 finally 三件
     清理：端点文件、host token、实例锁。此前没有任何测试覆盖优雅停机路径——
     子进程测试全部以 kill 收尾（非优雅路径），删掉 finally 里的清理依旧全绿。"""
@@ -471,7 +474,12 @@ def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(tmp_path: Path)
     def _run() -> None:
         try:
             outcomes.append(
-                serve_once(settings, credentials=backend, stop_when=stop.is_set)
+                serve_once(
+                    settings,
+                    credentials=backend,
+                    host=host,
+                    stop_when=stop.is_set,
+                )
             )
         except Exception as error:  # noqa: BLE001 — 线程边界：失败带回主线程断言，不静默
             errors.append(error)

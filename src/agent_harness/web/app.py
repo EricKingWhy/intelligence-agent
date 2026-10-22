@@ -2311,6 +2311,11 @@ class AuthSeamMiddleware:
         self.app = app
         self._settings = settings
         self._host_service_token = host_service_token
+        from agent_harness.web.projects import configured_control_plane_origins
+
+        self._allowed_origins = configured_control_plane_origins(
+            settings.control_plane_allowed_origins
+        )
         self._host_skills_nonce_lock = threading.Lock()
         self._host_skills_used_nonces: dict[str, float] = {}
 
@@ -2477,6 +2482,7 @@ class AuthSeamMiddleware:
         cross_origin = check_trusted_origin(
             headers.get("origin"),
             jwt_secret_configured=bool(self._settings.jwt_secret),
+            allowed_origins=self._allowed_origins,
         )
         if cross_origin is not None:
             # 文案里含客户端可控、无长度上界的 `Origin` ⇒ 按长度截断，别让它灌水。

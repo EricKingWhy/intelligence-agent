@@ -204,6 +204,16 @@ def test_extra_origin_and_host_require_explicit_configuration(tmp_path: Path) ->
             allowed.headers["access-control-allow-origin"] == "https://desktop.example"
         )
 
+        with client.websocket_connect(
+            "/api/ws",
+            headers={
+                "Origin": "https://desktop.example",
+                "Host": "control.example:8443",
+            },
+        ) as websocket:
+            websocket.send_text(json.dumps({"type": "ping"}))
+            assert json.loads(websocket.receive_text())["type"] == "pong"
+
         not_configured = client.get(
             _PRIVATE_PATH,
             headers={"Origin": "https://other.example", "Host": "control.example:8443"},
