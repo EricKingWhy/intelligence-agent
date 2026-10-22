@@ -20,6 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_harness.logging import log_event
 from agent_harness.model.config import ModelConfig
+from agent_harness.model.endpoint_guard import (
+    misconfiguration_rejection,
+    parse_allowlist,
+)
 from agent_harness.model.provider import create_chat_model
 from agent_harness.model.provider_store import (
     CredentialError,
@@ -45,6 +49,8 @@ _FAILURE_COPY: dict[str, str] = {
     "model_or_route_not_found": "模型或路径不存在：检查 Base URL 与模型名",
     "timeout": "连接超时",
     "rate_limited": "被限流（429）：配置本身可能是对的，稍后再试",
+    # #1485：误配置守卫拒绝（不是网络故障——地址本身不该指向云元数据/link-local）。
+    "endpoint_blocked": "目标被误配置守卫拒绝（云元数据 / link-local 地址）",
 }
 
 
@@ -117,6 +123,10 @@ def _redact_detail(detail: str) -> str:
 
 def _classify_failure(error: Exception) -> tuple[str, str]:
     """异常 → (reason, UI 文案)。HTTP 状态从异常文本/类型归类（§6.3）。"""
+    # #1485：守卫拒绝要排在网络分类之前——openai 会把它包成 APIConnectionError，
+    # 落到 network_error 就把"地址配错"说成"网络不可达"了。
+    if misconfiguration_rejection(error) is not None:
+        return "endpoint_blocked", _FAILURE_COPY["endpoint_blocked"]
     text = f"{type(error).__name__}: {error}"
     lower = text.lower()
     if "timeout" in lower or "timed out" in lower:
@@ -250,6 +260,9 @@ def register_model_provider_routes(app: FastAPI) -> None:
             config = ModelConfig(
                 provider=provider_id, model_name=model_id, api_key=api_key,
                 base_url=entry["base_url"], temperature=settings.temperature,
+                endpoint_allowlist=tuple(sorted(
+                    parse_allowlist(settings.model_endpoint_allowlist)
+                )),
             )
             # 真实构造路径（§6.1）：create_chat_model + ainvoke，max_tokens=1、
             # 不带 tools。request_timeout 用测试专用超时（15s，§6.2）。

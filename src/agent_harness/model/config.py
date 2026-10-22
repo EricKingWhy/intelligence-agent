@@ -436,6 +436,13 @@ def warn_unadopted_catalog_entries(settings: Settings) -> None:
         )
 
 
+def _endpoint_allowlist(settings: "Settings") -> tuple[str, ...]:
+    """#1485 所有者登记的端点守卫例外（`MODEL_ENDPOINT_ALLOWLIST`，逗号分隔）。"""
+    from agent_harness.model.endpoint_guard import parse_allowlist
+
+    return tuple(sorted(parse_allowlist(settings.model_endpoint_allowlist)))
+
+
 class ModelConfig:
     def __init__(
         self,
@@ -447,6 +454,7 @@ class ModelConfig:
         temperature: float,
         fallback: "ModelConfig | None" = None,
         reasoning_effort: ReasoningEffortCapability | None = None,
+        endpoint_allowlist: tuple[str, ...] = (),
     ):
         # 运行期 SDK 要明文，但持有形态是 SecretStr：repr(config) / vars(config)
         # / pytest 失败局部变量等调试路径脱敏为 **********（与 Settings 层一致）。
@@ -459,6 +467,9 @@ class ModelConfig:
         self.base_url = base_url
         self.temperature = temperature
         self.reasoning_effort = reasoning_effort
+        # #1485 端点守卫例外（所有者登记，来自 Settings.model_endpoint_allowlist）。
+        # 配置对象自身携带，是因为连接测试等路径只拿得到 ModelConfig，拿不到 Settings。
+        self.endpoint_allowlist = endpoint_allowlist
         # Model Fallback 两级链（ADR-0014 决策 14）：瞬时故障切 fallback、
         # never 切回。V1 只消费第一级（Runtime 的 coordinator 持有两级结构）。
         self.fallback = fallback
@@ -491,6 +502,7 @@ class ModelConfig:
             base_url=settings.model_base_url,
             temperature=settings.temperature,
             key_env="MODEL_API_KEY",
+            allowlist=_endpoint_allowlist(settings),
         )
         entry = find_catalog_entry(settings, config.provider, config.model_name)
         if entry is not None:
@@ -515,6 +527,7 @@ class ModelConfig:
             base_url=settings.fallback_model_base_url,
             temperature=settings.temperature,
             key_env="FALLBACK_MODEL_API_KEY",
+            allowlist=_endpoint_allowlist(settings),
         )
         entry = find_catalog_entry(settings, config.provider, config.model_name)
         if entry is not None:
@@ -546,6 +559,7 @@ class ModelConfig:
             temperature=(entry.temperature if entry.temperature is not None
                          else settings.temperature),
             reasoning_effort=entry.reasoning_effort,
+            endpoint_allowlist=_endpoint_allowlist(settings),
         )
         # fallback 链语义不动（ADR-0014）：catalog 选择只替换 primary。
         resolved.fallback = cls._fallback_from(settings)
@@ -580,6 +594,7 @@ class ModelConfig:
             api_key=api_key,
             base_url=target["base_url"],
             temperature=settings.temperature,
+            endpoint_allowlist=_endpoint_allowlist(settings),
         )
         # fallback 链语义不动（ADR-0014）：自定义供应商只替换 primary。
         resolved.fallback = cls._fallback_from(settings)
@@ -637,6 +652,7 @@ class ModelConfig:
     def _single_from(
         cls, *, provider: str, model_name: str, api_key: str,
         base_url: str, temperature: float, key_env: str,
+        allowlist: tuple[str, ...] = (),
     ) -> "ModelConfig":
         """解析单个（primary 或 fallback）模型配置；未知 provider 在配置期就抛错。"""
         if provider not in PROVIDER_PRESETS:
@@ -665,4 +681,5 @@ class ModelConfig:
             base_url=base_url or preset["model_base_url"],
             api_key=api_key,
             temperature=temperature,
+            endpoint_allowlist=allowlist,
         )

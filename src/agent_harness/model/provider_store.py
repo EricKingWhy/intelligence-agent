@@ -25,10 +25,13 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+from agent_harness.model.endpoint_guard import url_rejection
 
 logger = logging.getLogger("agent_harness.model")
 
@@ -56,12 +59,25 @@ def validate_provider_id(provider_id: str) -> bool:
 
 
 def validate_base_url(base_url: str) -> bool:
-    """base_url 必须 http/https；拒绝 file:/ftp: 与非 URL（§4.1）。"""
+    """base_url 必须 http/https；拒绝 file:/ftp: 与非 URL（§4.1）。
+
+    只管 scheme/形状；端点误配置守卫是**另一条**判据（`base_url_rejection`），
+    两条各自给自己的错误文案——把守卫塞进来会让元数据地址报"必须是 http/https"。
+    """
     try:
         parts = urlsplit(base_url)
     except ValueError:
         return False
     return parts.scheme in _ALLOWED_SCHEMES and bool(parts.netloc)
+
+
+def base_url_rejection(base_url: str, *, allow: Iterable[str] = ()) -> str | None:
+    """端点误配置守卫（#1485）：被拦返回原因，放行返回 None。
+
+    保存期只看 IP 字面量与云元数据主机名（**不做 DNS**——保存期解析既判不出真伪，
+    又会把通配 DNS 的结果当事实）；请求期由 `endpoint_guard` 的 hook 逐跳解析。
+    """
+    return url_rejection(base_url, allow=allow)
 
 
 class Credentials(ABC):
@@ -181,12 +197,15 @@ class ProviderStore:
     """
 
     def __init__(self, path: Path, credentials: Credentials,
-                 builtin_ids: frozenset[str] | set[str] = frozenset()) -> None:
+                 builtin_ids: frozenset[str] | set[str] = frozenset(),
+                 allowlist: Iterable[str] = ()) -> None:
         self._path = Path(path)
         self.credentials = credentials
         # 内置 preset id 集合（ADR-0032 §3.2 合并规则的"同 id = 覆盖内置"判据）。
         # 默认由 `for_settings` 填 PROVIDER_PRESETS；直接构造（测试）可显式指定。
         self._builtin_ids = frozenset(builtin_ids)
+        # #1485 所有者例外（`Settings.model_endpoint_allowlist`）：只对登记的端点生效。
+        self._allowlist = frozenset(allowlist)
 
     @classmethod
     def for_settings(cls, settings: Any, credentials: Credentials | None = None) -> ProviderStore:
@@ -202,12 +221,14 @@ class ProviderStore:
         装配层与校验闸拿到的是**同一个** store 语义。
         """
         from agent_harness.model.config import PROVIDER_PRESETS
+        from agent_harness.model.endpoint_guard import parse_allowlist
 
         if credentials is None:
             credentials = SystemCredentialStore()
         return cls(
             Path(settings.provider_store_path), credentials,
             builtin_ids=frozenset(PROVIDER_PRESETS),
+            allowlist=parse_allowlist(settings.model_endpoint_allowlist),
         )
 
     # ── 持久化 ──
@@ -308,8 +329,7 @@ class ProviderStore:
                 continue
             merged = {**entry, **self._sanitize_patch(patch)}
             self._require_id(merged)
-            if not validate_base_url(merged["base_url"]):
-                raise ProviderStoreError(f"base_url 非法: {merged['base_url']!r}")
+            self._require_valid_base_url(merged["base_url"])
             api_key = patch.get("api_key")
             if isinstance(api_key, str) and api_key == "":
                 # 显式清除（独立动作，不是"顺手清"）。
@@ -355,6 +375,17 @@ class ProviderStore:
         if not self.credentials.available():
             raise CredentialError("当前平台没有可用的凭据存储，无法保存 API Key")
 
+    def _require_valid_base_url(self, base_url: Any) -> None:
+        """写路径的 base_url 闸：scheme 与端点守卫，两条错误文案分开（可诊断）。"""
+        if not isinstance(base_url, str) or not validate_base_url(base_url):
+            raise ProviderStoreError(f"base_url 非法: {base_url!r}")
+        reason = base_url_rejection(base_url, allow=self._allowlist)
+        if reason is not None:
+            raise ProviderStoreError(
+                f"目标被误配置守卫拒绝：{base_url!r}（{reason}）。"
+                "如确为所有者自用端点，请在 MODEL_ENDPOINT_ALLOWLIST 显式登记"
+            )
+
     def _sanitize_patch(self, patch: dict) -> dict:
         """只接受已知非密字段（api_key 由 update 单独处理，绝不进配置文件）。"""
         allowed = {"label", "base_url", "models", "last_test"}
@@ -362,8 +393,7 @@ class ProviderStore:
 
     def _normalize(self, body: dict, provider_id: str) -> dict:
         base_url = body.get("base_url")
-        if not isinstance(base_url, str) or not validate_base_url(base_url):
-            raise ProviderStoreError(f"base_url 非法: {base_url!r}")
+        self._require_valid_base_url(base_url)
         models = body.get("models")
         if not isinstance(models, list) or not models:
             raise ProviderStoreError("models 必须是非空数组")

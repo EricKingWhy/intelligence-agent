@@ -1,0 +1,371 @@
+"""#1485：模型端点误配置守卫（裁决 25 **B**）——拦云元数据 / link-local，放行 loopback。
+
+票面验收（受控服务器/解析器，**绝不向真实元数据端点发请求**）：
+
+- 解析后地址、IPv4/IPv6、重定向落入 link-local、无重定向路径、具体端点例外；
+  被拦目标**零请求、零凭据**。
+- 所有者 loopback/LAN 的保存与连接测试照旧通过；例外只对登记的端点生效。
+- 错误明确说明"被误配置守卫拒绝"；不加任何二次审批。
+
+受控手段：`httpx2.MockTransport` 充当服务器（逐跳可计数、可回 302），
+`endpoint_guard` 的两个解析函数被替换成受控结果。真实 socket 一次都不开——
+"零请求"是传输层计数为 0，不是"没观察到"。
+"""
+
+from __future__ import annotations
+
+import http.server
+import json
+import threading
+from collections import Counter
+
+import httpx2
+import pytest
+from langchain_core.messages import HumanMessage
+
+from agent_harness.config import Settings
+from agent_harness.model import endpoint_guard
+from agent_harness.model.config import ModelConfig
+from agent_harness.model.endpoint_guard import (
+    EndpointBlockedError,
+    guarded_clients,
+    misconfiguration_rejection,
+    parse_allowlist,
+    url_rejection,
+)
+from agent_harness.model.provider import create_chat_model
+from agent_harness.model.provider_store import (
+    MemoryCredentialStore,
+    ProviderStore,
+    ProviderStoreError,
+)
+
+_METADATA_IP = "169.254.169.254"
+
+
+def _chat_completion() -> dict:
+    return {
+        "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+        "model": "deepseek-chat",
+        "choices": [{
+            "index": 0, "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "pong"},
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+class _Recorder:
+    """受控服务器：记录每一跳的 host 与 Authorization 头，按脚本回 302/200。"""
+
+    def __init__(self, redirect_to: str | None = None) -> None:
+        self.redirect_to = redirect_to
+        self.hosts: Counter[str] = Counter()
+        self.auth_headers: list[str | None] = []
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.hosts[request.url.host] += 1
+        self.auth_headers.append(request.headers.get("authorization"))
+        if self.redirect_to is not None:
+            location, self.redirect_to = self.redirect_to, None  # 只跳一次
+            return httpx2.Response(
+                302, headers={"location": location}, request=request,
+            )
+        return httpx2.Response(200, json=_chat_completion(), request=request)
+
+
+@pytest.fixture
+def fake_resolver(monkeypatch):
+    """受控解析器：按主机名给出地址；未登记的主机名回落真实解析。"""
+
+    table: dict[str, list[str]] = {}
+    real_sync = endpoint_guard._resolved_addresses
+    real_async = endpoint_guard._aresolved_addresses
+
+    def _sync(host: str, port: int | None) -> list[str]:
+        return table.get(host) or real_sync(host, port)
+
+    async def _async(host: str, port: int | None) -> list[str]:
+        return table.get(host) or await real_async(host, port)
+
+    monkeypatch.setattr(endpoint_guard, "_resolved_addresses", _sync)
+    monkeypatch.setattr(endpoint_guard, "_aresolved_addresses", _async)
+    return table
+
+
+def _model(base_url: str, allowlist: tuple[str, ...] = ()):
+    """按真实构造路径建模型，再把传输层换成可计数的受控服务器。"""
+    config = ModelConfig(
+        provider="deepseek", model_name="deepseek-chat", api_key="sk-test",
+        base_url=base_url, temperature=0.2, endpoint_allowlist=allowlist,
+    )
+    return create_chat_model(config, request_timeout=5.0)
+
+
+def _install(model, recorder: _Recorder) -> None:
+    """把两条客户端都换成可计数传输。
+
+    必须连 `_mounts` 一起清空：环境里的 `HTTP_PROXY` 会给非 NO_PROXY 主机挂上
+    代理 transport，只换 `_transport` 的话重定向目标会绕过计数（实测）。
+    """
+    for client in (model.root_client, model.root_async_client):
+        inner = client._client
+        inner._mounts = {}
+        inner._transport = httpx2.MockTransport(recorder)
+
+
+async def _invoke(model) -> None:
+    await model.ainvoke([HumanMessage(content="ping")], max_tokens=1)
+
+
+# ── 保存期：IP 字面量与元数据主机名 ──────────────────────────────────
+
+
+class TestSaveTimeRejection:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.170.2/v2/credentials",
+            "http://169.254.170.23/v1",
+            "http://100.100.100.200/latest/meta-data/",
+            "http://[fe80::1]/v1",
+            "http://[fe80::a9fe:a9fe]/v1",
+            "http://[fd00:ec2::254]/v1",
+            "http://[::ffff:169.254.169.254]/v1",  # IPv4-mapped
+            "http://[64:ff9b::a9fe:a9fe]/v1",  # NAT64 内嵌 IPv4
+            "http://metadata.google.internal/",
+            "http://metadata.amazonaws.com/",
+            "http://instance-data/",
+        ],
+    )
+    def test_metadata_and_link_local_literals_are_rejected(self, url):
+        reason = url_rejection(url)
+        assert reason is not None, url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://api.deepseek.com",
+            "https://api.example.com/v1",
+            "http://127.0.0.1:11434/v1",  # 所有者 loopback 直连
+            "http://localhost:8000/v1",
+            "http://192.168.1.5:8000/v1",  # RFC1918
+            "http://10.0.0.7/v1",
+            "http://[::1]:8080/v1",
+            "http://198.18.222.105/v1",  # 沙箱通配 DNS 段：必须放行
+        ],
+    )
+    def test_owner_and_private_endpoints_are_allowed(self, url):
+        assert url_rejection(url) is None, url
+
+    def test_store_create_rejects_metadata_target_with_guard_message(self, tmp_path):
+        store = ProviderStore(tmp_path / "p.json", MemoryCredentialStore())
+        with pytest.raises(ProviderStoreError, match="误配置守卫"):
+            store.create({
+                "id": "leak", "base_url": "http://169.254.169.254/latest/meta-data/",
+                "models": [{"model_id": "m"}],
+            })
+        assert store.list_entries() == []
+
+    def test_store_update_rejects_metadata_target(self, tmp_path):
+        store = ProviderStore(tmp_path / "p.json", MemoryCredentialStore())
+        store.create({"id": "p", "base_url": "http://127.0.0.1:11434/v1",
+                      "models": [{"model_id": "m"}]})
+        with pytest.raises(ProviderStoreError, match="误配置守卫"):
+            store.update("p", {"base_url": "http://[fe80::1]/v1"})
+        assert store.get_entry("p")["base_url"] == "http://127.0.0.1:11434/v1"
+
+    def test_owner_loopback_and_lan_save_and_resolve(self, tmp_path):
+        store = ProviderStore(tmp_path / "p.json", MemoryCredentialStore())
+        store.create({"id": "lan", "base_url": "http://192.168.1.5:8000/v1",
+                      "models": [{"model_id": "local-model"}], "api_key": "sk-test"})
+        store.create({"id": "loop", "base_url": "http://127.0.0.1:11434/v1",
+                      "models": [{"model_id": "local-model"}]})
+        assert store.get_entry("lan")["base_url"] == "http://192.168.1.5:8000/v1"
+        assert store.get_entry("loop")["base_url"] == "http://127.0.0.1:11434/v1"
+
+    def test_allowlist_exception_only_covers_registered_endpoint(self, tmp_path):
+        store = ProviderStore(
+            tmp_path / "p.json", MemoryCredentialStore(),
+            allowlist=parse_allowlist("169.254.169.254:8080"),
+        )
+        store.create({"id": "exempt", "base_url": "http://169.254.169.254:8080/v1",
+                      "models": [{"model_id": "m"}]})
+        with pytest.raises(ProviderStoreError, match="误配置守卫"):
+            # 同 host 换端口 = 另一个端点，例外不覆盖
+            store.update("exempt", {"base_url": "http://169.254.169.254:8081/v1"})
+        with pytest.raises(ProviderStoreError, match="误配置守卫"):
+            store.create({"id": "other", "base_url": "http://[fe80::1]/v1",
+                          "models": [{"model_id": "m"}]})
+
+
+# ── 请求期：逐跳、零请求、零凭据 ─────────────────────────────────────
+
+
+class TestRequestTimeGuard:
+    @pytest.mark.asyncio
+    async def test_no_redirect_path_reaches_owner_loopback(self, fake_resolver):
+        recorder = _Recorder()
+        model = _model("http://127.0.0.1:11434/v1")
+        _install(model, recorder)
+        await _invoke(model)
+        assert recorder.hosts["127.0.0.1"] == 1
+        # 凭据正常随请求走（loopback 是所有者端点，不受守卫影响）
+        assert recorder.auth_headers[0].startswith("Bearer ")
+
+    @pytest.mark.asyncio
+    async def test_resolved_link_local_address_blocks_with_zero_requests(
+        self, fake_resolver,
+    ):
+        fake_resolver["metadata.test"] = [_METADATA_IP]
+        recorder = _Recorder()
+        model = _model("http://metadata.test/v1")
+        _install(model, recorder)
+
+        with pytest.raises(Exception) as excinfo:
+            await _invoke(model)
+
+        assert misconfiguration_rejection(excinfo.value) is not None
+        assert recorder.hosts == Counter()  # 零请求
+        assert recorder.auth_headers == []  # 零凭据
+
+    @pytest.mark.asyncio
+    async def test_resolved_ipv6_link_local_blocks(self, fake_resolver):
+        fake_resolver["metadata6.test"] = ["fe80::1"]
+        recorder = _Recorder()
+        model = _model("http://metadata6.test/v1")
+        _install(model, recorder)
+        with pytest.raises(Exception) as excinfo:
+            await _invoke(model)
+        assert misconfiguration_rejection(excinfo.value) is not None
+        assert recorder.hosts == Counter()
+
+    @pytest.mark.asyncio
+    async def test_mixed_resolution_blocks_when_any_address_is_blocked(
+        self, fake_resolver,
+    ):
+        """解析出多个地址时逐个判：只要有一个落在拦截面就拒绝（防绕过）。"""
+        fake_resolver["mixed.test"] = ["10.0.0.7", _METADATA_IP]
+        recorder = _Recorder()
+        model = _model("http://mixed.test/v1")
+        _install(model, recorder)
+        with pytest.raises(Exception) as excinfo:
+            await _invoke(model)
+        assert misconfiguration_rejection(excinfo.value) is not None
+        assert recorder.hosts == Counter()
+
+    @pytest.mark.asyncio
+    async def test_redirect_into_link_local_is_blocked_per_hop(self, fake_resolver):
+        """第一跳合法 → 302 到元数据目标：第二跳在发出前被拦，零请求零凭据。"""
+        fake_resolver["metadata.test"] = [_METADATA_IP]
+        recorder = _Recorder(redirect_to="http://metadata.test/v1/chat/completions")
+        model = _model("http://127.0.0.1:11434/v1")
+        _install(model, recorder)
+
+        with pytest.raises(Exception) as excinfo:
+            await _invoke(model)
+
+        assert misconfiguration_rejection(excinfo.value) is not None
+        assert recorder.hosts["127.0.0.1"] == 1
+        assert recorder.hosts["metadata.test"] == 0
+        assert len(recorder.auth_headers) == 1  # 只有第一跳，且确实带了凭据
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_endpoint_exception_applies_per_request(
+        self, fake_resolver,
+    ):
+        fake_resolver["metadata.test"] = [_METADATA_IP]
+        recorder = _Recorder(redirect_to="http://metadata.test/v1/chat/completions")
+        model = _model("http://127.0.0.1:11434/v1", allowlist=("metadata.test",))
+        _install(model, recorder)
+
+        await _invoke(model)  # 例外生效：第二跳被放行
+
+        assert recorder.hosts["metadata.test"] == 1
+        assert recorder.auth_headers[0].startswith("Bearer ")
+
+    @pytest.mark.asyncio
+    async def test_literal_blocked_base_url_never_opens_a_connection(self):
+        """字面量元数据地址：构造不报错，请求在 hook 里被拦，传输层零请求。"""
+        recorder = _Recorder()
+        model = _model(f"http://{_METADATA_IP}/v1")
+        _install(model, recorder)
+        with pytest.raises(Exception) as excinfo:
+            await _invoke(model)
+        assert "误配置守卫" in str(misconfiguration_rejection(excinfo.value))
+        assert recorder.hosts == Counter()
+
+    @pytest.mark.asyncio
+    async def test_guard_error_message_names_the_guard(self, fake_resolver):
+        fake_resolver["metadata.test"] = [_METADATA_IP]
+        model = _model("http://metadata.test/v1")
+        _install(model, _Recorder())
+        with pytest.raises(Exception) as excinfo:
+            await _invoke(model)
+        rejection = misconfiguration_rejection(excinfo.value)
+        assert isinstance(rejection, EndpointBlockedError)
+        assert "误配置守卫" in str(rejection)
+        assert _METADATA_IP in str(rejection)
+
+
+# ── 守卫客户端本身 ──────────────────────────────────────────────────
+
+
+class TestGuardedClients:
+    def test_clients_keep_sdk_redirect_and_timeout_defaults(self):
+        sync_client, async_client = guarded_clients(base_url="http://127.0.0.1:1/v1")
+        try:
+            assert sync_client.follow_redirects is True
+            assert async_client.follow_redirects is True
+        finally:
+            sync_client.close()
+
+    def test_parse_allowlist_trims_and_drops_blanks(self):
+        assert parse_allowlist(" a ,, b:1 , ") == frozenset({"a", "b:1"})
+
+
+# ── 所有者 loopback 的端到端连接测试（真实本机服务）──────────────────
+
+
+class _ChatHandler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # 驼峰由 stdlib BaseHTTPRequestHandler 约定
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        body = json.dumps(_chat_completion()).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args) -> None:
+        return
+
+
+@pytest.mark.asyncio
+async def test_owner_loopback_connection_test_still_works():
+    """AC(b)：所有者配的 loopback 模型"保存 + 连接测试"照旧通过（真实本机服务）。"""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ChatHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        settings = Settings(
+            _env_file=None, model_api_key="sk-test", model_provider="deepseek",
+            model_name="deepseek-chat",
+        )
+        config = ModelConfig(
+            provider="deepseek", model_name="deepseek-chat", api_key="sk-test",
+            base_url=f"http://{host}:{port}/v1",
+            temperature=settings.temperature,
+            endpoint_allowlist=tuple(sorted(
+                parse_allowlist(settings.model_endpoint_allowlist)
+            )),
+        )
+        model = create_chat_model(config, request_timeout=10.0)
+        await model.ainvoke([HumanMessage(content="ping")], max_tokens=1)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

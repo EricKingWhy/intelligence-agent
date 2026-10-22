@@ -16,6 +16,7 @@ from agent_harness.model.config import (
     ConfigError,
     ModelConfig,
 )
+from agent_harness.model.endpoint_guard import guarded_clients
 
 logger = logging.getLogger("agent_harness.model")
 
@@ -92,6 +93,14 @@ def create_chat_model(
         "request_timeout": request_timeout,
         "max_retries": 0,
     }
+    # #1485 端点误配置守卫：注入带 request hook 的 httpx2 客户端。httpx2 在**每一跳**
+    # 重定向前都调 request hook（`_send_handling_redirects` 循环体首行），所以被拦
+    # 目标既收不到请求也收不到 Authorization 头。例外只来自所有者登记的
+    # `Settings.model_endpoint_allowlist`（经 ModelConfig 带到这里）。
+    kwargs["http_client"], kwargs["http_async_client"] = guarded_clients(
+        base_url=config.base_url,
+        allow=getattr(config, "endpoint_allowlist", ()),
+    )
     if reasoning_effort is not None:
         capability = config.validate_reasoning_effort(reasoning_effort)
         wire = capability.wire_mapping.get(reasoning_effort)
