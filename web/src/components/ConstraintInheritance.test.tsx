@@ -82,12 +82,15 @@ describe('ConstraintInheritance', () => {
     const rows = [...c.querySelectorAll('.ci-row')];
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain('PROJECT · 本项目');
-    expect(rows[0].textContent).toContain('constraint');
+    // #1445：行内类型显示中文名（`constraint` 机器码不进界面）。
+    expect(rows[0].querySelector('.ci-type')?.textContent).toBe('约束');
     expect(rows[0].textContent).toContain('所有 Python 改动必须先写 failing test');
     expect(rows[0].textContent).toContain('已沿用');
     expect(rows[1].textContent).toContain('SESSION · 本会话');
-    expect(rows[1].textContent).toContain('authorization');
+    expect(rows[1].querySelector('.ci-type')?.textContent).toBe('授权');
     expect(rows[1].textContent).toContain('已沿用');
+    expect(c.textContent).not.toContain('constraint');
+    expect(c.textContent).not.toContain('authorization');
     expect(c.querySelector('.ci-clean-msg')).toBeNull();
     // 无 NOT INHERITED 条目 → 该组不渲染
     expect(c.textContent).not.toContain('没有沿用');
