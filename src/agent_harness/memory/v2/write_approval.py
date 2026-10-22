@@ -575,13 +575,22 @@ class BlockedWriteStore:
             try:
                 drift = await _pin_drift(connection, actions)
                 if drift is None:
-                    records, superseded, invalidated = await self._replay_in(
-                        connection, actions, owner)
-                    await connection.execute(
+                    # CAS：`_owned` 在事务外读状态，两个并发 promote 都能看到 blocked。
+                    # 转状态这一步必须自己判 rowcount，否则两边都会重放整批动作，落出
+                    # 一对重复记录 + 重复 markdown 条目。与 `discard` 同一口径。
+                    cursor = await connection.execute(
                         "UPDATE memory_v2_blocked SET status=?, disposed_at=?, "
                         "disposition_note=NULL WHERE id=? AND status=?",
                         (PROMOTED, stamp(), blocked_id, BLOCKED),
                     )
+                    if cursor.rowcount != 1:
+                        # 并发窗口里对方先落了：回滚掉本笔，按"已处置"收口（与顺序
+                        # 二次 promote 的返回同形）。`BEGIN IMMEDIATE` 保证对方已提交，
+                        # 所以重读一定看到非 blocked 的结论。
+                        await connection.rollback()
+                        return await self._owned(blocked_id, trusted)
+                    records, superseded, invalidated = await self._replay_in(
+                        connection, actions, owner)
                     await connection.commit()
                 else:
                     await connection.rollback()
@@ -595,7 +604,12 @@ class BlockedWriteStore:
                 reason=f"目标已漂移（{drift}），整条拒绝；记录保持 blocked。",
             )
         # 提交后再补 markdown 权威面：与 executor 的 `_apply` 提交后镜像同一语义。
-        await self.writer.mirror_committed(records, invalidated=(*invalidated, *superseded))
+        # `records` 只给 ACTIVE——INVALIDATED 的 record 在两个列表里都出现时，
+        # `mirror_committed` 会先删后加，把刚撤回的内容写回权威面（`_apply` 同口径过滤）。
+        await self.writer.mirror_committed(
+            tuple(record for record in records if record.status is MemoryStatus.ACTIVE),
+            invalidated=(*invalidated, *superseded),
+        )
         return BlockedDecision(
             applied=True, reason="已放行并落盘。", records=records,
             invalidated=invalidated, superseded=superseded)

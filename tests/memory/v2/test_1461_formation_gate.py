@@ -85,6 +85,7 @@ from tests.memory.v2.test_v2_executor import (
     _candidate,
     _formation_candidates,
     _formation_no_memory,
+    _invalidate,
     _update,
 )
 from tests.web import test_memory_api as _shared
@@ -328,6 +329,64 @@ async def test_ac1_runner_reports_human_blocked_with_counts_only(
     assert [row.id for row in rows] == [blocked_id]
 
 
+@pytest.mark.asyncio
+async def test_ac1_settings_read_failure_keeps_the_gate_closed_for_writes(
+    tmp_path, monkeypatch,
+) -> None:
+    """P3-3①：设置读不出来时 gate 按**开**处理（fail-closed 的保守侧是拦下）。
+
+    设置存储抖一下不得把治理选择翻回"直落盘"：这一轮写入必须落 blocked 等人处置。
+    """
+    sessions = JsonlSessionStore(root=tmp_path / "sessions")
+    session = Session(SESSION, sessions, events=[])
+    mark = session.mark()
+    session.append(USER_MESSAGE, {"content": USER_TEXT})
+    session.append(RUN_STARTED, {"turn_index": 1}, run_id=RUN)
+    session.append(MODEL_COMPLETED, {"content": "好的"}, run_id=RUN)
+
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path / "workspace"), model_api_key="sk-test")
+    review = _scripted()
+    monkeypatch.setattr(assembly, "ChatModelInvoker", lambda *args, **kwargs: review)
+    runner = await assembly.build_memory_formation(
+        settings, sessions=sessions, roles=_ROLES)
+    assert runner is not None and runner.memory_v2 is not None
+
+    real_get_settings = runner.memory_v2.get_settings
+    calls = 0
+
+    async def _flaky(trusted):
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # 入队那一次（extraction_enabled）照常，抖动发生在 job 执行期
+            return await real_get_settings(trusted)
+        raise sqlite3.OperationalError("settings table is locked")
+
+    monkeypatch.setattr(runner.memory_v2, "get_settings", _flaky)
+    token = set_identity_context(
+        IdentityContext(USER_A.tenant_id, USER_A.user_id, ["user", "session"]))
+    try:
+        job = await runner.notify_run_finished(
+            session_id=SESSION, run_id=RUN, terminal_status="completed",
+            events=sessions.read_events(SESSION)[mark:])
+        assert job is not None
+        await runner.drain()
+    finally:
+        identity_context_var.reset(token)
+        await runner.aclose()
+
+    jobs = SqliteMemoryV2JobStore(
+        Path(settings.workspace_dir) / assembly.MEMORY_V2_DATABASE_NAME)
+    await jobs.initialize()
+    persisted = await jobs.get(job.job_id)
+    assert (persisted.stage, persisted.outcome) == (
+        MemoryJobStage.COMPLETED, MemoryJobOutcome.BLOCKED)
+    rows = await runner.memory_v2.blocked.list_for(USER_A.tenant_id, USER_A.user_id)
+    assert len(rows) == 1, "读设置失败时写入必须被拦下，不得直落盘"
+    database = Path(settings.workspace_dir) / assembly.MEMORY_V2_DATABASE_NAME
+    assert _record_count(database) == 0
+
+
 # --------------------------------------------------------------------------------------
 # AC2：门开着但没什么可拦 ⇒ 安静成功（走 `_NothingToApply` 既有路径）
 # --------------------------------------------------------------------------------------
@@ -439,6 +498,62 @@ async def test_ac4_promote_replays_the_payload_verbatim(gate: Gate) -> None:
     assert _record_count(gate.database) == 2, "二次 promote 不得新增任何记录"
 
 
+@pytest.mark.asyncio
+async def test_ac4_promote_of_an_invalidate_drops_the_content_from_markdown(
+    gate: Gate,
+) -> None:
+    """P1：block 一条 INVALIDATE → promote ⇒ 撤回的内容不得被写回 markdown。
+
+    `mirror_committed` 先按 `invalidated` 删、再按 `records` 加；把 INVALIDATED 的
+    record 同时塞进两处就是一个删除后又加回的僵尸回路。镜像口径与 gate-off 的
+    `_apply` 相同：`records` 只给 ACTIVE。
+    """
+    _seed_run(gate)
+    existing = await gate.service.create(make_draft(content=OLD_CONTENT), USER_A)
+    assert OLD_CONTENT in _memory_file(gate).read_text(encoding="utf-8")
+
+    invoker = FakeInvoker(
+        formation=[_formation_candidates(_candidate())],
+        adjudication=[_adjudication(_invalidate(existing.id))])
+    _job1, blocked_result, _sink = await _run(gate, invoker)
+    assert blocked_result is not None and blocked_result.outcome is MemoryJobOutcome.BLOCKED
+    [row] = await _blocked(gate)
+    assert [item["action"] for item in row.payload["actions"]] == ["invalidate"]
+
+    decision = await gate.service.blocked.promote(row.id, USER_A)
+
+    assert decision.applied is True
+    # SQLite 侧：目标行确实是 INVALIDATED，没有新记录
+    assert (await gate.service.read(existing.id, USER_A)).status is MemoryStatus.INVALIDATED
+    assert _record_count(gate.database) == 1
+
+    # markdown 侧：被撤回的内容彻底消失（僵尸回路的唯一观测面）
+    text = _memory_file(gate).read_text(encoding="utf-8")
+    assert OLD_CONTENT not in text, "被撤回的内容不得在 markdown 里留僵尸"
+    assert await _active(gate) == []
+
+
+@pytest.mark.asyncio
+async def test_ac4_concurrent_promotes_apply_the_payload_exactly_once(gate: Gate) -> None:
+    """P2-2：同一行被同时点两次 ⇒ 恰一次放行，落一条记录、markdown 一份。"""
+    _seed_run(gate)
+    await _run(gate, _scripted())
+    [row] = await _blocked(gate)
+
+    decisions = await asyncio.gather(
+        gate.service.blocked.promote(row.id, USER_A),
+        gate.service.blocked.promote(row.id, USER_A),
+    )
+
+    assert sorted(decision.applied for decision in decisions) == [False, True]
+    rejected = next(decision for decision in decisions if not decision.applied)
+    assert rejected.reason == "这条写入已被处置（promoted）。"
+    assert rejected.records == ()
+    assert _record_count(gate.database) == 1, "第二次 promote 不得再落一条记录"
+    text = _memory_file(gate).read_text(encoding="utf-8")
+    assert text.count(CONTENT) == 1, "markdown 权威面不得出现第二份"
+
+
 # --------------------------------------------------------------------------------------
 # AC5：pin 漂移 ⇒ 整条拒绝，行保持 blocked 且记下漂移原因
 # --------------------------------------------------------------------------------------
@@ -542,6 +657,50 @@ async def test_ac6_web_discard_is_audited(memory_app, caplog) -> None:
         if getattr(item, "event_type", None) == "memory_governance"]
     assert (record.entry_point, record.action, record.affected_count) == (
         "api", "discard_blocked", 1)
+
+
+@pytest.mark.asyncio
+async def test_ac6_cli_promote_is_audited(gate: Gate, caplog) -> None:
+    """P3-3②：promote 与 discard 同形，CLI 侧留一条审计。"""
+    blocked_id = await _insert_blocked_row(gate.service.blocked, trusted=USER_A)
+    token = set_identity_context(
+        IdentityContext(USER_A.tenant_id, USER_A.user_id, ["user"]))
+    try:
+        with caplog.at_level(logging.INFO, logger="agent_harness.memory.audit"):
+            output, failed = await cli._memory_command(
+                gate.settings,
+                argparse.Namespace(command="promote", blocked_id=blocked_id))
+    finally:
+        identity_context_var.reset(token)
+
+    assert (failed, output) == (False, f"{blocked_id}：已放行并落盘。")
+    [record] = [
+        item for item in caplog.records
+        if getattr(item, "event_type", None) == "memory_governance"]
+    assert (record.entry_point, record.action, record.affected_count) == (
+        "cli", "promote_blocked", 1)
+    assert (await gate.service.blocked.get(blocked_id)).status == PROMOTED
+
+
+@pytest.mark.asyncio
+async def test_ac6_web_promote_is_audited(memory_app, caplog) -> None:
+    """P3-3②：promote 与 discard 同形，Web 侧留一条审计。"""
+    client, _vectors = memory_app
+    blocked = await _wiring_blocked(client)
+    blocked_id = await _insert_blocked_row(
+        blocked, trusted=TrustedMemoryIdentity("acme", "alice"))
+
+    with caplog.at_level(logging.INFO, logger="agent_harness.memory.audit"):
+        response = client.post(
+            f"/api/memory-blocked/{blocked_id}/promote", headers=_auth(_ALICE))
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"id": blocked_id, "status": "promoted"}
+    [record] = [
+        item for item in caplog.records
+        if getattr(item, "event_type", None) == "memory_governance"]
+    assert (record.entry_point, record.action, record.affected_count) == (
+        "api", "promote_blocked", 1)
 
 
 # --------------------------------------------------------------------------------------
@@ -668,6 +827,21 @@ async def test_ac7_a_duplicate_intent_is_suppressed_on_the_second_job(gate: Gate
     assert state["suppressed_duplicates"] == 1
     assert state["blocked_ids"] == []
     assert len(await _blocked(gate)) == 1
+
+    # P2-1：查重**不分 status**。首行先被 discard（人的结论已经下过），同内容再来一次
+    # 仍然不得重新问一遍——否则 AC7② 的「相同存活集」只钉住了 blocked 那一态。
+    [first_row] = await _blocked(gate)
+    assert (await gate.service.blocked.discard(first_row.id, USER_A)).applied is True
+    third = await _job(gate, key="duplicate-after-discard")
+    _job3, result3, _sink3 = await _run(gate, _scripted(), job=third)
+
+    assert result3 is not None
+    assert result3.outcome is MemoryJobOutcome.BLOCKED
+    assert result3.blocked_ids == ()
+    state3 = (await gate.jobs.get(third.job_id)).state
+    assert state3["suppressed_duplicates"] == 1
+    assert state3["blocked_ids"] == []
+    assert len(await _blocked(gate)) == 1, "已 discard 的同内容不得被重新插一行"
 
 
 # --------------------------------------------------------------------------------------
