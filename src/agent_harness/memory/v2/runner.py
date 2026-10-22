@@ -337,13 +337,21 @@ def run_slice_bounds(
 
 @runtime_checkable
 class MemoryFormationNotifier(Protocol):
-    """运行时把一轮终结交给记忆形成的唯一入口（#298 T7b）。
+    """运行时把一轮的**终结**交给记忆形成的唯一入口（#298 T7b / #1439 F-03）。
 
     为什么是 Protocol，而不是让 `agent/runtime.py` 直接收 `MemoryJobRunner`：Runtime
     需要的只是"把这一轮告诉宿主"这一件事，而 `MemoryJobRunner` 是**作业宿主子系统**
     ——它自己拥有服务循环、认领、恢复、模型调用器与事件出口。让 agent 核心依赖那一整套
     （连同它背后的 jobs / executor / policy / formation 全链）等于把"运行时收尾"与
     "记忆作业怎么跑"焊在一起；而这个端口只有一行签名。
+
+    `notify_run_finished` 是终结入队，必须幂等、且不许把故障抛回 Runtime。
+
+    **轮次重置是端口之外的可选扩展能力。** Runtime 用 `getattr` 探测
+    `notify_run_started`（Hermes `turn_context._reset_per_turn_agent_state` 的
+    turn-start 同位）：只关心终结接缝的替身（集成测试的合成宿主）不必为一个空操作补齐
+    方法，生产宿主 `MemoryJobRunner` 则两个都实现（同样幂等、同样不抛）。所以这里不
+    声明它——声明了就等于说"替身必须有它"，与探测口径矛盾。
 
     `MemoryJobRunner` 在结构上满足它（因此它没有被继承）。`runtime_checkable` 让装配层
     能对"给进来的东西真的满足契约"下断言，而不是只靠注解。
@@ -424,8 +432,31 @@ class MemoryJobRunner:
         return self._max_concurrency
 
     # ----------------------------------------------------------------------------------
-    # 入队（Runtime 的终结臂调用）
+    # 轮次边界（Runtime 的 run-start / 终结臂调用）
     # ----------------------------------------------------------------------------------
+
+    def notify_run_started(self) -> None:
+        """一次 run 开始：把「本轮 consolidation 失败预算」归零（#1439 F-03）。
+
+        与 Hermes `turn_context._reset_per_turn_agent_state`（turn start 统一重置）同位：
+        markdown store 是**进程级单例**（`build_memory_v2_service` 建一次，跨 run 复用），
+        不在这里归零，计数就会跨 run 累积、长进程里后续 run 第 1 次失败就被判 TERMINAL。
+
+        同步、不抛：Runtime 在 run 的最前面调它，那时还没有可终结的 run，抛异常会变成
+        "run 没开始就失败"。store 缺席（纯 SQLite 部署 / 未接 markdown）时是 no-op。
+
+        **预算是进程级而非 run 级**（与上面的单例同源）：计数器挂在共享 store 上，
+        没有 session/run 维度。并发 run 的 run-start 会互相把对方的计数清零——单用户
+        部署里并发 run 罕见，影响小；多用户共享一个进程时这是真实的口径缺口，彻底
+        修法要按 session 分桶，超出本票范围。
+        """
+        try:
+            markdown = getattr(self.memory_v2, "markdown", None)
+            reset = getattr(markdown, "reset_consolidation_failures", None)
+            if callable(reset):
+                reset()
+        except Exception:
+            logger.exception("Memory V2 run-start 重置失败（旁路，不影响本轮）")
 
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,
