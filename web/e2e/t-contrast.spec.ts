@@ -1348,7 +1348,22 @@ for (const theme of ['dark', 'light'] as const) {
       { type: 'run/interrupted', data: { reason: 'process_restart' }, seq: 4, session_id: sid, run_id: 'ri', step_id: 1, time: T },
     ];
     await openContrastSession(page, theme, sid, frames, '被打断了');
-    await expectEachContrast(page, theme, ['.interrupt-banner']);
+    // F-06（#1449）：横幅新增两个动作按钮——主动作（.interrupt-action-primary）与
+    // 次级动作（.interrupt-dismiss）都量静态态；helper 不驱动 hover，下面各自
+    // hover 后再量一次（P3-3 的 hover 底色不是推断值）。
+    await expectEachContrast(page, theme, [
+      '.interrupt-banner',
+      '.interrupt-action-primary',
+      '.interrupt-dismiss',
+    ]);
+    for (const sel of ['.interrupt-action-primary', '.interrupt-dismiss']) {
+      await page.locator(sel).hover();
+      const m = await measure(page, sel);
+      const ratio = contrast(m.color, m.bg);
+      // eslint-disable-next-line no-console
+      console.log(`[${theme}] #1449 ${sel}:hover color=${m.color} bg=${m.bg} ratio=${ratio.toFixed(4)}`);
+      expect(ratio, `${sel}:hover contrast (${theme})`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   /* 熔断条 soft 徽标（.notice-strip-soft .notice-strip-badge）：soft failure-guard 事件。 */
