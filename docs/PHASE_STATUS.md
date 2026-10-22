@@ -1,5 +1,7 @@
 # Phase Status — 实施进度追踪
 
+- 2026-10-22：#1437 记忆投影一致性（F-01 甲案补投影 + F-06 重试不丢 + F-06b 全量重投影）交付到 PR [#1463](https://github.com/EricKingWhy/intelligence-agent/pull/1463) OPEN / `等待merge`，**未合并**。分支 `claude/1437-projection-consistency`，基线 `main=387bdcc8`，最终 tip `5aed8704`（被测树 `ffe1203d` / tree `799b5525`）。`memory` 工具写路径接上投影通道，派生层加两列与 pending 账本，对账键统一为 `entry_digest`；`_gate` 区域字节级未变（#1438 边界）。审查共 4 轮两轴：第 2 轮两轴同根 P1（既有库 `initialize` 抛 `no such column: projection_source`，记忆静默降级）已修并实证关闭；第 4 轮两轴 PASS-WITH-FINDINGS、P0=0/P1=0；修后重审超预算 2 轮，按 #1304 先例如实登记。沙箱裸全量 Gate-0 7/7 PASS（34.43s，收据 `docs/gate/ffe1203d5d01c5adb63aa15cbffd3281b0f17ba1.json`），coverage exit 0；`tests/memory` 沙箱 1122 passed / 33 skipped / 0 failed、宿主 1170 passed / 0 failed（差异为沙箱缺 langmem/langgraph，已逐文件对账）。两条 P2 作残余登记待合并裁决。详见 Tracker 与月档。
+
 - 2026-10-21：#1360 本地补修 tip `61ba21c4`（PR #1426 尚未更新；最新 `origin/main` 已是祖先）：修 Npipe recv、补流读取回归，并为 Windows 离线运行时锁补 tzdata 2026.5。两轴复审 PASS；installer lock 5 项与 desktop test/typecheck 通过。后端全量按用户要求未重跑；中断时的红点已由增量复现定位并修复。增量 Gate-0 3/3、裸 Gate-0 6/6，收据 `docs/gate/61ba21c4c78e54ec47aa82deec7d8bca3043ae08.json`；全量 pytest 未完成。详见月档。
 
 - 2026-10-21：#1360 PR #1431 Recovery attempt budget follow-up 已同步基线 `origin/main=14f5217a`；双轴复审 PASS、P0–P4=0。同步后后端全量为 8797 passed / 17 failed / 129 skipped / 43 deselected，后续按用户要求只做失败节点增量复验，不宣称全量通过；6 个相关测试通过。Gate-0 收据 `docs/gate/49653220f7927ff071bb9423d9404d55cbbc8d67.json` 为 6/6 PASS。PR OPEN / `等待merge`，待 CI gate0。详见 Tracker 与月档。
