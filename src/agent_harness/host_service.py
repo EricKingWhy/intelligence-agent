@@ -124,6 +124,9 @@ HOST_TOKEN_TTL_SECONDS = 7 * 24 * 3600
 #: 锁竞争输家二次检查的轮询间隔（秒）。
 _ATTACH_POLL_INTERVAL = 0.25
 
+# 本机控制面只允许显式 loopback 绑定；远程/LAN 部署不经 `serve` 这条个人服务入口。
+_LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
 # Bound local JSON reads so a stale or unexpected loopback service cannot force
 # an unbounded allocation during attach probing.
 _MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -698,7 +701,7 @@ def serve_once(
     探针 AUTH_FAILED ⇒ 服务活着但本凭据不可用，响亮拒绝；始终 ABSENT/STALE ⇒
     锁在非服务写者（如在途 CLI 命令）手里，原样抛 `InstanceLockError`。
 
-    拿到锁后：绑定 `127.0.0.1` 随机端口（`port=0` 受管）→ 生成/沿用 jwt 密钥 →
+    拿到锁后：绑定指定的 loopback 随机端口（`port=0` 受管）→ 生成/沿用 jwt 密钥 →
     签发限权身份 token 进凭据通道 → 发布端点文件 → 用与附着方**同一条探针**做
     启动自验 → 就绪行打到 stdout（只含端口，无 token）。**拿到锁之后的每一段
     都在 try/finally 里**：任何启动/运行异常都会清端点 + 清 token + 放锁
@@ -708,6 +711,11 @@ def serve_once(
     本机个人服务不开宽松 CORS（`enable_cors=False`）：本地 UI 同源/桌面壳加载，
     Vite dev 直连属显式开发配置，走 `create_app` 直调路径。
     """
+    normalized_host = host.strip().lower()
+    if normalized_host not in _LOOPBACK_BIND_HOSTS:
+        raise HostServiceError(
+            "agent-harness serve 只允许绑定 IPv4/IPv6 loopback（127.0.0.1、localhost、::1）"
+        )
     root = settings.workspace_dir
     creds = credentials if credentials is not None else default_credentials()
     token_store = HostTokenStore(creds)
@@ -763,7 +771,7 @@ def serve_once(
     server = uvicorn.Server(
         uvicorn.Config(
             app,
-            host=host,
+            host=normalized_host,
             port=0,
             log_level="warning",
             access_log=False,

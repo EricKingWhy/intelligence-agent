@@ -160,7 +160,7 @@ def test_cors_preflight_survives_auth_when_secret_configured(tmp_path):
             },
         )
         assert preflight.status_code == 200, "预检请求不得被认证层拦截"
-        assert preflight.headers["access-control-allow-origin"] == "*"
+        assert preflight.headers["access-control-allow-origin"] == "http://localhost:5173"
         # W-11：健康探针匿名 200，载荷含协议形状、不含秘密
         health = client.get("/api/health")
         assert health.status_code == 200

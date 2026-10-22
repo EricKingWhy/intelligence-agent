@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_harness.config import Settings
 from agent_harness.host_service import (
     HOST_PROTOCOL_VERSION,
     HOST_SKILLS_NONCE_HEADER,
@@ -25,6 +26,7 @@ from agent_harness.host_service import (
     HOST_SKILLS_TIMESTAMP_HEADER,
     AttachStatus,
     HostEndpointInfo,
+    HostServiceError,
     HostTokenStore,
     attach_probe,
     clear_endpoint,
@@ -34,6 +36,7 @@ from agent_harness.host_service import (
     publish_endpoint,
     query_attached_skill_catalog,
     read_endpoint,
+    serve_once,
 )
 from agent_harness.model.provider_store import MemoryCredentialStore
 
@@ -43,6 +46,14 @@ def _free_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def test_serve_rejects_non_loopback_binding_before_startup(tmp_path: Path) -> None:
+    with pytest.raises(HostServiceError, match="loopback"):
+        serve_once(
+            Settings(_env_file=None, workspace_dir=str(tmp_path)),
+            host="0.0.0.0",
+        )
 
 
 class _StubService:
