@@ -49,7 +49,7 @@ from agent_harness.memory.v2.types import (
     SourceType,
     TrustedMemoryIdentity,
 )
-from agent_harness.memory.v2.write_approval import StagedWriteStore
+from agent_harness.memory.v2.write_approval import BlockedWriteStore, StagedWriteStore
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,7 @@ class MemoryV2Service:
         *, relay: MemoryV2IndexRelay | None = None,
         markdown: MarkdownMemoryStore | None = None,
         staged: StagedWriteStore | None = None,
+        blocked: BlockedWriteStore | None = None,
     ) -> None:
         self._store = store
         self._index = index
@@ -106,6 +107,9 @@ class MemoryV2Service:
         #: #1353 M6：`write_approval` 门开时的待审区。跟着 markdown 走——没有权威面就没有
         #: 可审批的写入，工具也不会注册。
         self._staged = staged
+        #: #1461：后台 formation 被拦下的写入（第二段处置通道）。executor 的 gate 开路径
+        #: 往里落行，CLI/Web 从里面 promote/discard。
+        self._blocked = blocked
         self._tombstone_purger: asyncio.Task | None = None
 
     def start_tombstone_purger(self, *, interval_seconds: float = 3600) -> None:
@@ -172,6 +176,16 @@ class MemoryV2Service:
     def staged(self) -> StagedWriteStore | None:
         """#1353 M6 待审区；`None` = 这个部署没有审批面（门恒关）。"""
         return self._staged
+
+    @property
+    def blocked(self) -> BlockedWriteStore | None:
+        """#1461 被拦下的后台写入；`None` = 装配没接处置通道（gate 开时 executor 会响亮失败）。"""
+        return self._blocked
+
+    def attach_blocked(self, blocked: BlockedWriteStore) -> None:
+        """装配期接线：`BlockedWriteStore` 要拿本 service 当 writer（promote 重放），
+        所以它只能在 service 构造**之后**建——构造参数接不了这个先有鸡还是先有蛋。"""
+        self._blocked = blocked
 
     @staticmethod
     def markdown_target(record: MemoryDraftV2 | MemoryRecordV2) -> str:

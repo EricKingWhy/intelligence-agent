@@ -132,6 +132,8 @@ class TestSessionEventDTO:
             "memory/recalled",
             # #1353 M7：后台形成提交后的人面向摘要（只带计数/指纹，不带内容）。
             "memory/human_updated",
+            # #1461：写入被审批门拦下（只带计数/行 id，不带内容）。
+            "memory/human_blocked",
             # #313 T5：**每一次实际 Provider 请求**恰一条（primary / fallback /
             # closeout；被拒绝或传输失败的请求也在计数内）。它是 `02 §5.1` 里
             # `model_requests` / `total_tokens` / `cost_usd` 三个 counter 的**唯一**

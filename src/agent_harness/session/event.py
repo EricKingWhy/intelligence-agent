@@ -148,6 +148,10 @@ MEMORY_RECALLED = "memory/recalled"
 # 通知通道——事件流不是第二份记忆真相（不变量 #22，与 MEMORY_UPDATED 同一条理由）。
 # 安静成功（NO_MEMORY）与降级不发这个事件：没有可报的动作就不报。
 MEMORY_HUMAN_UPDATED = "memory/human_updated"
+# #1461：后台 formation 的写入被审批门拦下（落进 `memory_v2_blocked` 等人处置）。
+# 载荷只带 count / blocked_ids / job_id——**不带内容**：被拦下的内容还没经过人，
+# 事件流不是第二份记忆真相（不变量 #22，与上一条同一条理由）。
+MEMORY_HUMAN_BLOCKED = "memory/human_blocked"
 # ── #529 §6.2：Skill 沉淀闭环的登记留痕（对标 memory/audit.py 先例） ──────
 # 成功 run 提议的候选 skill 经 lint + 人审后写入 project skill 目录，三条
 # durable 事件分别标记注册/更新/删除（append-only，不改历史事件）。data 载荷：
@@ -358,6 +362,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         MEMORY_RECALLED,
         # #1353 M7：后台形成的人面向摘要（只带计数/指纹，见常量注释）
         MEMORY_HUMAN_UPDATED,
+        # #1461：写入被审批门拦下（只带计数/行 id）
+        MEMORY_HUMAN_BLOCKED,
         # #529 §6.2：skill 沉淀登记留痕（register / update / remove）
         SKILL_REGISTERED,
         SKILL_UPDATED,

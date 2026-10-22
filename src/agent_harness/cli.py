@@ -3501,7 +3501,9 @@ def _main_memory(argv: list[str]) -> None:
 
     - `memory pending`：列出待审写入（id + 形状 + 时间）；
     - `memory approve <id>`：按 stage 时钉住的条目重放；pin 失效则拒绝且保留记录；
-    - `memory reject <id>`：明确丢弃。
+    - `memory reject <id>`：明确丢弃；
+    - `memory blocked` / `promote <id>` / `discard <id>`（#1461）：后台 formation 被审批门
+      拦下的写入的两段式处置——列表、放行重放、丢弃。
 
     与 web 的 `/api/memory-pending*` 是**同一条**领域路径（`StagedWriteStore`），CLI 只
     做渲染。身份取本进程的 `get_identity_context()`（单用户部署下即 local/local），与
@@ -3517,6 +3519,11 @@ def _main_memory(argv: list[str]) -> None:
     approve.add_argument("staged_id", metavar="ID")
     reject = subcommands.add_parser("reject", help="拒绝一条待审写入")
     reject.add_argument("staged_id", metavar="ID")
+    subcommands.add_parser("blocked", help="列出被审批门拦下的后台写入（#1461）")
+    promote = subcommands.add_parser("promote", help="放行一条被拦下的写入并落盘")
+    promote.add_argument("blocked_id", metavar="ID")
+    discard = subcommands.add_parser("discard", help="丢弃一条被拦下的写入（零落盘）")
+    discard.add_argument("blocked_id", metavar="ID")
     journey = subcommands.add_parser("journey", help="按版本链列出记忆卡片时间线")
     journey.add_argument("--limit", type=int, default=50)
     subcommands.add_parser(
@@ -3588,6 +3595,44 @@ async def _memory_command(
             )
             lines.append(f"    {card['title']}")
         return "\n".join(lines), False
+    if args.command in ("blocked", "promote", "discard"):
+        # #1461：第二段处置通道。业务拒绝（已处置 / pin 冲突 / 不存在）是**业务结果**，
+        # 与 approve/reject 同口径：打印原因、照常退 0。
+        from agent_harness.memory.audit import record_memory_change
+
+        blocked_store = service.blocked
+        if blocked_store is None:  # 装配层总是建它；这里只是不臆造第二种形状
+            return "此部署没有被拦下的写入区。", False
+        if args.command == "blocked":
+            items = await blocked_store.list_for(trusted.tenant_id, trusted.user_id)
+            if not items:
+                return "（暂未被拦下的写入）", False
+            lines = [f"被拦下的写入（{len(items)} 条）："]
+            for item in items:
+                project = f"  project={item.project_id}" if item.project_id else ""
+                lines.append(
+                    f"  id={item.id}  job={item.job_id}  origin={item.origin}  "
+                    f"reason={item.reason}  status={item.status}{project}  "
+                    f"created_at={item.created_at}"
+                )
+                if item.disposition_note:
+                    lines.append(f"    note={item.disposition_note}")
+            return "\n".join(lines), False
+        try:
+            if args.command == "promote":
+                decision = await blocked_store.promote(args.blocked_id, trusted)
+            else:
+                decision = await blocked_store.discard(args.blocked_id, trusted)
+        except KeyError:
+            return f"没有这条被拦下的写入：{args.blocked_id}", False
+        if not decision.applied:
+            return f"未处置：{decision.reason}", False
+        record_memory_change(
+            entry_point="cli",
+            action="promote_blocked" if args.command == "promote" else "discard_blocked",
+            affected_count=1,
+        )
+        return f"{args.blocked_id}：{decision.reason}", False
     if staged is None:  # 装配层总是建它；这里只是不臆造第二种形状
         return "此部署没有待审写入区。", False
     if args.command == "pending":
