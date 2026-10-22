@@ -147,12 +147,20 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     expect(document.body.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe(
       '上下文窗口',
     );
-    expect(document.body.querySelector('.ctx-usage-title')?.textContent).toBe('上下文窗口');
+    // 作用域收进本面板根：`.ctx-usage-title` 是共享 class（ContextUsagePanel / TaskReviewPanel 同用），
+    // 全页多面板渲染时 body 级查询会串味；dialog / radiogroup 的 role 整页唯一，仍留在 body 级。
+    const panel = document.body.querySelector('.ctx-window-panel');
+    expect(panel).not.toBeNull();
+    expect(panel!.querySelector('.ctx-usage-title')?.textContent).toBe('上下文窗口');
+    // 描述句钉全文：票面要求只换主语，措辞漂移必须被捕获。
+    expect(panel!.querySelector('.ctx-window-desc')?.textContent).toBe(
+      '上下文窗口越大，AI 能记住的对话越多；耗时和成本取决于实际使用量。',
+    );
     expect(document.body.querySelector('[role="radiogroup"]')?.getAttribute('aria-label')).toBe(
       '上下文窗口',
     );
     // 旧名拼字构造：AC 要求本文件对旧名 grep 归零，断言仍要钉住它不再出现。
-    expect(document.body.textContent).not.toContain(['记忆', '容量'].join(''));
+    expect(panel!.textContent).not.toContain(['记忆', '容量'].join(''));
   });
 
   it('读设置失败 → 显示错误，不渲染挡位（不编一个假清单）', async () => {
