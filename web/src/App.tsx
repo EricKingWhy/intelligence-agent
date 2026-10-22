@@ -747,8 +747,9 @@ export default function App() {
    *  只有显式 `false` 才用于标注/禁用：后端沉默不等于不支持。 */
   const currentModelSupportsVision = effectiveModelEntry(selectedModel, models)?.supportsVision ?? null;
 
-  // #426：新建会话的预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
-  // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。
+  // #426/#1444：预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
+  // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。新建态随
+  // create 请求发出，已选态随下一次 `/messages` 作为 amend 发出（handleSubmit）。
   const [budgetRunTurnsDraft, setBudgetRunTurnsDraft] = useState('');
   const [budgetRunTokensDraft, setBudgetRunTokensDraft] = useState('');
   const [budgetRunDeadlineDraft, setBudgetRunDeadlineDraft] = useState('');
@@ -912,6 +913,15 @@ export default function App() {
         ...toAmendFields(composerControls),
         ...ruleSignal,
         ...scopedFacts,
+        // #1444：已选会话的预算草稿随下一次 `/messages` 作为 amend 发出（后端
+        // idle→launched 新 run 消费；queued / steer 只判定丢弃）。全空草稿在
+        // `toCreateBudget` 返回 undefined，api 层「有值才带键」⇒ 载荷逐字不变。
+        // 与 create 路径同一映射点（toCreateBudget），不另造构造器。
+        budget: toCreateBudget({
+          turns: budgetRunTurnsDraft,
+          totalTokens: budgetRunTokensDraft,
+          deadlineAt: budgetRunDeadlineDraft,
+        }),
         // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
         // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
         ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
@@ -2184,7 +2194,9 @@ export default function App() {
                     selectedReasoningEffort={selectedReasoningEffort}
                     reasoningEffortProjection={reasoningEffortProjection}
                     onReasoningEffortChange={setSelectedReasoningEffort}
-                    /* #426：新建会话的预算入口（会话内 Composer 不显示，见组件注释） */
+                    /* #426/#1444：预算入口两态都在——新建态随 create 请求发
+                       `budget.run`；已选态随下一次 `/messages` 作为 amend 发出
+                       （见 handleSubmit 的 amend 构造） */
                     budgetRunTurns={budgetRunTurnsDraft}
                     onBudgetRunTurnsChange={setBudgetRunTurnsDraft}
                     budgetRunTokens={budgetRunTokensDraft}
