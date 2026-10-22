@@ -28,6 +28,7 @@ import { ApiClient } from "./api.ts";
 import {
   applyEvent,
   createState,
+  visibleTurns,
   type ConversationState,
   type EventEnvelope,
   type Turn,
@@ -61,12 +62,7 @@ import {
 import { resolveVisionSupport, type ModelOptionView } from "./lib/vision.ts";
 import { SeqCursor, openStream } from "./sse.ts";
 import { createTheme, GLYPHS, type IaTheme } from "./theme.ts";
-import {
-  conversationComponents,
-  emptyStateComponent,
-  statusLine,
-  turnComponents,
-} from "./views/chat.ts";
+import { emptyStateComponent, statusLine, turnComponents } from "./views/chat.ts";
 import { approvalDecision, approvalLines } from "./views/approval.ts";
 import { sessionSelectList } from "./views/sessionselect.ts";
 import { renderPauseLines, renderResumeHint } from "./views/pause.ts";
@@ -793,11 +789,13 @@ export class TuiApp {
     // 跨会话/重建重置折叠开关：避免上一会话的展开态泄漏到新会话（#382 审查 P3）。
     this.planExpanded = false;
     this.renderedOrphanCount = 0;
-    if (this.state.turns.length === 0) {
+    // #1498 F7-3：被修订掉的轮次不进渲染（与 Web 同一份 supersede 区间规则）。
+    const turns = visibleTurns(this.state);
+    if (turns.length === 0) {
       // 空状态：短文案 + 命令提示，不堆装饰框
       this.renderedTurns = [{ sig: "", comps: [emptyStateComponent(this.theme)] }];
     } else {
-      this.renderedTurns = this.state.turns.map((turn) => ({
+      this.renderedTurns = turns.map((turn) => ({
         sig: turnSignature(turn, this.historyImagesVersion),
         comps: this.turnComps(turn),
       }));
@@ -831,8 +829,9 @@ export class TuiApp {
    *  turns 与 renderedTurns 皆空时下面的循环是 no-op，重建空对话容器无害。 */
   private renderIncremental(): void {
     // 已渲染轮次：签名变了才重建该轮（流式 delta 落在最后一轮）
-    for (let i = 0; i < this.state.turns.length; i++) {
-      const turn = this.state.turns[i];
+    const turns = visibleTurns(this.state);
+    for (let i = 0; i < turns.length; i++) {
+      const turn = turns[i];
       if (turn === undefined) continue;
       const sig = turnSignature(turn, this.historyImagesVersion);
       const rendered = this.renderedTurns[i];
@@ -843,8 +842,8 @@ export class TuiApp {
         this.renderedTurns[i] = { sig, comps: this.turnComps(turn) };
       }
     }
-    if (this.renderedTurns.length > this.state.turns.length) {
-      this.renderedTurns.length = this.state.turns.length;
+    if (this.renderedTurns.length > turns.length) {
+      this.renderedTurns.length = turns.length;
     }
     this.rebuildChat();
     this.renderOrphanArtifacts();
