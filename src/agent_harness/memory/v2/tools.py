@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -18,24 +18,32 @@ from agent_harness.memory.audit import (
     record_memory_change,
 )
 from agent_harness.memory.types import memory_session_var
+from agent_harness.memory.v2.capability import (
+    MarkdownBudgetExhausted,
+    MemoryContentRejected,
+)
 from agent_harness.memory.v2.commands import (
+    _REMEMBER_NEGATION,
     current_user_message,
     explicit_forget_matches,
     explicit_forget_query_matches,
-    explicit_remember_matches,
     has_forget_intent,
     trusted_identity_for_session,
 )
 from agent_harness.memory.v2.formation import MemoryPayload
+from agent_harness.memory.v2.memory_tool import _grounded_in_user_message
 from agent_harness.memory.v2.origin import FOREGROUND, reset_origin, set_origin
 from agent_harness.memory.v2.policy import find_secret
 from agent_harness.memory.v2.types import (
+    EpisodicPayload,
     EvidenceItem,
     MemoryDraftV2,
     MemoryKind,
     MemoryScope,
     MemoryStatus,
     MemoryTier,
+    ProceduralPayload,
+    SemanticCategory,
     SemanticPayload,
     SourceType,
     assert_kind_tier_payload_contract,
@@ -46,35 +54,66 @@ from agent_harness.tooling.reconcile import ReconcileHint
 from agent_harness.tooling.result import ErrorCode
 
 logger = logging.getLogger(__name__)
-_NEGATED_CONTENT = re.compile(
-    r"\b(?:not|never|no|without|cannot|can't|can’t|don't|don’t|doesn't|doesn’t|"
-    r"didn't|didn’t|won't|won’t|wouldn't|wouldn’t|isn't|isn’t|aren't|aren’t|"
-    r"wasn't|wasn’t|weren't|weren’t|haven't|haven’t|hasn't|hasn’t|hadn't|hadn’t|"
-    r"shouldn't|shouldn’t|mustn't|mustn’t|deny|denies|denied|denying)\b|"
-    r"\b(?:free\s+(?:of|from)|devoid\s+of|absence\s+of)\b|"
-    r"\bnon[- ]?(?:smoker|smoking|drinker|drinking|vegetarian|driver|diabetic|diabetes|"
-    r"allergic|pregnant|member|resident|citizen|employee|user|binary|verbal|compliant|"
-    r"existent|functional)\b|"
-    r"\b[a-z][a-z0-9]*-free\b|"
-    r"不(?:是|会|能|可以?|想|喜欢|要|需要|曾|同意|允许|授权|应|该|必|存在|具备|符合|"
-    r"支持|建议|推荐|属于|愿意|安全|确定|适合|知道|再|太|够|吃|喝|做|用)|"
-    r"没(?:有|法|能|得|吃|喝|做|去|来|看|听|写|用|学|懂|找|在|到)|"
-    r"没有|并非|並非|并不是|並不是|否认|否定|無法|无(?:法|需|权|效|意|关|所谓)|"
-    r"无[\u4e00-\u9fff]{1,16}(?:史|病|症状|疾病|记录|迹象)|"
-    r"非(?:糖尿病(?:患者)?|高血压(?:患者)?|心脏病(?:患者)?|癌症(?:患者)?|哮喘(?:患者)?|"
-    r"吸烟者|烟民|饮酒者|素食者|孕妇|过敏(?:者|体质)?|会员|居民|员工|用户|患者)|"
-    r"未(?:患有|诊断|確诊|确诊|检出|有|曾|能|完成|发现|同意|授权|报告|出现)|从未|不曾",
+
+
+#: 内容侧的"偏好/画像类"信号（#1353 §0 裁决 3 的 kind 推断表：target=user **或**内容为
+#: 偏好/画像类）。ponytail: 词面启发式，只在**没给 target** 时兜底；误判代价不止文件分拣
+#: ——`tier=profile` 还强制 `USER_GLOBAL` + `project_id=None`（§4.2），一条项目事实会被
+#: 提升成跨项目用户画像，影响注入范围。假阳性样例：`I am using PostgreSQL 16 for this
+#: project`（`I am`）、`We always run migrations before deploy`（`We always`）、
+#: `我是不是该用 pytest-xdist`（`我是`）。模型显式传 `target="memory"` 可否决。
+_PROFILE_CONTENT = re.compile(
+    r"\b(?:i|we)\s+(?:prefer|like|love|enjoy|always|usually|never|am|'m)\b|"
+    r"\bmy\s+(?:name|role|job|title|timezone|preferred|favorite|favourite)\b|"
+    r"(?:我|本人)(?:更?喜欢|偏好|习惯|叫|是|通常|一般)|我的(?:名字|姓名|职业|角色|时区|偏好)",
     re.IGNORECASE,
 )
 
 
+def _strip_edge_punctuation(content: str) -> str:
+    """剥 content 边缘的空白与标点，与基线 `commands.explicit_remember_matches` 同款字符集。
+
+    #1440 P3-1：软校验的规范化只做 casefold + 空白折叠，标点会让 `I have lupus.` 对
+    `…I have lupus` 子串命中失败——方向是误拒合法转述，与 #1353 立项动机相反。
+    `memory_tool._add_soft_check` 共用同一套规范化函数，其标点形态留作后续票据。
+    """
+    return content.strip(" \t\r\n\"'“”‘’.,!?。！？;；")
+
+
+def _synthesize_payload(kind: MemoryKind, content: str, tier: MemoryTier) -> MemoryPayload:
+    """payload 缺省时的确定性合成（#1440 F-05）：只由 content 派生，不猜额外语义。"""
+    if kind is MemoryKind.EPISODIC:
+        return EpisodicPayload(
+            situation=content, action=content, outcome=content, lesson=content,
+        )
+    if kind is MemoryKind.PROCEDURAL:
+        return ProceduralPayload(
+            trigger=content, procedure=content, success_condition=content,
+        )
+    category = (
+        SemanticCategory.PROFILE if tier is MemoryTier.PROFILE else SemanticCategory.PREFERENCE
+    )
+    return SemanticPayload(subject=content, fact=content, category=category)
+
+
 class _RememberV2Args(BaseModel):
+    """#1440 F-05 / #1353 §0 裁决 3：垫片不做逐字摘录校验，`kind`/`tier`/`payload` 可缺省。
+
+    模型给不出结构化 payload 是常态（#1025 的双重编码即证据），所以 `payload` 缺省时
+    由 `content` 确定性合成；`kind`/`tier` 按票面映射表推断，显式值永远优先。
+    content 的硬闸只有 add 软校验（在本轮 user message 里找得到依据），不是逐字相等。
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     content: str = Field(min_length=1, max_length=500)
-    kind: MemoryKind
-    tier: MemoryTier = MemoryTier.COLLECTION
-    payload: MemoryPayload
+    #: `user` = 用户画像/偏好（USER.md）；`memory` = 助手笔记（MEMORY.md）。与 `memory` 工具同名同义。
+    #: 缺省 `None` = 没表态，允许内容启发式兜底；显式 `memory` 是**否决权**（#1440 P3-2）：
+    #: 模型按 description 说"这是助手笔记"时，内容侧的 `_PROFILE_CONTENT` 不得改判到 USER.md。
+    target: Literal["memory", "user"] | None = None
+    kind: MemoryKind | None = None
+    tier: MemoryTier | None = None
+    payload: MemoryPayload | None = None
     importance: float = Field(default=0.8, ge=0.0, le=1.0)
     strength: float = Field(default=0.8, ge=0.0, le=1.0)
 
@@ -104,42 +143,65 @@ class _RememberV2Args(BaseModel):
             raise ValueError("content must not be blank")
         return value
 
-    @model_validator(mode="after")
-    def _payload_text_is_covered_by_content(self) -> _RememberV2Args:
-        normalized_content = " ".join(self.content.casefold().split()).strip(
-            " \t\r\n\"'“”‘’.,!?。！？;；:："
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_kind_tier_payload(cls, data: Any) -> Any:
+        """票面映射表（#1353 §0 裁决 3 / #1440 §1）：显式值永远优先。
+
+        - 显式 `kind` → 以显式为准；否则取 payload 自带的 kind（dict 或实例）；再否则推断。
+        - `tier` 缺省：semantic 且（target=user 或 target 未表态且内容为偏好/画像类）→
+          profile，其余 collection。显式 `target="memory"` 是否决权（#1440 P3-2）。
+        - `payload` 缺省 → `_synthesize_payload` 由 content 确定性派生。
+        """
+        if not isinstance(data, dict):
+            return data
+        raw_payload = data.get("payload")
+        parsed_payload: Any = raw_payload
+        if isinstance(raw_payload, str):
+            try:
+                parsed_payload = json.loads(raw_payload)
+            except (ValueError, RecursionError):
+                return data  # 非法字符串：原样留给字段级 coercion 报 Pydantic 原错误
+        # 显式值永远优先（票面映射表）。`kind` 也可由 payload 自带的判别字段补上；
+        # 实例形态（`EpisodicPayload(...)`）没有 `.get`，读属性——否则会落回 semantic，
+        # 再由组合校验报出"payload kind 不匹配"这种绕口的错（#1440 P4-6）。
+        explicit_kind = data.get("kind")
+        payload_kind = (
+            parsed_payload.get("kind") if isinstance(parsed_payload, dict)
+            else getattr(parsed_payload, "kind", None)
         )
-        for field, value in self.payload.model_dump(mode="json").items():
-            if field in {"kind", "category"} or not isinstance(value, str):
-                continue
-            normalized_value = " ".join(value.casefold().split()).strip(
-                " \t\r\n\"'“”‘’.,!?。！？;；:："
-            )
-            if not normalized_value or normalized_value not in normalized_content:
-                raise ValueError(
-                    f"payload.{field} must be derived from content：payload.{field} "
-                    "必须逐字摘自 content（只能原样截取 content 中的连续片段，不得改写、总结或增删字）；"
-                    f"请把 payload.{field} 改成 content 中的一段原文后重试"
-                )
-        if _NEGATED_CONTENT.search(self.content) and (
-            not isinstance(self.payload, SemanticPayload)
-            or normalized_content not in " ".join(self.payload.fact.casefold().split()).strip(
-                " \t\r\n\"'“”‘’.,!?。！？;；:："
-            )
-        ):
-            raise ValueError(
-                "negated content must remain verbatim in a semantic payload fact："
-                "content 含否定表述时 payload 必须是 semantic，且 payload.fact 必须逐字包含"
-                "整句 content 原文（含主语，不得只摘否定片段或改写）；"
-                "请把 payload.fact 改成与 content 完全一致的整句后重试"
-            )
-        return self
+        kind: MemoryKind
+        if explicit_kind is not None:
+            kind = MemoryKind(explicit_kind)
+        elif payload_kind:
+            kind = MemoryKind(payload_kind)
+        else:
+            kind = MemoryKind.SEMANTIC
+        content = data.get("content")
+        target = data.get("target")
+        # target=user 正向；target=memory 否决；未表态（None / 非法值留给字段校验）才看内容。
+        profile_signal = target == "user" or (
+            target is None
+            and isinstance(content, str)
+            and bool(_PROFILE_CONTENT.search(content))
+        )
+        # 缺省 tier：只有 semantic 能进 profile（§4.2），其余一律 collection。
+        tier = data.get("tier") or (
+            MemoryTier.PROFILE.value
+            if kind is MemoryKind.SEMANTIC and profile_signal
+            else MemoryTier.COLLECTION.value
+        )
+        payload = parsed_payload
+        if payload is None and isinstance(content, str) and content.strip():
+            payload = _synthesize_payload(kind, content, MemoryTier(tier)).model_dump(mode="json")
+        return {**data, "kind": kind.value, "tier": tier, "payload": payload}
 
     @model_validator(mode="after")
     def _kind_tier_payload_combination(self) -> _RememberV2Args:
         # scope/project 由 execute 期按身份决定，模型可控的组合错误只有这两条；
         # 在参数面提前拦截（权威规则见 types.assert_content_contract），报错经执行器
         # 带规则文本回模型自纠，而不是走进 execute 后被防泄漏分支吞成通用文案。
+        assert self.kind is not None and self.tier is not None and self.payload is not None
         assert_kind_tier_payload_contract(kind=self.kind, tier=self.tier, payload=self.payload)
         return self
 
@@ -159,21 +221,21 @@ class RememberMemoryV2Tool(Tool):
     @property
     def description(self) -> str:
         return (
-            "只在用户本轮明确要求记住（说了\"记住/记一下\"等）时，把该内容逐字写入一条 V2 长期记忆。"
-            "参数契约（违反即参数校验失败）：content 必须是用户本轮消息里要记住内容的逐字摘录"
-            "（≤500 字符，只允许去掉首尾空白/引号/标点，不得改写）；"
-            "kind 必填：semantic（稳定事实/偏好）| episodic（情境/行动/结果/教训）| procedural（操作规则）；"
-            "payload 必填且结构随 kind：semantic={kind:\"semantic\",subject,fact,category}，"
+            "只在用户本轮明确要求记住（说了\"记住/记一下\"等）时，把该内容写入一条 V2 长期记忆。"
+            "content 必填（≤500 字符）：写用户本轮消息里的原话或它的连续片段；"
+            "允许把用户原话压缩成一条条目，但必须能在本轮用户消息里找到依据——"
+            "凭空编造的内容会被软校验拒绝。"
+            "target 可选：user（用户画像/偏好，写入 USER.md）| memory（助手笔记，写入 MEMORY.md）。"
+            "不传则按内容推断；显式传 memory 会压制内容推断（助手笔记不会被当成画像）。"
+            "kind/tier/payload 均可省略，运行时按 target 与内容推断："
+            "semantic（稳定事实/偏好）| episodic（情境/行动/结果/教训）| procedural（操作规则）；"
+            "需要精确控制时再显式给出，payload 结构随 kind："
+            "semantic={kind:\"semantic\",subject,fact,category}，"
             "episodic={kind:\"episodic\",situation,action,outcome,lesson}，"
-            "procedural={kind:\"procedural\",trigger,procedure,success_condition}；"
-            "payload 的每个文本字段都必须逐字摘自 content（只截原文连续片段，不得改写/总结/增删字）。"
-            "content 含否定表述（不/没/无/未/non-/-free 等）时必须用 semantic，"
-            "且 payload.fact 必须与整句 content 完全一致（含主语，不得只摘否定片段）。"
-            "例：用户说\"记住我喜欢喝美式\"→ content=\"我喜欢喝美式\"，kind=\"semantic\"，"
-            "payload={\"kind\":\"semantic\",\"subject\":\"我\",\"fact\":\"喜欢喝美式\",\"category\":\"preference\"}；"
-            "用户说\"记住我不吃香菜\"→ payload.fact 必须写整句\"我不吃香菜\"，不能只写\"不吃香菜\"。"
-            "同一消息里出现任何拒绝保存的表述时本次写入一律拒绝；密钥、令牌、密码和私钥永不保存；"
-            "临时任务状态与本轮中间结果不该写入。"
+            "procedural={kind:\"procedural\",trigger,procedure,success_condition}。"
+            "例：用户说\"记住我喜欢喝美式\"→ content=\"我喜欢喝美式\"，target=\"user\"（或让运行时推断）；"
+            "用户说\"记住我不吃香菜\"→ content=\"我不吃香菜\"（否定整句照写，不要只写\"不吃香菜\"）。"
+            "密钥、令牌、密码和私钥永不保存；临时任务状态与本轮中间结果不该写入。"
         )
 
     @property
@@ -197,13 +259,30 @@ class RememberMemoryV2Tool(Tool):
 
     async def execute(self, args: _RememberV2Args) -> ToolResult:
         session_id = memory_session_var.get() or ""
+        assert args.kind is not None and args.tier is not None and args.payload is not None
         try:
             source = await current_user_message(self._sessions, session_id)
             source_text = str(source.data.get("content", "")) if source is not None else ""
-            if source is None or not explicit_remember_matches(source_text, args.content):
+            # 撤回同意/明确说"别记住"是**信任边界**，不是逐字摘录校验——F-05 推翻的是
+            # 后者（`explicit_remember_matches` 的子句内逐字命中），前者保留。
+            if source is not None and _REMEMBER_NEGATION.search(source_text):
                 return ToolResult.failure(
-                    message="未找到本轮用户对这条内容的明确记忆指令；没有写入。",
+                    message="用户本轮消息里有不要记住/撤回同意的表达；没有写入。",
                     error_code=ErrorCode.PERMISSION_DENIED,
+                )
+            # #1440 F-05 / #1353 §0 裁决 3：不再做逐字摘录校验，只做 add 软校验——
+            # content 必须能在本 run 的 user message 里找到依据（规范化后子串命中）。
+            # 规范化前先剥边缘标点，与基线 `explicit_remember_matches` 同款（#1440 P3-1）：
+            # 模型把用户原句加句号/引号后写入是常见形态，不剥就会误拒合法转述。
+            if source is None or not _grounded_in_user_message(
+                _strip_edge_punctuation(args.content), source_text,
+            ):
+                return ToolResult.failure(
+                    message=(
+                        "content 必须能在本轮用户消息里找到依据（软校验）；"
+                        "请把 content 改成用户本轮消息里的原话或它的连续片段后重试；没有写入。"
+                    ),
+                    error_code=ErrorCode.INVALID_ARGUMENT,
                 )
             if find_secret(source_text, args.content) is not None:
                 return ToolResult.failure(
@@ -212,7 +291,13 @@ class RememberMemoryV2Tool(Tool):
                 )
             trusted = trusted_identity_for_session(session_id, self._workspace_index)
             event_text = source_text
-            scope = MemoryScope.PROJECT if trusted.project_id is not None else MemoryScope.USER_GLOBAL
+            # §4.2：profile 档位只承载 user_global 的 semantic——用户画像不随项目走。
+            profile = args.tier is MemoryTier.PROFILE
+            scope = (
+                MemoryScope.USER_GLOBAL
+                if profile or trusted.project_id is None
+                else MemoryScope.PROJECT
+            )
             draft = MemoryDraftV2(
                 kind=args.kind, tier=args.tier, scope=scope,
                 project_id=trusted.project_id if scope is MemoryScope.PROJECT else None,
@@ -234,6 +319,19 @@ class RememberMemoryV2Tool(Tool):
             record_memory_change(
                 entry_point=ENTRY_TOOL, action="explicit_remember",
                 memory_ids=(record.id,), affected_count=1,
+            )
+        except MemoryContentRejected as error:
+            # #1440 F-12：凭证/威胁拒绝的**真因**必须可见，不再伪装成"身份无权"。
+            logger.info("V2 explicit memory write rejected as unsafe content")
+            return ToolResult.failure(
+                message=str(error), error_code=ErrorCode.PERMISSION_DENIED,
+            )
+        except MarkdownBudgetExhausted as error:
+            # #1440 F-12：预算超限是**永久条件**（重试落在同一条上限上），且三段式
+            # 说明（当前用量/上限/条目）是模型就地合并的唯一依据，必须原样透出。
+            logger.info("V2 explicit memory write rejected by markdown budget")
+            return ToolResult.failure(
+                message=str(error), error_code=ErrorCode.BUDGET_EXHAUSTED,
             )
         except PermissionError:
             return ToolResult.failure(

@@ -95,6 +95,7 @@ async def build_memory_v2_service(settings: Settings) -> MemoryV2Service:
         Path(settings.workspace_dir) / MEMORIES_DIRECTORY_NAME,
         memory_char_limit=settings.memory_char_limit,
         user_char_limit=settings.user_char_limit,
+        notification_mode=settings.memory_notification_mode,
     )
     markdown.load_from_disk()
     # #1353 M6：待审区与 job/record 同一个库文件（决定二）；与 markdown 同生共死。
