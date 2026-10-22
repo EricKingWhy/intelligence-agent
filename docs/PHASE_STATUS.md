@@ -1,5 +1,7 @@
 # Phase Status — 实施进度追踪
 
+- 2026-10-22：#1465 会话行布局回归锁收口（PR 待开）：`t-contrast.spec.ts:348` 摘掉死选择器 `.tl-seq`（#1419 已删该元素，`measure()` 抛错使本票 `:366` 断言在提交树上不可达）、spec 文件头归属订正为「协调员仲裁 + 已合入 main 的 #1399 定版实现」、删死字段。沙箱复跑：`session-row-layout` 整文件全绿，`t-contrast` 整文件仍红但失败数较基线下降、本票断言 4/4 实例转绿（读数见 `/home/agent/1465-logs/fix-d-runs.log`）。两轴：Correctness 首判 REJECT（阻塞点仅验收口径）→ 协调员裁定 `issuecomment-6334846599` + `:348` 修复后转 APPROVE；Standards APPROVE-WITH-FINDINGS（P2×3/P3×3/P4×4）逐条处置。Gate-0 冻结树 `f44fba2f` 收据如实落盘（唯一 ❌ = coverage，§8.2 第 4 条预期）；`a84e4d84` 的 (a) 路线实测 FAIL、改走 (b) 宽限窗口径。残余：t-contrast 剩余票外红与文件头陈旧项归批三。详见 Tracker `## #1465` 与月档。
+
 - 2026-10-21：#1360 本地补修 tip `61ba21c4`（PR #1426 尚未更新；最新 `origin/main` 已是祖先）：修 Npipe recv、补流读取回归，并为 Windows 离线运行时锁补 tzdata 2026.5。两轴复审 PASS；installer lock 5 项与 desktop test/typecheck 通过。后端全量按用户要求未重跑；中断时的红点已由增量复现定位并修复。增量 Gate-0 3/3、裸 Gate-0 6/6，收据 `docs/gate/61ba21c4c78e54ec47aa82deec7d8bca3043ae08.json`；全量 pytest 未完成。详见月档。
 
 - 2026-10-21：#1360 PR #1431 Recovery attempt budget follow-up 已同步基线 `origin/main=14f5217a`；双轴复审 PASS、P0–P4=0。同步后后端全量为 8797 passed / 17 failed / 129 skipped / 43 deselected，后续按用户要求只做失败节点增量复验，不宣称全量通过；6 个相关测试通过。Gate-0 收据 `docs/gate/49653220f7927ff071bb9423d9404d55cbbc8d67.json` 为 6/6 PASS。PR OPEN / `等待merge`，待 CI gate0。详见 Tracker 与月档。
