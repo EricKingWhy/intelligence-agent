@@ -4,7 +4,8 @@
  *  1. 9 会话、详细密度、Inspector 默认展开；允许 region 跳转键，首焦点到 composer
  *     ≤10 次按键。纯 Tab 路径只记录、不设阈值。
  *  2. 重放弹窗 Esc 后焦点回到触发按钮（行内 ⋯，而不是 body）。
- *  3. tooltip 全覆盖：顶栏 5 个（保留 4 + 更多）、rail 4 图标、会话行 ⋯、
+ *  3. tooltip 覆盖：顶栏只剩「更多工具」触发器 1 项（原 4 个独立按钮随 #1396 收进菜单，
+ *     改断言菜单项可达性，见 `issuecomment-6338942786` 裁定二）、rail 4 图标、会话行 ⋯、
  *     Inspector 统计行 6 个 tab、composer 5 chip、会话名下拉箭头。
  */
 
@@ -317,7 +318,7 @@ test('#1372 AC2：重放弹窗 Esc 后焦点回到行内 ⋯ 触发按钮', asyn
   await expect(trigger).toHaveAttribute('aria-label', /操作/);
 });
 
-test('#1372 AC3：tooltip 全覆盖（顶栏 / rail / 会话行 / Inspector / composer / 会话名）', async ({ page }) => {
+test('#1372 AC3：tooltip 覆盖与顶栏入口可达性（顶栏只剩触发器 tooltip + 菜单项可达性 / rail / 会话行 / Inspector / composer / 会话名）', async ({ page }) => {
   test.setTimeout(60_000);
   // 新会话态：先把 5 个 composer chip 量全（#1444 后预算 chip 两态都在，这里取新建态）。
   await openApp(page, false);

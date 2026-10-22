@@ -210,10 +210,10 @@ function contrast(fg: [number, number, number, number], bg: [number, number, num
  *  三个夹具各自走一条**真实渲染路径**（不是 createElement 影子元素），因此把字色
  *  改回纯 --danger #cf4a46 / --info #4a6fd6 / --warning #b07a10 时对应用例必然变红。 */
 
-/** `.app-error`（分叉失败横幅，App.tsx:1433 forkError）夹具：两轮已完成会话。
+/** `.app-error`（分叉失败横幅，App.tsx:1997 forkError）夹具：两轮已完成会话。
  *  为什么是这个夹具：只有「第 2 轮的 .fork-btn + 后端 422」才经 handleFork 的
  *  catch 走到 `setForkError`，渲染出 className="app-error" role="alert"
- *  （App.tsx:1434）——真实路径。user/message 的 seq 与 turn 序号刻意错开
+ *  （App.tsx:1998）——真实路径。user/message 的 seq 与 turn 序号刻意错开
  *  （2 / 30，照 b-fork.spec.ts 同型夹具），避免「锚点误用 turn 序号」的回归把
  *  本用例干扰成另一种失败。 */
 const FORK_SID = 's-contrast-fork';
@@ -242,7 +242,7 @@ function forkTwoTurnEvents(): FrameSpec[] {
   ];
 }
 
-/** `.app-notice`（worktree 隔离横幅，App.tsx:1419 worktreeNotice）夹具：
+/** `.app-notice`（worktree 隔离横幅，App.tsx:1982 worktreeNotice）夹具：
  *  alpha 空项目 + beta 一条会话（照 u-project-task.spec.ts 的 baseMock），创建会话
  *  的响应带 `X-Worktree-Path` 头。为什么是这个夹具：只有「项目内新建任务」这条
  *  路径经 handleStartTaskInProject 传 onWorktreeCreated 回调，才把该横幅
@@ -268,7 +268,7 @@ function worktreeStartFrames(task: string): FrameSpec[] {
   ];
 }
 
-/** `.recover-btn`（App.tsx:1447「恢复会话」按钮）夹具：崩溃会话（run 无终态 +
+/** `.recover-btn`（App.tsx:2017「恢复会话」按钮）夹具：崩溃会话（run 无终态 +
  *  一条未配对 tool/call，isRecoverableRun 为真），照 recovery-w13.spec.ts 的
  *  crashedEvents 同型。为什么是这个夹具：只有 canRecover 为真才渲染该按钮，
  *  它的正文色是 --warning、底色 14% 染色（hover 22%）——两个态都要量，因为 hover
@@ -1024,7 +1024,7 @@ for (const theme of ['dark', 'light'] as const) {
   });
 
   /* #1136 P3-2：`.auth-banner`（后端 401 引导横幅）把 --warning 当正文色，压在 10% 底上。
-     渲染条件是 `authRequired=true`（App.tsx:1401，后端 401 广播触发）——夹具同
+     渲染条件是 `authRequired=true`（App.tsx:1939，后端 401 广播触发）——夹具同
      l-auth-banner.spec.ts（共享 mockAuthRequired）。 */
   test(`[${theme}] #1136 .auth-banner（401 引导横幅）对比度 ≥4.5`, async ({ page }) => {
     await mockAuthRequired(page);
@@ -1122,7 +1122,7 @@ for (const theme of ['dark', 'light'] as const) {
   });
 
   /* #1172：白字压 --danger 实心底。与上面两处方向相反——要压深的是**底**。
-     夹具走 failure-guard 的 hard 事件条（Conversation.tsx:735），真渲染路径。 */
+     夹具走 failure-guard 的 hard 事件条（Conversation.tsx:1024-1025），真渲染路径。 */
   test(`[${theme}] #1172 .notice-strip-hard 徽标（白字压实底）对比度 ≥4.5`, async ({ page }) => {
     const sid = 's-contrast-guard';
     const events: FrameSpec[] = [
@@ -1163,7 +1163,7 @@ for (const theme of ['dark', 'light'] as const) {
 /** 恢复列表错误态夹具：`GET /api/recovery/interrupted` 返回 500（`listInterruptedRecoveries`
  *  非 2xx 抛错）→ `state.kind='error'` → `.recovery-list-error`（role=alert）落屏。
  *  入口是顶栏「更多工具」菜单项「恢复列表」（#1396 把原顶栏独立按钮收进菜单，
- *  `TopBar.tsx:407-412`；菜单项是 `menuitem`，每次调用都要先开菜单）。 */
+ *  `TopBar.tsx:408-411`（文本行 `:410`）；菜单项是 `menuitem`，每次调用都要先开菜单）。 */
 test(`[${theme}] #1208 .recovery-list-error（恢复列表拉取失败条）对比度 ≥4.5`, async ({ page }) => {
   await routeApi(page, {
     sessions: [], events: [], models: MODELS,
