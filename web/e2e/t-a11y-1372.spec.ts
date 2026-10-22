@@ -368,9 +368,6 @@ test('#1372 AC3：tooltip 全覆盖（顶栏 / rail / 会话行 / Inspector / co
     await expectTip(page, page.locator(`.detail-tab[aria-label="${label}"]`), text);
   }
 
-  // 唯一存活项「更多工具」的 tooltip 原样保留（先跑，避免菜单关合后的焦点态干扰）。
-  await expectTip(page, page.locator('button[aria-label="更多工具"]'), '更多工具');
-
   // 协调员裁定二（issuecomment-6338942786）：这 4 项的原 `button[aria-label]` 已随 #1396
   // 收进「更多工具」菜单，菜单项本身无 Tip 机制——**tooltip 覆盖随产品表面（按钮 + Tip）
   // 被 #1396 退役而退役**，不是为求绿改弱。替代断言守的是同一批入口在现行形态下的
@@ -382,6 +379,17 @@ test('#1372 AC3：tooltip 全覆盖（顶栏 / rail / 会话行 / Inspector / co
   }
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menuitem', { name: '记忆管理' })).toHaveCount(0);
+  // 菜单关闭后焦点回到「更多工具」触发器，其 Tooltip 因聚焦 instant-open 常驻；
+  // 移开指针 + blur，避免后续 hover 断言读到这一枚残留 tooltip。
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+  // 唯一存活项「更多工具」的 tooltip 原样保留。
+  await expectTip(page, page.locator('button[aria-label="更多工具"]'), '更多工具');
+  // 同上：该触发器的 tooltip 会因残留焦点再次 instant-open，落地前清掉指针与焦点，
+  // 否则下一个 hover 断言会读到它的文本。
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
   const rail: Array<[string, string]> = [
     ['插件', '插件：MCP Servers'],
