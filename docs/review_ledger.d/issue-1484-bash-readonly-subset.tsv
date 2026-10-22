@@ -1,0 +1,1 @@
+2026-10-23	#1484 双轴独立复核（Standards + Spec）：审查 c451eafe..05f56838；C 分级只读 Bash 子集；find 执行/删除/写动作、越界路径、未知表达式与反斜杠/shell 语法均回 ASK，已知破坏性 DENY 优先；ToolExecutor ASK 拒绝/无通道零执行、批准单次执行；P0/P1/P2/P3=0/0/0/0；focused 70 passed、tooling 430 passed；三组 mutation 均命中。	c451eafe3b35328cb37fcf9cb2101f7cd7c27a7b..05f56838
