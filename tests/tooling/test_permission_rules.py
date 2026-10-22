@@ -99,6 +99,7 @@ class TestBashClassification:
             "cat ./../outside.txt",
             "cat /etc/passwd",
             "cat ~",
+            "cat %TEMP%",
             r"cat C:\outside.txt",
             r"cat \outside.txt",
             "cat local.txt\nrm local.txt",
@@ -118,6 +119,8 @@ class TestBashClassification:
             "find .",
             "find . -maxdepth 2 -type f -print",
             "find . -name '*.py' -print0",
+            "find . -printf '%p'",
+            "date +%Y",
         ],
     )
     def test_safe_find_queries_remain_allowed(self, command: str) -> None:
@@ -125,6 +128,10 @@ class TestBashClassification:
 
     def test_find_unknown_expression_is_asked(self) -> None:
         assert classify_bash_command("find . -unknown-action") is RuleVerdict.ASK
+
+    @pytest.mark.parametrize("command", ["date 2026-01-01", "date --set=2026-01-01"])
+    def test_date_setter_is_asked(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
 
     @pytest.mark.parametrize("command", ["find . -maxdepth", "find . -type"])
     def test_incomplete_find_expression_is_asked(self, command: str) -> None:

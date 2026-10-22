@@ -21,6 +21,7 @@ DSH 宁可 fail-closed 也不做字符串过滤）。破坏性命令分类器**�
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -183,6 +184,10 @@ _READONLY_COMMANDS = frozenset({
 _SHELL_CONNECTORS = (";", "&&", "||", "|", "$(", "`", ">", "<", "&", "\n", "\r")
 #: 即使没有连接符，变量/命令替换也会把首词白名单变成未知语义 → ASK。
 _SHELL_EXPANSION_MARKERS = ("$",)
+_WINDOWS_ENV_EXPANSION = re.compile(
+    r"%(?:[A-Za-z_][A-Za-z0-9_]*(?::[^%\r\n]*)?|[0-9*]|~[0-9*])%"
+)
+_WINDOWS_BATCH_EXPANSION = re.compile(r"%~?[0-9*]")
 
 #: `find` 只允许能证明把结果写到 stdout、且不会执行/删除/写文件的动作。
 _FIND_UNSAFE_ACTIONS = frozenset({
@@ -266,7 +271,11 @@ def _has_shell_connector(command: str) -> bool:
 
 
 def _has_shell_expansion(command: str) -> bool:
-    return any(marker in command for marker in _SHELL_EXPANSION_MARKERS)
+    return (
+        any(marker in command for marker in _SHELL_EXPANSION_MARKERS)
+        or _WINDOWS_ENV_EXPANSION.search(command) is not None
+        or _WINDOWS_BATCH_EXPANSION.search(command) is not None
+    )
 
 
 def _readonly_arguments_are_safe(
@@ -292,7 +301,7 @@ def _readonly_arguments_are_safe(
             for arg in args
         )
     if first == "date":
-        return not any(
+        return all(arg.startswith(("-", "+")) for arg in args) and not any(
             arg in {"-s", "--set", "--set-date"}
             or arg.startswith(("-s", "--set=", "--set-date="))
             for arg in args
