@@ -22,6 +22,8 @@ vi.mock('../lib/api', async (importOriginal) => {
 
 let host: HTMLDivElement;
 let root: Root;
+/** #1477：菜单夹具挂在 host 之外（模拟 Radix Portal 落在 body），逐个清掉。 */
+let fixtures: HTMLElement[] = [];
 
 const LOADED: InterruptedRecoveries = {
   snapshot_available: true,
@@ -64,6 +66,39 @@ async function render(
   return { onResume };
 }
 
+/** 切到关闭态，并等 Radix FocusScope 的 0ms 归还回调真正跑完。 */
+async function close(): Promise<void> {
+  await act(async () => {
+    root.render(<RecoveryListPanel open={false} onOpenChange={() => {}} onResume={() => {}} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+/** #1477：造一个 TopBar「更多工具」形状的菜单——常驻触发器 + 菜单内容。
+ *  与 Radix DropdownMenu.Content 一致：内容挂 `role="menu"` 与
+ *  `aria-labelledby=<触发器 id>`；菜单关闭时整段内容（含菜单项）卸载。 */
+function mountMoreMenu(): { trigger: HTMLButtonElement; menu: HTMLDivElement; item: HTMLDivElement } {
+  const trigger = document.createElement('button');
+  trigger.id = `more-trigger-${Math.random().toString(36).slice(2)}`;
+  trigger.setAttribute('aria-haspopup', 'menu');
+  trigger.setAttribute('aria-label', '更多工具');
+  document.body.appendChild(trigger);
+  const menu = document.createElement('div');
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-labelledby', trigger.id);
+  const item = document.createElement('div');
+  item.setAttribute('role', 'menuitem');
+  item.tabIndex = -1;
+  item.textContent = '恢复列表';
+  menu.appendChild(item);
+  document.body.appendChild(menu);
+  fixtures.push(trigger, menu);
+  return { trigger, menu, item };
+}
+
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   host = document.createElement('div');
@@ -75,6 +110,8 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
+  fixtures.forEach((node) => node.remove());
+  fixtures = [];
   vi.mocked(listInterruptedRecoveries).mockReset();
 });
 
@@ -175,5 +212,35 @@ describe('RecoveryListPanel', () => {
     await render();
     expect(document.querySelector('.recovery-list-empty')).not.toBeNull();
     expect(document.querySelector('.recovery-list-item')).toBeNull();
+  });
+});
+
+describe('#1477 面板关闭后焦点回到常驻控件', () => {
+  it('经「更多工具」菜单打开：关闭后焦点回到菜单触发器（菜单项已随菜单卸载）', async () => {
+    const { trigger, menu, item } = mountMoreMenu();
+    item.focus();
+    expect(document.activeElement).toBe(item);
+
+    await render();
+    // 菜单在面板打开的同时关闭（Radix 在 onSelect 之后卸载内容）——记下的 opener 成了死节点。
+    menu.remove();
+    expect(item.isConnected).toBe(false);
+
+    await close();
+
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('入口本身是常驻按钮：关闭后焦点仍回到该按钮（旧行为不回归）', async () => {
+    const button = document.createElement('button');
+    button.textContent = '恢复列表';
+    document.body.appendChild(button);
+    fixtures.push(button);
+    button.focus();
+
+    await render();
+    await close();
+
+    expect(document.activeElement).toBe(button);
   });
 });
