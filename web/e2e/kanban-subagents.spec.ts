@@ -11,7 +11,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { routeApi, sessionRow, type ApiMock } from './fixtures';
+import { clickTopBarMenuItem, routeApi, sessionRow, type ApiMock } from './fixtures';
 
 const T = '2026-10-17T00:00:00Z';
 
@@ -32,10 +32,16 @@ function boardRow(
   });
 }
 
+/** #1396：看板入口已收进顶栏「更多工具」菜单（`menuitem`，不是 `button`）。
+ *  打开动作单独成函数：「关掉再开、不刷新」那条用例复用的是同一条入口路径。 */
+async function openBoardPanel(page: Page): Promise<void> {
+  await clickTopBarMenuItem(page, 'Agent 看板');
+  await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+}
+
 async function openBoard(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByLabel('看板').click();
-  await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+  await openBoardPanel(page);
 }
 
 /** 委派行（形状 = 后端 `web/delegations.py` 的行 / `api.ts::DelegationEntry`）。
@@ -182,8 +188,7 @@ test.describe('#1307 看板子智能体按需拉取', () => {
     await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toHaveCount(0);
     // **不刷新页面**地重新打开：考的正是"卡片随看板卸载"这条路径（page.goto 会
     // 顺带清掉一切，绿了也证明不了缓存边界）。
-    await page.getByLabel('看板').click();
-    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+    await openBoardPanel(page);
     await expect(cardOf(page, 's-exec').getByRole('button', { name: '子任务' }))
       .toHaveAttribute('aria-expanded', 'false');
     await cardOf(page, 's-exec').getByRole('button', { name: '子任务' }).click();

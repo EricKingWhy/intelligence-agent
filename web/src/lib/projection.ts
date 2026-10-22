@@ -2010,6 +2010,11 @@ const EVENT_SEMANTICS: Record<EventTypeValue, EventSemantics> = {
   // （不变量 #22：内容预览只走日志通道）。登记为 no-op ⇒ 已知类型、不进
   // `unknown_events`；不登记则 `Record<EventTypeValue, EventSemantics>` 穷尽性被破坏。
   [EventType.MEMORY_HUMAN_UPDATED]: { apply: noopProjection, summarize: emptySummary },
+  // #1461：`memory/human_blocked` 与 MEMORY_HUMAN_UPDATED 同形——写路径被审批门拦下时
+  // 的人面向通知事件，载荷只有 count / blocked IDs / job ID，**不带内容**（不变量 #22）。
+  // 登记为 no-op ⇒ 已知类型、不进 `unknown_events`；不登记则
+  // `Record<EventTypeValue, EventSemantics>` 穷尽性被破坏，`tsc` 直接红。
+  [EventType.MEMORY_HUMAN_BLOCKED]: { apply: noopProjection, summarize: emptySummary },
   // #1017：不再是无归属的 no-op——按「事件到达时的最后一轮」verbatim 归位（呈现层
   // 与轮次锚定，消灭尾部游离卡），事件本体照旧留在 events 日志（Inspector Timeline）。
   [EventType.MEMORY_RECALLED]: { apply: projectMemoryRecalled, summarize: emptySummary },

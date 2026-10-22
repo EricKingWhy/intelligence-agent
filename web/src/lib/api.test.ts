@@ -1501,6 +1501,23 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     await expect(createEmptySession({ cwd: 'D:/x', auto_approve: true }))
       .rejects.toThrow('task 与 launch=false 互斥');
   });
+
+  /* #1467：`budget.run` 与 launch=false 后端 422 互斥（app.py `create_session`），
+     所以 `createEmptySession` 的字段表不再登记 `budget`。类型上已无该键——这里
+     刻意绕过类型锁（`as never`，仓库测试既有的绕过写法），钉的是**运行期**字段表：
+     旧实现的表里有 `budget` 构造器，调用方塞进来就会原样上线；现在构造器根本不
+     读这个键。类型锁与字段表是两道独立的闸，缺一道都能把 422 放出去。 */
+  it('调用方绕过类型塞 budget → 请求体仍不含 budget 键（#1467 运行期双保险）', async () => {
+    const cap = captureFetchWithHeaders(200, { session_id: 'sid-4' });
+    await createEmptySession({
+      cwd: 'D:/repos/alpha',
+      auto_approve: true,
+      budget: { run: { max_agent_turns_total: 5 } },
+    } as never);
+    expect(cap.calls[0].url).toBe('/api/sessions?launch=false');
+    expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', auto_approve: true });
+    expect(cap.calls[0].body).not.toHaveProperty('budget');
+  });
 });
 
 describe('resumeSession — 同 run 恢复的 ceiling 形状（`#313` / `#314`）', () => {

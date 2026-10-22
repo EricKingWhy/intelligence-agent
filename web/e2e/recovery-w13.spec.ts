@@ -10,7 +10,7 @@
  *  驱动）；帧形状与后端 contract 一致。 */
 
 import { expect, test, type Page } from '@playwright/test';
-import { RUN, SID, T, routeApi, type ApiMock, type FrameSpec } from './fixtures';
+import { RUN, SID, T, clickTopBarMenuItem, routeApi, type ApiMock, type FrameSpec } from './fixtures';
 
 const ROW = {
   session_id: SID,
@@ -73,7 +73,8 @@ test('恢复列表：先列后继续（加载完成前「继续」disabled），
     },
   });
   await page.goto('/');
-  await page.getByRole('button', { name: '恢复列表' }).click();
+  // #1396：恢复列表入口已收进顶栏「更多工具」菜单（`menuitem`，不是常驻 `button`）。
+  await clickTopBarMenuItem(page, '恢复列表');
 
   // ① 加载窗口内：只有 disabled 的占位「继续」+ 原因
   const loadingButton = page.locator('.recovery-list-loading .recovery-resume-btn');
@@ -117,7 +118,8 @@ test('恢复列表：点「继续」打开该会话并关闭列表', async ({ pa
     },
   });
   await page.goto('/');
-  await page.getByRole('button', { name: '恢复列表' }).click();
+  // #1396：恢复列表入口已收进顶栏「更多工具」菜单（`menuitem`，不是常驻 `button`）。
+  await clickTopBarMenuItem(page, '恢复列表');
   await page.locator('.recovery-list-item').first().getByRole('button', { name: '继续' }).click();
   await expect(page.locator('.recovery-list-panel')).toHaveCount(0);
 });

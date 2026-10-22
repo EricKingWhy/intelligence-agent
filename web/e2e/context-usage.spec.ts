@@ -208,5 +208,5 @@ test('T6d：Esc 关闭看板（与既有 picker 一致）', async ({ page }) => 
   await clickTopBarMenuItem(page, '上下文容量');
   await expect(page.getByRole('dialog', { name: '上下文容量' })).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog', { name: '记忆用量' })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: '上下文容量' })).toHaveCount(0);
 });
