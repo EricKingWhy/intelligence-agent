@@ -19,6 +19,18 @@
   （状态列只有 `A` / `M`，无 `D`/`R`/`C`/`T`；5 条路径全部命中 `DOC_PATTERN`。收据笔 `f3d4318` 上同一命令的输出只有第一条台账行 —— 收据就是在那棵树上跑的，tree `a465c6ee`。）
   ② `git status --short` 原文 = **空**（无输出）。
   ⇒ 判为「跑过门禁的树 = 被集成的代码面」，`f3d4318` 的 7/7 读数对代码 tip `016fd452` 有效；其后各笔均为 docs / 台账 / 收据。
+- **§8.1 判据原文（同步轮，冻结代码面 = merge 提交 `af144b57`；Gate-0 收据跑在 `b54d0fe2`）**：
+  判据前置自证（两次分次调用，均 exit 0）：`git rev-parse --verify "b54d0fe293d039538323ec0765d0fa0f4548505a^{commit}"` = `b54d0fe293d039538323ec0765d0fa0f4548505a`、`git rev-parse --verify "HEAD^{commit}"` = 本笔 HEAD。
+  ① `git diff --name-status --no-renames b54d0fe293d039538323ec0765d0fa0f4548505a HEAD` 原文：
+  ```
+  M	docs/PHASE_STATUS.md
+  M	docs/SDD_TICKET_TRACKER.md
+  A	docs/gate/b54d0fe293d039538323ec0765d0fa0f4548505a.json
+  M	docs/phase_status/2026-10.md
+  ```
+  （状态列只有 `A` / `M`，无 `D`/`R`/`C`/`T`；4 条路径全部命中 `DOC_PATTERN`。本 bullet 自身的提交只改本文件，行集合不变；台账行 `A docs/review_ledger.d/t1461-sync-ed96f551-af144b57.tsv` 在 `b54d0fe2` 上**已包含**，故不在区间内。）
+  ② `git status --short` 原文 = **空**（无输出）。
+  ⇒ 判为「跑过门禁的树 = 被集成的代码面」：`b54d0fe2` 的 7/7 读数对同步后的合并树有效，`af144b57..HEAD` 的代码面 `git diff -- src/ tests/ web/` 为**空**。
 - **同步轮（sync merge `af144b57`）**：`origin/main` 自基线 `a5ecbd52` 领先 115 笔至 `ed96f551`，`git merge --no-ff` 汇入本分支（两父 `8e5cdd40` / `ed96f551`，merge-base `a5ecbd52`）。合并前 `git merge-tree --write-tree` 预演与实跑一致：重叠文件仅 `docs/PHASE_STATUS.md`、`docs/SDD_TICKET_TRACKER.md`、`docs/phase_status/2026-10.md`，**冲突 1 处**在 `docs/PHASE_STATUS.md`（按两边条目都保留解，`#1461` 条目与 main 侧条目并存），**零代码冲突**。代码面核对：本票 16 文件在 `8e5cdd40` 与合并后 HEAD 上的补丁逐字相同（两 patch `sha256=1a458c96…`，各 2269 行）；`git diff ed96f551 HEAD -- <main 侧 38 文件>` 为空（main 改动逐字全收）；两侧文件集合交集为空。三档仅 **69 行纯新增、0 删除**，`#1461` 条目零丢失。读数（沙箱 `shell/ia-test`）：合并树 `tests/memory` -n 4 = **1126 passed / 33 skipped / 0 failed（21.07s）**；新 main 基线 `ed96f551` 同环境 = **1107 passed / 33 skipped / 0 failed（17.82s）** ⇒ 差 **+19 passed** = 本票净增，skipped 同、failed 0。合并树 Gate-0 实跑 **7/7 PASS**（24.7s，收据 `docs/gate/b54d0fe293d039538323ec0765d0fa0f4548505a.json`，tree `dd4120e5`）；首次 5/7 的唯一原因是沙箱新 worktree 缺 `.venv` / `node_modules` 链接（结构性，补齐即 7/7），非本票代码问题。同步 merge 的机械归属行 = `docs/review_ledger.d/t1461-sync-ed96f551-af144b57.tsv`（`git show --cc` 文件表恰 3 条全 docs、三棵树互不相等），`check_review_coverage.py` exit 0。
 - **残余 / 待办**：**P3-1（查重顺序敏感）/ P3-2（count=0 通知）待用户裁决**；推送与 PR 描述由协调员派发；`evaluate_gate` 的 docstring 口径已随设计 §4.7 更新；白名单外改动 6 处 + kill-child 辅助已在月档逐条登记被迫理由（详见 `docs/phase_status/2026-10.md` #1461 节）。
 
