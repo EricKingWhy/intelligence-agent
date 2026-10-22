@@ -89,14 +89,15 @@ import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from '
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
 import { composerPermissionMode } from './lib/permission';
-import type {
-  AskUserAnswer,
-  ConstraintInputAnswer,
-  PlanApprovalAnswer,
-  ToolCall,
-  PresetTask,
-  AgentEvent,
-  UndeliveredInput,
+import {
+  EventType,
+  type AskUserAnswer,
+  type ConstraintInputAnswer,
+  type PlanApprovalAnswer,
+  type ToolCall,
+  type PresetTask,
+  type AgentEvent,
+  type UndeliveredInput,
 } from './types';
 
 // 队列条空态兜底（引用恒定：避免每次渲染生成新数组让 Composer 的 memo 失效）。
@@ -577,6 +578,66 @@ export default function App() {
     setInspectorOpen((v) => !v);
   };
 
+  /* F-06（#1449）：中断横幅的两个纯前端动作（看缺口 / 忽略）。
+   *
+   * 落点 = **最后一个** `run/interrupted` 事件本体：投影 `run_interrupted` 只留
+   * step/seq/reason，不含 run_id，也不含 `focusEvent` 需要的完整事件。`run/started`
+   * 会清空投影，所以投影非 null 时事件必然在 `conversation.events` 里（投影由它派生）；
+   * 找不到时按钮仍渲染，退回 run 级 focus 再打开右栏，不抛错。
+   *
+   * 「忽略」照抄既有 dismiss 模式（`contextFullDismissedRunId`）：App 级
+   * `useState<string|null>` 存被忽略对象的标识，渲染时比对；视图状态不持久化。
+   * 标识首选事件 `run_id`（同一次中断唯一）；匿名 run（后端 `detect_unterminated_runs`
+   * 允许 run_id 为 None）退到该事件的 seq / 该次中断的 `interrupted_seq`。 */
+  const interruptedEvent = useMemo(() => {
+    // 常见路径（没有中断的会话）不扫全表：流式期间每个 delta 都会产生新
+    // conversation（projection 的 copy-on-write），O(N) 反向扫描会累计成 O(N²)。
+    if (!conversation?.run_interrupted) return null;
+    const events = conversation.events;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      // quarantine 帧（eventValidate 拒收）保留 type 但 seq/run_id 归一成 null；
+      // 持久化的 run/interrupted 必有 seq，跳过它们才与投影事实同源（P4-2）。
+      if (event.type === EventType.RUN_INTERRUPTED && event.seq !== null) return event;
+    }
+    return null;
+  }, [conversation]);
+  /* 标识 = 会话前缀 + 该次中断的身份。run_id 用**真值**判断（`||` 而不是 `??`）：
+   * 后端允许匿名 run（run_id=None），旧数据还可能出现空串——空串必须继续回退到
+   * seq，否则同一会话的两次匿名/空串中断会共用一个标识，第二次被静默吞掉。
+   * seq 是每会话单调（契约 C5），不是全局唯一，所以必须带 `conversation.session_id`
+   * 前缀：在 A 会话点「忽略」不能连 B 会话同 seq 的中断一起隐藏。
+   * 不再保留第三级 `'unknown'` 常量兜底：投影非 null 时事件必然在场（投影由它
+   * 派生）；即使事件被 quarantine 跳过，投影的 `interrupted_seq` 也是后端
+   * `InterruptedRun.interrupted_seq: int` 的契约字段，可直接作为该次中断的序号
+   * （只有形状合法却缺 seq 的非持久化帧才可能落到它，仍比常量兜底可区分）。 */
+  const interruptedIdentity = (() => {
+    if (!conversation?.run_interrupted) return null;
+    const prefix = conversation.session_id;
+    if (interruptedEvent) {
+      return `${prefix}:${interruptedEvent.run_id || `seq:${interruptedEvent.seq}`}`;
+    }
+    return `${prefix}:interrupted:${conversation.run_interrupted.interrupted_seq}`;
+  })();
+  const [dismissedInterruptedIdentity, setDismissedInterruptedIdentity] = useState<string | null>(null);
+  const handleInspectInterruption = useCallback(() => {
+    // 正常数据：定位到中断事件本体。事件缺失（防御性边界）：退回 run 级 focus，
+    // 不把上一次无关的 focus 留在右栏（P4-1）。
+    if (interruptedEvent) focusEvent(interruptedEvent);
+    else focusRun();
+    setInspectorOpen(true);
+    // `setInspectorOpen` 是 useState 的稳定 setter，引用在组件生命周期内恒定；
+    // 列进 deps 不改变行为，但与 oxlint 推断的依赖一致（复审 R-2）。相邻
+    // `focusChild` 省略 setter 是既有体例差异，不复制它的 lint 债。
+  }, [interruptedEvent, focusEvent, focusRun, setInspectorOpen]);
+  const handleDismissInterruption = useCallback(() => {
+    setDismissedInterruptedIdentity(interruptedIdentity);
+    // 横幅整块卸载后，被点击的按钮消失，浏览器会把焦点丢到 body。落到主工作区
+    // 容器（`#region-main` 带 tabIndex=-1，SkipLinks 的既有落点），下一次 Tab
+    // 从会话区内部继续，而不是从页面开头重来。
+    document.getElementById('region-main')?.focus();
+  }, [interruptedIdentity]);
+
   /** #183 面板动作的唯一入口（pin/expand/resize/peek 开关/关闭）。
    *
    *  `close` 单独一条路而不是塞进 `setPanel` 的 updater：它要同时改另一个 state
@@ -747,8 +808,11 @@ export default function App() {
    *  只有显式 `false` 才用于标注/禁用：后端沉默不等于不支持。 */
   const currentModelSupportsVision = effectiveModelEntry(selectedModel, models)?.supportsVision ?? null;
 
-  // #426：新建会话的预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
-  // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。
+  // #426/#1444：预算入口草稿（常用三项；Composer 输入框原样字符串；判形在
+  // 映射层 toCreateBudget 一处做——空值/非法值 = 不发键 = 后端默认）。新建态随
+  // create 请求发出，已选态随下一次 `/messages` 作为 amend 发出（handleSubmit）。
+  // #1467：懒建本身（launch=false）不带它（后端 422 互斥）；懒建出的会话
+  // 走首条消息的 amend 发出。
   const [budgetRunTurnsDraft, setBudgetRunTurnsDraft] = useState('');
   const [budgetRunTokensDraft, setBudgetRunTokensDraft] = useState('');
   const [budgetRunDeadlineDraft, setBudgetRunDeadlineDraft] = useState('');
@@ -837,21 +901,17 @@ export default function App() {
     const pending = (async (): Promise<string | null> => {
       try {
         // #204 口径：只建会话、不启动 run。载荷与「发文本新建」分支同形——
-        // `auto_approve: true` 恒送 + 项目 cwd + 用户在新建态选的权限档 + 预算
-        // 草稿（F1：否则懒建出的会话静默回落到后端默认档，与发文本建出的会话
-        // 语义不同——权限档是 Runtime 边界（不变量 #11），不能静默丢）。空值丢
-        // 弃由 `api.ts buildBody` 单一执行（见 amend.ts 顶部契约说明）。
-        // `model` / `agent_profile` / `reasoning_effort` 不在这里：它们随随后
-        // 首条消息的 amend 面发出（`handleSubmit` 的 `toAmendFields`），懒建只
-        // 负责把会话身份先建出来。
+        // `auto_approve: true` 恒送 + 项目 cwd + 用户在新建态选的权限档（F1：否则
+        // 懒建出的会话静默回落到后端默认档，与发文本建出的会话语义不同——权限档是
+        // Runtime 边界（不变量 #11），不能静默丢）。空值丢弃由 `api.ts buildBody`
+        // 单一执行（见 amend.ts 顶部契约说明）。
+        // `model` / `agent_profile` / `reasoning_effort` / `budget` 不在这里：它们随
+        // 随后首条消息的 amend 面发出（`handleSubmit` 的 `toAmendFields` +
+        // `toCreateBudget`），懒建只负责把会话身份先建出来。#1467：`budget.run` 与
+        // launch=false 互斥（后端 422），带上它这个入口恒失败。
         const created = await createEmptySession({
           auto_approve: true,
           permission_mode: composerControls.permissionMode ?? undefined,
-          budget: toCreateBudget({
-            turns: budgetRunTurnsDraft,
-            totalTokens: budgetRunTokensDraft,
-            deadlineAt: budgetRunDeadlineDraft,
-          }),
           ...(activeProject ? { cwd: activeProject.path } : {}),
         });
         ensuredIdRef.current = created.sessionId;
@@ -866,7 +926,7 @@ export default function App() {
     })();
     ensuringRef.current = pending;
     return pending;
-  }, [selectedId, selectSession, refreshSessions, activeProject, composerControls, budgetRunTurnsDraft, budgetRunTokensDraft, budgetRunDeadlineDraft]);
+  }, [selectedId, selectSession, refreshSessions, activeProject, composerControls]);
 
   const handleSubmit = useCallback(
     /** 返回值 = 这次发送是否已被受理（#1029），原样透传给 Composer：
@@ -912,6 +972,16 @@ export default function App() {
         ...toAmendFields(composerControls),
         ...ruleSignal,
         ...scopedFacts,
+        // #1444：已选会话的预算草稿随下一次 `/messages` 作为 amend 发出（后端
+        // idle→launched 新 run 消费；queued / steer 只判定丢弃）。全空草稿在
+        // `toCreateBudget` 返回 undefined，api 层「有值才带键」⇒ 载荷逐字不变。
+        // 与 create 路径同一映射点（toCreateBudget），不另造构造器。
+        // #1467：懒建（`ensureSession`）不再带 budget——首条消息走的就是这里。
+        budget: toCreateBudget({
+          turns: budgetRunTurnsDraft,
+          totalTokens: budgetRunTokensDraft,
+          deadlineAt: budgetRunDeadlineDraft,
+        }),
         // #825（MM-04）：附图引用随 `/messages` 的 `attachments` 发出（「有值才带键」
         // 由 api.ts 的字段表单点执行——空数组与缺省等价，不制造空字段）。
         ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
@@ -1993,7 +2063,9 @@ export default function App() {
               <AdjudicationTechDetail message={recoverState.message} />
             </div>
           )}
-          {conversation?.run_interrupted && !streaming && (
+          {conversation?.run_interrupted &&
+            !streaming &&
+            interruptedIdentity !== dismissedInterruptedIdentity && (
             <div className="interrupt-banner" role="status" aria-live="polite">
               {/* step_id 可能缺失/null，且这是**真值不是缺失**：进程在该 run 的第一个
                   带步号事件之前就死了（run/started 本身不带 step，检测器只能
@@ -2001,15 +2073,39 @@ export default function App() {
                   run/interrupted 里有 2 条信封整个不带 step_id（run/started 后
                   紧接 interrupted，如 c63ce4d3-3b26-40bb-8e8c-e3af8dd33035）——
                   渲染成「第 ? 步」等于把「还没开始就断了」说成一个未知数字。*/}
-              {conversation.run_interrupted.step_id !== null
-                ? `上次任务在第 ${conversation.run_interrupted.step_id} 步中断`
-                : '上次任务在首个步骤开始前中断'}
-              （原因：{conversation.run_interrupted.reason}）
+              <span className="interrupt-banner-text">
+                {conversation.run_interrupted.step_id !== null
+                  ? `上次任务在第 ${conversation.run_interrupted.step_id} 步中断`
+                  : '上次任务在首个步骤开始前中断'}
+                （原因：{conversation.run_interrupted.reason}）
+              </span>
+              {/* F-06（#1449）：两个动作都是纯前端视图操作——「看缺口」把中断事件
+                  本身定位到右栏（复用 focusEvent 的 peek 语义），「忽略」按中断
+                  标识收起这一屏。后端没有部分重跑能力，这里**不**造重跑入口。
+                  按钮走专用类（`.interrupt-action`），不裸用全局 `.recover-btn`：
+                  崩溃恢复面板与本横幅可能同屏，全局选择器保持单一含义。 */}
+              <button
+                type="button"
+                className="interrupt-action interrupt-action-primary"
+                onClick={handleInspectInterruption}
+                title="在右栏 Inspector 定位到这次中断的事件"
+              >
+                在右栏看缺口
+              </button>
+              <button
+                type="button"
+                className="interrupt-action interrupt-dismiss"
+                onClick={handleDismissInterruption}
+                title="收起这条中断提示（不改变会话事实）"
+              >
+                忽略
+              </button>
             </div>
           )}
           {/* 预算暂停面板（#312）：与 interrupt-banner **互斥**（暂停非终态、不会同时
-              出现 run/interrupted），但两者刻意不是同一个组件——中断没有可执行动作，
-              预算暂停有（抬高绝对 ceiling → 同 run 恢复）。
+              出现 run/interrupted），但两者刻意不是同一个组件——中断只有两个纯前端
+              视图动作（F-06：右栏定位 / 忽略），预算暂停有恢复动作（抬高绝对 ceiling
+              → 同 run 恢复）。
               #968：stuck 暂停没有这个动作——后端对 stuck 的 budget_increase 一律 409
               （恢复前置是相关 steer / 环境 / policy 变更），走单独的引导面板
               （`11 §6.1`：MUST NOT 提供一键重试）；Composer 不被禁用/遮挡，steer
@@ -2184,7 +2280,9 @@ export default function App() {
                     selectedReasoningEffort={selectedReasoningEffort}
                     reasoningEffortProjection={reasoningEffortProjection}
                     onReasoningEffortChange={setSelectedReasoningEffort}
-                    /* #426：新建会话的预算入口（会话内 Composer 不显示，见组件注释） */
+                    /* #426/#1444：预算入口两态都在——新建态随 create 请求发
+                       `budget.run`；已选态随下一次 `/messages` 作为 amend 发出
+                       （见 handleSubmit 的 amend 构造） */
                     budgetRunTurns={budgetRunTurnsDraft}
                     onBudgetRunTurnsChange={setBudgetRunTurnsDraft}
                     budgetRunTokens={budgetRunTokensDraft}

@@ -22,7 +22,12 @@ allow / stage——``blocked`` 是**审批结果**（用户明确拒绝）而不
   `tooling/approval_queue.py` 的会话队列——而那个队列按 tool_call 作用域登记、
   由 ToolExecutor 消费，``memory`` 工具拿不到它。票面给的兜底正是本仓的答案：
   **拿不到通道 → stage，绝不静默拒绝**。所以门开时 memory 写入一律 stage，审批走
-  ``/memory pending|approve|reject``。
+  ``agent-harness memory pending|approve|reject`` 或 ``/api/memory-pending*``。
+
+  **审批回调不接 `approval_queue`（追认偏离）**：#1438 已就此项作出裁决（用户
+  2026-10-21 评论，issue #1438）——不强接队列，理由是上面那条作用域约束仍然成立，
+  且 M6 自建的 ``memory_v2_staged`` 表已经承载了审批态与 pinning。该偏离已登记于
+  #1353 `issuecomment-6315586413`。
 
 # entry pinning（堵 TOCTOU）
 
@@ -47,6 +52,7 @@ from uuid import uuid4
 
 from agent_harness.memory.v2._sqlite import connect, stamp
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
+from agent_harness.memory.v2.origin import ORIGINS, current_origin
 from agent_harness.memory.v2.store import STAGED_SCHEMA, MemorySettingsV2
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.storage.sqlite import retry_on_busy
@@ -96,21 +102,39 @@ class GateDecision:
             raise ValueError("exactly one of allow / blocked / stage must be true")
 
 
-def evaluate_gate(settings: MemorySettingsV2) -> GateDecision:
-    """``memory`` 写入的门。开 → stage；关 → allow。
+def evaluate_gate(settings: MemorySettingsV2, origin: str | None = None) -> GateDecision:
+    """``memory`` 写入的门：gate 关 → allow；gate 开 → 按写入来源分流（#1438）。
 
-    门开时**总是** stage：本仓没有可用的行内审批通道（见模块 docstring），而票面
-    明确"拿不到审批通道 → stage，绝不静默拒绝"。
+    分流矩阵（票面 §5.1；``origin`` 省略时取 `origin.current_origin()`）：
 
-    消费者只有一个：``MemoryTool._gate``（前台 ``memory`` 工具）。**后台 formation
-    不经过这里**——``executor`` 在 ``commit_with_outcome`` 的同一事务里直接
+    ==================  ==================  =======
+    write_approval      origin              decision
+    ==================  ==================  =======
+    关                  任一                allow
+    开                  ``foreground``      stage
+    开                  ``background_review``  stage
+    ==================  ==================  =======
+
+    两格同值不是抄漏：本仓没有可问的通道（见模块 docstring），前台与后台都只能
+    stage。矩阵留在这里是因为「按 origin 分流」是票面 M6 的语义契约——将来真有
+    可问通道时，改的只是 ``foreground`` 那一格。``blocked`` **永远不由这里产出**：
+    它是审批结果（人工 approve/reject），把"没人问过"和"用户说不"混在一起就分不清了。
+
+    消费者是 ``MemoryTool._gate``（前台 ``memory`` 工具）。**后台 formation 不经过
+    这里**——``executor`` 在 ``commit_with_outcome`` 的同一事务里直接
     ``create_in/update_in/invalidate_in``，把其中一条改成 stage 会让 job 终态与
     记录落地分属两个事务（AC6/AC7 要的"终态与副作用一起落地"正是那条事务）。
     后台写入的开关是 ``extraction_enabled``：关掉它就不形成，而不是形成后再逐条问。
+    后台仍然**打标**（``BACKGROUND_REVIEW``），只是不在本函数分流——标是给软校验和
+    将来策略用的，不是给这条事务用的。
     """
-    if settings.write_approval:
-        return GateDecision(stage=True, message=_staged_message())
-    return GateDecision(allow=True)
+    source = current_origin() if origin is None else origin
+    if source not in ORIGINS:
+        # 打标写错字必须响亮：静默 stage 会把"来源不明"伪装成"来源合法"。
+        raise ValueError(f"unknown memory write origin {source!r}")
+    if not settings.write_approval:
+        return GateDecision(allow=True)
+    return GateDecision(stage=True, message=_staged_message())
 
 
 def _staged_message() -> str:

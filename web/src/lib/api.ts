@@ -359,11 +359,13 @@ export interface StartSessionPayload {
 /** createEmptySession 的载荷（#204 裁定 §2）：只建会话、不启动 run。
  *  `task` **刻意不在这个形状里**——launch=false + task 是矛盾组合（给了任务却
  *  静默不执行），后端 422；类型上没有它，编译期就挡住调用方传进来。
+ *  `budget` 同理（#1467）：`budget.run` 只属于启动 run 的请求，launch=false 下
+ *  后端 422（app.py `create_session`）；类型上没有它 + 下方字段表不登记它，
+ *  编译期与运行期两道闸。预算随首条消息的 `/messages` amend 发出。
  *  `permission_mode` 与 startSession 同词汇（弹窗选的档 = 会话级权限）；省略 =
  *  后端默认 workspace-write + auto-approve。 */
 export interface CreateEmptySessionPayload {
   cwd?: string;
-  budget?: BudgetPayload;
   auto_approve?: boolean;
   permission_mode?: string;
   workspace?: string;
@@ -393,7 +395,8 @@ export async function createEmptySession(
       buildBody(payload, {
         workspace: (p) => (p.workspace ? ['workspace', p.workspace] : null),
         cwd: (p) => (p.cwd ? ['cwd', p.cwd] : null),
-        budget: (p) => (p.budget !== undefined ? ['budget', p.budget] : null),
+        // #1467：**不登记** `budget`——`budget.run` 与 launch=false 互斥（后端 422）。
+        // 调用方绕过类型塞进来也不会被序列化（字段表就是运行期白名单）。
         auto_approve: (p) => (p.auto_approve !== undefined ? ['auto_approve', p.auto_approve] : null),
         permission_mode: (p) => (p.permission_mode ? ['permission_mode', p.permission_mode] : null),
       }),
