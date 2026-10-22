@@ -216,6 +216,41 @@ ID/root/version/状态/来源、staged 审批 payload 与 pin、outbox 派生动
 - **不抢跑** #1491–#1496 与 #1507 的任何一步。
 - 尚未开票的后续项：§3.8 的重建入口缺口（ADR-0042 D7.1 的运维命令已不存在）需在第 7 步前
   单独处置；本 ADR 只登记，不在此开票。
+- **工程规格承接说明（C 卷宗 §4.3）**：下列 Engineering Spec / PRD 章节在转向后仍带**旧权威**
+  （SQLite 是 Memory 唯一内容 owner）或**旧 scope**（tenant/user/project 路由）语言。它们的修订
+  **由裁决 1/2/7/16/20 的已裁范围承接授权，不在本票（#1490）执行**，须在记忆转向第 7 步
+  （#1496）**之前**由单独工作项完成；已按所有者「发现可开票问题先单独开票」的规矩开票
+  **#1543**（创建时未打 `in-progress`，尚未开工）。逐组点名（8 行照 C 卷宗 §4.3 原表，未概括；
+  `SPEC_ROOT` = `goal/Lightweight_Observable_Agent_Harness_Spec/docs/spec/`，不是根 `docs/spec/`）：
+  1. `SPEC_ROOT/06_CONTEXT_ARTIFACT_MEMORY.md` §6 :108–166（默认 LangMem、多原语与
+     scope/relevance/recency 职责）；
+  2. 同 Spec §7 :168–178（`user_global`/`project` 两 scope 与扩 scope 规则）；
+  3. 同 Spec §8–9 :180–197（LangMem 默认/替换验收、文件检索/治理、故障/恢复准入）；
+  4. `SPEC_ROOT/00_PROJECT_VISION.md` §4 与 `SPEC_ROOT/13_OPEN_SOURCE_REUSE_MATRIX.md`
+     §4 LangMem :91–95（旧默认 LangMem 与新 Hermes 文件实现的适用关系）；
+  5. `SPEC_ROOT/14_IMPLEMENTATION_ROADMAP.md` Phase 6 :109–122（旧 LangMem/scope 交付与 Gate，
+     不追溯改写已完成历史）；
+  6. `SPEC_ROOT/01_SYSTEM_ARCHITECTURE.md` §5–6 与
+     `SPEC_ROOT/07_STORAGE_PERSISTENCE_RECOVERY.md` 的独立 Ledger/Checkpoint 边界
+     （「哪种事实由谁拥有」，不把多载体一概判双主）；
+  7. `docs/PRD_PRODUCTION_LONG_TERM_MEMORY_V2.md` §4.2–4.3 :117–126、§6.1–6.6 :212–302
+     （profile×scope、身份信封/API、SQLite 唯一 owner）；
+  8. 同 PRD :32/:72/:96–97、§5 删除 :170、§7 与验收 :316/:333/:352–353/:372–379
+     （旧权威/形成作业/召回/cutover AC 与新提交语义对账）。
+
+  各组「应保留的不变量」见 C 卷宗 §4.3 右列（Capability+Context Provider、完整保存≠完整注入、
+  不由模型选权限/来源、optional failure 不拖垮 Core、Phase 历史不改写、SessionEvent/Operation/
+  Artifact 各自 owner、类型/来源/审批/删除抑制语义、receipt 与 failure/recovery 证据），修订时
+  不得一并删除。本 ADR 与 #1490 均不改这些文档。
+- **C 卷宗 §4.2 的条件项（只登记，不处置）**：① **ADR-0013 条件重开**——RAG 用单租户 partition
+  与 SQLite source registry；只有所有者要求全产品去掉 tenant 列时才单列 RAG 数据映射，本转向只移除
+  Memory 路由、不动其数据，也不把 Knowledge 专属协议/collection 与 Memory 合并；② **ADR-0020b
+  核对并保留**——provider 名 `memory`、用户可选 provider 集合、`None` 与 `[]` 差异继续适用，只需
+  更新指向已退役 V1 类的例子/测试夹具，不为改存储重开整个 Context 消费合同；③ **`GLOSSARY.md`
+  :259–305 正名**——`IdentityContext`、`MemoryCapability`、`MemoryScope`、`MemoryEntry`、
+  `MemoryStore`、`Extractor`、`LangMem`、`Outbox`、`retrieve_memory`/`remember_this` 需同步正名，
+  已被共享引用的定义先保留适用上下文（删 V1 实现 ≠ 删全部概念）。三项均属后续需处置项，本 ADR
+  只登记、不处置，也不据此扩大本票范围。
 
 ## 10. 验证约定
 
