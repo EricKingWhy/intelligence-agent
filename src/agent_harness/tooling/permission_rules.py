@@ -180,7 +180,36 @@ _READONLY_COMMANDS = frozenset({
     "stat", "tree", "printenv", "which",
 })
 #: shell 连接符：出现任一即**不算只读**（保守——连接符后的命令无法从首 token 判定）。
-_SHELL_CONNECTORS = (";", "&&", "||", "|", "$(", "`", ">", "<", "&")
+_SHELL_CONNECTORS = (";", "&&", "||", "|", "$(", "`", ">", "<", "&", "\n", "\r")
+#: 即使没有连接符，变量/命令替换也会把首词白名单变成未知语义 → ASK。
+_SHELL_EXPANSION_MARKERS = ("$",)
+
+#: `find` 只允许能证明把结果写到 stdout、且不会执行/删除/写文件的动作。
+_FIND_UNSAFE_ACTIONS = frozenset({
+    "-delete", "-exec", "-execdir", "-ok", "-okdir",
+    "-fprint", "-fprint0", "-fprintf", "-fls",
+})
+#: `find` 表达式里不带值的只读谓词/连接词。
+_FIND_SAFE_FLAGS = frozenset({
+    "!", "(", ")", "-a", "-and", "-o", "-or",
+    "-xdev", "-mount", "-depth", "-d", "-ignore_readdir_race",
+    "-noignore_readdir_race", "-print", "-print0", "-ls", "-quit",
+    "-prune", "-empty", "-readable", "-writable", "-executable",
+    "-true", "-false",
+})
+#: `find` 表达式里带一个值、但仍只读的谓词/选项。
+_FIND_SAFE_VALUE_OPTIONS = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+    "-type", "-xtype", "-size", "-amin", "-anewer", "-atime", "-cmin",
+    "-cnewer", "-ctime", "-mmin", "-mnewer", "-mtime", "-newer",
+    "-newermt", "-perm", "-user", "-uid", "-group", "-gid", "-inum",
+    "-links", "-maxdepth", "-mindepth", "-printf",
+})
+#: 少数仍在只读白名单中的命令带有明确的文件写出/生成选项。
+_READONLY_WRITE_OPTIONS = {
+    "tree": frozenset({"-o", "--outfile"}),
+    "file": frozenset({"-C", "--compile"}),
+}
 
 
 def classify_bash_command(command: str) -> RuleVerdict:
@@ -192,8 +221,12 @@ def classify_bash_command(command: str) -> RuleVerdict:
     - **DENY**：提权（sudo/doas/runas/su）；``rm`` 且参数含递归旗（``-r``/``-R``/
       ``--recursive``，含 ``-rf`` 等合并短旗）；``mkfs``/``format``/``dd``/``diskpart``
       或以 ``mkfs.`` 开头。
-    - **ALLOW**：首 token ∈ 只读白名单 **且** 命令不含任何 shell 连接符。
+    - **ALLOW**：首 token ∈ 只读白名单、命令不含 shell 语法，且参数只涉及
+      workspace-relative 的读操作；``find`` 仅放行可核验的查询表达式。
     - **ASK**：其余（含 ``git``——子命令读写难分；以及所有解析失败）。
+
+    这里的路径判断只是一层审批路由启发式：绝对路径、父目录遍历和 shell 展开不进免问
+    子集；它不宣称提供 OS 级路径围墙。
     """
     try:
         tokens = shlex.split(command, posix=True)
@@ -207,7 +240,12 @@ def classify_bash_command(command: str) -> RuleVerdict:
         return RuleVerdict.DENY
     if first == "rm" and any(_is_recursive_flag(token) for token in tokens[1:]):
         return RuleVerdict.DENY
-    if first in _READONLY_COMMANDS and not _has_shell_connector(command):
+    if (
+        first in _READONLY_COMMANDS
+        and not _has_shell_connector(command)
+        and not _has_shell_expansion(command)
+        and _readonly_arguments_are_safe(first, tokens[1:], command)
+    ):
         return RuleVerdict.ALLOW
     return RuleVerdict.ASK
 
@@ -225,6 +263,111 @@ def _is_recursive_flag(token: str) -> bool:
 
 def _has_shell_connector(command: str) -> bool:
     return any(connector in command for connector in _SHELL_CONNECTORS)
+
+
+def _has_shell_expansion(command: str) -> bool:
+    return any(marker in command for marker in _SHELL_EXPANSION_MARKERS)
+
+
+def _readonly_arguments_are_safe(
+    first: str, args: list[str], command: str,
+) -> bool:
+    """只让可核验的读参数进入免问子集。
+
+    没有把 bash 变成 parser 或 OS sandbox：只拒绝能明确看出会越界、执行动作、写文件
+    或引入未知表达式的形状。无法证明安全就回到既有 ASK 路径。
+    """
+    if _has_outside_path_syntax(args, command):
+        return False
+    if _has_readonly_write_option(first, args):
+        return False
+    if first == "find":
+        return _is_safe_find_query(args)
+    if first == "hostname":
+        # `hostname NAME` / `hostname -F FILE` change host state on common POSIX implementations。
+        return not any(
+            not arg.startswith("-")
+            or arg in {"-F", "--file"}
+            or arg.startswith(("-F", "--file="))
+            for arg in args
+        )
+    if first == "date":
+        return not any(
+            arg in {"-s", "--set", "--set-date"}
+            or arg.startswith(("-s", "--set=", "--set-date="))
+            for arg in args
+        )
+    return True
+
+
+def _has_readonly_write_option(first: str, args: list[str]) -> bool:
+    """识别白名单命令中会生成文件或改变本地状态的显式选项。"""
+    options = _READONLY_WRITE_OPTIONS.get(first, frozenset())
+    for arg in args:
+        if arg in options:
+            return True
+        if first == "tree" and arg.startswith(("-o", "--outfile=")):
+            return True
+        if first == "file" and arg.startswith("--compile="):
+            return True
+    return False
+
+
+def _has_outside_path_syntax(args: list[str], command: str) -> bool:
+    """保守识别绝对路径、父目录遍历和常见 Windows 外部路径形状。"""
+    if (
+        "../" in command
+        or "..\\" in command
+        or _has_windows_absolute_path(command)
+    ):
+        return True
+    return any(_looks_like_outside_path(arg) for arg in args)
+
+
+def _has_windows_absolute_path(command: str) -> bool:
+    """识别 shlex 会吞掉反斜杠的 Windows 盘符/UNC 绝对路径。"""
+    if "\\\\" in command:
+        return True
+    return any(
+        command[index].isalpha()
+        and command[index + 1] == ":"
+        and command[index + 2] in {"/", "\\"}
+        for index in range(len(command) - 2)
+    )
+
+
+def _looks_like_outside_path(value: str) -> bool:
+    normalized = value.replace("\\", "/")
+    if normalized.startswith(("/", "//", "~")):
+        return True
+    if len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/":
+        return True
+    return ".." in normalized.split("/")
+
+
+def _is_safe_find_query(args: list[str]) -> bool:
+    """只接受 `find` 的查询谓词，不接受执行、删除或文件输出动作。"""
+    expression_started = False
+    index = 0
+    while index < len(args):
+        token = args[index]
+        lower = token.lower()
+        if lower in _FIND_UNSAFE_ACTIONS:
+            return False
+        if not expression_started and not token.startswith("-") and token not in {"!", "(", ")"}:
+            index += 1
+            continue
+        expression_started = True
+        if lower in _FIND_SAFE_FLAGS:
+            index += 1
+            continue
+        if lower in _FIND_SAFE_VALUE_OPTIONS:
+            if index + 1 >= len(args):
+                return False
+            index += 2
+            continue
+        return False
+    return True
 
 
 # ============================================================================

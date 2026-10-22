@@ -81,6 +81,54 @@ class TestBashClassification:
     def test_readonly_subset_allowed(self, command: str) -> None:
         assert classify_bash_command(command) is RuleVerdict.ALLOW
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find . -exec echo {} +",
+            "find . -execdir echo {} +",
+            "find . -ok echo {} +",
+            "find . -okdir echo {} +",
+            "find . -delete",
+            "find . -fprint result.txt",
+            "find . -fprint0 result.txt",
+            "find . -fprintf result.txt %p",
+            "find . -fls result.txt",
+            "find . -name x -delete",
+            "cat local.txt > result.txt",
+            "cat ../outside.txt",
+            "cat ./../outside.txt",
+            "cat /etc/passwd",
+            "cat ~",
+            r"cat C:\outside.txt",
+            "cat local.txt\nrm local.txt",
+            "tree -o result.txt",
+            "file -C",
+        ],
+    )
+    def test_readonly_subset_rejects_actions_and_outside_paths(
+        self, command: str,
+    ) -> None:
+        """Unsafe actions, paths, shell syntax, and writer flags must not bypass approval."""
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find .",
+            "find . -maxdepth 2 -type f -print",
+            "find . -name '*.py' -print0",
+        ],
+    )
+    def test_safe_find_queries_remain_allowed(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    def test_find_unknown_expression_is_asked(self) -> None:
+        assert classify_bash_command("find . -unknown-action") is RuleVerdict.ASK
+
+    @pytest.mark.parametrize("command", ["find . -maxdepth", "find . -type"])
+    def test_incomplete_find_expression_is_asked(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
     def test_pipe_connector_not_readonly(self) -> None:
         """含 `|` 连接符 → 不算只读（ASK）。"""
         assert classify_bash_command("ls -la | grep x") is RuleVerdict.ASK
