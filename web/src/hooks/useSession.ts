@@ -1770,12 +1770,16 @@ export function useSession() {
    *  **过期/纠正**路径，回 `true` 而非 `false`，本就不在「保留输入」这条契约上——
    *  那次投递的结局与用户**当前**看到的会话无关，代际守卫已经把它判出局。
    *
-   *  amend（可选，后端 Q2 批次）：续聊时携带当前 Composer 的三项档位
+   *  amend（可选，后端 Q2 批次）：续聊时携带当前 Composer 的档位
    *  （model / agent_profile / reasoning_effort；**不含 `permission_mode`**——
-   *  它不在 /messages 请求契约内，是会话属性，创建后由后端从事件流派生，见 #236）。仅在
-   *  「空闲 → launched 新 run」时被后端应用；在途 run 的 queued 消息忽略。
-   *  空值不发键（api.sendMessage 兜底归一化；App.tsx 侧另有与 create 分支
-   *  同款的「有值才带」展开），与 create 分支同一语义。 */
+   *  它不在 /messages 请求契约内，是会话属性，创建后由后端从事件流派生，见 #236）。
+   *  #1444 起 **`budget` 也在 amend 面内**（已选会话的预算入口随下一次提交发出）：
+   *  后端只在该次消息触发 **idle → launched 新 run** 时消费，在途 run 的
+   *  queued / steer 只判定、丢弃（app.py `SendMessageRequest.budget` 注释）——
+   *  与 model 等 amend 字段同一语义，不是改写当前 run。
+   *  空值不发键（唯一执行点是 api.sendMessage 的 `SEND_MESSAGE_FIELDS`；
+   *  App 侧只传 `toCreateBudget` 的结果，值可为 undefined），与 create 分支
+   *  同一语义。 */
   const sendFollowUp = useCallback(
     /** 返回值 = 这次发送**是否已被后端受理**（#1029）。`false` 是 composer
      *  「保留用户未发送的输入」的唯一信号：文本既没进队列、也没落日志，清空即丢失。
@@ -1792,7 +1796,7 @@ export function useSession() {
          *
          *  #308：`maxSteps` 选项随迁移移除——续聊不再主动发送任何 local fuse
          *  数字，缺省由后端按 Deployment/AgentProfile 解析（默认 500）。 */
-        amend?: Omit<SendMessagePayload, 'content' | 'budget'>;
+        amend?: Omit<SendMessagePayload, 'content'>;
       },
     ): Promise<boolean> => {
       setError(null);

@@ -189,6 +189,65 @@ test('#426 不设置预算：创建载荷不含 budget 键（默认行为不变�
   await expect(page.locator('.model-output').last()).toContainText('完成。');
 });
 
+/** #1444：已选会话态的预算入口 + 生效语义。
+ *
+ *  旧行为（#308 的 UI 隐藏）下这个用例在**第一步**就红：选中会话后
+ *  `.composer-budget-trigger` 根本不在 DOM 里（Composer 的 `!permissionInSession`
+ *  门控）。修好后它同时钉住三件事：入口在场、选择器可打开、选档随下一次
+ *  `/messages` 提交作为 amend 发出（后端 idle→launched 消费；queued / steer 只判定
+ *  丢弃——与 model 等 amend 字段同语义）。 */
+test('#1444 已选会话：预算入口在场，选档随下一次 /messages 作为 amend 发出', async ({ page }) => {
+  const createFrames: FrameSpec[] = [
+    { type: 'session/started', seq: 1, session_id: SID, run_id: RUN, time: T },
+    { type: 'run/started', seq: 2, session_id: SID, run_id: RUN, time: T },
+    { type: 'user/message', data: { content: '第一条消息' }, seq: 3, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'model/started', data: { model: 'e2e-model' }, seq: 4, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'text/delta', data: { delta: '第一条完成。' }, seq: 5, session_id: SID, run_id: RUN, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 6, session_id: SID, run_id: RUN, time: T },
+  ];
+  const followFrames: FrameSpec[] = [
+    { type: 'run/started', seq: 7, session_id: SID, run_id: `${RUN}-2`, time: T },
+    { type: 'user/message', data: { content: '第二条消息' }, seq: 8, session_id: SID, run_id: `${RUN}-2`, step_id: 1, time: T },
+    { type: 'text/delta', data: { delta: '第二条完成。' }, seq: 9, session_id: SID, run_id: `${RUN}-2`, step_id: 1, time: T },
+    { type: 'run/completed', data: {}, seq: 10, session_id: SID, run_id: `${RUN}-2`, time: T },
+  ];
+  let messagesBody: Record<string, unknown> | null = null;
+
+  await routeApi(page, {
+    onSessionPost: (route) => fulfillSse(route, createFrames),
+    onMessagesPost: async (route) => {
+      messagesBody = route.request().postDataJSON() as Record<string, unknown>;
+      await fulfillSse(route, followFrames);
+    },
+    events: createFrames,
+  });
+
+  await page.goto('/');
+
+  // ① 新建态选轮数档（草稿留在 App 里，建会话后不清空）。
+  await page.locator('.composer-budget-trigger[aria-label="预算"]').click();
+  await page.getByLabel('轮数上限（留空用默认值）').fill('4');
+  await page.keyboard.press('Escape');
+  await submitTask(page, '第一条消息');
+  await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
+
+  // ② 已选会话态：入口仍在场、摘要带出草稿；选择器可打开（不是只有壳）。
+  const trigger = page.locator('.composer-budget-trigger[aria-label="预算"]');
+  await expect(trigger).toBeVisible();
+  await expect(trigger.locator('.composer-trigger-current')).toHaveText('预算：轮数 4');
+  await trigger.click();
+  await expect(page.getByLabel('轮数上限（留空用默认值）')).toHaveValue('4');
+  await page.keyboard.press('Escape');
+
+  // ③ 续聊提交：budget.run 作为 amend 随 /messages 发出（逐字对齐 RunBudgetRequest）。
+  await submitTask(page, '第二条消息');
+  await expect.poll(() => messagesBody).not.toBeNull();
+  expect((messagesBody as Record<string, unknown>).budget).toEqual({
+    run: { max_agent_turns_total: 4 },
+  });
+  await expect(page.locator('.model-output').last()).toContainText('第二条完成。');
+});
+
 test('#1198 visual: light/dark panel matches the pinned mockup', async ({ page }, testInfo) => {
   const mockup = await page.request.get(
     'https://gist.githubusercontent.com/EricKingWhy/b087e3ca29188c86f6a068a55ee89b06/raw/b65e328d4907c44b02a1f2c2483c9c77e7c6ea71/budget-picker-mockup.html',
