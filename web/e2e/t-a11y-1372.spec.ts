@@ -4,7 +4,8 @@
  *  1. 9 会话、详细密度、Inspector 默认展开；允许 region 跳转键，首焦点到 composer
  *     ≤10 次按键。纯 Tab 路径只记录、不设阈值。
  *  2. 重放弹窗 Esc 后焦点回到触发按钮（行内 ⋯，而不是 body）。
- *  3. tooltip 全覆盖：顶栏 5 个（保留 4 + 更多）、rail 4 图标、会话行 ⋯、
+ *  3. tooltip 覆盖：顶栏只剩「更多工具」触发器 1 项（原 4 个独立按钮随 #1396 收进菜单，
+ *     改断言菜单项可达性，见 `issuecomment-6338942786` 裁定二）、rail 4 图标、会话行 ⋯、
  *     Inspector 统计行 6 个 tab、composer 5 chip、会话名下拉箭头。
  */
 
@@ -185,7 +186,9 @@ test('#1372：Inspector 收起时不再给出无法落焦的跳转键', async ({
 
   // 自动值班：main（含会话区/工作区/Inspector）整体 hidden —— 四条都不可落焦。
   await clickTopBarMenuItem(page, '自动值班');
-  await expect(page.getByLabel('自动值班面板')).toBeVisible();
+  // 菜单项仍叫「自动值班」（TopBar.tsx:459），面板名归 #1365 术语批：aria-label
+  // 已改为「定时任务面板」（WatchtowerPanel.tsx:202）。
+  await expect(page.getByLabel('定时任务面板')).toBeVisible();
   for (const name of ['跳到会话区', '跳到主工作区', '跳到 Inspector', '跳到输入框']) {
     await expect(page.getByRole('link', { name }), `${name}（自动值班时）`).toHaveCount(0);
   }
@@ -254,11 +257,11 @@ test('#1372：顶栏收纳后「更多工具」6 项零丢失（逐项打开真�
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog', { name: '持久审批规则' })).toHaveCount(0);
 
-  // 5) 自动值班 → 独立面板
+  // 5) 自动值班 → 独立面板（面板准确名见上：#1365 改为「定时任务面板」）
   await clickTopBarMenuItem(page, '自动值班');
-  await expect(page.getByLabel('自动值班面板')).toBeVisible();
+  await expect(page.getByLabel('定时任务面板')).toBeVisible();
   await page.getByRole('button', { name: '返回工作区' }).click();
-  await expect(page.getByLabel('自动值班面板')).toHaveCount(0);
+  await expect(page.getByLabel('定时任务面板')).toHaveCount(0);
 
   // 6) Inspector 开关：收起 → 展开
   await clickTopBarMenuItem(page, '收起 Inspector');
@@ -315,20 +318,32 @@ test('#1372 AC2：重放弹窗 Esc 后焦点回到行内 ⋯ 触发按钮', asyn
   await expect(trigger).toHaveAttribute('aria-label', /操作/);
 });
 
-test('#1372 AC3：tooltip 全覆盖（顶栏 / rail / 会话行 / Inspector / composer / 会话名）', async ({ page }) => {
+test('#1372 AC3：tooltip 覆盖与顶栏入口可达性（顶栏只剩触发器 tooltip + 菜单项可达性 / rail / 会话行 / Inspector / composer / 会话名）', async ({ page }) => {
   test.setTimeout(60_000);
-  // 新会话态：预算 chip 只在启动 run 前渲染，先把 5 个 composer chip 量全。
+  // 新会话态：先把 5 个 composer chip 量全（#1444 后预算 chip 两态都在，这里取新建态）。
   await openApp(page, false);
   const chips: Array<[string, string]> = [
-    ['button[aria-label="模型选择"]', '默认链'],
+    // #1370：chip 的 tooltip 不再复用标签文字（旧期望「默认链」），改为语义说明；
+    // 未选模型时 content 就是这一句（ModelPicker.tsx:129-133）。
+    ['button[aria-label="模型选择"]', '模型：这次会话使用哪个模型'],
     ['button[aria-label="权限模式"]', '权限模式'],
-    ['button[aria-label="Agent Profile"]', 'Agent Profile'],
-    ['button[aria-label="Reasoning Effort"]', 'Reasoning Effort'],
-    ['button[aria-label="预算"]', '这次任务的预算'],
   ];
   for (const [selector, text] of chips) {
     await expectTip(page, page.locator(selector), text);
   }
+
+  // #1405（F-12）：Agent / 推理档收进「更多设置」披露，默认工具栏只有模型 + 权限。
+  // 未展开时那两只 chip 不渲染 ⇒ 先按用户的真实路径展开（仍是 5 只 chip 全覆盖）。
+  await page.getByRole('button', { name: '更多设置' }).click();
+  await expect(page.getByRole('button', { name: '更多设置' })).toHaveAttribute('aria-expanded', 'true');
+  const moreChips: Array<[string, string]> = [
+    ['button[aria-label="Agent Profile"]', 'Agent Profile'],
+    ['button[aria-label="Reasoning Effort"]', 'Reasoning Effort'],
+  ];
+  for (const [selector, text] of moreChips) {
+    await expectTip(page, page.locator(selector), text);
+  }
+  await expectTip(page, page.locator('button[aria-label="预算"]'), '这次任务的预算');
 
   // 选中会话：会话名下拉、行内 ⋯、Inspector tab、顶栏与 rail。
   await page.locator('.session-item').first().click();
@@ -341,35 +356,54 @@ test('#1372 AC3：tooltip 全覆盖（顶栏 / rail / 会话行 / Inspector / co
   await expectTip(page, row.locator('.rail-menu-btn'), '会话操作');
 
   const tabs: Array<[string, string]> = [
-    ['Timeline', '时间线'],
-    ['Overview', '概览'],
-    ['Changes', '改动'],
-    ['Terminal', '输出'],
-    ['Artifacts', '产物'],
-    ['Constraints', '约束'],
+    // #1365 术语批把 Inspector 六个 tab 的可访问名从英文改成中文
+    // （StepDetail.tsx:76-82 的 TABS.label 即 aria-label）。
+    ['时间线', '时间线'],
+    ['概览', '概览'],
+    ['变更', '改动'],
+    ['终端', '输出'],
+    ['产出文件', '产物'],
+    ['我的要求', '约束'],
   ];
   for (const [label, text] of tabs) {
     await expectTip(page, page.locator(`.detail-tab[aria-label="${label}"]`), text);
   }
 
-  const topbar: Array<[string, string]> = [
-    ['记忆管理', '记忆管理'],
-    ['看板', 'Agent 看板'],
-    ['恢复列表', '恢复列表'],
-    ['切换主题', '切换主题'],
-    ['更多工具', '更多工具'],
-  ];
-  for (const [label, text] of topbar) {
-    await expectTip(page, page.locator(`button[aria-label="${label}"]`), text);
+  // 协调员裁定二（issuecomment-6338942786）：这 4 项的原 `button[aria-label]` 已随 #1396
+  // 收进「更多工具」菜单，菜单项本身无 Tip 机制——**tooltip 覆盖随产品表面（按钮 + Tip）
+  // 被 #1396 退役而退役**，不是为求绿改弱。替代断言守的是同一批入口在现行形态下的
+  // 「存在 + 命名正确 + 可达」；可及名以 TopBar.tsx 菜单项原文为准（已逐项核对）。
+  const topbarMenuItems = ['记忆管理', 'Agent 看板', '恢复列表', '切换主题'];
+  await page.getByRole('button', { name: '更多工具' }).click();
+  for (const name of topbarMenuItems) {
+    await expect(page.getByRole('menuitem', { name })).toBeVisible();
   }
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menuitem', { name: '记忆管理' })).toHaveCount(0);
+  // 菜单关闭后焦点回到「更多工具」触发器，其 Tooltip 因聚焦 instant-open 常驻；
+  // 移开指针 + blur，避免后续 hover 断言读到这一枚残留 tooltip。
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+  // 唯一存活项「更多工具」的 tooltip 原样保留。
+  await expectTip(page, page.locator('button[aria-label="更多工具"]'), '更多工具');
+  // 同上：该触发器的 tooltip 会因残留焦点再次 instant-open，落地前清掉指针与焦点，
+  // 否则下一个 hover 断言会读到它的文本。
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
   const rail: Array<[string, string]> = [
     ['插件', '插件：MCP Servers'],
     ['显示已归档会话', '显示已归档会话'],
-    ['新建项目', '新建项目'],
+    // 收窄到 rail 动作条：项目区标题右侧也有一个 `aria-label="新建项目"` 的「+」
+    // （SessionList.tsx:539，只有原生 title、无 Tip），裸选择器会一次命中两个。
+    ['.session-list-actions button[aria-label="新建项目"]', '新建项目'],
     ['新建会话', '新建会话'],
   ];
   for (const [label, text] of rail) {
-    await expectTip(page, page.locator(`button[aria-label="${label}"]`), text);
+    const trigger = label.startsWith('.')
+      ? page.locator(label)
+      : page.locator(`button[aria-label="${label}"]`);
+    await expectTip(page, trigger, text);
   }
 });

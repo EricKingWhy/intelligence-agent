@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   GREP_TRUNCATED_SUFFIX,
   hasGrepTruncatedSuffix,
+  interpretToolResult,
   parseErrorShape,
   parseReadShape,
   stripGrepTruncatedSuffix,
@@ -185,5 +186,47 @@ describe('parseErrorShape — 失败工具 L0 摘要', () => {
       errorCode: 'SANDBOX_DOWN',
       message: '',
     });
+  });
+});
+
+describe('interpretToolResult — ToolResult 终态与错误元数据', () => {
+  it('识别正式成功与失败信封，保留 data 和 ErrorShape', () => {
+    expect(interpretToolResult('{"ok":true,"data":{"exit_code":0}}')).toMatchObject({
+      outcome: 'success',
+      data: { exit_code: 0 },
+      error: null,
+    });
+    expect(interpretToolResult('{"ok":false,"error_code":"TIMEOUT","message":"超时"}'))
+      .toMatchObject({
+        outcome: 'failure',
+        data: null,
+        error: { errorCode: 'TIMEOUT', message: '超时' },
+      });
+  });
+
+  it('取消优先于 ok 与错误字段，不把取消提取成失败错误', () => {
+    for (const ok of [false, true]) {
+      expect(interpretToolResult(JSON.stringify({
+        ok,
+        error_code: 'COMMAND_CANCELLED',
+        message: 'cancelled',
+        data: { cancelled: true },
+      }))).toMatchObject({
+        outcome: 'cancelled',
+        error: null,
+      });
+    }
+  });
+
+  it('未知输入保持未知；已解析对象仅在兼容模式接受', () => {
+    const object = { ok: true, data: { exit_code: 0 } };
+    expect(interpretToolResult(object).outcome).toBe('unknown');
+    expect(interpretToolResult(object, 'serialized-or-object')).toMatchObject({
+      outcome: 'success',
+      data: { exit_code: 0 },
+    });
+    for (const input of ['plain text', '{broken', '42', '"text"', 'null', '[]', '{"message":"legacy"}']) {
+      expect(interpretToolResult(input).outcome).toBe('unknown');
+    }
   });
 });

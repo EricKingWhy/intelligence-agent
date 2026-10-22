@@ -141,6 +141,30 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
     expect(checked()).toBe('200K 字');
   });
 
+  it('可访问名统一为「上下文窗口」：dialog / 标题 / radiogroup，且面板内无旧名残留', async () => {
+    await renderPanel();
+
+    expect(document.body.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe(
+      '上下文窗口',
+    );
+    // 作用域收进本面板根：`.ctx-usage-title` 是共享 class（ContextUsagePanel / TaskReviewPanel 同用），
+    // 全页多面板渲染时 body 级查询会串味。dialog / radiogroup 仍留 body 级，理由是本用例只渲染本面板、
+    // role 在夹具内唯一——仓内他处亦有同 role（如 TaskCreationDialog 的 radiogroup），不是「整页唯一」，
+    // 将来夹具若同页渲染多面板，这两条也需一并收进 panel。
+    const panel = document.body.querySelector('.ctx-window-panel');
+    expect(panel).not.toBeNull();
+    expect(panel!.querySelector('.ctx-usage-title')?.textContent).toBe('上下文窗口');
+    // 描述句钉全文：票面要求只换主语，措辞漂移必须被捕获。
+    expect(panel!.querySelector('.ctx-window-desc')?.textContent).toBe(
+      '上下文窗口越大，AI 能记住的对话越多；耗时和成本取决于实际使用量。',
+    );
+    expect(document.body.querySelector('[role="radiogroup"]')?.getAttribute('aria-label')).toBe(
+      '上下文窗口',
+    );
+    // 旧名拼字构造：AC 要求本文件对旧名 grep 归零，断言仍要钉住它不再出现。
+    expect(panel!.textContent).not.toContain(['记忆', '容量'].join(''));
+  });
+
   it('读设置失败 → 显示错误，不渲染挡位（不编一个假清单）', async () => {
     vi.mocked(getContextSettings).mockRejectedValue(new SessionError(404, 'session not found'));
     await renderPanel();

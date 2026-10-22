@@ -48,6 +48,21 @@ export function RecoveryListPanel({ open, onOpenChange, onResume }: Props) {
 /** 「先列后继续」的加载门控文案（说明为什么现在不能继续）。 */
 const GATE_REASON = '加载完成前不能继续——先核对完上次任务的完整状态。';
 
+/** #1477：关闭时把焦点还给谁。经「更多工具」菜单打开时 `activeElement` 是菜单项，
+ *  菜单关闭即卸载 ⇒ `isConnected === false` ⇒ 不归还、焦点掉回 `<body>`。
+ *  按 Radix 的菜单契约在**记录时**上溯到常驻触发器：菜单内容挂
+ *  `aria-labelledby=<触发器 id>`（DropdownMenu 的 Content 固定注入），触发器本身
+ *  常驻。不是菜单项就原样返回——从常驻按钮打开的旧行为不变。
+ *  （与 `MemoryPanel.tsx` 的同名函数同形；两处各自私有，免得为一处六行引入共享模块。） */
+function focusReturnTarget(active: Element | null): HTMLElement | null {
+  if (!(active instanceof HTMLElement)) return null;
+  const menu = active.closest('[role="menu"]');
+  if (!menu) return active;
+  const triggerId = menu.getAttribute('aria-labelledby')?.split(' ')[0];
+  const trigger = triggerId ? document.getElementById(triggerId) : null;
+  return trigger instanceof HTMLElement ? trigger : null;
+}
+
 function ResumeButton({
   sessionId,
   enabled,
@@ -101,7 +116,7 @@ function RecoveryListBody({
     <Dialog.Content
       className="recovery-list-panel"
       onOpenAutoFocus={() => {
-        openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        openerRef.current = focusReturnTarget(document.activeElement);
       }}
       onCloseAutoFocus={(event) => {
         if (openerRef.current?.isConnected) {

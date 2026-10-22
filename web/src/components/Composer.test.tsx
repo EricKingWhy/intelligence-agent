@@ -385,10 +385,12 @@ describe('Composer 权限 pill（#283）', () => {
 });
 
 // ── #536：预算三项收敛为单入口 popover（替换 #426 三平铺）──
-// 预算属于**启动 run** 的请求（#422 裁决）：仅新建会话态渲染；会话内（续聊
-// /messages 不带 budget，#308）不显示。判形/换算在映射层 toCreateBudget /
-// resolveDeadlineDraft（lib/amend.ts）。面板是 Radix Portal 内容，SSR 不可见
-// （同权限 pill 分工）——面板内三维控件的逐项断言在 BudgetPicker.test.tsx
+// #1444：**两态（新建 / 已选会话）都渲染**。已选态的选择随下一次 `/messages`
+// 提交作为 amend 发出（后端 idle→launched 消费，queued / steer 只判定丢弃）——
+// 与 model 等 amend 字段同语义，不是"会话内不显示"（#308 的真实约束是在途 run
+// 不改写，不是续聊提交不得携带下一 run 的预算声明）。判形/换算在映射层
+// toCreateBudget / resolveDeadlineDraft（lib/amend.ts）。面板是 Radix Portal 内容，
+// SSR 不可见（同权限 pill 分工）——面板内三维控件的逐项断言在 BudgetPicker.test.tsx
 // （Panel 独立渲染）与 e2e/budget-entry.spec.ts（交互+wire）锁。
 
 describe('Composer 预算入口（#536 单入口 popover）', () => {
@@ -426,11 +428,12 @@ describe('Composer 预算入口（#536 单入口 popover）', () => {
     expect(html).toContain('>预算：轮数 5 · 500k · 2h<');
   });
 
-  it('会话内（permissionInSession）→ 预算入口不渲染（续聊不带 budget，#308）', () => {
+  it('会话内（permissionInSession）→ 入口同样在场，摘要「预算：默认」（#1444 两态同入口）', () => {
     const html = renderToString(
       createElement(Composer, { ...base, permissionInSession: true, ...budgetProps }),
     ).replaceAll('<!-- -->', '');
-    expect(html).not.toContain('aria-label="预算"');
+    expect(html).toContain('aria-label="预算"');
+    expect(html).toContain('>预算：默认<');
   });
 
   it('未接任何预算 onChange → 入口不渲染；只接一维 → 入口在场（面板内只出该维）', () => {

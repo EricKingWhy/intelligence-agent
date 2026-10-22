@@ -44,6 +44,7 @@ export const EventType = {
   MEMORY_UPDATED: 'memory/updated',
   MEMORY_RECALLED: 'memory/recalled',
   MEMORY_HUMAN_UPDATED: 'memory/human_updated',
+  MEMORY_HUMAN_BLOCKED: 'memory/human_blocked',
   SKILL_REGISTERED: 'skill/registered',
   SKILL_UPDATED: 'skill/updated',
   SKILL_REMOVED: 'skill/removed',

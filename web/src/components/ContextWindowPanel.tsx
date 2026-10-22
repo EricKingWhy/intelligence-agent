@@ -99,11 +99,11 @@ export function ContextWindowPanel({
       <div
         className="ctx-usage-popover ctx-window-panel"
         role="dialog"
-        aria-label="记忆容量"
+        aria-label="上下文窗口"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="ctx-usage-head">
-          <span className="ctx-usage-title">记忆容量</span>
+          <span className="ctx-usage-title">上下文窗口</span>
           <button className="ctx-usage-close" onClick={onClose} aria-label="关闭">
             <X size={14} />
           </button>
@@ -122,10 +122,10 @@ export function ContextWindowPanel({
             {/* 文案以票面正文（方案 1）审批的提示语为准；效果图 01（mockup.html）
                 写的是「窗口越大，压缩越晚；单次运行也会更慢、成本更高。」，两者同义
                 不同文，这里按票面。 */}
-            <p className="ctx-window-desc">记忆容量越大，AI 能记住的对话越多；耗时和成本取决于实际使用量。</p>
+            <p className="ctx-window-desc">上下文窗口越大，AI 能记住的对话越多；耗时和成本取决于实际使用量。</p>
             <span className="ctx-window-badge">{fmtTier(settings.context_window)} 当前生效</span>
 
-            <div className="ctx-window-choices" role="radiogroup" aria-label="记忆容量">
+            <div className="ctx-window-choices" role="radiogroup" aria-label="上下文窗口">
               {settings.tiers.map((t) => (
                 <button
                   key={t}

@@ -24,7 +24,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { routeApi, sessionRow } from './fixtures';
+import { clickTopBarMenuItem, routeApi, sessionRow } from './fixtures';
 
 /** 看板行：在 `sessionRow` 之上补 #1303 的四个字段（真后端恒发全部四个）。 */
 function boardRow(
@@ -43,10 +43,17 @@ function boardRow(
   });
 }
 
+/** #1396：看板入口已收进顶栏「更多工具」菜单（`menuitem`，不是 `button`）。
+ *  本仓惯例：各看板 spec 各自定义自己的 `openBoardPanel`（`kanban-subagents.spec.ts`
+ *  同款），不做跨 spec import、不搬进 fixtures。 */
+async function openBoardPanel(page: Page): Promise<void> {
+  await clickTopBarMenuItem(page, 'Agent 看板');
+  await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+}
+
 async function openBoard(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByLabel('看板').click();
-  await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+  await openBoardPanel(page);
 }
 
 function cardsIn(page: Page, slug: string) {
@@ -84,10 +91,9 @@ test.describe('#1305 看板 WS 推送', () => {
     // 应用外壳自己会在挂载时拉列表（`useSession.refreshSessions`，与看板无关）。
     // 本用例要量的是**开板**带来的 REST 流量 ⇒ 先取基线、只看增量；把外壳的
     // 请求算进来会让"WS 替换了开板时那次拉取"这条判据失去分辨力。
-    await page.getByLabel('看板').waitFor();
+    await page.getByRole('button', { name: '更多工具' }).waitFor();
     const listGetsBeforeBoard = listGets;
-    await page.getByLabel('看板').click();
-    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+    await openBoardPanel(page);
 
     // ① 首帧（订阅即推）已渲染 —— 这条同时证明"打开时不再拉 REST"：
     //    行来自 WS 推送，而开板后的 REST 请求增量为 0。
@@ -163,6 +169,11 @@ test.describe('#1305 看板 WS 推送', () => {
     expect(boardSubscribes.length).toBe(1);
 
     // 关板（Esc，与既有 AC-15 同一条关闭路径）。
+    // 协调员裁定一（issuecomment-6338942786）：指针点菜单项后「更多工具」触发器保持聚焦、
+    // 其 Radix tooltip instant-open 常开，首记 Esc 被 tooltip 的 DismissableLayer 认领并
+    // preventDefault（KanbanPanel.tsx:148 让位）⇒ 先移开指针并 blur 触发器，再按 Esc。
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toHaveCount(0);
 
@@ -170,8 +181,7 @@ test.describe('#1305 看板 WS 推送', () => {
     push!([boardRow('s-close', 'executing'), boardRow('s-ghost', 'executing')]);
 
     // 重开看板：不得出现那一帧的行（旧连接已退订，新连接拿到的是**当前** sessions）。
-    await page.getByLabel('看板').click();
-    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+    await openBoardPanel(page);
     await expect(cardsIn(page, 'executing')).toHaveCount(1);
     await expect(page.locator('.kanban-card[data-session-id="s-ghost"]')).toHaveCount(0);
   });
@@ -192,10 +202,9 @@ test.describe('#1305 看板 WS 推送', () => {
     await page.goto('/');
     // 同上一例：先扣掉应用外壳挂载时的列表请求，只量**开板**带来的增量，
     // 否则外壳那 2 次请求会让"降级确实拉了一次"这条断言恒真（假绿）。
-    await page.getByLabel('看板').waitFor();
+    await page.getByRole('button', { name: '更多工具' }).waitFor();
     const listGetsBeforeBoard = listGets;
-    await page.getByLabel('看板').click();
-    await expect(page.getByRole('dialog', { name: 'Agent 看板' })).toBeVisible();
+    await openBoardPanel(page);
 
     // 降级后仍显示行（行来自 REST 拉取），且开板后确实拉过 REST。
     await expect(cardsIn(page, 'executing')).toHaveCount(1);

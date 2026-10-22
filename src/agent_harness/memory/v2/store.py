@@ -74,6 +74,33 @@ CREATE INDEX IF NOT EXISTS memory_v2_staged_identity
     ON memory_v2_staged(identity, status, created_at);
 """
 
+#: #1461 后台 formation 被审批门拦下的写入（`BLOCKED` 两段式处置的第一段）。
+#: 每行 = 一组**同 identity** 的存活动作，`payload` 存的是已经解析好的写入意图
+#: （refs 已翻成真实 event_id、pin 已钉住），所以 promote 不需要 job 与 refs 即可重放。
+#: 与 `STAGED_SCHEMA` 同法建在 store 里：同库同生命周期，且 store 反向 import 审批
+#: 模块会成环。
+BLOCKED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_v2_blocked (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    project_id TEXT,
+    origin TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'blocked',
+    disposition_note TEXT,
+    created_at TEXT NOT NULL,
+    disposed_at TEXT,
+    UNIQUE (job_id, identity, content_hash)
+);
+CREATE INDEX IF NOT EXISTS memory_v2_blocked_scope
+    ON memory_v2_blocked(identity, status, created_at);
+CREATE INDEX IF NOT EXISTS memory_v2_blocked_dedupe
+    ON memory_v2_blocked(identity, content_hash);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory_v2_records (
     memory_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL,
@@ -145,6 +172,8 @@ CREATE TABLE IF NOT EXISTS memory_v2_projection_pending (
     PRIMARY KEY (tenant_id, user_id, target, content_digest)
 );
 
+-- #1461：被审批门拦下的后台写入。与 staged 同库同生命周期、同建表归属。
+""" + BLOCKED_SCHEMA + """
 -- #1353 §5：词法检索腿的 FTS5 虚表（rowid = memory_v2_records.rowid）。
 -- 只收 content：`keyword_search` 的语义就是"只搜规范内容"，不搜 payload/evidence。
 -- 刻意**不是** `content='memory_v2_records'` 的外部内容表：CJK 需要逐字切分才能命中
