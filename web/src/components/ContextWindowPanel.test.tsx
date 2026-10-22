@@ -148,7 +148,9 @@ describe('ContextWindowPanel 挡位选择器（效果图 01）', () => {
       '上下文窗口',
     );
     // 作用域收进本面板根：`.ctx-usage-title` 是共享 class（ContextUsagePanel / TaskReviewPanel 同用），
-    // 全页多面板渲染时 body 级查询会串味；dialog / radiogroup 的 role 整页唯一，仍留在 body 级。
+    // 全页多面板渲染时 body 级查询会串味。dialog / radiogroup 仍留 body 级，理由是本用例只渲染本面板、
+    // role 在夹具内唯一——仓内他处亦有同 role（如 TaskCreationDialog 的 radiogroup），不是「整页唯一」，
+    // 将来夹具若同页渲染多面板，这两条也需一并收进 panel。
     const panel = document.body.querySelector('.ctx-window-panel');
     expect(panel).not.toBeNull();
     expect(panel!.querySelector('.ctx-usage-title')?.textContent).toBe('上下文窗口');
