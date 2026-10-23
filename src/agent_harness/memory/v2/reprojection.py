@@ -240,6 +240,9 @@ class _Summary(dict):
     def __init__(self) -> None:
         super().__init__(
             created=0, deleted=0, skipped=[], pending=False, desired=0, unreadable=[])
+        #: 本轮不可读文件集的归因快照（首次归因时算一次，之后复用）——#1482 A2：
+        #: 逐行重读两文件是 O(n) 次重复磁盘读，还会让同一轮内不同行归因不一致。
+        self._unreadable_snapshot: list[str] | None = None
 
     def skipped_add(self, target: str, content: str, reason: str) -> None:
         self["skipped"].append([target, entry_digest(content), reason])
@@ -249,7 +252,7 @@ class _Summary(dict):
             self["unreadable"].append(target)
 
     def count_retraction(
-        self, outcome: str, target: str, markdown: MarkdownMemoryStore | None = None,
+        self, outcome: str, target: str, markdown: MarkdownMemoryStore,
     ) -> None:
         if outcome == "deleted":
             self["deleted"] += 1
@@ -260,7 +263,10 @@ class _Summary(dict):
             self["pending"] = True
             # 归因给**真正**读不出来的文件，不是正在对账的 target：另一侧读不出来时
             # 本 target 的文件其实好好的，报成它不可读会把运维引向错文件（#1482 F2）。
-            for name in (_unreadable_files(markdown) if markdown is not None else [target]):
+            # 每轮只读一次盘、同一实例内复用（#1482 A2）——`markdown` 必填，没有旧错位口径的回退。
+            if self._unreadable_snapshot is None:
+                self._unreadable_snapshot = _unreadable_files(markdown)
+            for name in self._unreadable_snapshot:
                 self.mark_unreadable(name)
 
 
