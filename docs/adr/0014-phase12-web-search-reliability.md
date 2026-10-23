@@ -1,12 +1,13 @@
 # ADR-0014: Web Search / Reliability（Phase 12）
 
 - 状态：Accepted（grill 2026-09-06，用户逐项拍板，5 轮）
+- **Supersedes**: Partial — 决策 7（统一 `RetrievalProvider` 窄协议）由 #1507 / 裁决 20（D4-A）于 2026-10-23 supersede：改为「共享数据形状 `RetrievalHit`、各自返回类型」。决策 9 中「`WebSearchProvider` 实现 `RetrievalProvider`」的复述同步修正。其余决策不变。
 - 关联：spec 09_MCP_SKILLS_KNOWLEDGE_WEB §8 Web Search/Retrieval Fallback / 14_IMPLEMENTATION_ROADMAP Phase 12 / ADR-0013（Knowledge，平行域）/ ADR-0009（identity 隔离）/ issue #69（同错熔断，前端实测回执）
 - 研究：pi-mono + oh-my-pi（github.com/badlogic/pi-mono、can1357/oh-my-pi）的 retry/fallback 链与 web search schema；OpenAI Codex + Anthropic Claude hosted web_search schema；Tavily/Serper/Brave/Google/Bocha API 对比
 
 ## 背景
 
-Roadmap Phase 12 冻结交付 5 项：WebSearchProvider、独立 `web_search` Tool、Retrieval Fallback、Repeated Tool Guard（#69）、Model Fallback。Gate：KB 足够不联网；不足才 fallback；provider 瞬时有 fallback reason。#69 来自前端实测：模型在工具受限环境下反复重试同一失败工具，烧穿步数/token——当前 Runtime 仅有 `max_steps`（默认 20）兜底，无中间护栏。Phase 11 已交付 Knowledge 域（ADR-0013），本 ADR 决定 Web Search 如何与 Knowledge 平行（统一检索接口）、以及 Reliability 三项（同错熔断 + Model Fallback + Fallback 透明事件）如何落地。
+Roadmap Phase 12 冻结交付 5 项：WebSearchProvider、独立 `web_search` Tool、Retrieval Fallback、Repeated Tool Guard（#69）、Model Fallback。Gate：KB 足够不联网；不足才 fallback；provider 瞬时有 fallback reason。#69 来自前端实测：模型在工具受限环境下反复重试同一失败工具，烧穿步数/token——当前 Runtime 仅有 `max_steps`（默认 20）兜底，无中间护栏。Phase 11 已交付 Knowledge 域（ADR-0013），本 ADR 决定 Web Search 如何与 Knowledge 平行（共享数据形状、各自返回类型，见决策 7 的 #1507 修订）、以及 Reliability 三项（同错熔断 + Model Fallback + Fallback 透明事件）如何落地。
 
 ## 决策
 
@@ -22,14 +23,19 @@ Roadmap Phase 12 冻结交付 5 项：WebSearchProvider、独立 `web_search` To
 5. **硬熔断动作**：`end_run(status="failed", reason="identical_tool_failure_loop")`。绝不伪造最终回答。
 6. **白盒透明**（用户 Q14 拍板 B）：新 SessionEvent `tool_failure_guard`（两级：`soft`/`hard`，含指纹 + 计数 + 动作）——过词表校验 + `gen_event_types` 同步 + 前端投影适配。诊断日志同步记录。**无上游蓝图**：pi-mono/oh-my-pi/claude-code 都没工具失败检测（只有 assistant-spin caps / transport circuit breaker）——这是自研护栏。
 
-### 统一检索接口
+### 检索接口（决策 7 已由 #1507 supersede，见本条修订注）
 
 7. **窄 Protocol + 平行域**：`RetrievalProvider.search(query, *, k=5, gl=None, hl=None, freshness=None) -> list[RetrievalHit]`。KB（`KnowledgeVectorStore` 继承窄 Protocol + chunk 生命周期）和 Web（`WebSearchProvider` 只实现窄 Protocol）平行。`RetrievalHit` 统一 `{citation, content, score, metadata}`——KB 的 `source_id`/`chunk_index` 和 Web 的 `url`/`title` 走 metadata dict（spec §4 一致）。不泛化、不动 Phase 11 已冻结的 `KnowledgeVectorStore`（它继承窄 Protocol 即可，零改动）。
+
+   > **2026-10-23 修订（#1507 / 裁决 20，D4-A）：本条被 supersede。** 上述「统一以 `RetrievalProvider` 协议表达」的承诺**从未被代码履行，且零生产消费者**——`WebSearchProvider` 返回 `list[WebHit]`、KB 走 `KnowledgeService.retrieve` 返回 `KnowledgeHit`，没有任何一方实现 `RetrievalProvider.search`；唯一「实现」是 `KnowledgeService.as_retrieval_provider()` 这个只有两处测试用的适配器。`RetrievalProvider` 协议与 `KnowledgeRetrievalProvider` 适配器已于 #1507 删除。
+   > **新承诺：KB 与 Web 共享数据形状（`RetrievalHit`），各自返回自己的类型。** `RetrievalHit` 仍是引用/证据的通用货币（`citation` 可追溯、`content` 模型可见、`metadata` 域特定），由各域用自己的返回类型构造（Web 侧 `WebHit.to_retrieval_hit()`；KB 侧 `KnowledgeHit` 本身已带 `citation`/`source_id`/`chunk_index`）。跨域共性停在数据形状，不再假装有跨域 provider 协议——「替换 provider = 替换策略类」的诉求由各域自己的 Protocol（如 `WebSearchProvider`）与注入点承担。
 8. **两个独立工具**（spec §8 硬约束：Web MUST 独立）：`retrieve_knowledge` + `web_search` 并存；背后各自 provider 策略类。**「同时选 KB+Web」= 模型一回合调用两个工具的 agentic 路径**，不是 Runtime 强制并行、不是合并成一个工具。
 
 ### WebSearchProvider
 
-9. **Protocol + 默认 Tavily（手写 httpx）**：`WebSearchProvider` 实现 `RetrievalProvider`；`WebHit = {title, url, snippet, score?, raw_content?}`（snippet=最佳可用摘要；raw_content 可选全文）。Tavily 默认实现：手写 httpx POST 到 `api.tavily.com/search`，**零新依赖**（同 `MilvusKnowledgeVectorStore` 「SDK 不绑死 Core」姿势）；错误分类 timeout/401/429/5xx → `WebSearchError(category)`。未配置 `TAVILY_API_KEY` → OPTIONAL_RUNTIME 降级缺席（同 `KNOWLEDGE_COLLECTION`）。
+9. **Protocol + 默认 Tavily（手写 httpx）**：`WebSearchProvider` 是 Web 域自有协议（返回 `list[WebHit]`）；`WebHit = {title, url, snippet, score?, raw_content?}`（snippet=最佳可用摘要；raw_content 可选全文）。Tavily 默认实现：手写 httpx POST 到 `api.tavily.com/search`，**零新依赖**（同 `MilvusKnowledgeVectorStore` 「SDK 不绑死 Core」姿势）；错误分类 timeout/401/429/5xx → `WebSearchError(category)`。未配置 `TAVILY_API_KEY` → OPTIONAL_RUNTIME 降级缺席（同 `KNOWLEDGE_COLLECTION`）。
+
+   > **2026-10-23 修订（#1507 / 裁决 20，D4-A）：** 原文「`WebSearchProvider` 实现 `RetrievalProvider`」是**对决策 7 承诺的复述，不是事实**——两者返回类型不同（`list[WebHit]` vs `list[RetrievalHit]`），从未构成实现关系。`RetrievalProvider` 删除后，`WebSearchProvider` 是独立的 Web 域协议，`WebHit.to_retrieval_hit()` 保留为单向转换到共享数据形状。本决策其余部分（默认 Tavily、零新依赖、错误分类、缺 key 降级）不变。
 10. **Provider 可换 = 加策略类**（用户 Q4 核心诉求）：研究验证 Tavily/Serper/Brave/Google/Bocha 都能映射到同一 Protocol（auth 放 adapter 构造器、不进 Protocol 签名；HTTP verb 由 adapter 自有）。
 
 ### web_search 工具 schema（模型可见）
