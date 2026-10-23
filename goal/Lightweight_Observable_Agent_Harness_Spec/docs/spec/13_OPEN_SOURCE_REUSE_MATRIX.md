@@ -89,10 +89,17 @@ Pi 当前核心价值适合借鉴：
 - 本项目自己做 MCPToolAdapter
 
 ### LangMem
-`REUSE + ADAPT`
-- 默认 MemoryProvider
+`REUSE + ADAPT`（可选 Adapter，不再是默认 MemoryProvider）
+- 仅作为 MemoryProvider 的一种可选实现；当前默认是仓内 Markdown 文件存储
+  （`MEMORY.md` / `USER.md`，见 06 §6）——ADR-0056 §7 取代了「LangMem 为默认」的旧表述
 - 必须经 `MemoryCapability / MemoryContextProvider`
 - Core 禁止 import LangMem concrete class
+
+### Hermes memory（参考设计）
+`PORT DESIGN`
+- 有界 MEMORY/USER 文件 + 会话开始冻结注入 + 显式 write-approval 的机制参考
+- 本仓已存在的 Markdown 实现按 `ADAPT` 处理：复用文件内容权威、expected revision、扫描、
+  原子单文件替换；不照搬上游 profile/patch 合同，不复制代码（ADR-0056 §8）
 
 ### Milvus SDK
 `REUSE + ADAPT`

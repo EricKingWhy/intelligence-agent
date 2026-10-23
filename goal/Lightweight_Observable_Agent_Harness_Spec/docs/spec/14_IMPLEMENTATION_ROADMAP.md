@@ -112,14 +112,23 @@ Gate：
 - MemoryCapability
 - MemoryProvider Protocol
 - MemoryContextProvider
-- LangMemProvider
-- scope/relevance/recency/importance budget
+- MarkdownMemoryStore（当前默认：`MEMORY.md` / `USER.md` 文件内容权威）
+- LangMemProvider（可选 Adapter）
+- relevance/recency/importance budget
 - graceful degradation
 
 Gate：
-- 使用 LangMem 正常 recall；
-- 切换 Fake Provider 不改 Core；
+- 使用默认 Markdown 实现正常 recall 与注入；
+- 切换 Fake / LangMem Provider 不改 Core；
 - Memory 挂掉基础 Agent 仍运行。
+
+### Phase 6 后续工作：记忆转向（裁决 1/2/7/16/20）
+
+Phase 6 原交付里的 `user_global` / `project` 两 scope 与「LangMem 为默认 Provider」已被
+ADR-0056 取代：内容转 Markdown 文件权威，操作状态（job/lease/approval/settings/tombstone/
+receipt/history）各自点名 owner，记忆不再按 tenant/user/project 路由。这是 Phase 6 的**后续工作**，
+不追溯改写上面已完成的 Phase 6 历史正文（进度仍只记在 `PHASE_STATUS.md`）；施工票为
+#1491–#1496、#1507，规格承接见 #1543。RAG 仍属 Phase 11，不并入 Memory。
 
 ## Phase 7 — Capability / Plugin Foundation + Skills
 

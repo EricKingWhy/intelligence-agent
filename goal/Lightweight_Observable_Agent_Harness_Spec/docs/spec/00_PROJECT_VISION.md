@@ -134,7 +134,7 @@ V1 MUST 同时具备：
 - Operation Ledger + Reconcile；
 - Artifact Store（Local + MinIO Provider）；
 - Context Compaction；
-- Memory Capability（默认 LangMem Adapter）；
+- Memory Capability（当前默认：仓内 Markdown 文件存储 `MEMORY.md` / `USER.md`；LangMem 为可选 Adapter）；
 - MCP Client Tool Adapter；
 - Skills；
 - Knowledge/RAG Capability；
