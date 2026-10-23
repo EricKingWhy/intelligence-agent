@@ -104,7 +104,8 @@ def _strip_leading_zeros(part: str) -> str:
     """
     if part[:2].lower() == "0x":
         digits = part[2:].lstrip("0")
-        return "0x" + digits if digits else part
+        # 全零段收敛成 ``0x0``：回退原串会让 ≥9 个 0 撞长度上限 ⇒ link-local 保存期放行。
+        return part if len(part) == 2 else "0x" + (digits or "0")
     if part.startswith("0"):
         digits = part[1:].lstrip("0")
         if digits[:1] in ("x", "X"):
