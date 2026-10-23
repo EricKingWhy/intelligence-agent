@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**已完成、未集成（2026-10-23，#1552）**：Issue CLOSED，保留 `bug`/`P2`/`memory`，移除 `in-progress`；本地分支 `codex/issue-1552-memory-promote`，代码提交 `b524d547`，未 push / PR / merge。Web promote 重放现对 `MemoryContentRejected` 复用 `memory_http_error`，返回 403 + `X-Memory-Reason-Code`；聚焦测试 71 passed，Ruff 与 diff-check 通过；Standards / Spec 两轴独立审查 PASS，P0–P4=0。集成负责人 EricKingWhy。详见月档 `docs/phase_status/2026-10.md` #1552。
+**已完成、未集成（2026-10-23，#1552）**：Issue CLOSED，保留 `bug`/`P2`/`memory`，移除 `in-progress`；本地分支 `codex/issue-1552-memory-promote`，代码提交 `b524d547`；PR [#1557](https://github.com/EricKingWhy/intelligence-agent/pull/1557) OPEN（base `main` / `bd97fbfd`，创建时 head `817e5e6a`），未 merge。Gate-0 7/7 PASS，收据 `docs/gate/2dc04b755d5647f63c310ca6a4034e8cc3000255.json`。Web promote 重放现对 `MemoryContentRejected` 复用 `memory_http_error`，返回 403 + `X-Memory-Reason-Code`；聚焦测试 71 passed，Ruff 与 diff-check 通过；Standards / Spec 两轴独立审查 PASS，P0–P4=0。集成负责人 EricKingWhy。详见月档 `docs/phase_status/2026-10.md` #1552。
 
 **等待 merge（2026-10-22，#1437）**：Issue #1437「记忆投影一致性」（F-01 甲案补投影 + F-06 重试不丢 + F-06b 全量重投影）。PR [#1463](https://github.com/EricKingWhy/intelligence-agent/pull/1463) OPEN，base `main`，分支 `claude/1437-projection-consistency`，最终 tip `5aed8704`（被测树 `ffe1203d` / tree `799b5525`），基线 `387bdcc8`。Issue 标签已由 `in-progress` 换为 `等待merge`。**未 merge，合并由维护者执行。**
 

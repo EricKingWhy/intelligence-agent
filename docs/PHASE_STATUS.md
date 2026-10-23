@@ -1,5 +1,7 @@
 # Phase Status — 实施进度追踪
 
+- 2026-10-23：#1552 已交付到 PR [#1557](https://github.com/EricKingWhy/intelligence-agent/pull/1557) OPEN（base `main`=`bd97fbfd`，创建时 head `817e5e6a`），未 merge。Gate-0 7/7 PASS，收据 `docs/gate/2dc04b755d5647f63c310ca6a4034e8cc3000255.json`；聚焦测试 71 passed，双轴 review PASS（P0–P4=0）。服务端 gate0 PASS，E2E 冒烟 pending；完整 pytest 未运行，较宽 tests/web 验证限制见月档。详见 Tracker/月档。
+
 - 2026-10-22：#1437 记忆投影一致性（F-01 甲案补投影 + F-06 重试不丢 + F-06b 全量重投影）交付到 PR [#1463](https://github.com/EricKingWhy/intelligence-agent/pull/1463) OPEN / `等待merge`，**未合并**。分支 `claude/1437-projection-consistency`，基线 `main=387bdcc8`，最终 tip `5aed8704`（被测树 `ffe1203d` / tree `799b5525`）。`memory` 工具写路径接上投影通道，派生层加两列与 pending 账本，对账键统一为 `entry_digest`；`_gate` 区域字节级未变（#1438 边界）。审查共 4 轮两轴：第 2 轮两轴同根 P1（既有库 `initialize` 抛 `no such column: projection_source`，记忆静默降级）已修并实证关闭；第 4 轮两轴 PASS-WITH-FINDINGS、P0=0/P1=0；修后重审超预算 2 轮，按 #1304 先例如实登记。沙箱裸全量 Gate-0 7/7 PASS（34.43s，收据 `docs/gate/ffe1203d5d01c5adb63aa15cbffd3281b0f17ba1.json`），coverage exit 0；`tests/memory` 沙箱 1122 passed / 33 skipped / 0 failed、宿主 1170 passed / 0 failed（差异为沙箱缺 langmem/langgraph，已逐文件对账）。两条 P2 作残余登记待合并裁决。详见 Tracker 与月档。
 
 - 2026-10-22：#1451 已关闭（代码尚未集成），本地分支 `codex/issue-1450-1451` / commit `ff4ff0ab5ee7a63ebfc42cc41a2151c5e4099c13`；Timeline 与键盘导航共用一次派生的筛选行。全量 Vitest 192 files passed / 1 skipped、2586 passed / 1 skipped；指定 Playwright 双视口 34 passed；lint/build exit 0。双轴 PASS、P0–P4=0，Phase 10 保持 COMPLETED；性能探针低于冻结预算，不宣称加速。关单评论 https://github.com/EricKingWhy/intelligence-agent/issues/1451#issuecomment-6326237988，详见月档。
