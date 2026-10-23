@@ -23,8 +23,10 @@ export const CopyButton = memo(function CopyButton({ text, label = '复制' }: P
   }, []);
 
   const onCopy = async () => {
+    let copySucceeded = false;
     try {
       await navigator.clipboard.writeText(text);
+      copySucceeded = true;
     } catch {
       // 非安全上下文回退（clipboard API 仅 https/localhost 可用）：
       // 临时 textarea + execCommand，同步路径，剪贴板历史上广泛支持。
@@ -34,9 +36,10 @@ export const CopyButton = memo(function CopyButton({ text, label = '复制' }: P
       ta.style.opacity = '0';
       document.body.appendChild(ta);
       ta.select();
-      document.execCommand('copy');
+      copySucceeded = document.execCommand('copy');
       ta.remove();
     }
+    if (!copySucceeded) return;
     setCopied(true);
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => setCopied(false), 1600);
