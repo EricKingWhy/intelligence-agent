@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 import subprocess
@@ -98,7 +99,7 @@ async def test_append_async_keeps_event_loop_responsive_during_slow_fsync(
         during = len(ticks) - before
         window = ticks[before:]
         gap = max(
-            (b - a for a, b in zip(window, window[1:])), default=0.0,
+            (b - a for a, b in itertools.pairwise(window)), default=0.0,
         )
         measured.append(
             f"commit#{index}: 墙钟={elapsed * 1000:.1f}ms 期间心跳={during} "
