@@ -21,6 +21,7 @@ from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.v2.capability import (
     MarkdownBudgetExhausted,
     MemoryContentRejected,
+    MemoryRejectionReason,
 )
 from agent_harness.memory.v2.commands import (
     _REMEMBER_NEGATION,
@@ -285,9 +286,10 @@ class RememberMemoryV2Tool(Tool):
                     error_code=ErrorCode.INVALID_ARGUMENT,
                 )
             if find_secret(source_text, args.content) is not None:
-                return ToolResult.failure(
-                    message="该内容匹配凭证或密钥规则，不能写入长期记忆。",
-                    error_code=ErrorCode.PERMISSION_DENIED,
+                # #1440 C 案：与 `_reject_secret` 同源同一异常，reason_code 才只有一份。
+                raise MemoryContentRejected(
+                    "该内容匹配凭证或密钥规则，不能写入长期记忆。",
+                    MemoryRejectionReason.SECRET_CONTENT,
                 )
             trusted = trusted_identity_for_session(session_id, self._workspace_index)
             event_text = source_text
@@ -322,9 +324,13 @@ class RememberMemoryV2Tool(Tool):
             )
         except MemoryContentRejected as error:
             # #1440 F-12：凭证/威胁拒绝的**真因**必须可见，不再伪装成"身份无权"。
+            # C 案：机器可读归因走 `metadata.reason_code`（`ToolResult` 无专用字段，
+            # 不新造平行契约；缺失即 None，判定方 fail-closed）。
             logger.info("V2 explicit memory write rejected as unsafe content")
+            reason_code = getattr(error, "reason_code", None)
             return ToolResult.failure(
                 message=str(error), error_code=ErrorCode.PERMISSION_DENIED,
+                metadata={"reason_code": reason_code.value} if reason_code else {},
             )
         except MarkdownBudgetExhausted as error:
             # #1440 F-12：预算超限是**永久条件**（重试落在同一条上限上），且三段式

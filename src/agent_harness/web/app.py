@@ -221,6 +221,8 @@ EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
     {
         "X-Local-Fuse-Source",
         "X-Local-Max-Agent-Turns",
+        # #1440 C 案：memory 内容拒绝的机读归因码（`memory_http_error` 下发）。
+        "X-Memory-Reason-Code",
         "X-Permission-Mode",
         "X-Worktree-Path",
         "X-Worktree-Path-Encoded",
