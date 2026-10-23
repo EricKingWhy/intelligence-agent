@@ -178,14 +178,17 @@ describe('#1419 Terminal M-4 live 卡', () => {
     expect(c.querySelector('.step-meta')?.textContent).not.toContain('exit');
   });
 
-  it('流式缓冲（tool.output）优先于 result——终态后 result 到达，流式内容不丢', () => {
+  it('终态 result 优先于流式缓冲，且保留 stdout/stderr 的可判别夹具', () => {
     render([
       bash({
-        id: 's', seq: 2, result: { exit_code: 0, stdout: 'final\n' },
+        id: 's', seq: 2, result: { exit_code: 0, stdout: 'final', stderr: 'error' },
         output: [{ channel: 'stdout', text: 'partial' }, { channel: 'stdout', text: '-more' }],
       }),
     ]);
-    expect(card(0)!.querySelector('.term-out')!.textContent).toBe('partial-more');
+    const output = card(0)!.querySelector('.term-out')!.textContent;
+    expect(output).toBe('final\nerror');
+    expect(output).not.toContain('partial-more');
+    expect(card(0)!.querySelector('.term-foot')!.textContent).toContain('stderr 有内容');
   });
 });
 
