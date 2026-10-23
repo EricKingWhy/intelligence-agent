@@ -334,10 +334,11 @@ def read_endpoint(root: str | os.PathLike[str]) -> HostEndpointInfo | None:
     if not isinstance(payload, dict):
         return None
     try:
+        raw_host = payload.get("host")
         info = HostEndpointInfo(
             pid=int(payload["pid"]),
             port=int(payload["port"]),
-            host=str(payload.get("host", "127.0.0.1")) or "127.0.0.1",
+            host=raw_host if isinstance(raw_host, str) and raw_host else "127.0.0.1",
             protocol_version=int(payload.get("protocol_version", 0)),
             auth_required=bool(payload.get("auth_required", True)),
             owner=str(payload.get("owner", "")),

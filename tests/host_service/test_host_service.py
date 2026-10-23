@@ -205,6 +205,40 @@ def test_endpoint_read_corrupt_file_is_absent(tmp_path: Path) -> None:
     assert read_endpoint(root) is None
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected_host"),
+    [
+        pytest.param({"host": None}, "127.0.0.1", id="null-host"),
+        pytest.param({}, "127.0.0.1", id="missing-host"),
+        pytest.param({"host": ""}, "127.0.0.1", id="empty-host"),
+        pytest.param({"host": "::1"}, "::1", id="normal-host"),
+    ],
+)
+def test_endpoint_read_host_shape_falls_back_to_loopback(
+    tmp_path: Path, payload: dict[str, object], expected_host: str
+) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / ".host-service.json").write_text(
+        json.dumps(
+            {
+                "pid": 1,
+                "port": 8000,
+                "owner": "test-user",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "service_uuid": "test-service",
+                **payload,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    endpoint = read_endpoint(root)
+
+    assert endpoint is not None
+    assert endpoint.host == expected_host
+
+
 def test_loopback_url_and_cli_attach_message_use_bound_ipv6_host(monkeypatch) -> None:
     endpoint = HostEndpointInfo(pid=1, port=51820, host="::1")
     assert _loopback_url(endpoint.host, endpoint.port, "") == "http://[::1]:51820"

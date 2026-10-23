@@ -159,13 +159,13 @@ def configured_control_plane_origins(raw: str) -> frozenset[str]:
 
 
 def configured_control_plane_hosts(raw: str) -> frozenset[str]:
-    """解析显式 Host；拒绝 ``*`` / ``null``，其余按完整 host[:port] 精确匹配。"""
+    """解析显式 Host；拒绝含 ``*`` / ``null``，其余按完整 host[:port] 精确匹配。"""
     configured: set[str] = set()
     for item in raw.split(","):
         value = item.strip()
         if not value:
             continue
-        if value.casefold() in {"*", "null"}:
+        if "*" in value or value.casefold() == "null":
             raise ValueError(f"invalid CONTROL_PLANE_ALLOWED_HOSTS entry: {value!r}")
         parsed = _parse_host(value)
         if parsed is None:

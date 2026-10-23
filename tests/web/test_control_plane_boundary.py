@@ -244,7 +244,7 @@ def test_wildcard_extra_origin_is_rejected_at_app_creation(tmp_path: Path) -> No
         )
 
 
-@pytest.mark.parametrize("value", ["*", "null"])
+@pytest.mark.parametrize("value", ["*", "null", "*.example", "control*.example"])
 def test_wildcard_or_null_extra_host_is_rejected_at_app_creation(
     tmp_path: Path, value: str
 ) -> None:

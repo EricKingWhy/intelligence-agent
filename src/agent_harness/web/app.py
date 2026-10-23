@@ -2706,7 +2706,6 @@ def create_app(
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
     app.state.host_service_token = host_service_token
-    app.state.allowed_hosts = allowed_hosts
     app.state.allowed_origins = allowed_origins
 
     # #517 BUG-06：未捕获异常的全局兜底。Starlette 默认给 text/plain 的

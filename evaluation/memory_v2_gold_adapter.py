@@ -673,7 +673,7 @@ async def _run_secret_write_probe(
             },
         }
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://memory-v2-gold.test",
+            transport=ASGITransport(app=app), base_url="http://127.0.0.1:8000",
         ) as client:
             safe_response = await client.patch(
                 f"/api/memories/{previous.id}",
@@ -872,7 +872,7 @@ async def _verify_cross_session_lifecycle(
     headers = _gold_auth_headers(trusted)
     params = {"project_id": trusted.project_id}
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://memory-v2-gold.test",
+        transport=ASGITransport(app=app), base_url="http://127.0.0.1:8000",
     ) as client:
         why_response = await client.get(
             f"/api/sessions/{recall_session_id}/memory-recalls", headers=headers,
