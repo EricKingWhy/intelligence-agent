@@ -5,6 +5,12 @@
  * applyEvent 是纯状态机：测试在 test/adapter.test.ts 钉住映射语义。
  */
 import { EVENT, asNumber, asString, isRecord, type EventEnvelope } from "./events.ts";
+import {
+  isShadowed,
+  planItemsFromData,
+  supersedeRanges,
+} from "./shared/event-semantics.ts";
+import type { PlanItem } from "./shared/event-semantics.ts";
 
 export type { EventEnvelope };
 
@@ -43,7 +49,10 @@ export interface ToolCard {
   /** tool/call.data.title（部分工具带）；缺失为空串（OMP 状态行的描述位）。 */
   title: string;
   args: Record<string, unknown>;
-  status: "running" | "success" | "error";
+  /** DSH 四态：running、success、error，以及 stopped（被中断，不等于失败）。
+   *  #1498 F7-2：run 终态（或暂停收口执行区间）时仍在 running 的工具转 stopped，
+   *  与 Web 同口径（`web/src/lib/projection.ts::finalizeRun`）。 */
+  status: "running" | "success" | "error" | "stopped";
   /** tool/result.content 解析出的 ok；unparseable 为 null（不编造）。 */
   ok: boolean | null;
   /** 结果 message 或原文。 */
@@ -91,15 +100,8 @@ export interface ResumeInfo {
 }
 
 /** 进度清单行（#382 W-28；PRD 长任务第 7.1 节五字段，`task/plan_updated.data.items`）。
- *  与 W-27 `web/src/types.ts` 的 PlanItem 同形；TUI 与 Web 消费同一份服务端投影。 */
-export interface PlanItem {
-  id: string;
-  content: string;
-  activeForm: string;
-  /** 服务端枚举 `pending|in_progress|completed`；投影不做状态机改写（脏数据原样进）。 */
-  status: string;
-  source: string;
-}
+ *  #1498 起与 Web **同一份定义**：`src/shared/event-semantics.ts`（原两端各写一遍）。 */
+export type { PlanItem };
 
 export interface ConversationState {
   turns: Turn[];
@@ -120,6 +122,12 @@ export interface ConversationState {
    * 交叉查 `GET /api/models` 的 `supports_vision` 来判定"当前模型能不能看图"。
    */
   modelName: string | null;
+  /** #1498 F7-3：`message/superseded.data.superseded_seq` 的收集（被修订掉的输入）。
+   *  区间规则是共享纯函数（`supersedeRanges`）；这里只存**事实**，不存区间推导结果，
+   *  避免增量投影时区间与 turns 两份状态互相过期。 */
+  supersededSeqs: number[];
+  /** 已见的最大 seq（区间右端点兜底：没有后继 user 消息时一直覆盖到日志末尾）。 */
+  lastSeq: number;
 }
 
 export function createState(): ConversationState {
@@ -134,12 +142,32 @@ export function createState(): ConversationState {
     orphanArtifacts: [],
     plan: null,
     modelName: null,
+    supersededSeqs: [],
+    lastSeq: 0,
   };
+}
+
+/** #1498 F7-3：现行（未被告修订取代）的轮次。渲染端只画这些。
+ *
+ *  与 Web 同一规则（`web/src/lib/projection.ts::applySupersedeShadow` 读同一份
+ *  `supersedeRanges`）：整轮退场，不在界面上留「已改写」标记（ADR-0030 第 4.5.1 节）。
+ *  状态里的 `turns` 不删除元素：append-only 的重放确定性更重要，退场只是渲染过滤。
+ */
+export function visibleTurns(state: ConversationState): Turn[] {
+  const ranges = supersedeRanges(
+    state.supersededSeqs,
+    state.turns.filter((turn) => turn.role === "user" && turn.seq !== null).map((turn) => turn.seq as number),
+    state.lastSeq,
+  );
+  if (ranges.length === 0) return state.turns;
+  return state.turns.filter((turn) => !isShadowed(turn.seq, ranges));
 }
 
 /** 事件 -> 状态（seq 幂等由 sse.SeqCursor 在入口保证，这里不重复判）。 */
 export function applyEvent(state: ConversationState, event: EventEnvelope): void {
   const data = event.data;
+  // #1498 F7-3：区间右端点兜底要用「已见最大 seq」：它随日志推进，与 turns 无关。
+  if (event.seq !== null && event.seq > state.lastSeq) state.lastSeq = event.seq;
   switch (event.type) {
     case EVENT.USER_MESSAGE:
       state.turns.push({
@@ -250,6 +278,10 @@ export function applyEvent(state: ConversationState, event: EventEnvelope): void
         data,
         seq: event.seq,
       };
+      // #1498 F7-2：暂停不是终态，但**这一轮的执行区间确实结束了**：与 Web
+      // `projectRunPaused` 同口径（caret 停、在跑工具标 stopped），否则暂停面板亮着
+      // 而工具卡还在转圈。
+      settleExecution(state);
       break;
     case EVENT.RUN_RESUMED:
       state.runStatus = "running";
@@ -264,15 +296,29 @@ export function applyEvent(state: ConversationState, event: EventEnvelope): void
       state.runStatus = "completed";
       state.pauseInfo = null;
       state.usageTotal = isRecord(data.usage_total) ? data.usage_total : null;
+      settleExecution(state);
       break;
     case EVENT.RUN_FAILED:
       state.runStatus = "failed";
       state.pauseInfo = null;
       state.failReason = asString(data.reason) || null;
+      settleExecution(state);
       break;
     case EVENT.RUN_INTERRUPTED:
       state.runStatus = "interrupted";
+      // #1498 F7-2（票面夹具 terminal fixture）：中断 不等于 失败，也**不等于还在跑**。
+      // 未配对工具转 stopped，与 Web `finalizeRun` 一致。
+      settleExecution(state);
       break;
+    case EVENT.MESSAGE_SUPERSEDED: {
+      // #1498 F7-3（票面夹具 supersede fixture）：被修订掉的输入与旧回答不得再作
+      // 现行对话显示。这里只记事实（被取代的 seq），区间推导是共享纯函数，
+      // 渲染端按 `visibleTurns` 过滤整轮。
+      const seq = asNumber(data.superseded_seq);
+      if (seq === null) break; // 一行坏数据只损失该行（与后端仅收 int 同口径）
+      if (!state.supersededSeqs.includes(seq)) state.supersededSeqs.push(seq);
+      break;
+    }
     case EVENT.TASK_PLAN_UPDATED:
       projectPlanUpdated(state, data);
       break;
@@ -281,33 +327,36 @@ export function applyEvent(state: ConversationState, event: EventEnvelope): void
   }
 }
 
+/** #1498 F7-2：执行区间收口：run 结束（终态或暂停）时，仍在 running 的工具被
+ *  **中断**而非失败，转 stopped 并保留已有结果字段（不清空 message/output）。
+ *
+ *  与 Web `finalizeRun` 的阶段清扫同口径（DSH 四态冻结决策第 69 行「interrupted
+ *  不等于 error」）。幂等：已 settle 的工具不再变动，恢复后的新工具照常从 running 起。
+ *  终态集合只在 `RUN_TERMINAL_TYPES` 里判（共享一份，不在这里再列一遍）。
+ */
+function settleExecution(state: ConversationState): void {
+  for (const turn of state.turns) {
+    for (const tool of turn.tools) {
+      if (tool.status === "running") tool.status = "stopped";
+    }
+  }
+}
+
 /** #382（W-28）：`task/plan_updated` 投影，整表覆盖 last-wins + 行级容错。
  *
  *  契约：PRD 长任务第 7.1-7.3 节（五字段、整表覆盖、软上限 50）；后端 `session/plan.py`
  *  handler 已硬校验（单 in_progress / 状态机 / id 唯一），投影只防「手写 / 污染 JSONL
- *  的旧数据」：一行坏数据只损失该行，与 W-27 `web/src/lib/projection.ts:1245-1265`
- *  同一容错哲学。状态机级违规（如双 in_progress）不改写、原样保留，渲染端容错。
+ *  的旧数据」：一行坏数据只损失该行。状态机级违规（如双 in_progress）不改写、原样保留，
+ *  渲染端容错。
+ *
+ *  #1498：解析规则（行级过滤 / 归一 / 去重 / 坏帧忽略）已收进共享纯函数
+ *  `src/shared/event-semantics.ts::planItemsFromData`，与 Web 同一份实现（实测两端
+ *  函数体归一化后逐字符相同）；本函数只剩「把结果写进 TUI 自己的 state」这一步。
  *
  *  data.items 非数组 = 坏帧整个忽略（清单保持原值）；[] 是合法清空。 */
 function projectPlanUpdated(state: ConversationState, data: Record<string, unknown>): void {
-  const rawItems = data.items;
-  if (!Array.isArray(rawItems)) return;
-  const items: PlanItem[] = [];
-  const seen = new Set<string>();
-  for (const raw of rawItems) {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
-    const row = raw as Record<string, unknown>;
-    if (typeof row.id !== "string" || row.id === "" || seen.has(row.id)) continue;
-    seen.add(row.id);
-    const content = typeof row.content === "string" ? row.content : "";
-    items.push({
-      id: row.id,
-      content,
-      activeForm: typeof row.activeForm === "string" && row.activeForm !== "" ? row.activeForm : content,
-      status: typeof row.status === "string" ? row.status : "",
-      source: typeof row.source === "string" ? row.source : "",
-    });
-  }
+  const items = planItemsFromData(data);
+  if (items === null) return;
   state.plan = items;
 }
 

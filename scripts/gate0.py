@@ -90,7 +90,7 @@ GATE0_BUDGET = 60.0
 #: 逐条的判据 / 证据 / 实测读数见 `docs/agents/verification.md` §2 ⑦（此处只写「守什么」，
 #: 不复述机制 —— `AGENTS.md` §16.1）：
 #:   ① 生成物同步：`src/.../event.py`（词汇唯一真值）↔ `web/src/generated/event-types.ts`
-#:      ↔ `docs/EVENT_VOCABULARY.md`。
+#:      ↔ `tui/src/generated/event-types.ts`（#1498：TUI 产物落在 tui 包内）↔ `docs/EVENT_VOCABULARY.md`。
 #:   ② 验证映射：`docs/agents/verification.map.tsv` 必须覆盖**全部被跟踪文件**、车道 id 合法、
 #:      focused 路径存在，且**每一行都承重**（删掉任一行都会有文件的受影响集合变化）⇒ map
 #:      不能悄悄腐烂。

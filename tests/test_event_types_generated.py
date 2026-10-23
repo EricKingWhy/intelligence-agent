@@ -14,7 +14,13 @@ event.py 生成，本测试兜底防漂移：
 
 from __future__ import annotations
 
-from scripts.gen_event_types import OUTPUT_PATH, collect_vocabulary, generate_ts
+from scripts.gen_event_types import (
+    OUTPUT_PATH,
+    TUI_OUTPUT_PATH,
+    collect_vocabulary,
+    generate_ts,
+    generate_tui_ts,
+)
 
 
 def test_generated_event_types_artifact_is_current():
@@ -27,6 +33,20 @@ def test_generated_event_types_artifact_is_current():
     actual = OUTPUT_PATH.read_text(encoding="utf-8")
     assert actual == expected, (
         f"{OUTPUT_PATH} 与 src/agent_harness/session/event.py 漂移——"
+        "运行 uv run python scripts/gen_event_types.py 重新生成"
+    )
+
+
+def test_generated_tui_event_types_artifact_is_current():
+    """#1498（G-1）：TUI 产物与生成器输出一致（同一份词汇，落在 tui 包内）。"""
+    expected = generate_tui_ts()
+    if not TUI_OUTPUT_PATH.exists():
+        raise AssertionError(
+            f"{TUI_OUTPUT_PATH} 不存在——运行 uv run python scripts/gen_event_types.py 生成"
+        )
+    actual = TUI_OUTPUT_PATH.read_text(encoding="utf-8")
+    assert actual == expected, (
+        f"{TUI_OUTPUT_PATH} 与 src/agent_harness/session/event.py 漂移——"
         "运行 uv run python scripts/gen_event_types.py 重新生成"
     )
 

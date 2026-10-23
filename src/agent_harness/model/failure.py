@@ -29,6 +29,7 @@ from typing import Literal
 import httpx
 import httpx2
 
+from agent_harness.model.endpoint_guard import misconfiguration_rejection
 from agent_harness.model.stall import ModelStallError
 
 #: DeepSeek 系（主/备 provider 均为 deepseek 模型）工具调用的协议保留标记。
@@ -186,7 +187,13 @@ def transport_failure_kind(error: BaseException) -> Literal["timeout", "connecti
     （``fallback.is_transient_model_error``）的**唯一**来源。超时必须先判：
     ``httpx.TimeoutException`` 是 ``TransportError`` 的子类、``APITimeoutError`` 是
     ``APIConnectionError`` 的子类，后判会被连接类吞掉。
+
+    #1485 守卫拒绝先判、且**不**归连接类：openai 把 ``EndpointBlockedError`` 包成
+    ``APIConnectionError``，若落到 ``"connection"`` 就被 fallback 当网络抖动吞掉，
+    用户看到另一个模型的回答却没有任何信号。它是**确定性**的配置错，不是传输失败。
     """
+    if misconfiguration_rejection(error) is not None:
+        return None
     mro_names = {cls.__name__ for cls in type(error).__mro__}
     if isinstance(error, _TIMEOUT_TYPES) or mro_names & _TIMEOUT_ERROR_NAMES:
         return "timeout"
@@ -202,6 +209,9 @@ def unclassified_failure_message(error: BaseException) -> str:
     无状态码 ⇒ 按 :func:`transport_failure_kind` 判超时 / 连接失败；都不是 ⇒ 逐字是 #222 的兜底句。
     """
     error_type = type(error).__name__
+    rejection = misconfiguration_rejection(error)
+    if rejection is not None:
+        return str(rejection)
     status = provider_http_status(error)
     if status is not None:
         if 400 <= status < 500:
