@@ -100,6 +100,10 @@ class TestBashClassification:
             "cat /etc/passwd",
             "cat ~",
             "cat %TEMP%",
+            "cat $HOME/x",
+            "cat C:secret.txt",
+            "cat {/etc,}/passwd",
+            "cat %~dp0secret.txt",
             r"cat C:\outside.txt",
             r"cat \outside.txt",
             "cat local.txt\nrm local.txt",
@@ -111,6 +115,24 @@ class TestBashClassification:
         self, command: str,
     ) -> None:
         """Unsafe actions, paths, shell syntax, and writer flags must not bypass approval."""
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "wc -c --files0-from=/tmp/rev1484-out/list.txt",
+            "grep -f/etc/passwd .",
+            "grep --file=/etc/passwd .",
+            "grep --exclude-from=/etc/passwd .",
+            "file -f/etc/passwd",
+            "file --files-from=/etc/passwd",
+            "head --files0-from=x",
+            "diff --from-file=/etc/passwd",
+            "date -f/etc/passwd",
+        ],
+    )
+    def test_file_consuming_options_require_approval(self, command: str) -> None:
+        """文件承载选项不能进入可证明安全的免问子集。"""
         assert classify_bash_command(command) is RuleVerdict.ASK
 
     @pytest.mark.parametrize(
@@ -129,8 +151,55 @@ class TestBashClassification:
     def test_find_unknown_expression_is_asked(self) -> None:
         assert classify_bash_command("find . -unknown-action") is RuleVerdict.ASK
 
-    @pytest.mark.parametrize("command", ["date 2026-01-01", "date --set=2026-01-01"])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "date 2026-01-01",
+            "date --set=2026-01-01",
+            "date -s2026-01-01",
+            "date -us20260101",
+            "date -u -s20260101",
+        ],
+    )
     def test_date_setter_is_asked(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "date",
+            "date +%Y",
+            "date -u",
+            "date -R",
+            "date -I",
+            "date -u +%Y",
+            "hostname",
+            "hostname -a",
+            "hostname -A",
+            "hostname -d",
+            "hostname -f",
+            "hostname -i",
+            "hostname -I",
+            "hostname -s",
+            "hostname -y",
+        ],
+    )
+    def test_query_only_date_and_hostname_flags_remain_allowed(
+        self, command: str,
+    ) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "hostname NAME",
+            "hostname -F FILE",
+            "hostname -F/etc/hostname",
+            "hostname -bF/etc/hostname",
+            "hostname --file=/etc/hostname",
+        ],
+    )
+    def test_hostname_mutating_forms_are_asked(self, command: str) -> None:
         assert classify_bash_command(command) is RuleVerdict.ASK
 
     @pytest.mark.parametrize("command", ["find . -maxdepth", "find . -type"])

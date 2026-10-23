@@ -181,13 +181,15 @@ _READONLY_COMMANDS = frozenset({
     "stat", "tree", "printenv", "which",
 })
 #: shell 连接符：出现任一即**不算只读**（保守——连接符后的命令无法从首 token 判定）。
-_SHELL_CONNECTORS = (";", "&&", "||", "|", "$(", "`", ">", "<", "&", "\n", "\r")
+_SHELL_CONNECTORS = (
+    ";", "&&", "||", "|", "$(", "`", ">", "<", "&", "{", "}", "\n", "\r",
+)
 #: 即使没有连接符，变量/命令替换也会把首词白名单变成未知语义 → ASK。
 _SHELL_EXPANSION_MARKERS = ("$",)
 _WINDOWS_ENV_EXPANSION = re.compile(
     r"%(?:[A-Za-z_][A-Za-z0-9_]*(?::[^%\r\n]*)?|[0-9*]|~[0-9*])%"
 )
-_WINDOWS_BATCH_EXPANSION = re.compile(r"%~?[0-9*]")
+_WINDOWS_BATCH_EXPANSION = re.compile(r"%(?:~|[0-9*])")
 
 #: `find` 只允许能证明把结果写到 stdout、且不会执行/删除/写文件的动作。
 _FIND_UNSAFE_ACTIONS = frozenset({
@@ -215,6 +217,18 @@ _READONLY_WRITE_OPTIONS = {
     "tree": frozenset({"-o", "--outfile"}),
     "file": frozenset({"-C", "--compile"}),
 }
+# 文件承载选项的内容可能再提供路径或模式，无法在这个轻量分类器中证明为安全。
+# 因而这些选项统一进入 ASK；短旗附着值和 `--option=value` 也由同一张表识别。
+_READONLY_FILE_OPTIONS = {
+    "wc": frozenset({"--files0-from"}),
+    "grep": frozenset({"-f", "--file", "--exclude-from"}),
+    "file": frozenset({"-f", "--files-from"}),
+    "head": frozenset({"--files0-from"}),
+    "diff": frozenset({"--from-file", "--to-file"}),
+    "date": frozenset({"-f", "--file"}),
+}
+_DATE_QUERY_FLAGS = frozenset({"-u", "-R", "-I"})
+_HOSTNAME_QUERY_FLAGS = frozenset({"-a", "-A", "-d", "-f", "-i", "-I", "-s", "-y"})
 
 
 def classify_bash_command(command: str) -> RuleVerdict:
@@ -286,26 +300,20 @@ def _readonly_arguments_are_safe(
     没有把 bash 变成 parser 或 OS sandbox：只拒绝能明确看出会越界、执行动作、写文件
     或引入未知表达式的形状。无法证明安全就回到既有 ASK 路径。
     """
-    if _has_outside_path_syntax(args, command):
+    if _has_outside_path_syntax(first, args, command):
         return False
     if _has_readonly_write_option(first, args):
+        return False
+    if _has_readonly_file_option(first, args):
         return False
     if first == "find":
         return _is_safe_find_query(args)
     if first == "hostname":
-        # `hostname NAME` / `hostname -F FILE` change host state on common POSIX implementations。
-        return not any(
-            not arg.startswith("-")
-            or arg in {"-F", "--file"}
-            or arg.startswith(("-F", "--file="))
-            for arg in args
-        )
+        # 只接受可核验的查询旗；其余旗形一律回到 ASK，避免合并短旗漏判写分支。
+        return all(arg in _HOSTNAME_QUERY_FLAGS for arg in args)
     if first == "date":
-        return all(arg.startswith(("-", "+")) for arg in args) and not any(
-            arg in {"-s", "--set", "--set-date"}
-            or arg.startswith(("-s", "--set=", "--set-date="))
-            for arg in args
-        )
+        # 只接受纯查询旗与格式串；设置日期的短旗簇/长旗均不在白名单内。
+        return all(arg.startswith("+") or arg in _DATE_QUERY_FLAGS for arg in args)
     return True
 
 
@@ -322,7 +330,28 @@ def _has_readonly_write_option(first: str, args: list[str]) -> bool:
     return False
 
 
-def _has_outside_path_syntax(args: list[str], command: str) -> bool:
+def _has_readonly_file_option(first: str, args: list[str]) -> bool:
+    """识别会从文件读取路径/模式的选项，包括合并短旗和附着值。"""
+    options = _READONLY_FILE_OPTIONS.get(first, frozenset())
+    short_flags = {
+        option[1]
+        for option in options
+        if len(option) == 2 and option.startswith("-")
+    }
+    for arg in args:
+        if arg in options or any(arg.startswith(f"{option}=") for option in options):
+            return True
+        if (
+            short_flags
+            and arg.startswith("-")
+            and not arg.startswith("--")
+            and any(flag in arg[1:] for flag in short_flags)
+        ):
+            return True
+    return False
+
+
+def _has_outside_path_syntax(first: str, args: list[str], command: str) -> bool:
     """保守识别绝对路径、父目录遍历和常见 Windows 外部路径形状。"""
     if (
         "../" in command
@@ -330,7 +359,26 @@ def _has_outside_path_syntax(args: list[str], command: str) -> bool:
         or _has_windows_absolute_path(command)
     ):
         return True
-    return any(_looks_like_outside_path(arg) for arg in args)
+    return any(_looks_like_outside_path(value) for value in _path_candidates(first, args))
+
+
+def _path_candidates(first: str, args: list[str]):
+    """返回参数本身及选项中的附着值，避免值绕过路径判定。"""
+    options = _READONLY_FILE_OPTIONS.get(first, frozenset())
+    short_flags = {
+        option[1]
+        for option in options
+        if len(option) == 2 and option.startswith("-")
+    }
+    for arg in args:
+        yield arg
+        if "=" in arg:
+            yield arg.split("=", 1)[1]
+        if short_flags and arg.startswith("-") and not arg.startswith("--"):
+            for index in range(1, len(arg)):
+                if arg[index] in short_flags and index + 1 < len(arg):
+                    yield arg[index + 1:]
+                    break
 
 
 def _has_windows_absolute_path(command: str) -> bool:
@@ -340,8 +388,7 @@ def _has_windows_absolute_path(command: str) -> bool:
     return any(
         command[index].isalpha()
         and command[index + 1] == ":"
-        and command[index + 2] in {"/", "\\"}
-        for index in range(len(command) - 2)
+        for index in range(len(command) - 1)
     )
 
 
@@ -349,7 +396,7 @@ def _looks_like_outside_path(value: str) -> bool:
     normalized = value.replace("\\", "/")
     if normalized.startswith(("/", "//", "~")):
         return True
-    if len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/":
+    if len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":":
         return True
     return ".." in normalized.split("/")
 

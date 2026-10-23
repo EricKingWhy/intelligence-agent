@@ -435,6 +435,46 @@ class TestPermissionRuleEngineIntegration:
         assert calls[0].reason == "Bash 命令需逐次审批。"
         assert spy.execute_calls == 1
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "wc -c --files0-from=/tmp/rev1484-out/list.txt",
+            "grep -f/etc/passwd .",
+            "grep --file=/etc/passwd .",
+            "grep --exclude-from=/etc/passwd .",
+            "file -f/etc/passwd",
+            "file --files-from=/etc/passwd",
+            "head --files0-from=x",
+            "diff --from-file=/etc/passwd",
+            "date -f/etc/passwd",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_file_consuming_readonly_option_is_approved_before_execution(
+        self, sandbox: LocalSubprocessSandbox, command: str,
+    ):
+        """每个文件承载选项都必须先进入既有审批闸，拒绝时零执行。"""
+        spy = _SpyBashTool()
+        registry = ToolRegistry()
+        registry.register(spy)
+        calls: list[ApprovalRequest] = []
+
+        async def rejecting(req: ApprovalRequest) -> ApprovalResponse:
+            calls.append(req)
+            return ApprovalResponse(approved=False, reason="reject file option")
+
+        result = await ToolExecutor(
+            registry,
+            approval_callback=rejecting,
+            permission_rules=default_rule_set(),
+            workspace_root=sandbox.workspace_root,
+        ).execute(_tc("bash", {"command": command}))
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+        assert len(calls) == 1
+        assert spy.execute_calls == 0
+
     @pytest.mark.asyncio
     async def test_ask_bash_uses_rule_reason(
         self, sandbox: LocalSubprocessSandbox
