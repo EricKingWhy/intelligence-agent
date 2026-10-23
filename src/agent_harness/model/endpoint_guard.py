@@ -106,7 +106,10 @@ def _strip_leading_zeros(part: str) -> str:
         digits = part[2:].lstrip("0")
         return "0x" + digits if digits else part
     if part.startswith("0"):
-        return "0" + part[1:].lstrip("0")
+        digits = part[1:].lstrip("0")
+        if digits[:1] in ("x", "X"):
+            return part  # ``00X4`` 不是任何合法写法，别把剥零变成"补出合法十六进制"
+        return "0" + digits
     return part
 
 
