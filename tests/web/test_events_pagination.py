@@ -131,12 +131,18 @@ def test_append_between_pages_lands_in_next_page(tmp_path: Path) -> None:
     )
     rebuilt = list(page1)
     after_seq = page1[-1]["seq"]
+    pages = 1
     while True:
         page = _page(client, sid, after_seq, 5)
         rebuilt.extend(page)
+        pages += 1
         if len(page) < 5:
             break
+        # 游标前进守卫（复审 F1）：与上面两处循环同款——后端忽略 after_seq/limit
+        # 时秒级失败，不让 while True 无限空转。
+        assert page[-1]["seq"] > after_seq, f"游标未前进（after_seq={after_seq}）"
         after_seq = page[-1]["seq"]
+        assert pages <= 12, "页数超过事件总数：后端分页语义已坏"
 
     seqs = [e["seq"] for e in rebuilt]
     assert seqs == list(range(12)), f"并发新增后重建不完整：{seqs}"
