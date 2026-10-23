@@ -24,8 +24,10 @@ from collections import Counter
 import httpx2
 import pytest
 from langchain_core.messages import HumanMessage
+from openai import APIConnectionError
 
 from agent_harness.config import Settings
+from agent_harness.memory.embeddings import create_embeddings
 from agent_harness.model import endpoint_guard
 from agent_harness.model.config import ModelConfig, endpoint_allowlist
 from agent_harness.model.endpoint_guard import (
@@ -121,6 +123,10 @@ async def _invoke(model) -> None:
     await model.ainvoke([HumanMessage(content="ping")], max_tokens=1)
 
 
+def _invoke_sync(model) -> None:
+    model.invoke([HumanMessage(content="ping")], max_tokens=1)
+
+
 # ── 保存期：IP 字面量与元数据主机名 ──────────────────────────────────
 
 
@@ -137,9 +143,16 @@ class TestSaveTimeRejection:
             "http://[fd00:ec2::254]/v1",
             "http://[::ffff:169.254.169.254]/v1",  # IPv4-mapped
             "http://[64:ff9b::a9fe:a9fe]/v1",  # NAT64 内嵌 IPv4
+            "http://[64:ff9b:1::a9fe:a9fe]/v1",  # RFC 8215 local-use NAT64
+            "http://[64:ff9b:1:a9fe::fea9:0]/v1",  # 同上，按 RFC 6052 分片摆放
+            "http://[::169.254.169.254]/v1",  # IPv4-compatible（RFC 4291 弃用但仍可解析）
             "http://metadata.google.internal/",
             "http://metadata.amazonaws.com/",
             "http://instance-data/",
+            # 归一化：大小写与末尾点不改变判定
+            "http://METADATA.GOOGLE.INTERNAL/",
+            "http://metadata.google.internal./",
+            "http://169.254.169.254:99999/v1",  # 端口越界：保存期也必须拦
         ],
     )
     def test_metadata_and_link_local_literals_are_rejected(self, url):
@@ -157,6 +170,8 @@ class TestSaveTimeRejection:
             "http://10.0.0.7/v1",
             "http://[::1]:8080/v1",
             "http://198.18.222.105/v1",  # 沙箱通配 DNS 段：必须放行
+            "http://[64:ff9b::808:808]/v1",  # NAT64 里的公网地址：内嵌 v4 不在拦截面
+            "http://[::0.0.0.1]/v1",  # IPv4-compatible 的 loopback
         ],
     )
     def test_owner_and_private_endpoints_are_allowed(self, url):
@@ -344,6 +359,43 @@ class TestRequestTimeGuard:
         assert "误配置守卫" in str(rejection)
         assert _METADATA_IP in str(rejection)
 
+    def test_sync_invoke_path_is_also_guarded(self, fake_resolver):
+        """同步 hook 与异步 hook 是两份代码：`model.invoke` 必须同样零请求。
+
+        `evaluation/real_eval/judge.py` 走的就是同步路径——只测 ainvoke 会让
+        同步 hook 被改成 `return None` 后仍全绿。
+        """
+        fake_resolver["metadata.test"] = [_METADATA_IP]
+        recorder = _Recorder()
+        model = _model("http://metadata.test/v1")
+        _install(model, recorder)
+        with pytest.raises(Exception) as excinfo:
+            _invoke_sync(model)
+        assert misconfiguration_rejection(excinfo.value) is not None
+        assert recorder.hosts == Counter()
+        assert recorder.auth_headers == []
+
+    @pytest.mark.asyncio
+    async def test_resolver_failure_is_not_a_bypass(self, fake_resolver, monkeypatch):
+        """解析器抛 OSError 时**不得**放行（fail-open 就是一条构造得出来的绕过）。
+
+        请求连 transport 都不该到；异常类型不必是守卫拒绝（它按瞬时连接失败处理，
+        可重试），但"零请求"是硬要求。
+        """
+        def _boom(host: str, port: int | None) -> list[str]:
+            raise OSError("resolver unavailable")
+
+        monkeypatch.setattr(endpoint_guard, "_resolved_addresses", _boom)
+        recorder = _Recorder()
+        model = _model("http://metadata.test/v1")
+        _install(model, recorder)
+        with pytest.raises(APIConnectionError) as excinfo:
+            await _invoke(model)
+        # 仍是瞬时连接失败（可重试），不是守卫拒绝——别把 DNS 抖动说成配置错。
+        assert misconfiguration_rejection(excinfo.value) is None
+        assert recorder.hosts == Counter()
+        assert recorder.auth_headers == []
+
 
 # ── 守卫客户端本身 ──────────────────────────────────────────────────
 
@@ -367,6 +419,30 @@ class TestGuardedClients:
         """静默永不命中的条目（带 scheme / 路径 / 空白 / 端口越界）在构造期报错。"""
         with pytest.raises(ValueError):
             validate_allowlist(entry)
+
+    def test_embeddings_client_is_guarded_too(self, fake_resolver):
+        """embedding 端点走同一个守卫：配成元数据地址同样零请求。
+
+        它自己一条构造路径（`memory/embeddings.py`），不测就漏——只守住 chat
+        的地址等于只守住半个模型面。
+        """
+        fake_resolver["metadata.test"] = [_METADATA_IP]
+        settings = Settings(
+            _env_file=None, embedding_model="m",
+            embedding_base_url="http://metadata.test/v1", embedding_api_key="sk-test",
+        )
+        embeddings = create_embeddings(settings)
+        recorder = _Recorder()
+        inner = embeddings.client._client
+        inner._mounts = {}
+        inner._transport = httpx2.MockTransport(recorder)
+
+        with pytest.raises(Exception) as excinfo:
+            embeddings.embed_query("hi")
+
+        assert misconfiguration_rejection(excinfo.value) is not None
+        assert recorder.hosts == Counter()
+        assert recorder.auth_headers == []
 
     def test_settings_rejects_bad_allowlist_at_construction(self):
         with pytest.raises(ValueError):

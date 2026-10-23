@@ -7,6 +7,10 @@
    ``100.100.100.200``、AWS IMDS IPv6 ``fd00:ec2::/32``；
 2. IPv6 link-local ``fe80::/10``（含 OpenStack Nova ``fe80::a9fe:a9fe``）。
 
+带内嵌 IPv4 的写法一并拆开再判：IPv4-mapped ``::ffff:``、NAT64 ``64:ff9b::/96`` 与
+``64:ff9b:1::/48``、IPv4-compatible ``::/96``——它们在 ``ipaddress`` 里**都不**命中
+IPv4 网段（实测），不拆就是白名单。
+
 RFC1918 / loopback / ``198.18.0.0/15`` 一律放行。``198.18/15`` 尤其不能拦：沙箱的
 通配 DNS 会把**任意**主机名解析进该段（实测 ``api.example.com`` → 198.18.222.105），
 照搬 ``langchain_core`` 默认策略（= 裁决 C 的全私网拦截）会让本机所有模型调用假红。
@@ -35,6 +39,13 @@ RFC1918 / loopback / ``198.18.0.0/15`` 一律放行。``198.18/15`` 尤其不能
 pin-IP transport（复制一份 ``SSRFSafeTransport`` 到 httpx2），超出"轻量防误配"的
 本票范围；见完工报告"残余风险"。
 
+解析失败（``OSError``）在 hook 里**不吞**：吞掉再放行就是"解析器一抖就绕过"，
+而真实连接用的是同一个解析器——放过它换不来可用性，只换来一条绕过路径。异常
+原样上抛后由 openai 包成 ``APIConnectionError``，仍按瞬时连接失败（可重试）。
+
+覆盖面：chat（``create_chat_model``）与 embedding（``create_embeddings``）两条
+构造路径共用本模块；只守住前者等于只守住半个模型面。
+
 第二项：``_BLOCKED_NETWORKS`` / ``_METADATA_HOSTNAMES`` 是**拷贝**，不随上游扩充
 （新云厂商的元数据地址不会自动进来）。新证据出现时手工补这里，别指望同步。
 """
@@ -58,8 +69,15 @@ _BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("fd00:ec2::/32"),  # AWS IMDS IPv6
 )
 
-#: NAT64 well-known prefix：``64:ff9b::a9fe:a9fe`` 这类形态要取出内嵌 IPv4 再判。
-_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+#: 内嵌 IPv4 的过渡前缀：**低 32 位**就是那个 IPv4，要取出来再判。
+#: 三个都实测过 ``::ffff:`` 之外它们**不**命中 IPv4 网段（与 mapped 同一坑）：
+#: NAT64 well-known、RFC 8215 local-use（``64:ff9b:1::a9fe:a9fe``）、
+#: IPv4-compatible ``::169.254.169.254``（RFC 4291 已弃用，但解析器仍接受）。
+_EMBEDDED_V4_PREFIXES = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("::/96"),
+)
 
 #: 云元数据主机名（大小写不敏感；末尾点先剥掉）。
 _METADATA_HOSTNAMES = frozenset(
@@ -171,6 +189,26 @@ def _is_allowed(
     return False
 
 
+def _embedded_ipv4(address: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    """过渡地址里可能内嵌的 IPv4（空 = 不是这类地址）。
+
+    低 32 位对 ``/96`` 前缀是**精确**的。``64:ff9b:1::/48`` 按 RFC 6052 把 v4 放在
+    bit 48-63 + 72-87，低 32 位那份是**防御性**判定（该前缀只用于 NAT64，误伤可由
+    所有者例外豁免）；两种位置都取，宁可多判一条也不留写法差异。
+    """
+    number = int(address)
+    found: list[ipaddress.IPv4Address] = []
+    for prefix in _EMBEDDED_V4_PREFIXES:
+        if address not in prefix:
+            continue
+        found.append(ipaddress.IPv4Address(number & 0xFFFFFFFF))
+        if prefix.prefixlen == 48:
+            high = (number >> 64) & 0xFFFF
+            low = (number >> 40) & 0xFFFF
+            found.append(ipaddress.IPv4Address((high << 16) | low))
+    return found
+
+
 def _address_rejection(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> str | None:
@@ -181,8 +219,10 @@ def _address_rejection(
         mapped = address.ipv4_mapped
         if mapped is not None:
             return _address_rejection(mapped)
-        if address in _NAT64_PREFIX:
-            return _address_rejection(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
+        for embedded in _embedded_ipv4(address):
+            reason = _address_rejection(embedded)
+            if reason is not None:
+                return reason
     for network in _BLOCKED_NETWORKS:
         if address.version == network.version and address in network:
             return f"{address} 属于 {network}"
@@ -206,17 +246,22 @@ def _host_rejection(host: str) -> str | None:
 def url_rejection(url: str, *, allow: Iterable[str] = ()) -> str | None:
     """保存期判据：URL 的 host 是拦截面目标则返回原因（不解析 DNS）。
 
-    URL 本身不可解析（scheme/端口坏）时返回 None——那是 ``validate_base_url``
-    的责任域，不在本守卫报错。
+    URL 本身不可解析（scheme 坏）时返回 None——那是 ``validate_base_url`` 的责任域。
+    但**端口**坏（``http://169.254.169.254:99999/v1``）不能因此整条跳过：那样保存期
+    放行、请求期照样拦，表现为"存得进去、跑起来报守卫拒绝"。端口未知 ⇒ 只认不带端口
+    的例外条目（带端口的条目无法证明匹配）。
     """
     try:
         parts = urlsplit(url)
-        host = parts.hostname
-        port = parts.port
     except ValueError:
         return None
+    host = parts.hostname
     if not host:
         return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None if _is_allowed(host, None, allow) else _host_rejection(host)
     if _is_allowed(host, port, allow, parts.scheme):
         return None
     return _host_rejection(host)
@@ -252,7 +297,14 @@ def _rejection_for(addresses: list[str]) -> str | None:
 
 
 def _check_request(request: httpx2.Request, allow: frozenset[str]) -> str | None:
-    """单跳请求的判据；返回拒绝原因（None = 放行）。"""
+    """单跳请求的判据；返回拒绝原因（None = 放行）。
+
+    解析失败（``OSError``）**不吞**：hook 抛什么，这一跳就到不了 transport。
+    吞掉再放行等于"解析器一抖就绕过守卫"，而真实连接用的是同一个解析器，
+    放过它换不来可用性、只换来一条绕过路径。异常原样上抛后由 openai 包成
+    ``APIConnectionError``（cause 保留），仍按**瞬时**连接失败处理——DNS 抖动
+    不会因此变成不可重试的配置错。
+    """
     host = request.url.host
     port = request.url.port
     if not host or _is_allowed(host, port, allow, request.url.scheme):
@@ -260,12 +312,7 @@ def _check_request(request: httpx2.Request, allow: frozenset[str]) -> str | None
     literal = _host_rejection(host)
     if literal is not None:
         return literal
-    try:
-        addresses = _resolved_addresses(host, port)
-    except OSError:
-        # 解析失败交给真实连接报"连不上"，本守卫不越俎代庖。
-        return None
-    return _rejection_for(addresses)
+    return _rejection_for(_resolved_addresses(host, port))
 
 
 async def _acheck_request(request: httpx2.Request, allow: frozenset[str]) -> str | None:
@@ -276,11 +323,7 @@ async def _acheck_request(request: httpx2.Request, allow: frozenset[str]) -> str
     literal = _host_rejection(host)
     if literal is not None:
         return literal
-    try:
-        addresses = await _aresolved_addresses(host, port)
-    except OSError:
-        return None
-    return _rejection_for(addresses)
+    return _rejection_for(await _aresolved_addresses(host, port))
 
 
 def guarded_clients(
