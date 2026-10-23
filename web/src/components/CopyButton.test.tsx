@@ -49,5 +49,14 @@ describe('CopyButton fallback', () => {
 
     expect(button.classList.contains('copied')).toBe(true);
     expect(button.querySelector('.copy-btn-label')).not.toBeNull();
+
+    execCommand.mockReturnValue(false);
+    await act(async () => {
+      button.click();
+    });
+
+    expect(button.classList.contains('copied')).toBe(false);
+    expect(button.querySelector('.copy-btn-label')).toBeNull();
+    expect(button.getAttribute('aria-label')).toBe('Copy text');
   });
 });

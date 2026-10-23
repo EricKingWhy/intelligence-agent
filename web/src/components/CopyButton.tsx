@@ -23,6 +23,11 @@ export const CopyButton = memo(function CopyButton({ text, label = '复制' }: P
   }, []);
 
   const onCopy = async () => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+    setCopied(false);
     let copySucceeded = false;
     try {
       await navigator.clipboard.writeText(text);
