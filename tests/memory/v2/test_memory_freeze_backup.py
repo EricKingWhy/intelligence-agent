@@ -49,11 +49,30 @@ def test_backup_requires_a_complete_writer_proof(tmp_path: Path) -> None:
         str(tmp_path / "memory-backup.iab"),
         "--writer-proof",
         str(proof_path),
+        "--rehearsal-fixture",
         env=key_env(),
     )
 
     assert result.returncode != 0
     assert "writer" in result.stderr.lower()
+
+
+def test_backup_rejects_synthetic_fixture_without_rehearsal_flag(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+
+    result = run_tool(
+        "backup",
+        "--workspace",
+        str(workspace),
+        "--output",
+        str(tmp_path / "offline" / "memory-backup.iab"),
+        "--writer-proof",
+        str(workspace / "writer-proof.json"),
+        env=key_env(),
+    )
+    assert result.returncode != 0
+    assert "rehearsal flag" in result.stderr.lower()
 
 
 def test_backup_and_isolated_restore_reconcile_the_seeded_lifecycle(tmp_path: Path) -> None:
@@ -71,6 +90,7 @@ def test_backup_and_isolated_restore_reconcile_the_seeded_lifecycle(tmp_path: Pa
         str(archive),
         "--writer-proof",
         str(workspace / "writer-proof.json"),
+        "--rehearsal-fixture",
         env=encryption_env,
     )
     assert backed_up.returncode == 0, backed_up.stderr
@@ -177,6 +197,7 @@ def test_backup_refuses_runtime_output_and_missing_key(tmp_path: Path) -> None:
         str(workspace / "memory-backup.iab"),
         "--writer-proof",
         str(workspace / "writer-proof.json"),
+        "--rehearsal-fixture",
         env=key_env(),
     )
     assert inside.returncode != 0
@@ -192,6 +213,7 @@ def test_backup_refuses_runtime_output_and_missing_key(tmp_path: Path) -> None:
         str(outside),
         "--writer-proof",
         str(workspace / "writer-proof.json"),
+        "--rehearsal-fixture",
         env={"MEMORY_BACKUP_KEY": ""},
     )
     assert missing_key.returncode != 0
@@ -212,6 +234,7 @@ def test_restore_rejects_tampered_ciphertext(tmp_path: Path) -> None:
         str(archive),
         "--writer-proof",
         str(workspace / "writer-proof.json"),
+        "--rehearsal-fixture",
         env=encryption_env,
     )
     assert backed_up.returncode == 0, backed_up.stderr
@@ -249,6 +272,7 @@ def test_writer_proof_cannot_use_a_local_lock_as_evidence(tmp_path: Path) -> Non
         str(tmp_path / "offline" / "memory-backup.iab"),
         "--writer-proof",
         str(proof_path),
+        "--rehearsal-fixture",
         env=key_env(),
     )
     assert result.returncode != 0
@@ -271,7 +295,31 @@ def test_writer_proof_requires_structured_zero_write_verification(tmp_path: Path
         str(tmp_path / "offline" / "memory-backup.iab"),
         "--writer-proof",
         str(proof_path),
+        "--rehearsal-fixture",
         env=key_env(),
     )
     assert result.returncode != 0
     assert "active_writers" in result.stderr
+
+
+def test_writer_proof_requires_fresh_per_writer_verification(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+    proof = json.loads((workspace / "writer-proof.json").read_text(encoding="utf-8"))
+    proof["writers"]["governance"]["verification"]["verified_at"] = "2020-01-01T00:00:00+00:00"
+    proof_path = tmp_path / "stale-writer-proof.json"
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
+
+    result = run_tool(
+        "backup",
+        "--workspace",
+        str(workspace),
+        "--output",
+        str(tmp_path / "offline" / "memory-backup.iab"),
+        "--writer-proof",
+        str(proof_path),
+        "--rehearsal-fixture",
+        env=key_env(),
+    )
+    assert result.returncode != 0
+    assert "one-day" in result.stderr

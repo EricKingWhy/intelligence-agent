@@ -235,15 +235,16 @@ def _ensure_not_inside(path: Path, parent: Path, label: str) -> None:
 
 
 def _is_reparse_point(path: Path) -> bool:
-    if path.is_symlink():
-        return True
-    is_junction = getattr(path, "is_junction", None)
-    if callable(is_junction) and is_junction():
-        return True
     try:
-        return bool(path.stat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
-    except (AttributeError, OSError):
+        metadata = path.lstat()
+    except FileNotFoundError:
         return False
+    except OSError as error:
+        raise BackupError(f"cannot inspect path for reparse containment: {path}: {error}") from error
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(metadata, "st_file_attributes", 0) & reparse_attribute)
 
 
 def _reject_reparse_components(path: Path, label: str) -> None:
@@ -304,15 +305,17 @@ def _load_key(key_env: str) -> bytes:
     return key
 
 
-def _load_writer_proof(path: Path) -> dict[str, Any]:
+def _load_writer_proof(path: Path, *, allow_fixture: bool) -> dict[str, Any]:
     try:
         proof = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise BackupError(f"cannot read writer proof: {error}") from error
-    return _validate_writer_proof(proof, require_fresh=True)
+    return _validate_writer_proof(proof, require_fresh=True, allow_fixture=allow_fixture)
 
 
-def _validate_writer_proof(proof: Any, *, require_fresh: bool) -> dict[str, Any]:
+def _validate_writer_proof(
+    proof: Any, *, require_fresh: bool, allow_fixture: bool
+) -> dict[str, Any]:
     if not isinstance(proof, dict) or proof.get("schema_version") != 1:
         raise BackupError("writer proof must have schema_version=1")
     if proof.get("freeze_effective") is not True:
@@ -355,6 +358,10 @@ def _validate_writer_proof(proof: Any, *, require_fresh: bool) -> dict[str, Any]
             raise BackupError(
                 f"writer {category!r} must declare a supported stop method"
             )
+        if entry["method"] == "fixture-no-writer" and not allow_fixture:
+            raise BackupError(
+                "synthetic fixture writer proof requires the explicit local rehearsal flag"
+            )
         if not isinstance(entry.get("control_action"), str) or not entry["control_action"].strip():
             raise BackupError(f"writer {category!r} lacks a non-empty control_action")
         scope = entry.get("scope")
@@ -377,6 +384,10 @@ def _validate_writer_proof(proof: Any, *, require_fresh: bool) -> dict[str, Any]
             raise BackupError(f"writer {category!r} lacks structured proof evidence")
         if proof_evidence.get("evidence_type") not in WRITER_EVIDENCE_TYPES:
             raise BackupError(f"writer {category!r} has an unsupported proof evidence type")
+        if proof_evidence["evidence_type"] == "fixture" and not allow_fixture:
+            raise BackupError(
+                "synthetic fixture writer evidence requires the explicit local rehearsal flag"
+            )
         if proof_evidence.get("observed_state") != entry["status"]:
             raise BackupError(f"writer {category!r} proof state does not match status")
         if not isinstance(proof_evidence.get("evidence_ref"), str) or not proof_evidence["evidence_ref"].strip():
@@ -412,6 +423,8 @@ def _validate_writer_proof(proof: Any, *, require_fresh: bool) -> dict[str, Any]
                 ) from error
             if moment > now + timedelta(minutes=5):
                 raise BackupError(f"writer {category!r} verification {field} is in the future")
+            if field == "verified_at" and require_fresh and now - moment > timedelta(days=1):
+                raise BackupError(f"writer {category!r} verification is outside the one-day evidence window")
         evidence = json.dumps(entry, ensure_ascii=False, sort_keys=True).lower()
         if any(
             term in evidence
@@ -695,7 +708,11 @@ def _restore_stream(archive_path: Path, destination: Path, key: bytes) -> tuple[
                     proof_value = json.loads(extracted.read().decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
                     raise BackupError("backup writer proof is not valid JSON") from error
-                proof = _validate_writer_proof(proof_value, require_fresh=False)
+                proof = _validate_writer_proof(
+                    proof_value,
+                    require_fresh=False,
+                    allow_fixture=manifest["writer_proof_mode"] == "fixture",
+                )
                 seen.add(name)
                 continue
             allowed = _allowed_archive_members(manifest)
@@ -748,6 +765,8 @@ def _validate_manifest(manifest: Any) -> None:
         raise BackupError("restored manifest has no workspace identity")
     if manifest.get("runtime_loaded") is not False or manifest.get("retrieval_registered") is not False:
         raise BackupError("restored manifest claims runtime or retrieval registration")
+    if manifest.get("writer_proof_mode") not in {"fixture", "owner"}:
+        raise BackupError("restored manifest has an invalid writer proof mode")
     if manifest.get("writer_categories") != list(WRITER_CATEGORIES):
         raise BackupError("restored manifest has an incomplete writer category list")
     inventory = manifest.get("source_files")
@@ -1019,13 +1038,19 @@ def _seed_workspace(workspace: Path) -> dict[str, Any]:
     return {"workspace": str(workspace), "writer_proof": str(proof_path)}
 
 
-def _backup(workspace_arg: Path, output_arg: Path, writer_proof_arg: Path, key_env: str) -> dict[str, Any]:
+def _backup(
+    workspace_arg: Path,
+    output_arg: Path,
+    writer_proof_arg: Path,
+    key_env: str,
+    allow_fixture: bool,
+) -> dict[str, Any]:
     workspace = _resolve_existing(workspace_arg, "workspace")
     if not workspace.is_dir():
         raise BackupError(f"workspace is not a directory: {workspace}")
     output = _prepare_output(output_arg, workspace)
     writer_proof = _resolve_existing(writer_proof_arg, "writer proof")
-    proof = _load_writer_proof(writer_proof)
+    proof = _load_writer_proof(writer_proof, allow_fixture=allow_fixture)
     proof_hash = _sha256_file(writer_proof)
     key = _load_key(key_env)
     before = _source_inventory(workspace)
@@ -1046,6 +1071,7 @@ def _backup(workspace_arg: Path, output_arg: Path, writer_proof_arg: Path, key_e
         "snapshot_method": "sqlite-online-backup-api",
         "runtime_loaded": False,
         "retrieval_registered": False,
+        "writer_proof_mode": "fixture" if allow_fixture else "owner",
         "writer_categories": list(WRITER_CATEGORIES),
         "source_files": before,
         "databases": databases,
@@ -1071,6 +1097,7 @@ def _backup(workspace_arg: Path, output_arg: Path, writer_proof_arg: Path, key_e
         "snapshot_method": "sqlite-online-backup-api",
         "runtime_loaded": False,
         "retrieval_registered": False,
+        "writer_proof_mode": "fixture" if allow_fixture else "owner",
         "retention_until": RETENTION_UNTIL,
         "writer_categories": list(WRITER_CATEGORIES),
     }
@@ -1106,6 +1133,7 @@ def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[st
         "manifest_match": True,
         "retention_until": manifest["retention_until"],
         "writer_categories": manifest["writer_categories"],
+        "writer_proof_mode": manifest["writer_proof_mode"],
         "runtime_loaded": False,
         "retrieval_registered": False,
         "proof_schema_version": proof["schema_version"],
@@ -1126,6 +1154,11 @@ def _parser() -> argparse.ArgumentParser:
     backup.add_argument("--output", type=Path, required=True)
     backup.add_argument("--writer-proof", type=Path, required=True)
     backup.add_argument("--key-env", default=DEFAULT_KEY_ENV)
+    backup.add_argument(
+        "--rehearsal-fixture",
+        action="store_true",
+        help="allow synthetic seed writer evidence; never use for production",
+    )
 
     restore = subparsers.add_parser("restore", help="restore and verify an isolated backup")
     restore.add_argument("--archive", type=Path, required=True)
@@ -1140,7 +1173,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "seed":
             result = _seed_workspace(args.workspace)
         elif args.command == "backup":
-            result = _backup(args.workspace, args.output, args.writer_proof, args.key_env)
+            result = _backup(
+                args.workspace,
+                args.output,
+                args.writer_proof,
+                args.key_env,
+                args.rehearsal_fixture,
+            )
         else:
             result = _restore(args.archive, args.restore_root, args.key_env)
     except (BackupError, OSError, sqlite3.Error) as error:

@@ -94,6 +94,7 @@ $env:MEMORY_BACKUP_KEY = '<base64 encoding of an owner-managed 32-byte key>'
   --workspace $seed `
   --output $archive `
   --writer-proof (Join-Path $seed 'writer-proof.json') `
+  --rehearsal-fixture `
   --key-env MEMORY_BACKUP_KEY
 .venv\Scripts\python.exe scripts/memory_freeze_backup.py restore `
   --archive $archive `
@@ -104,6 +105,8 @@ $env:MEMORY_BACKUP_KEY = '<base64 encoding of an owner-managed 32-byte key>'
 备份在 AES-GCM 加密 tar 流中直接生成，不落未加密的 tar/staging 副本；成功的 backup
 receipt 必须显示 `encrypted=true`、`snapshot_method=sqlite-online-backup-api`、
 `runtime_loaded=false`、`retrieval_registered=false` 与 `retention_until=2027-10-23`。
+本地 seed 只有显式传入 `--rehearsal-fixture` 才允许使用 synthetic fixture proof；生产命令
+不得传该 flag，必须使用 owner 生成的 process/service/scheduler/manual evidence。
 restore receipt 必须显示 source files、database tables、row/table manifests 和 SQLite
 `integrity_check` 全部匹配，并内嵌完整 `source_file_manifest`、各表状态/旧键/lease/provenance
 摘要和行哈希。种子 V2 workspace 同时包含带 lease 的 forming job 与带 idempotency key、终态
@@ -114,7 +117,8 @@ restore receipt 必须显示 source files、database tables、row/table manifest
 
 本仓库没有生产数据库，以下步骤在本票中没有被假装执行：
 
-1. 所有者按上表完成六类 writer 的停写/围住，审阅证据并生成完整 `writer-proof.json`。
+1. 所有者按上表完成六类 writer 的停写/围住，审阅证据并生成完整 `writer-proof.json`；
+   生产 backup 不得使用 `--rehearsal-fixture`。
 2. 选择 workspace 外、访问权限受控的离线输出目录；不得把 `.iab` 放入 workspace，也不得
    把它挂载成当前 Memory retrieval source。
 3. 从所有者管理的安全输入设置 `MEMORY_BACKUP_KEY`。只传环境变量名给命令；不要把 key
