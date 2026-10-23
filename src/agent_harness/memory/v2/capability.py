@@ -196,9 +196,9 @@ class MemoryV2Service:
     ) -> dict[str, Any]:
         """F-06b 运维/漂移入口：先把 pending 账本排空，再全量对账该 target。
 
-        返回 summary 额外带两项供 CLI 判失败（#1482 Finding 二）：`unreadable`（本轮没读到
-        的 target，来自 `reproject_target`）与 `remaining`（排空后仍在账本里的行数——服务层
-        没有其它可读面，不透传的话"账本有积压"在入口侧不可见）。
+        返回 summary 额外带两项供 CLI 判失败（#1482 Finding 二）：`unreadable`（本轮没读到的
+        **文件**，来自 `reproject_target`）与 `remaining`（对账**之后**该 target 仍在账本里的
+        行数——服务层没有其它可读面，不透传的话"账本有积压"在入口侧不可见）。
         """
         markdown = self._markdown
         if markdown is None:
@@ -206,9 +206,15 @@ class MemoryV2Service:
                 "desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False,
                 "unreadable": [], "remaining": 0,
             }
-        drain = await reprojection.drain_pending(self._store, markdown, trusted)
+        await reprojection.drain_pending(self._store, markdown, trusted)
         summary = await reprojection.reproject_target(self._store, markdown, trusted, target)
-        summary["remaining"] = drain["remaining"]
+        # 必须在对账**之后**回读，且只数本 target 的行：拿 drain 的快照会让一次已经收敛的
+        # 运行仍报「账本积压」并退 2，而那个计数是全 target 的，双 target 循环里会被重复
+        # 计入（#1482 F3）。
+        summary["remaining"] = sum(
+            1 for row in await self._store.pending_projections(trusted)
+            if str(row["target"]) == target
+        )
         return summary
 
     # ----------------------------------------------------------------------------------

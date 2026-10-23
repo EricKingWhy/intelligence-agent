@@ -115,6 +115,11 @@ def _known_entries(markdown: MarkdownMemoryStore) -> list[list[str]] | None:
     return files
 
 
+def _unreadable_files(markdown: MarkdownMemoryStore) -> list[str]:
+    """真正读不出来的文件名——归因用，不能拿「正在对账的 target」冒充（#1482 F2）。"""
+    return [name for name in ("memory", "user") if markdown.disk_entries(name) is None]
+
+
 async def project_entry(
     store: SqliteMemoryV2Store, target: str, content: str,
     trusted: TrustedMemoryIdentity, *, session_id: str | None = None,
@@ -226,8 +231,10 @@ async def _retract(
 class _Summary(dict):
     """投影结果汇总；`pending` 只在有失败时置真，`desired` 只在全量对账时有意义。
 
-    `unreadable` 列出本轮**读不出**的 target：那种轮次删/增都判不了，与"真空"必须可区分，
-    否则 CLI 会把一次没读到文件的对账报成"一切正常"（#1482 Finding 二）。
+    `unreadable` 列出本轮**读不出**的文件（`memory` / `user`，不是"正在对账的 target"）：
+    那种轮次删/增都判不了，与"真空"必须可区分，否则 CLI 会把一次没读到文件的对账报成
+    "一切正常"（#1482 Finding 二）。归因必须指向真正读不出的那个文件，否则运维会去修错文件
+    （#1482 F2）。
     """
 
     def __init__(self) -> None:
@@ -241,7 +248,9 @@ class _Summary(dict):
         if target not in self["unreadable"]:
             self["unreadable"].append(target)
 
-    def count_retraction(self, outcome: str, target: str) -> None:
+    def count_retraction(
+        self, outcome: str, target: str, markdown: MarkdownMemoryStore | None = None,
+    ) -> None:
         if outcome == "deleted":
             self["deleted"] += 1
         elif outcome == "pending":
@@ -249,7 +258,10 @@ class _Summary(dict):
         elif outcome == "unknown":
             # 读不出来 = 这一轮没收敛：与 `pending` 同等对待（回执不许报 done）。
             self["pending"] = True
-            self.mark_unreadable(target)
+            # 归因给**真正**读不出来的文件，不是正在对账的 target：另一侧读不出来时
+            # 本 target 的文件其实好好的，报成它不可读会把运维引向错文件（#1482 F2）。
+            for name in (_unreadable_files(markdown) if markdown is not None else [target]):
+                self.mark_unreadable(name)
 
 
 async def _project(
@@ -317,11 +329,11 @@ async def apply_write(
             if index in removed:
                 summary.count_retraction(await retract_entry(
                     store, markdown, target, removed[index], trusted,
-                    reason="markdown_removed"), target)
+                    reason="markdown_removed"), target, markdown)
             if index in replaced:
                 summary.count_retraction(await retract_entry(
                     store, markdown, target, replaced[index], trusted,
-                    reason="markdown_replaced"), target)
+                    reason="markdown_replaced"), target, markdown)
             if action in ("add", "replace"):
                 await _project(
                     store, target, operation.get("content") or "", trusted,
@@ -330,11 +342,13 @@ async def apply_write(
 
     if removed_entry := response.get("removed_entry"):
         summary.count_retraction(await retract_entry(
-            store, markdown, target, removed_entry, trusted, reason="markdown_removed"), target)
+            store, markdown, target, removed_entry, trusted, reason="markdown_removed"),
+            target, markdown)
         return summary
     if replaced_entry := response.get("replaced_entry"):
         summary.count_retraction(await retract_entry(
-            store, markdown, target, replaced_entry, trusted, reason="markdown_replaced"), target)
+            store, markdown, target, replaced_entry, trusted, reason="markdown_replaced"),
+            target, markdown)
     if content:
         await _project(
             store, target, content, trusted,
@@ -453,7 +467,7 @@ async def reproject_target(
             # 一致：`kept` 只说明「这次别删」，`unknown` 是「没读到」，都不说明「已经一致」
             # （审查 Corr N4 / C3、#1482 Finding 一）。
             await store.clear_projection(trusted, target, digest)
-        summary.count_retraction(outcome, target)
+        summary.count_retraction(outcome, target, markdown)
     return summary
 
 

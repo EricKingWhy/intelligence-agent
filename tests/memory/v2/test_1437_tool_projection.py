@@ -373,8 +373,11 @@ async def test_remove_keeps_the_row_while_the_other_file_still_has_it(tmp_path) 
     await service.reproject(TRUSTED, "user")
     assert len(await store.list_active(TRUSTED, limit=10)) == 1
 
-    assert (await tool.execute(_MemoryArgs(
-        action="remove", target="memory", old_text="两个文件都有这句话"))).ok is True
+    result = await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="两个文件都有这句话"))
+    assert result.ok is True
+    # 票面 AC3 第三句：真 `kept` 不是"没收敛"，回执必须是 done（#1482 F5）。
+    assert result.data["projection"] == "done"
 
     assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
         "两个文件都有这句话"]
@@ -943,3 +946,35 @@ async def test_repeated_drain_against_an_unreadable_file_keeps_the_ledger_row(
     assert rows[0][4] == "UnreadableMarkdown"
     assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
         "瞬时不可读句"]
+
+
+async def test_reproject_on_a_readable_target_keeps_the_ledger_when_the_other_file_is_unreadable(
+    tmp_path, monkeypatch,
+) -> None:
+    """#1482 F1：**目标文件可读**、另一文件读不出来时，`reproject_target` 也不得清账本。
+
+    既有用例（`:746`）走的是目标文件本身不可读的早退分支，碰不到删行循环里的清账本判据。
+    这里让 memory 侧可读、USER.md 不可读，并对一个 memory target 的孤儿行做全量对账：
+    判不出「另一个文件还有没有」就不能删行、不能清账（否则文件恢复后 drain 无行可做，
+    孤儿派生行永久存活）。
+    """
+    store, markdown, _service = await build(tmp_path)
+    await store.create(
+        reprojection.draft_for("memory", "孤儿句"), TRUSTED,
+        projection_source="tool", projection_target="memory")
+    await store.enqueue_projection(TRUSTED, "memory", "孤儿句")
+    monkeypatch.setattr(
+        MarkdownMemoryStore, "read_raw_checked",
+        _unreadable(markdown.path_for("user")),
+    )
+
+    summary = await reprojection.reproject_target(store, markdown, TRUSTED, "memory")
+
+    assert summary["deleted"] == 0, summary
+    assert summary["unreadable"] == ["user"], summary  # 归因给真正读不出的文件
+    rows = _pending_rows(store.database_path)
+    assert len(rows) == 1, rows
+    assert (rows[0][0], rows[0][1], rows[0][4]) == (
+        "memory", entry_digest("孤儿句"), "UnreadableMarkdown")
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "孤儿句"]

@@ -3512,7 +3512,8 @@ def _main_memory(argv: list[str]) -> None:
     web 的 `_trusted_v2()` 同源。
 
     退出码：approve/reject 被拒（pin 失效、id 不存在）是**业务结果**不是进程失败，
-    照常打印原因并退 0；只有命令自报失败（迁移有未导出条目）才退 2。
+    照常打印原因并退 0；命令自报失败才退 2 —— 迁移有未导出条目，或 `reproject` 未收敛
+    （markdown 未装配 / 有文件读不出来 / 账本仍有该 target 的积压行 / 仍有待投影项）。
     """
     parser = argparse.ArgumentParser(prog="agent-harness memory")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -3606,9 +3607,19 @@ async def _memory_command(
                 f"  {target}: created={summary['created']} deleted={summary['deleted']} "
                 f"pending={summary['pending']} desired={summary['desired']}"
             )
-            if target in summary["unreadable"]:
-                lines.append(f"    {target}: 文件读不出来，本轮未对账（修好文件后重跑）")
-                failed_targets.append(f"{target} 不可读")
+            if summary["unreadable"]:
+                # `unreadable` 列的是**真正读不出来**的文件，不一定就是本轮的对账对象：
+                # 另一侧读不出来时把本 target 说成不可读，会让运维去修错文件（#1482 F2）。
+                unreadable = "、".join(summary["unreadable"])
+                if target in summary["unreadable"]:
+                    lines.append(f"    {target}: 文件读不出来，本轮未对账（修好文件后重跑）")
+                    failed_targets.append(f"{target} 不可读")
+                else:
+                    lines.append(
+                        f"    {unreadable} 读不出来，本轮无法判定 {target}"
+                        "（修好文件后重跑）"
+                    )
+                    failed_targets.append(f"{target} 未对账（{unreadable} 不可读）")
             if summary["remaining"]:
                 lines.append(f"    账本仍有 {summary['remaining']} 行待收敛")
                 failed_targets.append(f"{target} 账本积压 {summary['remaining']} 行")

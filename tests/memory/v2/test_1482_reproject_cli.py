@@ -163,7 +163,51 @@ def test_entry_exits_non_zero_when_the_ledger_still_has_rows(
     assert "user: created=0 deleted=0" in printed
     assert "账本仍有 1 行待收敛" in printed
     assert "未收敛：" in printed
-    assert _pending_count(db_path) >= 1  # 行没被清掉（两个 target 各记一次）
+    assert _pending_count(db_path) == 2  # 行没被清掉（两个 target 各记一次）
+
+
+def test_a_run_that_converges_in_reproject_target_does_not_report_a_backlog(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    """#1482 F3：drain 阶段删失败一次、对账阶段删成功 ⇒ 本轮 `remaining == 0`、CLI 退 0。
+
+    `remaining` 若取 drain 的旧快照，一次已经收敛的运行会仍报「账本积压」并退 2——对脚本
+    化调用方是假红。这里复现审查员探针 `probe_stale_remaining.py` 的场景。
+    """
+    settings = _settings(tmp_path)
+    db_path = Path(settings.workspace_dir) / "memory-v2.db"
+    (tmp_path / "memories").mkdir()
+    async def _seed():
+        store = SqliteMemoryV2Store(db_path)
+        await store.initialize()
+        await store.create(
+            reprojection.draft_for("memory", "瞬时积压句"), TRUSTED,
+            projection_source="tool", projection_target="memory")
+        await store.enqueue_projection(TRUSTED, "memory", "瞬时积压句")
+
+    asyncio.run(_seed())
+
+    real_delete = SqliteMemoryV2Store.delete
+    state = {"calls": 0}
+
+    async def _flaky_delete(self, *args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return await real_delete(self, *args, **kwargs)
+
+    monkeypatch.setattr(SqliteMemoryV2Store, "delete", _flaky_delete)
+    _main(monkeypatch, settings)
+
+    cli._main_memory(["reproject", "--target", "memory"])  # 不抛 SystemExit
+
+    printed = capsys.readouterr().out
+    assert state["calls"] == 2, state  # drain 失败一次 + 对账成功一次
+    assert "deleted=1" in printed, printed
+    assert "账本仍有" not in printed, printed
+    assert "未收敛" not in printed, printed
+    assert _pending_count(db_path) == 0
+    assert asyncio.run(_active_contents(db_path)) == []
 
 
 def test_entry_exits_non_zero_when_a_target_still_has_pending_projections(
@@ -216,6 +260,56 @@ def test_entry_exits_non_zero_when_a_target_is_unreadable(
     assert "user 不可读" in printed
 
 
+def test_markdown_readable_with_the_other_file_unreadable_does_not_blame_the_wrong_file(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    """#1482 F2：USER.md 读不出来时，跑 `--target memory` 不得声称 MEMORY.md/memory 不可读。
+
+    `unreadable` 必须指向真正读不出的文件；把可读的那个说成不可读会把运维引去修错文件。
+    造法同审查员探针 `probe_cli_misattrib.py`：MEMORY.md 可读、USER.md 钉成不可读，且
+    派生层有一条 markdown 里已没有的工具行——memory 侧的撤回因此判 `unknown`。
+    退码语义不变（有不可读 ⇒ 2），轮到 user 时如实报。
+    """
+    settings = _settings(tmp_path)
+    db_path = Path(settings.workspace_dir) / "memory-v2.db"
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "MEMORY.md").write_text("可读的一句", encoding="utf-8")
+    (memories / "USER.md").write_text("", encoding="utf-8")
+    async def _seed():
+        store = SqliteMemoryV2Store(db_path)
+        await store.initialize()
+        await store.create(
+            reprojection.draft_for("memory", "被删掉的句子"), TRUSTED,
+            projection_source="tool", projection_target="memory")
+
+    asyncio.run(_seed())
+    user_path = memories / "USER.md"
+    real = MarkdownMemoryStore.read_raw_checked
+    monkeypatch.setattr(
+        MarkdownMemoryStore, "read_raw_checked",
+        staticmethod(lambda path: ("", False) if Path(path) == user_path else real(path)),
+    )
+    _main(monkeypatch, settings)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._main_memory(["reproject"])
+
+    printed = capsys.readouterr().out
+    assert excinfo.value.code == 2
+    # 可读的 memory 不得被说成不可读（旧实现会打印「memory: 文件读不出来」+「memory 不可读」）。
+    assert "memory: 文件读不出来" not in printed, printed
+    assert "memory 不可读" not in printed, printed
+    # 被阻断的 memory 要如实说是「谁」读不出来（中性文案），不能只说「memory 有问题」。
+    assert "user 读不出来，本轮无法判定 memory" in printed, printed
+    # 真正不可读的 user 如实报，退码语义不变。
+    assert "user: 文件读不出来，本轮未对账" in printed, printed
+    assert "user 不可读" in printed, printed
+    # 派生行没被误删、账本行仍在（未知不等于已一致）。
+    assert "被删掉的句子" in asyncio.run(_active_contents(db_path))
+    assert _pending_count(db_path) == 1
+
+
 def test_entry_exits_non_zero_when_markdown_is_not_assembled(
     tmp_path, monkeypatch, capsys,
 ) -> None:
@@ -228,5 +322,8 @@ def test_entry_exits_non_zero_when_markdown_is_not_assembled(
     with pytest.raises(SystemExit) as excinfo:
         cli._main_memory(["reproject"])
 
+    printed = capsys.readouterr().out
     assert excinfo.value.code == 2
-    assert "未装配 markdown 权威面" in capsys.readouterr().out
+    assert "未装配 markdown 权威面" in printed
+    # 票面 §2.2：不许打印全零摘要装作成功（#1482 F4）。
+    assert "created=" not in printed, printed
