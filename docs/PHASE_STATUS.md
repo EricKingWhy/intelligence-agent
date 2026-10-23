@@ -1,6 +1,8 @@
 # Phase Status — 实施进度追踪
 
 - 2026-10-24：#1513 JWT 深层解析结构化拒绝 / JSONL 有限轮转；基线 `5a8b6c4d`，实现 `42eadaa4`，同步 `origin/main=0f47ed06` 后分支 tip `4a9200fd`。修前后 HTTP/log 计数与双轴审查 findings 关闭；聚焦测试 17 passed；Gate-0 7/7 PASS，收据及完整后端测试残余见 `docs/phase_status/2026-10.md`。完整套件未全绿；推送/PR 待完成，禁止 merge。
+- 2026-10-24：#1432 完成，Issue CLOSED / `等待merge`；PR [#1558](https://github.com/EricKingWhy/intelligence-agent/pull/1558) OPEN，**未合并**。分支 `codex/issue-1432-copybutton`，基线 `origin/main=13a96482`，tip `60a106ab`。组件 Vitest 1/1、Playwright 双视口 2/2、双轴审查 PASS；全量 Vitest 2,640 passed / 1 skipped / 2 个无关失败。Gate-0 6/7，唯一失败是既有 `memory/human_blocked` 事件生成物漂移。详见 Tracker 与月档。
+- 2026-10-23：#1552 已交付到 PR [#1557](https://github.com/EricKingWhy/intelligence-agent/pull/1557) OPEN（base `main`=`bd97fbfd`，创建时 head `817e5e6a`），未 merge。Gate-0 7/7 PASS，收据 `docs/gate/2dc04b755d5647f63c310ca6a4034e8cc3000255.json`；聚焦测试 71 passed，双轴 review PASS（P0–P4=0）。服务端 gate0 PASS，E2E 冒烟 pending；完整 pytest 未运行，较宽 tests/web 验证限制见月档。详见 Tracker/月档。
 
 - 2026-10-23：#1485 模型端点元数据/link-local 轻量防误配（SEC-07 PARTIAL，裁决 25 B）实现 + 两轴审查 P0–P4 全修完成，**PR [#1545](https://github.com/EricKingWhy/intelligence-agent/pull/1545) 已开（base=main），未 merge**。分支 `claude/issue-1485-provider-url-guard`，基线 `origin/main=dec9aa69`，代码 tip `916d21f4`（tree `1a9215d4`）。新增 `model/endpoint_guard.py`：解析后地址（IPv4/IPv6 + 内嵌 v4，含 RFC 6052 拆位）与**每一跳重定向**拦截元数据/link-local 段，被拦目标零请求零凭据；`model_endpoint_allowlist` 为按端点所有者例外，回环/RFC1918 日常保存与测试不受影响；拒绝理由经 `misconfiguration_rejection` 与网络抖动区分。沙箱 `shell/ia-test` 全量 `-n 4` = 26 failed / 8877 passed / 258 skipped / 4 errors，基线 `dec9aa69` = 27 failed / 8816 passed / 258 skipped / 4 errors，**逐条对账零新增红**；聚焦三文件 78 passed。Gate-0 7/7 PASS（收据 `docs/gate/916d21f4fd8ae175c99003a05ef1cad4b4c3977e.json`），coverage exit 0。详见 Tracker 与月档。
 
@@ -135,6 +137,7 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
+- **2026-10-23 · #1552 已关单、代码待集成**：本地分支 `codex/issue-1552-memory-promote`，代码提交 `b524d547`；Web promote 重放按既有映射返回 403 + `X-Memory-Reason-Code`。聚焦 71 passed，Ruff / diff-check 通过；两轴 review PASS、P0–P4=0。未 push / PR / merge；详见 Tracker 与月档。
 - **2026-10-17 · #1289 已关单、PR 待合并**：Issue CLOSED（保留 `bug`/`P2`、加 `等待merge`、移除 `in-progress`）；PR [#1291](https://github.com/EricKingWhy/intelligence-agent/pull/1291) OPEN、未合并。Unicode Windows 路径修复已推送；focused 11/11、Ruff、review coverage 与 diff-check 通过，PR Gate-0、Chromium smoke、gitleaks 通过。Gate-0 收据 `docs/gate/64557772c268bb57faa512615a6bbbeaadd33e90.json`；关单记录与细节见 Tracker/月档。
 - **2026-10-17 · #1183/#1288 已关单、PR 待合并**：Issue #1183 保留 `10-15-UI优化`/`等待merge`；#1288 保留 bug/P3/`等待merge`，施工标签均已移除。PR [#1274](https://github.com/EricKingWhy/intelligence-agent/pull/1274) OPEN、未合并，代码 tip `34761909`；PR Gate-0、Chromium smoke、gitleaks 与完整 nightly 全过。测试、关单评论与月档读数见 Tracker/月档。
 - **2026-10-17 · #1184 已集成**：Issue CLOSED，仅保留 `10-15-UI优化`；PR [#1268](https://github.com/EricKingWhy/intelligence-agent/pull/1268) merge commit `795fe5afda241c1dd441d5c8e985390fae65247c`。实现、审查和验证见 Tracker/月档 #1184。
