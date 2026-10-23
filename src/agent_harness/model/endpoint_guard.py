@@ -90,9 +90,24 @@ _METADATA_HOSTNAMES = frozenset(
 )
 
 #: 传统 IPv4 单段写法：十六进制 ``0x…`` / 八进制 ``0…`` / 十进制。**不含**符号与空白。
-#: 每段长度都封顶到 32 位能表示的范围（``int()`` 对超长十进制串会抛 ``ValueError``，
+#: 每段长度封顶到 32 位能表示的范围（``int()`` 对超长数字串会抛 ``ValueError``，
 #: 而这里的输入来自用户 URL——守卫不能自己变成 500）。
-_LEGACY_V4_PART_RE = re.compile(r"0[xX][0-9a-fA-F]{1,8}|0[0-7]{0,10}|[1-9][0-9]{0,9}")
+_LEGACY_V4_PART_RE = re.compile(r"0[xX][0-9a-fA-F]{1,8}|0[0-7]{0,11}|[1-9][0-9]{0,9}")
+
+
+def _strip_leading_zeros(part: str) -> str:
+    """去掉多余前导零，但保留进制标记（``0x`` / 八进制的 ``0``）。
+
+    ``inet_aton`` 认任意多个前导零（``0x00a9fea9fe`` / ``00000251.0376....``），
+    而下面的长度上限按**有效位数**定 ⇒ 不先剥零，补零写法会因长度超限被判成
+    "不是地址"而放行。剥完仍交给同一份正则判合法（``0x`` 剥不出数字 ⇒ 仍是非法）。
+    """
+    if part[:2].lower() == "0x":
+        digits = part[2:].lstrip("0")
+        return "0x" + digits if digits else part
+    if part.startswith("0"):
+        return "0" + part[1:].lstrip("0")
+    return part
 
 
 class EndpointBlockedError(RuntimeError):
@@ -257,6 +272,7 @@ def _legacy_ipv4(name: str) -> ipaddress.IPv4Address | None:
         return None
     numbers: list[int] = []
     for part in parts:
+        part = _strip_leading_zeros(part)
         if not _LEGACY_V4_PART_RE.fullmatch(part):
             return None
         if part[:2].lower() == "0x":

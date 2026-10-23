@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import http.server
+import ipaddress
 import json
+import socket
 import threading
 from collections import Counter
 
@@ -182,8 +184,10 @@ class TestSaveTimeRejection:
         [
             "http://0xa9fea9fe/v1",  # 单整数十六进制 = 169.254.169.254（POSIX inet_aton）
             "http://0XA9FEA9FE/v1",  # 十六进制大小写不敏感
+            "http://0x00a9fea9fe/v1",  # 前导零不改变地址（inet_aton 认，长度上限不能判成域名）
             "http://2852039166/v1",  # 单整数十进制
             "http://0251.0376.0251.0376/v1",  # 八进制分段
+            "http://00000251.0376.0251.0376/v1",  # 同上，补零写法
             "http://169.254.0xa9.0xfe/v1",  # 十进制 + 十六进制混写
             "http://169.254.0xa9.0xfe:99999/v1",  # 端口坏也不能跳过判定
         ],
@@ -196,6 +200,7 @@ class TestSaveTimeRejection:
         "url",
         [
             "http://0x7f.1:11434/v1",  # loopback 传统写法：裁决 25 B 照旧放行
+            "http://0x007f.1:11434/v1",  # 同上，补零写法
             "http://2130706433/v1",
             "http://0177.0.0.1/v1",
             "http://127.1/v1",
@@ -213,6 +218,27 @@ class TestSaveTimeRejection:
     def test_oversized_numeric_host_is_not_an_exception(self, url):
         """超长数字串不是地址；守卫只能判"放行"，不能把保存打成 500。"""
         assert url_rejection(url) is None, url
+
+    def test_legacy_parser_matches_inet_aton_on_sample(self):
+        """规范化层与 ``socket.inet_aton`` 同口径（补零 / 进制 / 段长边界）。
+
+        自己实现而要的是跨平台确定性，判据就得跟系统的口径对齐——用差分法钉住，
+        否则补零写法会悄悄从"拦截"退回"当域名放行"（#1485 修复轮实测）。
+        """
+        samples = [
+            "0xa9fea9fe", "0x00a9fea9fe", "0xA9FEA9FE", "2852039166",
+            "0251.0376.0251.0376", "00000251.0376.0251.0376", "169.254.0xa9.0xfe",
+            "0x7f.1", "0x007f.1", "2130706433", "0177.0.0.1", "127.1",
+            "037777777777", "0", "00", "0x0000", "0x00000000000000a9fea9fe",
+            "0x", "09", "0009", "256.1.1.1", "1.2.3.4.5", "0xa9fea9fe.com",
+            "4294967296", "1.16777216",
+        ]
+        for host in samples:
+            try:
+                expected = ipaddress.IPv4Address(socket.inet_aton(host))
+            except OSError:
+                expected = None
+            assert endpoint_guard._legacy_ipv4(host) == expected, host
 
     def test_store_create_rejects_metadata_target_with_guard_message(self, tmp_path):
         store = ProviderStore(tmp_path / "p.json", MemoryCredentialStore())
