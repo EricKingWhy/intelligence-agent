@@ -11,6 +11,10 @@
 ``64:ff9b:1::/48``、IPv4-compatible ``::/96``——它们在 ``ipaddress`` 里**都不**命中
 IPv4 网段（实测），不拆就是白名单。
 
+传统数字 IPv4 写法（``0xa9fea9fe`` / ``2852039166`` / ``0251.0376.0251.0376``）在
+``ipaddress`` 里**不合法**，但在 ``inet_aton`` / 系统解析器眼里就是同一个地址 ⇒
+判定前先按 :func:`_legacy_ipv4` 规范化，否则保存期放行、连接期照样连上去。
+
 RFC1918 / loopback / ``198.18.0.0/15`` 一律放行。``198.18/15`` 尤其不能拦：沙箱的
 通配 DNS 会把**任意**主机名解析进该段（实测 ``api.example.com`` → 198.18.222.105），
 照搬 ``langchain_core`` 默认策略（= 裁决 C 的全私网拦截）会让本机所有模型调用假红。
@@ -54,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
 from collections.abc import Iterable
 from urllib.parse import urlsplit
@@ -83,6 +88,11 @@ _EMBEDDED_V4_PREFIXES = (
 _METADATA_HOSTNAMES = frozenset(
     {"metadata.google.internal", "metadata.amazonaws.com", "metadata", "instance-data"}
 )
+
+#: 传统 IPv4 单段写法：十六进制 ``0x…`` / 八进制 ``0…`` / 十进制。**不含**符号与空白。
+#: 每段长度都封顶到 32 位能表示的范围（``int()`` 对超长十进制串会抛 ``ValueError``，
+#: 而这里的输入来自用户 URL——守卫不能自己变成 500）。
+_LEGACY_V4_PART_RE = re.compile(r"0[xX][0-9a-fA-F]{1,8}|0[0-7]{0,10}|[1-9][0-9]{0,9}")
 
 
 class EndpointBlockedError(RuntimeError):
@@ -229,6 +239,42 @@ def _address_rejection(
     return None
 
 
+def _legacy_ipv4(name: str) -> ipaddress.IPv4Address | None:
+    """传统数字 IPv4 写法 → 地址（不是这类写法则 None）。
+
+    系统解析器与 ``socket.inet_aton`` 都接受 ``0xa9fea9fe`` / ``2852039166`` /
+    ``0251.0376.0251.0376`` / ``127.1`` 这类写法（同一个地址的不同拼法），而
+    ``ipaddress.ip_address`` 只认规范四段十进制。只补这一层，判定仍统一走
+    :func:`_address_rejection`——否则保存期放行、连接期按传统写法解析，一条绕过路径。
+
+    规则按 ``inet_aton``：1–4 段，每段十进制、``0`` 开头八进制或 ``0x`` 十六进制；
+    前几段各占一个字节，末段占剩余字节。自己实现而不直接调 ``socket.inet_aton``：
+    后者是平台相关的（本仓施工机与 CI 不同 OS），而这里要的是**确定**的判定。
+    非数字形态（``0xa9fea9fe.com``、``1.2.3.4.5``）一律返回 None，仍按域名处理。
+    """
+    parts = name.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+    numbers: list[int] = []
+    for part in parts:
+        if not _LEGACY_V4_PART_RE.fullmatch(part):
+            return None
+        if part[:2].lower() == "0x":
+            numbers.append(int(part, 16))
+        elif part.startswith("0"):
+            numbers.append(int(part, 8))
+        else:
+            numbers.append(int(part))
+    head, last = numbers[:-1], numbers[-1]
+    room = 4 - len(head)
+    if any(number > 0xFF for number in head) or last >= 256**room:
+        return None
+    value = last
+    for index, number in enumerate(head):
+        value |= number << (8 * (3 - index))
+    return ipaddress.IPv4Address(value)
+
+
 def _host_rejection(host: str) -> str | None:
     """主机名/IP 字面量的**本地**判据（不解析 DNS）。"""
     name = host.strip().strip("[]").rstrip(".").lower()
@@ -239,7 +285,9 @@ def _host_rejection(host: str) -> str | None:
     try:
         address = ipaddress.ip_address(name)
     except ValueError:
-        return None
+        address = _legacy_ipv4(name)
+        if address is None:
+            return None
     return _address_rejection(address)
 
 
