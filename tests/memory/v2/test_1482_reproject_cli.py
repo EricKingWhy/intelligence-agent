@@ -210,6 +210,52 @@ def test_a_run_that_converges_in_reproject_target_does_not_report_a_backlog(
     assert asyncio.run(_active_contents(db_path)) == []
 
 
+def test_backlog_in_the_other_target_does_not_fail_a_single_target_run(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    """#1482 B1：`remaining` 必须**只数本 target**——user 槽有积压时跑 `--target memory` 不许假报。
+
+    复审员探针（跨 target）：user 槽一行账本积压（另一文件仍含该句 ⇒ 撤回判 `kept`，账本行
+    保留），跑 `--target memory` 时若拿全局计数就会打印「账本仍有 1 行待收敛」并退 2；
+    按 target 过滤后本轮无积压、退 0。随后跑全量 `reproject`，user 槽的积压必须如实报出并退 2
+    （不把这半条修成"少报"）。
+    """
+    settings = _settings(tmp_path)
+    db_path = Path(settings.workspace_dir) / "memory-v2.db"
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    # 共享行由 MEMORY.md 兜着 ⇒ user 槽那行的撤回判 `kept`，账本行不会被清掉（真积压）；
+    # USER.md 里没有它，所以这不是「已经一致」的假积压。
+    (memories / "MEMORY.md").write_text("共享积压句", encoding="utf-8")
+    (memories / "USER.md").write_text("另一句", encoding="utf-8")
+
+    async def _seed():
+        store = SqliteMemoryV2Store(db_path)
+        await store.initialize()
+        await store.create(
+            reprojection.draft_for("user", "共享积压句"), TRUSTED,
+            projection_source="tool", projection_target="user")
+        await store.enqueue_projection(TRUSTED, "user", "共享积压句")
+
+    asyncio.run(_seed())
+    _main(monkeypatch, settings)
+
+    cli._main_memory(["reproject", "--target", "memory"])  # 不抛 SystemExit
+
+    printed = capsys.readouterr().out
+    assert "memory: created=0 deleted=0" in printed, printed
+    assert "账本仍有" not in printed, printed
+    assert _pending_count(db_path) == 1  # user 槽那一行原样保留
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli._main_memory(["reproject"])
+
+    printed = capsys.readouterr().out
+    assert excinfo.value.code == 2
+    assert "账本仍有 1 行待收敛" in printed, printed
+    assert "user 账本积压 1 行" in printed, printed  # 积压归到 user，不记到 memory 头上
+
+
 def test_entry_exits_non_zero_when_a_target_still_has_pending_projections(
     tmp_path, monkeypatch, capsys,
 ) -> None:
