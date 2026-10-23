@@ -36,6 +36,73 @@ function listTsFiles(dir: string): string[] {
   return out;
 }
 
+/**
+ * 把注释替换成等长空白（保留换行与偏移），字符串/模板内容原样保留。
+ * 守卫钉的是「活代码手抄」；注释里提事件名是合法文档（复核 A1 的 8 处全在注释里）。
+ * ponytail: 正则字面量按普通代码扫——本仓没有 `//`/`/*` 形态的正则，
+ * 而字符串态已能挡住 `"http://…"` 里的斜杠；真出现再补正则态。
+ */
+function stripComments(text: string): string {
+  type Mode = "code" | "line" | "block" | "double" | "single" | "template";
+  let mode: Mode = "code";
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i] ?? "";
+    const next = text[i + 1];
+    if (mode === "code") {
+      if (ch === "/" && next === "/") {
+        mode = "line";
+        out += "  ";
+        i++;
+        continue;
+      }
+      if (ch === "/" && next === "*") {
+        mode = "block";
+        out += "  ";
+        i++;
+        continue;
+      }
+      if (ch === '"') mode = "double";
+      else if (ch === "'") mode = "single";
+      else if (ch === "`") mode = "template";
+      out += ch;
+      continue;
+    }
+    if (mode === "line") {
+      if (ch === "\n") {
+        mode = "code";
+        out += ch;
+      } else out += " ";
+      continue;
+    }
+    if (mode === "block") {
+      if (ch === "*" && next === "/") {
+        mode = "code";
+        out += "  ";
+        i++;
+        continue;
+      }
+      out += ch === "\n" ? "\n" : " ";
+      continue;
+    }
+    // 字符串/模板：内容必须原样保留（事件值字面量就在里面），只跳过转义对
+    if (ch === "\\") {
+      out += ch + (next ?? "");
+      i++;
+      continue;
+    }
+    if (
+      (mode === "double" && ch === '"') ||
+      (mode === "single" && ch === "'") ||
+      (mode === "template" && ch === "`")
+    ) {
+      mode = "code";
+    }
+    out += ch;
+  }
+  return out;
+}
+
 test("生成物带 GENERATED 头与再生成命令（不是手写文件）", () => {
   const text = readFileSync(ARTIFACT, "utf8");
   const head = text.split("\n", 3).join("\n");
@@ -64,11 +131,12 @@ test("src/ 下（生成物之外）不再出现事件值字面量", () => {
   const offenders: string[] = [];
   for (const file of listTsFiles(SRC_ROOT)) {
     if (file === ARTIFACT) continue;
-    const text = readFileSync(file, "utf8");
-    for (const match of text.matchAll(/"([a-z]+(?:\/[a-z_-]+)+)"/g)) {
-      const value = match[1];
+    // 三种引号都要查：生成物自己用单引号，单/双引号手抄同样得红（复核 F-1）。
+    const text = stripComments(readFileSync(file, "utf8"));
+    for (const match of text.matchAll(/(["'`])([a-z]+(?:\/[a-z_-]+)+)\1/g)) {
+      const value = match[2];
       if (value !== undefined && eventValues.has(value)) {
-        offenders.push(`${file}: "${value}"`);
+        offenders.push(`${file}: ${match[1]}${value}${match[1]}`);
       }
     }
   }
