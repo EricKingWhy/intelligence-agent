@@ -1,0 +1,2 @@
+2026-10-23	#1432 初审：Spec 发现成功后再失败会保留 copied 状态（AC 缺口）；Standards PASS。该 finding 已由 1d02e68e 修复，见修后复审	bd97fbfdc157a182e3249481ac21a22e473d4a0c..067dbe333d16a5d35a45ff081aa3ccd2bc77ca2c
+2026-10-23	#1432 修后双轴复审：Spec PASS，Standards PASS；原 finding 关闭；P0–P4=0	bd97fbfdc157a182e3249481ac21a22e473d4a0c..1d02e68e6bd5036e3c051d8ad0699616545173b3
