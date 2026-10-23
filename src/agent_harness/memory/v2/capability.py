@@ -18,10 +18,12 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import Sequence
+from enum import Enum
 from typing import Any, Protocol
 
 import aiosqlite
 
+from agent_harness.memory.v2 import reprojection
 from agent_harness.memory.v2.index import MemoryV2IndexRelay, MemoryV2VectorIndex
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
 from agent_harness.memory.v2.policy import find_secret
@@ -157,6 +159,47 @@ class MemoryV2Service:
         return await self._store.invalidate(memory_id, trusted)
 
     # ----------------------------------------------------------------------------------
+    # 工具写入 → 派生层投影（#1437 F-01 甲案 / F-06 / F-06b）
+    # ----------------------------------------------------------------------------------
+    #
+    # 刻意**不**复用 `create()`：它第一步就是 `_mirror_markdown`，而这里的 markdown 写入
+    # 已经由 `MemoryTool` 提交过了，再镜像一遍会把 replace/batch 的内容写第二次。
+    # 这一节只读 markdown、只写 SQLite。
+
+    async def project_tool_write(
+        self, target: str, response: dict[str, Any], trusted: TrustedMemoryIdentity, *,
+        session_id: str | None = None, event_id: str | None = None,
+        operations: Sequence[dict[str, Any]] | None = None, content: str | None = None,
+    ) -> dict[str, Any]:
+        """把一次已落盘的 markdown 写入投影到派生层；失败只留 pending 账本，不抛。
+
+        写入成功后顺带 drain 一次历史账本（设计稿 §4.2 的重试触发点 1）：派生层此刻是
+        健康的，之前积压的行可以在同一轮收敛。本次写入自己失败时跳过——那时派生层正
+        不可用，重试只会再失败一次并抬高 `attempts`。
+        """
+        markdown = self._markdown
+        if markdown is None:
+            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+        summary = await reprojection.apply_write(
+            self._store, markdown, target, response, trusted,
+            operations=operations, content=content,
+            session_id=session_id, event_id=event_id,
+        )
+        if not summary["pending"]:
+            await reprojection.drain_pending(self._store, markdown, trusted)
+        return summary
+
+    async def reproject(
+        self, trusted: TrustedMemoryIdentity, target: str,
+    ) -> dict[str, Any]:
+        """F-06b 运维/漂移入口：先把 pending 账本排空，再全量对账该 target。"""
+        markdown = self._markdown
+        if markdown is None:
+            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+        await reprojection.drain_pending(self._store, markdown, trusted)
+        return await reprojection.reproject_target(self._store, markdown, trusted, target)
+
+    # ----------------------------------------------------------------------------------
     # markdown 权威面（#1353 §2）
     # ----------------------------------------------------------------------------------
     #
@@ -211,13 +254,23 @@ class MemoryV2Service:
         """markdown 的失败是**返回值**（`success=False`），不是异常。
 
         权威面没写成就不能继续写 SQLite 投影：调用方看到的必须是一次失败写入，
-        而不是"派生层有、权威层没有"的分叉。错误文案只带 store 的 message，
-        不回显条目内容。
+        而不是"派生层有、权威层没有"的分叉。错误文案带 store 的 message；**预算类失败
+        例外地带上当前条目列表**（`current_entries`），供模型就地合并——条目只进模型
+        可见的 message，不进事件流（不变量 #22）。
         """
-        if not response.get("success"):
-            raise MarkdownAuthorityError(
-                f"markdown {operation} failed: {response.get('error') or 'unknown error'}",
-            )
+        if response.get("success"):
+            return
+        message = str(response.get("error") or "unknown error")
+        entries = response.get("current_entries")
+        # `usage` 只由预算类失败携带（`_failure_with_entries` / `_batch_failure`）；
+        # 零命中之类的可自纠失败带 `current_entries` 但不带 `usage`，不能报成预算耗尽。
+        if response.get("usage") and entries:
+            # #1440 F-12：带上活条目列表的预算失败——当前用量与上限已在 store 文案里，
+            # 条目是模型就地合并的唯一依据（与 `memory_tool._result` 同形）。
+            # 条目只进模型可见的 message，不进事件流（不变量 #22）。
+            message += "\n\n当前条目：\n" + "\n".join(f"- {entry}" for entry in entries)
+            raise MarkdownBudgetExhausted(f"markdown {operation} failed: {message}")
+        raise MarkdownAuthorityError(f"markdown {operation} failed: {message}")
 
     async def _mirror_markdown(
         self, draft: MemoryDraftV2 | None, *, previous_id: str | None = None,
@@ -575,14 +628,60 @@ class MemoryV2Service:
         texts = [draft.content, draft.payload.model_dump_json()]
         texts.extend(item.excerpt for item in draft.evidence)
         if find_secret(*texts) is not None:
-            raise PermissionError("memory content contains a credential or secret")
+            raise MemoryContentRejected(
+                SECRET_CONTENT_REJECTION,
+                MemoryRejectionReason.SECRET_CONTENT,
+            )
         for text in texts:
             if first_threat_message(text, scope="strict") is not None:
-                raise PermissionError("memory content contains a threat pattern")
+                raise MemoryContentRejected(
+                    "该内容匹配注入或外泄模式，不能写入长期记忆。",
+                    MemoryRejectionReason.THREAT_PATTERN,
+                )
+
+
+class MemoryRejectionReason(str, Enum):
+    """内容被拒的稳定归因码（进 `MemoryContentRejected.reason_code`）。
+
+    字面量是**观测契约**的一部分：金标判定与排障都按它对账，不随中文文案变动
+    （文案会为了可读性改写，码不会——#1440 C 案）。码值由
+    `tests/evaluation/test_memory_v2_gold_reason_contract.py` 的字面量断言钉住。
+    """
+
+    SECRET_CONTENT = "secret_content"
+    THREAT_PATTERN = "threat_pattern"
+
+
+#: 凭证拒绝的中文真因文案：入口 `_reject_secret` 与显式路径 `tools.py` 共用一份，
+#: 两处措辞才不会有第二份真源（#1440 C 案）。**文案可变、`reason_code` 不变**。
+SECRET_CONTENT_REJECTION = "该内容匹配凭证或密钥规则，不能写入长期记忆。"
+
+
+class MemoryContentRejected(PermissionError):
+    """内容本身被拒（凭证/密钥/注入模式），与"身份无权"是两件事（#1440 F-12）。
+
+    继承 `PermissionError` 是为了保持入口层的 403 语义：`memory_http_error` 沿 MRO 查
+    `_MEMORY_ERROR_STATUS`，本类命中父类那一行（#1440 P2-1 之前是精确类型索引，子类
+    会 KeyError 成 500）。垫片层先捕获本类、再捕获裸 `PermissionError`，真因才不会被
+    "当前身份无权"吞掉。
+
+    `reason_code` 是机器可读的稳定归因（`MemoryRejectionReason`），随异常对象传播；
+    缺省 `None` 只用于构造兼容，判定方对缺失一律 fail-closed（#1440 C 案）。
+    """
+
+    def __init__(
+        self, message: str, reason_code: MemoryRejectionReason | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 class MarkdownAuthorityError(RuntimeError):
     """markdown 权威面拒绝了这次写入（成功与否是返回值，不是异常）。"""
+
+
+class MarkdownBudgetExhausted(MarkdownAuthorityError):
+    """权威面因**预算/条目合并**拒绝——永久条件，重试落在同一条上限上（#1440 F-12）。"""
 
 
 class StaleMemoryVersion(ValueError):

@@ -647,18 +647,34 @@ def test_explicit_command_match_rejects_negated_intent():
     assert not has_forget_intent("不要忘记我的编辑器偏好")
 
 
-def test_remember_args_reject_payload_text_outside_consented_content():
+def test_remember_args_accept_payload_text_outside_consented_content():
+    """#1440 F-05 推翻披露：`payload ⊆ content` 逐字校验已按 #1353 §0 裁决 3 移除。
+
+    原用例（`test_remember_args_reject_payload_text_outside_consented_content`）钉住
+    `_payload_text_is_covered_by_content` 的硬闸；裁决 3 明定垫片「放弃 verbatim 校验，
+    折中为 add 的软校验」。软校验在执行期比对**本轮 user message**（见
+    `test_1440_shim_drift.py::test_remember_tool_uses_soft_check_*`），参数面不再
+    对 payload 做逐字包含检查。
+    """
     for subject, fact in (("I", "I have lupus"), ("I have lupus", "I prefer tea")):
-        with pytest.raises(ValueError, match="payload.*content"):
-            _RememberV2Args(
-                content="I prefer tea", kind=MemoryKind.SEMANTIC,
-                payload=SemanticPayload(
-                    subject=subject, fact=fact, category=SemanticCategory.PREFERENCE,
-                ),
-            )
+        args = _RememberV2Args(
+            content="I prefer tea", kind=MemoryKind.SEMANTIC,
+            payload=SemanticPayload(
+                subject=subject, fact=fact, category=SemanticCategory.PREFERENCE,
+            ),
+        )
+        assert args.payload.subject == subject
+        assert args.payload.fact == fact
 
 
-def test_remember_args_preserve_negation_in_semantic_fact():
+def test_remember_args_accept_negation_without_rewriting_it():
+    """#1440 F-05 推翻披露：`negated content` 逐字否定校验已按 #1353 §0 裁决 3 移除。
+
+    原用例（`test_remember_args_preserve_negation_in_semantic_fact`）要求「payload 里出现
+    去掉否定的片段」直接 `ValueError`。裁决 3 放弃 verbatim 校验后，参数面不再替模型
+    做否定改写检测；否定语义由模型写全（描述词已改为「否定整句照写」），信任边界由
+    `_REMEMBER_NEGATION`（撤回同意 / 明确说别记）与软校验兜住。
+    """
     for content, fact in (
         ("I do not have diabetes", "have diabetes"),
         ("I am free of diabetes", "diabetes"),
@@ -685,13 +701,13 @@ def test_remember_args_preserve_negation_in_semantic_fact():
         ("我非吸烟者", "吸烟者"),
         ("我非素食者", "素食者"),
     ):
-        with pytest.raises(ValueError, match="negated content"):
-            _RememberV2Args(
-                content=content, kind=MemoryKind.SEMANTIC,
-                payload=SemanticPayload(
-                    subject=fact, fact=fact, category=SemanticCategory.PROFILE,
-                ),
-            )
+        args = _RememberV2Args(
+            content=content, kind=MemoryKind.SEMANTIC,
+            payload=SemanticPayload(
+                subject=fact, fact=fact, category=SemanticCategory.PROFILE,
+            ),
+        )
+        assert args.payload.fact == fact
         args = _RememberV2Args(
             content=content, kind=MemoryKind.SEMANTIC,
             payload=SemanticPayload(
@@ -701,14 +717,14 @@ def test_remember_args_preserve_negation_in_semantic_fact():
         )
         assert args.payload.fact == content
 
-    with pytest.raises(ValueError, match="negated content"):
-        _RememberV2Args(
-            content="I do not have diabetes", kind=MemoryKind.EPISODIC,
-            payload=EpisodicPayload(
-                situation="I do not have diabetes", action="I do not have diabetes",
-                outcome="I do not have diabetes", lesson="I do not have diabetes",
-            ),
-        )
+    args = _RememberV2Args(
+        content="I do not have diabetes", kind=MemoryKind.EPISODIC,
+        payload=EpisodicPayload(
+            situation="I do not have diabetes", action="I do not have diabetes",
+            outcome="I do not have diabetes", lesson="I do not have diabetes",
+        ),
+    )
+    assert args.payload.lesson == "I do not have diabetes"
 
     args = _RememberV2Args(
         content="用不锈钢盆揉面，直到面团均匀", kind=MemoryKind.PROCEDURAL,
@@ -792,13 +808,19 @@ async def test_remember_tool_requires_current_user_consent_and_writes_typed_sour
 
 
 @pytest.mark.asyncio
-async def test_remember_tool_rejects_unbound_or_negated_content(governance, tmp_path):
+async def test_remember_tool_rejects_negated_content(governance, tmp_path):
+    """#1440 F-05 推翻披露：本用例原名 `..._rejects_unbound_or_negated_content`。
+
+    原断言里两条**非**否定用例钉的是 `explicit_remember_matches` 的子句/归属规则
+    （"Remember I prefer tea. My diagnosis is X."、"我记得我喜欢喝茶"）：它们既不在
+    记忆指令子句里、也不是逐字摘录，但 content 确实能在本轮消息里找到依据。裁决 3
+    把闸门降为 add 软校验后这两条应当**成功**——硬保留就是本票要修的 F-05 本身。
+    否定/撤回同意类用例全部保留（那是信任边界，见 `_REMEMBER_NEGATION`）。
+    """
     service, store, _index = governance
     sessions = JsonlSessionStore(root=tmp_path / "sessions")
     cases = (
         ("negated", "You should not remember this: I prefer tea", "I prefer tea"),
-        ("unbound", "Remember I prefer tea. My diagnosis is X.", "My diagnosis is X"),
-        ("reported", "我记得我喜欢喝茶", "我喜欢喝茶"),
         ("curly-negation", "You shouldn’t remember this: I prefer tea", "I prefer tea"),
         ("unconsented", "Remember tea, but do not store my diagnosis: I have lupus",
          "I have lupus"),
@@ -843,10 +865,27 @@ async def test_remember_tool_rejects_unbound_or_negated_content(governance, tmp_
                 ))
             finally:
                 memory_session_var.reset(binding)
-            assert not result.ok
+            assert not result.ok, session_id
+        assert await store.list_records(TRUSTED) == []
+
+        # 推翻后应成功的两条：内容有依据，但不在"记住"子句里 / 是转述。
+        for session_id, text, content in (
+            ("unbound", "Remember I prefer tea. My diagnosis is X.", "My diagnosis is X"),
+            ("reported", "我记得我喜欢喝茶", "我喜欢喝茶"),
+        ):
+            await _write_user_turn(sessions, session_id, text)
+            binding = memory_session_var.set(session_id)
+            try:
+                result = await tool.execute(_RememberV2Args(
+                    content=content, kind=MemoryKind.SEMANTIC,
+                    payload=_semantic_payload(content),
+                ))
+            finally:
+                memory_session_var.reset(binding)
+            assert result.ok, (session_id, result.message)
     finally:
         identity_context_var.reset(identity_token)
-    assert await store.list_records(TRUSTED) == []
+    assert len(await store.list_records(TRUSTED)) == 2
 
 
 @pytest.mark.asyncio
