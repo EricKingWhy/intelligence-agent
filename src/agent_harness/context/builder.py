@@ -37,7 +37,6 @@ from agent_harness.session import Session
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     ProtectedFact,
-    derive_messages,
     derive_messages_with_source_ranges,
     derive_modified_file_paths,
     derive_protected_facts,
@@ -681,6 +680,28 @@ class ContextBuilder:
         # 把一个对象的 seq 成本用于另一个对象，同时保持单个对象内的增量缓存。
         self._token_memo: dict[tuple[str, int, bool], int] = {}
         self._token_memo_session: Session | None = None
+        # #1528：derive 复用——(会话对象, 事件前缀长度, 视觉口径) → 未裁剪的
+        # `(message, source_range)` 列表。同一 mark 上 build / compact_now /
+        # `_reproject` / `usage_snapshot` 此前各自全量重派生（一次压缩 build 实测
+        # 同 mark 派生 3 次；看板每次轮询再加 1 次）。剖析归因：开销几乎全在构造
+        # langchain pydantic 消息（1600 事件 3 次派生 0.459s 中 ≈73%），不在扫描
+        # 事件——故**只复用已构造的不可变消息**，不做增量前缀计算（票面：不承诺
+        # 缺证据的增量框架）。
+        #
+        # 等价性前提（逐条可核）：`SessionEvent` 冻结、事件 append-only 且唯一追加
+        # 路径是 `Session._persist_event`（故 `session.mark()` 是精确的内容版本）；
+        # `derive_messages_with_source_ranges` 是纯函数；全仓唯一原地改消息对象的
+        # 位置是 compactor 对 `model_copy()` 副本的裁剪。这与 `_token_memo` 依赖的
+        # 同一条既有前提（「事件落盘后其投影消息内容在同一口径下终身不变」）一致，
+        # 不是新假设。因此「同一事件前缀 + 同一视觉口径」派生结果必然逐条相同。
+        # 键含会话**对象**（同 id 不同对象不同键，与 `_token_memo_session` 同纪律）；
+        # 会话对象每次都比对，故不存在 `id()` 复用的悬垂键。
+        # 纯缓存：可随时丢弃并从事件流重建，不产生第二份 Session 真相。
+        self._projection_cache: (
+            list[tuple[AnyMessage, tuple[int, int] | None]] | None
+        ) = None
+        self._projection_cache_session: Session | None = None
+        self._projection_cache_key: tuple[int, bool] | None = None
         # 最近一次 build 的估算总量——测试观察口（生产路径走参数传递）。
         # **只含投影 messages**（_estimate_tokens_cached 的返回值）；system_prompt
         # 与 provider 注入另行记账，见 _last_provider_tokens_by_name /
@@ -779,6 +800,31 @@ class ContextBuilder:
         text = _render_progress_block(doc, status=verification.status)
         return text, estimate_message_tokens([SystemMessage(content=text)])
 
+    def _derive_pairs(
+        self, session: Session,
+    ) -> list[tuple[AnyMessage, tuple[int, int] | None]]:
+        """派生（或复用）**未裁剪**的投影+source ranges（#1528）。
+
+        键 = (会话对象, `session.mark()`, `_supports_vision`)。三者任一变化即重派生；
+        事件 append-only 且投影是纯函数，故命中缓存与全量重算逐条相等。
+
+        只缓存 derive 的产物，**不缓存裁剪**：裁剪决策每次仍由 `ToolResultPruner`
+        重放（决策与 memo 失效是它自己的合同，见 `_prune_projection`），本缓存因此
+        对 pruner 路径完全透明。
+        """
+        key = (session.mark(), self._supports_vision)
+        if self._projection_cache_session is session and self._projection_cache_key == key:
+            cached = self._projection_cache
+            if cached is not None:
+                return cached
+        pairs = derive_messages_with_source_ranges(
+            session.events, supports_vision=self._supports_vision
+        )
+        self._projection_cache = pairs
+        self._projection_cache_session = session
+        self._projection_cache_key = key
+        return pairs
+
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
         # #1197 项 1：每轮从会话事件现派生窗口（per-session 挡位，改后下一轮生效）。
@@ -790,9 +836,7 @@ class ContextBuilder:
         self._last_pressure_warning_tokens = 0
         self._image_payloads = await self._load_image_payloads(session)
         source_ranges: list[tuple[int, int] | None] | None = None
-        pairs = derive_messages_with_source_ranges(
-            session.events, supports_vision=self._supports_vision
-        )
+        pairs = self._derive_pairs(session)
         if self._pruner is None:
             # 与 session.derive_messages() 同一投影；额外留下 source_ranges 供
             # #448 的真实 usage 锚做「事件 → 消息」定位（不传给压缩器，行为不变）。
@@ -1080,9 +1124,7 @@ class ContextBuilder:
         self._sync_session_context_window(session)
         # ── 投影（与 build 同一口径；裁剪路径存在时重放裁剪决策）──────────
         source_ranges: list[tuple[int, int] | None] | None = None
-        pairs = derive_messages_with_source_ranges(
-            session.events, supports_vision=self._supports_vision
-        )
+        pairs = self._derive_pairs(session)
         if self._pruner is None:
             messages = [message for message, _source_range in pairs]
             anchor_ranges = [source_range for _message, source_range in pairs]
@@ -1476,14 +1518,10 @@ class ContextBuilder:
         （占位符文本）不一致 ⇒ 误报 `CompactionPostWriteError`。
         """
         if self._pruner is None:
-            return derive_messages(
-                session.events, supports_vision=self._supports_vision
-            )
-        pairs = derive_messages_with_source_ranges(
-            session.events, supports_vision=self._supports_vision
-        )
+            return [message for message, _source_range in self._derive_pairs(session)]
         return self._pruner.apply(
-            pairs, self._prune_decisions.get(session.session_id, {}),
+            self._derive_pairs(session),
+            self._prune_decisions.get(session.session_id, {}),
         )
 
     async def _prune_projection(
@@ -1819,17 +1857,14 @@ class ContextBuilder:
             # #823 / MM-02（A6）：看板/tokens_before 读数必须与 build/compact 的
             # 视觉口径一致——带图会话下用 vision=False 的占位符文本估算会低估，
             # 与真实投影（图片块）口径漂移。传同一 `self._supports_vision`。
+            # #1528：复用 `build` 刚落下的同一 mark 投影，看板轮询不再全量重派生。
             messages_tokens = estimate_message_tokens(
-                derive_messages(
-                    session.events, supports_vision=self._supports_vision,
-                )
+                [message for message, _source_range in self._derive_pairs(session)]
             )
         else:
-            pairs = derive_messages_with_source_ranges(
-                session.events, supports_vision=self._supports_vision,
-            )
             messages = self._pruner.apply(
-                pairs, self._prune_decisions.get(session.session_id, {}),
+                self._derive_pairs(session),
+                self._prune_decisions.get(session.session_id, {}),
             )
             messages_tokens = estimate_message_tokens(messages)
         system_prompt_tokens = self._system_prompt_tokens or 0
