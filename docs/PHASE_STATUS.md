@@ -131,6 +131,7 @@
 **单条 bullet 上限 2000 字符**（防止本文件再长回 500 KB）：明细超出就只在这里留一行索引 + 正文进当月归档文件。
 
 ### 最近条目（最新在上）
+- **2026-10-23 · #1552 已关单、代码待集成**：本地分支 `codex/issue-1552-memory-promote`，代码提交 `b524d547`；Web promote 重放按既有映射返回 403 + `X-Memory-Reason-Code`。聚焦 71 passed，Ruff / diff-check 通过；两轴 review PASS、P0–P4=0。未 push / PR / merge；详见 Tracker 与月档。
 - **2026-10-17 · #1289 已关单、PR 待合并**：Issue CLOSED（保留 `bug`/`P2`、加 `等待merge`、移除 `in-progress`）；PR [#1291](https://github.com/EricKingWhy/intelligence-agent/pull/1291) OPEN、未合并。Unicode Windows 路径修复已推送；focused 11/11、Ruff、review coverage 与 diff-check 通过，PR Gate-0、Chromium smoke、gitleaks 通过。Gate-0 收据 `docs/gate/64557772c268bb57faa512615a6bbbeaadd33e90.json`；关单记录与细节见 Tracker/月档。
 - **2026-10-17 · #1183/#1288 已关单、PR 待合并**：Issue #1183 保留 `10-15-UI优化`/`等待merge`；#1288 保留 bug/P3/`等待merge`，施工标签均已移除。PR [#1274](https://github.com/EricKingWhy/intelligence-agent/pull/1274) OPEN、未合并，代码 tip `34761909`；PR Gate-0、Chromium smoke、gitleaks 与完整 nightly 全过。测试、关单评论与月档读数见 Tracker/月档。
 - **2026-10-17 · #1184 已集成**：Issue CLOSED，仅保留 `10-15-UI优化`；PR [#1268](https://github.com/EricKingWhy/intelligence-agent/pull/1268) merge commit `795fe5afda241c1dd441d5c8e985390fae65247c`。实现、审查和验证见 Tracker/月档 #1184。
