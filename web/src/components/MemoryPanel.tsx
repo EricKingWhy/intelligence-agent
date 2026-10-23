@@ -34,6 +34,7 @@ import '../styles/memory-v2.css';
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  focusReturnTargetRef?: { current: HTMLElement | null };
 }
 
 const KIND_LABELS: Record<MemoryKind, string> = {
@@ -61,19 +62,25 @@ function focusReturnTarget(active: Element | null): HTMLElement | null {
   return trigger instanceof HTMLElement ? trigger : null;
 }
 
-export function MemoryPanel({ open, onOpenChange }: Props) {
+export function MemoryPanel({ open, onOpenChange, focusReturnTargetRef }: Props) {
   const openerRef = useRef<HTMLElement | null>(null);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="palette-overlay" />
-        {open && <MemoryPanelBody openerRef={openerRef} />}
+        {open && <MemoryPanelBody openerRef={openerRef} focusReturnTargetRef={focusReturnTargetRef} />}
       </Dialog.Portal>
     </Dialog.Root>
   );
 }
 
-function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | null } }) {
+function MemoryPanelBody({
+  openerRef,
+  focusReturnTargetRef,
+}: {
+  openerRef: { current: HTMLElement | null };
+  focusReturnTargetRef?: { current: HTMLElement | null };
+}) {
   const [queryDraft, setQueryDraft] = useState('');
   const [filters, setFilters] = useState<MemoryFilters>({});
   const memories = useMemories(filters);
@@ -200,7 +207,9 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
     <Dialog.Content
       className="memory-panel memory-v2-panel"
       onOpenAutoFocus={() => {
-        openerRef.current = focusReturnTarget(document.activeElement);
+        const requestedTarget = focusReturnTargetRef?.current ?? null;
+        if (focusReturnTargetRef) focusReturnTargetRef.current = null;
+        openerRef.current = focusReturnTarget(requestedTarget ?? document.activeElement);
       }}
       onCloseAutoFocus={(event) => {
         if (openerRef.current?.isConnected) {

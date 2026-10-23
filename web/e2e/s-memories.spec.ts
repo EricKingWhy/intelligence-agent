@@ -274,7 +274,7 @@ test('入口：命令面板「管理记忆」也能打开（顶栏按钮之外�
 
   await page.keyboard.press('Control+k');
   await page.locator('.palette-input').fill('管理记忆');
-  await page.locator('.palette-item', { hasText: '管理记忆' }).click();
+  await page.getByRole('option', { name: '管理记忆' }).click();
 
   await expect(panel(page)).toBeVisible();
   await expect(row(page, '不要客套话')).toBeVisible();
@@ -282,4 +282,117 @@ test('入口：命令面板「管理记忆」也能打开（顶栏按钮之外�
   // Esc 关闭（Radix Dialog 语义）：管理面不该只能靠按钮退出。
   await page.keyboard.press('Escape');
   await expect(panel(page)).toBeHidden();
+  await expect(page.locator('#composer-input')).toBeFocused();
+});
+
+test('command palette: closing persistent approval rules returns focus to its opener', async ({ page }) => {
+  await routeApi(page, { sessions: [] });
+  await page.route('**/api/approve-policy/rules', (route) =>
+    route.fulfill({ status: 200, body: '[]', contentType: 'application/json' }),
+  );
+  await page.goto('/');
+
+  const opener = page.locator('.appbar-more-trigger');
+  await opener.focus();
+  await expect(opener).toBeFocused();
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('approval');
+  await page.getByRole('option').click();
+
+  const dialog = page.locator('.approve-policy-dialog');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
+});
+
+test('focus: selecting an already open panel does not leak its opener to the next panel', async ({
+  page,
+}) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.route('**/api/approve-policy/rules', (route) =>
+    route.fulfill({ status: 200, body: '[]', contentType: 'application/json' }),
+  );
+  await page.goto('/');
+
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('memory');
+  await page.getByRole('option').click();
+  await expect(panel(page)).toBeVisible();
+
+  // Running the same command again does not reopen the mounted panel or start a new focus lifecycle.
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('memory');
+  await page.locator('.palette-item').click({ force: true });
+  await expect(panel(page)).toBeVisible();
+  await expect(page.locator('.palette-input')).toHaveCount(0);
+
+  await closeMemories(page);
+  const opener = page.locator('.appbar-more-trigger');
+  await opener.click();
+  await page
+    .getByRole('menuitem')
+    .filter({ has: page.locator('svg.lucide-shield-check') })
+    .click();
+
+  const dialog = page.locator('.approve-policy-dialog');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
+});
+
+test('focus: body focus on a non-chat tab falls back to a visible app control', async ({ page }) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.route('**/api/approve-policy/rules', (route) =>
+    route.fulfill({ status: 200, body: '[]', contentType: 'application/json' }),
+  );
+  await page.goto('/');
+  await page.getByRole('tab').nth(1).click();
+  await expect(page.locator('#workspace-panel-changes')).toBeVisible();
+  await expect(page.locator('#composer-input')).toBeHidden();
+
+  const opener = page.locator('.appbar-more-trigger');
+  for (const [keyword, selector] of [
+    ['memory', '.memory-panel'],
+    ['approval', '.approve-policy-dialog'],
+  ]) {
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).toBe('BODY');
+    await page.keyboard.press('Control+k');
+    await page.locator('.palette-input').fill(keyword);
+    await page.locator('.palette-item').click();
+
+    const dialog = page.locator(selector);
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(opener).toBeFocused();
+  }
+});
+
+test('focus: body focus skips a disabled composer when choosing a palette return target', async ({
+  page,
+}) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.goto('/');
+
+  const composer = page.locator('#composer-input');
+  await expect(composer).toBeVisible();
+  // Simulate the native disabled state used while approval/decision input locks the composer.
+  await composer.evaluate((element) => {
+    (element as HTMLTextAreaElement).disabled = true;
+  });
+  await expect(composer).toBeDisabled();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).toBe('BODY');
+
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('memory');
+  await page.getByRole('option').click();
+  await expect(panel(page)).toBeVisible();
+
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toBeHidden();
+  await expect(page.locator('.appbar-more-trigger')).toBeFocused();
 });
