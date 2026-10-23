@@ -34,6 +34,9 @@ RFC1918 / loopback / ``198.18.0.0/15`` 一律放行。``198.18/15`` 尤其不能
 连接时会再解析一次，理论上存在 DNS rebinding 的 TOCTOU 窗口。彻底封堵需要自建
 pin-IP transport（复制一份 ``SSRFSafeTransport`` 到 httpx2），超出"轻量防误配"的
 本票范围；见完工报告"残余风险"。
+
+第二项：``_BLOCKED_NETWORKS`` / ``_METADATA_HOSTNAMES`` 是**拷贝**，不随上游扩充
+（新云厂商的元数据地址不会自动进来）。新证据出现时手工补这里，别指望同步。
 """
 
 from __future__ import annotations
@@ -80,7 +83,11 @@ class _GuardedSyncClient(DefaultHttpxClient):  # type: ignore[misc]
 
 
 class _GuardedAsyncClient(DefaultAsyncHttpxClient):  # type: ignore[misc]
-    """同上，异步版（openai 的 `AsyncHttpxClientWrapper` 同款实现）。"""
+    """同上，异步版。
+
+    与 openai `AsyncHttpxClientWrapper` 同形：只在**有运行中的 loop** 时能排队关闭，
+    否则（解释器退出 / 同步上下文里被 GC）静默跳过——连接随进程回收，析构期不能抛。
+    """
 
     def __del__(self) -> None:
         try:
@@ -96,6 +103,33 @@ def parse_allowlist(raw: str) -> frozenset[str]:
     条目原样保留，匹配在 :func:`_is_allowed` 里做（同一份解析规则，不抄第二份）。
     """
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def validate_allowlist(raw: str) -> None:
+    """构造期校验（`Settings` 的 field_validator 调它）：坏条目在启动期响亮失败。
+
+    运行期 :func:`parse_allowlist` 保持宽容——同一个字符串到了请求路径再抛只会变成
+    500。这里只拦"静默永不命中"的形态：带 scheme / 路径 / 空白、端口越界。
+    ``_split_entry`` 对后两种是**吞掉**的（回落成整串当 host），配错了只会表现为
+    "登记了例外却仍被拦"，排查成本远高于启动期报错。
+    """
+    for entry in parse_allowlist(raw):
+        if "://" in entry or "/" in entry or any(c.isspace() for c in entry):
+            raise ValueError(
+                f"model_endpoint_allowlist 条目只接受 host 或 host:port，"
+                f"收到 {entry!r}（不要带 scheme / 路径 / 空白）"
+            )
+        try:
+            ipaddress.ip_address(entry.strip("[]"))
+            continue  # 裸 IP（含裸 IPv6）：没有端口可校验
+        except ValueError:
+            pass
+        try:
+            _ = urlsplit("//" + entry).port
+        except ValueError as error:
+            raise ValueError(
+                f"model_endpoint_allowlist 条目 {entry!r} 的端口无法解析：{error}"
+            ) from error
 
 
 def _split_entry(entry: str) -> tuple[str, int | None]:
@@ -209,7 +243,7 @@ async def _aresolved_addresses(host: str, port: int | None) -> list[str]:
     return [info[4][0] for info in infos]
 
 
-def _rejection_for(host: str, port: int | None, addresses: list[str]) -> str | None:
+def _rejection_for(addresses: list[str]) -> str | None:
     for raw in addresses:
         reason = _host_rejection(raw)
         if reason is not None:
@@ -231,7 +265,7 @@ def _check_request(request: httpx2.Request, allow: frozenset[str]) -> str | None
     except OSError:
         # 解析失败交给真实连接报"连不上"，本守卫不越俎代庖。
         return None
-    return _rejection_for(host, port, addresses)
+    return _rejection_for(addresses)
 
 
 async def _acheck_request(request: httpx2.Request, allow: frozenset[str]) -> str | None:
@@ -246,7 +280,7 @@ async def _acheck_request(request: httpx2.Request, allow: frozenset[str]) -> str
         addresses = await _aresolved_addresses(host, port)
     except OSError:
         return None
-    return _rejection_for(host, port, addresses)
+    return _rejection_for(addresses)
 
 
 def guarded_clients(

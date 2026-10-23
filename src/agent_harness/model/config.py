@@ -436,8 +436,12 @@ def warn_unadopted_catalog_entries(settings: Settings) -> None:
         )
 
 
-def _endpoint_allowlist(settings: "Settings") -> tuple[str, ...]:
-    """#1485 所有者登记的端点守卫例外（`MODEL_ENDPOINT_ALLOWLIST`，逗号分隔）。"""
+def endpoint_allowlist(settings: "Settings") -> tuple[str, ...]:
+    """#1485 所有者登记的端点守卫例外（`MODEL_ENDPOINT_ALLOWLIST`，逗号分隔）。
+
+    归一化只此一处：运行期（本模块）与连接测试（`web/model_providers.py`）都调它，
+    两处若各写一遍，会出现"测试通过但实际被拦"。
+    """
     from agent_harness.model.endpoint_guard import parse_allowlist
 
     return tuple(sorted(parse_allowlist(settings.model_endpoint_allowlist)))
@@ -502,7 +506,7 @@ class ModelConfig:
             base_url=settings.model_base_url,
             temperature=settings.temperature,
             key_env="MODEL_API_KEY",
-            allowlist=_endpoint_allowlist(settings),
+            allowlist=endpoint_allowlist(settings),
         )
         entry = find_catalog_entry(settings, config.provider, config.model_name)
         if entry is not None:
@@ -527,7 +531,7 @@ class ModelConfig:
             base_url=settings.fallback_model_base_url,
             temperature=settings.temperature,
             key_env="FALLBACK_MODEL_API_KEY",
-            allowlist=_endpoint_allowlist(settings),
+            allowlist=endpoint_allowlist(settings),
         )
         entry = find_catalog_entry(settings, config.provider, config.model_name)
         if entry is not None:
@@ -559,7 +563,7 @@ class ModelConfig:
             temperature=(entry.temperature if entry.temperature is not None
                          else settings.temperature),
             reasoning_effort=entry.reasoning_effort,
-            endpoint_allowlist=_endpoint_allowlist(settings),
+            endpoint_allowlist=endpoint_allowlist(settings),
         )
         # fallback 链语义不动（ADR-0014）：catalog 选择只替换 primary。
         resolved.fallback = cls._fallback_from(settings)
@@ -594,7 +598,7 @@ class ModelConfig:
             api_key=api_key,
             base_url=target["base_url"],
             temperature=settings.temperature,
-            endpoint_allowlist=_endpoint_allowlist(settings),
+            endpoint_allowlist=endpoint_allowlist(settings),
         )
         # fallback 链语义不动（ADR-0014）：自定义供应商只替换 primary。
         resolved.fallback = cls._fallback_from(settings)

@@ -1,6 +1,8 @@
 """ModelProvider：唯一的职责是把 ModelConfig 变成可用的 ChatModel。
 
-不写 HTTP Client、不做重试/缓存——这些都由 langchain-openai 和底层 openai SDK 负责。
+不做重试/缓存——这些由 langchain-openai 和底层 openai SDK 负责。**唯一**自建的
+HTTP 对象是 #1485 的守卫客户端（`guarded_clients`）：它只是给 SDK 默认 client 挂一个
+request hook，超时 / 连接池 / 重定向仍取 SDK 默认值。
 """
 
 import logging
@@ -99,7 +101,7 @@ def create_chat_model(
     # `Settings.model_endpoint_allowlist`（经 ModelConfig 带到这里）。
     kwargs["http_client"], kwargs["http_async_client"] = guarded_clients(
         base_url=config.base_url,
-        allow=getattr(config, "endpoint_allowlist", ()),
+        allow=config.endpoint_allowlist,
     )
     if reasoning_effort is not None:
         capability = config.validate_reasoning_effort(reasoning_effort)

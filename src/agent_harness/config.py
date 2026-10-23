@@ -339,6 +339,19 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("model_endpoint_allowlist")
+    @classmethod
+    def _validate_endpoint_allowlist(cls, value: str) -> str:
+        """#1485 端点例外在构造期（= 启动期）校验：配错就起不来，而不是静默永不命中。
+
+        解析规则单点在 `model.endpoint_guard`（运行期读的是同一份字符串）；延迟
+        import 与该模块的既有用法一致（`model/*` 反向依赖 `config`，顶部 import 会成环）。
+        """
+        from agent_harness.model.endpoint_guard import validate_allowlist
+
+        validate_allowlist(value)
+        return value
+
     @field_validator("attachment_allowed_media_types")
     @classmethod
     def _validate_allowed_media_types(cls, value: str) -> str:

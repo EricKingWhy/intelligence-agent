@@ -19,11 +19,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_harness.logging import log_event
-from agent_harness.model.config import ModelConfig
-from agent_harness.model.endpoint_guard import (
-    misconfiguration_rejection,
-    parse_allowlist,
-)
+from agent_harness.model.config import ModelConfig, endpoint_allowlist
+from agent_harness.model.endpoint_guard import misconfiguration_rejection
 from agent_harness.model.provider import create_chat_model
 from agent_harness.model.provider_store import (
     CredentialError,
@@ -260,9 +257,7 @@ def register_model_provider_routes(app: FastAPI) -> None:
             config = ModelConfig(
                 provider=provider_id, model_name=model_id, api_key=api_key,
                 base_url=entry["base_url"], temperature=settings.temperature,
-                endpoint_allowlist=tuple(sorted(
-                    parse_allowlist(settings.model_endpoint_allowlist)
-                )),
+                endpoint_allowlist=endpoint_allowlist(settings),
             )
             # 真实构造路径（§6.1）：create_chat_model + ainvoke，max_tokens=1、
             # 不带 tools。request_timeout 用测试专用超时（15s，§6.2）。

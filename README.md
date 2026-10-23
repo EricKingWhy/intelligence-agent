@@ -143,6 +143,7 @@ curl -N -X POST 'http://127.0.0.1:8000/api/sessions?launch=false' \
 | `MAX_CONTEXT_TOKENS` | 上下文窗口大小 |
 | `AUTO_COMPACT_THRESHOLD` | 自动压缩触发阈值（默认 0.70） |
 | `HARD_GUARD_THRESHOLD` | 上下文硬守卫（默认 0.85） |
+| `MODEL_ENDPOINT_ALLOWLIST` | 端点守卫例外（逗号分隔 `host` / `host:port`）——默认拦云元数据 / link-local，见 ADR-0032 §7.4 |
 
 完整列表见 `.env.example`，包括 `MILVUS_*`（记忆）、`ARTIFACT_STORE_*`（产物）与沙箱选项。
 

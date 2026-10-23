@@ -10,6 +10,8 @@
 受控手段：`httpx2.MockTransport` 充当服务器（逐跳可计数、可回 302），
 `endpoint_guard` 的两个解析函数被替换成受控结果。真实 socket 一次都不开——
 "零请求"是传输层计数为 0，不是"没观察到"。
+**唯一例外**是 `test_owner_loopback_connection_test_still_works`：它起一个真
+`ThreadingHTTPServer` 绑 127.0.0.1，证明放行路径确实能连通（仍不碰任何元数据地址）。
 """
 
 from __future__ import annotations
@@ -25,13 +27,14 @@ from langchain_core.messages import HumanMessage
 
 from agent_harness.config import Settings
 from agent_harness.model import endpoint_guard
-from agent_harness.model.config import ModelConfig
+from agent_harness.model.config import ModelConfig, endpoint_allowlist
 from agent_harness.model.endpoint_guard import (
     EndpointBlockedError,
     guarded_clients,
     misconfiguration_rejection,
     parse_allowlist,
     url_rejection,
+    validate_allowlist,
 )
 from agent_harness.model.provider import create_chat_model
 from agent_harness.model.provider_store import (
@@ -357,6 +360,24 @@ class TestGuardedClients:
     def test_parse_allowlist_trims_and_drops_blanks(self):
         assert parse_allowlist(" a ,, b:1 , ") == frozenset({"a", "b:1"})
 
+    @pytest.mark.parametrize(
+        "entry", ["https://metadata.test", "metadata.test/v1", "a b", "host:99999"],
+    )
+    def test_bad_allowlist_entry_fails_at_startup(self, entry):
+        """静默永不命中的条目（带 scheme / 路径 / 空白 / 端口越界）在构造期报错。"""
+        with pytest.raises(ValueError):
+            validate_allowlist(entry)
+
+    def test_settings_rejects_bad_allowlist_at_construction(self):
+        with pytest.raises(ValueError):
+            Settings(_env_file=None, model_endpoint_allowlist="https://metadata.test")
+
+    def test_settings_accepts_host_and_host_port_entries(self):
+        settings = Settings(
+            _env_file=None, model_endpoint_allowlist=" fe80::1 , metadata.test:8080 ",
+        )
+        assert endpoint_allowlist(settings) == ("fe80::1", "metadata.test:8080")
+
 
 # ── 所有者 loopback 的端到端连接测试（真实本机服务）──────────────────
 
@@ -392,9 +413,7 @@ async def test_owner_loopback_connection_test_still_works():
             provider="deepseek", model_name="deepseek-chat", api_key="sk-test",
             base_url=f"http://{host}:{port}/v1",
             temperature=settings.temperature,
-            endpoint_allowlist=tuple(sorted(
-                parse_allowlist(settings.model_endpoint_allowlist)
-            )),
+            endpoint_allowlist=endpoint_allowlist(settings),
         )
         model = create_chat_model(config, request_timeout=10.0)
         await model.ainvoke([HumanMessage(content="ping")], max_tokens=1)
