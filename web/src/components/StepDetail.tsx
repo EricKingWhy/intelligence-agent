@@ -28,7 +28,7 @@ import { lineDiff, type LineDiffResult } from '../lib/lineDiff';
 import { allTools, displayedSessionUsage, summarizeEvent } from '../lib/projection';
 import { addDecimalTexts } from '../lib/runBudget';
 import { permissionView } from '../lib/permission';
-import { commandOutputs, commandResult, isCommand } from '../lib/commandOutput';
+import { commandOutputs, isCommand } from '../lib/commandOutput';
 import {
   INSPECTOR_MAX_W, INSPECTOR_MIN_W,
   KEY_RESIZE_BURST_MS, PEEK_TAP_MS, clampInspectorWidth, escAction, eventKey, nextSelectionIndex, toolKey,
@@ -2624,24 +2624,34 @@ function TermCard({
   selected: boolean;
   onFocusTool: (t: ToolCall) => void;
 }) {
-  const running = tool.status === 'running';
-  const [open, setOpen] = useState(tool.status !== 'success');
-  const result = commandResult(tool);
+  const commandOutput = commandOutputs([tool])[0];
+  const status = commandOutput?.status ?? tool.status;
+  const running = commandOutput?.streaming ?? false;
+  const [open, setOpen] = useState(status !== 'success');
   const command = String(tool.args.command ?? '');
   const seq = toolSeq(tool);
   const dur = formatDuration(tool.started_at, tool.completed_at);
-  const liveText = (tool.output ?? []).map((c) => c.text).join('');
-  const stdout = liveText !== '' ? liveText : result?.stdout ?? '';
-  const stderr = liveText !== '' ? '' : result?.stderr ?? '';
-  const exit = result?.exit_code;
+  const chunks = commandOutput?.chunks ?? [];
+  const lines = chunks.reduce((text, chunk, index) => {
+    const previous = chunks[index - 1];
+    const separator = previous !== undefined
+      && previous.channel !== chunk.channel
+      && text !== ''
+      && !text.endsWith('\n')
+      && !chunk.text.startsWith('\n')
+      ? '\n'
+      : '';
+    return `${text}${separator}${chunk.text}`;
+  }, '');
+  const hasStderr = chunks.some((chunk) => chunk.channel === 'stderr' && chunk.text !== '');
+  const exit = commandOutput?.exitCode ?? null;
   /* 状态词/图标：效果图 fail 红 / run 琥珀 + 绿字 live / ok 绿。`stopped`（中断）
      不是错误，用 warn 一档，不冒充 fail。 */
-  const ico = tool.status === 'failed' ? 'fail' : running || tool.status === 'stopped' ? 'warn' : 'ok';
-  const word = tool.status === 'failed' ? 'fail' : running ? 'live' : tool.status === 'stopped' ? 'stop' : 'ok';
-  const wordClass = tool.status === 'failed' ? 'del' : tool.status === 'stopped' ? 'warn' : 'add';
+  const ico = status === 'failed' ? 'fail' : running || status === 'stopped' ? 'warn' : 'ok';
+  const word = status === 'failed' ? 'fail' : running ? 'live' : status === 'stopped' ? 'stop' : 'ok';
+  const wordClass = status === 'failed' ? 'del' : status === 'stopped' ? 'warn' : 'add';
   /* 展示截断先做（`truncateForDisplay` 是渲染层防御，投影仍是全量真相），
      再切行——20k 字符的 split 只做一次，不在 map 里重复。 */
-  const lines = `${stdout}${stderr !== '' ? `${stdout !== '' ? '\n' : ''}${stderr}` : ''}`;
   const shown = lines === '' ? null : truncateForDisplay(lines).split('\n');
   return (
     <section className="step term" data-term={tool.tool_call_id}>
@@ -2664,8 +2674,8 @@ function TermCard({
             {/* 中断先于 exit 码：被取消的命令可能带着半截 exit 码，语义仍是「中断」。 */}
             <span>
               {running ? '进行中'
-                : tool.status === 'stopped' ? '已中断'
-                  : exit !== undefined ? `exit ${exit}` : '—'}
+                : status === 'stopped' ? '已中断'
+                  : exit !== null ? `exit ${exit}` : '—'}
             </span>
             {dur !== null && <><span>·</span><span>{dur}</span></>}
             {seq !== null && <><span>·</span><span className="mono">seq {seq}</span></>}
@@ -2703,7 +2713,7 @@ function TermCard({
                   <span>来源</span>
                   {seq !== null && <span className="mono">seq {seq}</span>}
                   <span>·</span>
-                  <span>{stderr !== '' ? 'stderr 有内容' : 'stdout'}</span>
+                  <span>{hasStderr ? 'stderr 有内容' : 'stdout'}</span>
                 </>
               )}
               <span className="grow" />
