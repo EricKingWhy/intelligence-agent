@@ -102,7 +102,6 @@ class Settings(BaseSettings):
     jwt_secret: SecretStr | None = None
     milvus_uri: str = ""
     milvus_token: SecretStr = SecretStr("")
-    milvus_collection: str = ""
     # Knowledge 域独立 Collection（ADR-0013 决策 13）：必填无默认——
     # 不配 = knowledge capability 缺席降级，绝不静默写默认库。
     knowledge_collection: str = ""
