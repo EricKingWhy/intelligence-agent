@@ -264,7 +264,7 @@ def test_confirmed_batch_survives_real_kill(tmp_path: Path) -> None:
         f"子进程未按预期被 kill：rc={completed.returncode} stderr={completed.stderr}"
     )
     lines = completed.stdout.strip().splitlines()
-    assert lines and lines[-1] != "#END" or "#END" in lines, f"子进程输出异常：{lines[-3:]}"
+    assert lines and "#END" in lines, f"子进程输出异常：{lines[-3:]}"
     end_index = lines.index("#END")
     session_id = lines[0]
     confirmed: list[int] = json.loads(lines[end_index + 1])
