@@ -19,6 +19,7 @@ per-session 文件锁（``instance_lock.session_append_lock``）串行，见 ``_
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -262,6 +263,84 @@ class _ScanGate:
         return result
 
 
+class _FlushTicket:
+    """一次「等本轮 fsync」的凭证：leader 完成后按成功/异常释放。"""
+
+    __slots__ = ("done", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+
+class _GroupFlush:
+    """每会话的刷盘协调器（#1489）：同时到达的写者合并成一次 fsync。
+
+    形状取自 PostgreSQL WAL 的 ``commit_delay``：**只移植「共享刷盘 + 确认边界」**
+    ——leader 在 fsync 返回后才释放整批 waiter，每个 waiter 的 ``append_event``
+    仍在「自己的字节已被 fsync」之后才返回（返回即耐久不变）；不做异步早确认，
+    也不去掉 fsync。
+
+    cohort 在 fsync **之前**快照：fsync 开始后才登记的写者归下一轮，绝不被本轮
+    「顺带确认」。反方向是安全的——写者总是先写完（锁内 write+flush）再登记凭证，
+    所以被释放的凭证对应的字节一定已被本次（或更晚一次）fsync 覆盖。
+
+    为什么是线程原语：写者跨线程（事件循环下放的工作线程 + 同步入口的调用线程），
+    asyncio 层的协调够不着同步写者。
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._pending: list[_FlushTicket] = []
+        self._flushing = False
+        #: 实际执行的 fsync 轮数（原始读数，供 #1489 的组提交观测引用）。
+        self.rounds = 0
+
+    def commit(self, path: Path) -> None:
+        """登记本轮并等 fsync 完成；返回即本条字节已耐久，失败原样抛出。
+
+        leader 只服务**一轮**：cohort 在 fsync 前快照，本轮之后的登记者归下一轮。
+        轮到自己那批释放后立刻退出（`ticket.done` 检查在取 cohort 之前），不会
+        因为队列一直有人而被扣住继续当 leader。
+        """
+        ticket = _FlushTicket()
+        with self._cv:
+            self._pending.append(ticket)
+        while True:
+            with self._cv:
+                if ticket.done.is_set():
+                    break
+                if self._flushing:
+                    self._cv.wait()
+                    continue
+                self._flushing = True
+                cohort, self._pending = self._pending, []
+                self.rounds += 1
+            error: BaseException | None = None
+            try:
+                self._fsync(path)
+            except BaseException as exc:  # noqa: BLE001 — 原样转交整批 waiter
+                error = exc
+            with self._cv:
+                self._flushing = False
+                for waiter in cohort:
+                    waiter.error = error
+                    waiter.done.set()
+                self._cv.notify_all()
+        if ticket.error is not None:
+            raise ticket.error
+
+    @staticmethod
+    def _fsync(path: Path) -> None:
+        # 单独开 fd 而不是复用写句柄：写句柄在写锁内就已关闭（锁内只 write+flush）。
+        # `O_RDWR` 是 Windows 的要求——`FlushFileBuffers` 需要写权限，只读句柄会失败。
+        fd = os.open(path, os.O_RDWR)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 class JsonlSessionStore:
     """JSONL append-only 事件存储。
 
@@ -300,6 +379,10 @@ class JsonlSessionStore:
             str, tuple[tuple[int, int], SessionSummaryStats]
         ] = {}
         self._state_guard = threading.Lock()
+        # #1489：每会话一个刷盘协调器（懒创建，表结构由 `_state_guard` 保护）。
+        # 与 `_seq_locks` 分表：写锁管「读戳→判定→写」的原子性，协调器管「谁的
+        # fsync 覆盖了谁的字节」，两件事的生命周期不同（协调器可在写锁外被等待）。
+        self._group_flush: dict[str, _GroupFlush] = {}
         # #516 并发列表的单飞闸（用户裁决第五选项）：见 _ScanGate 的契约边界。
         self._scan_gate = _ScanGate()
         # #1389：落盘后的可选观察者（归档索引）。**纯通知**——与本类的一切
@@ -366,6 +449,24 @@ class JsonlSessionStore:
             if lock is None:
                 lock = self._seq_locks[session_id] = threading.Lock()
             return lock
+
+    def _group_flush_for(self, session_id: str) -> _GroupFlush:
+        """取得该会话的刷盘协调器（懒创建；表结构由 `_state_guard` 保护）。"""
+        with self._state_guard:
+            flush = self._group_flush.get(session_id)
+            if flush is None:
+                flush = self._group_flush[session_id] = _GroupFlush()
+            return flush
+
+    def last_written_seq(self, session_id: str) -> int:
+        """已**写入**文件的最大 seq（可能尚未 fsync；无文件 = -1）。
+
+        #1489：异步入口在 await 期间被取消时，那条写仍会在工作线程里跑完，调用方
+        因此不知道它用了哪个号。此时不猜——向 store 要盘面事实，把调用方的计数器
+        对齐到「不小于盘面」。取会话写锁读，与在途写者串行，不会读到半个状态。
+        """
+        with self._lock_for(session_id):
+            return self._last_seq_on_disk(session_id)
 
     def _last_seq_on_disk(self, session_id: str) -> int:
         """已落盘最大 seq（无文件 = -1）。带文件戳校验的缓存，必须在会话写锁内调用。
@@ -473,7 +574,10 @@ class JsonlSessionStore:
                 with path.open("a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
                     fh.flush()
-                    os.fsync(fh.fileno())
+                    # fsync **不在这里**（#1489）：刷盘移出临界区，由 `_GroupFlush`
+                    # 把同时到达的写者合并成一次。锁内等磁盘会把它们串成串行，共享
+                    # 刷盘就无从谈起；耐久边界不动——`append_event` 仍在本轮 fsync
+                    # 成功后才返回。
                 # 文件戳/缓存更新必须**留在文件锁内**（#1063）：原实现放在
                 # `_lock_for` 内、`session_append_lock` 外，跨进程下会在「放锁 → stat」
                 # 之间被另一进程追加，于是把**自己**的 seq 配上**别人刚写后**的
@@ -484,9 +588,35 @@ class JsonlSessionStore:
                     self._last_seq[session_id] = (
                         event.seq, stat.st_size, stat.st_mtime_ns,
                     )
+        # 锁外提交（#1489）：同时到达的写者在这里合并成一次 fsync。返回即耐久。
+        self._group_flush_for(session_id).commit(path)
         # 锁外通知（#1389）：观察者是派生索引，绝不与写临界区共享失败面。
         self._notify_observer(session_id, event)
         return event
+
+    async def append_event_async(
+        self, session_id: str, event: SessionEvent, *, allocate: bool = False,
+    ) -> SessionEvent:
+        """:meth:`append_event` 的异步入口（#1489）：把 durable 刷盘的等待移出事件循环。
+
+        整段都在工作线程里跑 :meth:`append_event`，事件循环只在投递与取回两端各停
+        一次。刻意不另开一条写路径：
+
+        * 顺序合同（#1063 的读戳 → 判定 → 写 → 戳缓存）与同步入口是**同一份代码**，
+          不存在两条会漂移的实现；
+        * 全仓的故障注入替身（``RejectingStore`` / ``FailingFromStore`` 等）都覆写
+          ``append_event``，故障因此在**热路径**上照样传播——这正是验收 3 要的形状。
+
+        返回即耐久：正常返回 ⇒ 本条事件已 fsync（票面「不许确认未耐久事件」）。
+        write/flush/fsync 的失败原样抛进调用方（不吞、不重投）。
+
+        取消语义（诚实披露）：``to_thread`` 的取消只放弃**等待**，线程里那次写会
+        跑完——本条是否落盘属 UNKNOWN。UNKNOWN 不得盲目重投；seq 计数器与盘面的
+        对齐由 :meth:`Session.append_async` 负责（它 shield 本调用并在完成回调里对齐）。
+        """
+        return await asyncio.to_thread(
+            self.append_event, session_id, event, allocate=allocate,
+        )
 
     def _neutralize_torn_tail(self, path: Path) -> None:
         """append 前中立化「无换行撕裂尾段」（#565 双轴收敛 P2 加固）。
