@@ -5898,35 +5898,11 @@ class SessionService:
         """#565：events.jsonl 完整性闸门——恢复入口对损坏日志拒绝继续。
 
         三类（`EventLogCorruptError` docstring）：完整坏行 / seq 断层 / seq 重复。
-        文案带**脱敏定位**（行号 / 字节偏移 / 长度 / sha256 / reason，不含行内容）；
-        原字节保留在文件里未动，修复是人工动作。本错误**不可重试**：重读同一
-        文件无用——与写时 `SeqConflict`（可重读快照重试）在语义上分开。
+        判定与文案的唯一 owner 是 `EventLogIntegrity.raise_if_corrupt`——#1516
+        起启动恢复扫描（`recovery.scan`）也走同一个方法，两个写恢复事实的入口
+        因此不可能对同一份日志给出不同判定（本方法只保留既有调用点的形状）。
         """
-        if integrity.healthy:
-            return
-        parts: list[str] = []
-        for record in integrity.corrupt_lines:
-            parts.append(
-                f"损坏行 lineno={record.lineno} offset={record.byte_offset} "
-                f"len={record.byte_length} sha256={record.line_sha256} "
-                f"reason={record.reason}"
-            )
-        for lo, hi in integrity.seq_gaps:
-            parts.append(f"seq 断层 {lo}-{hi}" if lo != hi else f"seq 缺号 {lo}")
-        for seq in integrity.seq_duplicates:
-            parts.append(f"seq 重复 {seq}")
-        # 文案封顶（P3 残余修复）：千行全坏的文件会把无界拼接变成数十 KB 的
-        # 409 detail（撑爆错误弹窗、进不了日志检索）。文案只带前 cap 条 +
-        # 总条数——完整定位记录本就在 store WARNING 日志里，一条不少。
-        cap = 5
-        detail = "；".join(parts[:cap])
-        if len(parts) > cap:
-            detail += f"；…共 {len(parts)} 条（其余 {len(parts) - cap} 条见 store WARNING 日志与完整性报告）"
-        raise EventLogCorruptError(
-            f"Session '{session_id}' 事件日志损坏，恢复已拒绝：{detail}。"
-            "请按 store WARNING 日志的定位记录核对原字节后人工修复文件；修复前"
-            "恢复入口保持拒绝（本错误不可重试）"
-        )
+        integrity.raise_if_corrupt(session_id)
 
     async def _read_events_precheck(self, session_id: str) -> list[SessionEvent]:
         """只读恢复预检（#1082）：`recover` 与 `pending_decisions` 共用的五步前导。
@@ -7588,6 +7564,7 @@ __all__ = [
     "ApprovalRequestMissing",
     "CompactionConcurrentWrite",
     "CompactionInProgress",
+    "EventLogCorruptError",
     "InvalidDecision",
     "InvalidForkBoundary",
     "InvalidSessionId",

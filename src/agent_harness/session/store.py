@@ -32,7 +32,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from agent_harness.instance_lock import session_append_lock
-from agent_harness.session.errors import SeqConflict, SessionNotFound
+from agent_harness.session.errors import (
+    EventLogCorruptError,
+    SeqConflict,
+    SessionNotFound,
+)
 from agent_harness.session.event import (
     RUN_TERMINAL_TYPES,
     SESSION_STARTED,
@@ -95,6 +99,47 @@ class EventLogIntegrity:
     @property
     def healthy(self) -> bool:
         return not (self.corrupt_lines or self.seq_gaps or self.seq_duplicates)
+
+    def raise_if_corrupt(self, session_id: str) -> None:
+        """#565 完整性闸门——**恢复类写操作**对损坏日志拒绝继续（唯一判据 owner）。
+
+        「损坏」的三类见类 docstring；合法尾部半行不在其中（`_classify_event_line`
+        按写入中断的预期形状容错），所以本闸门不会误伤崩溃留下的半行。
+
+        文案带**脱敏定位**（行号 / 字节偏移 / 长度 / sha256 / reason，不含行内容）；
+        原字节保留在文件里未动，修复是人工动作。本错误**不可重试**：重读同一
+        文件无用——与写时 `SeqConflict`（可重读快照重试）在语义上分开。
+
+        调用方：`SessionService` 的恢复入口（recover / pending_decisions / fork /
+        get_events）与启动恢复扫描（#1516）。扫描若绕过本闸门直接 append
+        ``run/interrupted``，坏日志上就会多出「恢复结论」，等于把丢失的
+        permission/tool 事实当成不存在（不变量 #14 的反面）。
+        """
+        if self.healthy:
+            return
+        parts: list[str] = []
+        for record in self.corrupt_lines:
+            parts.append(
+                f"损坏行 lineno={record.lineno} offset={record.byte_offset} "
+                f"len={record.byte_length} sha256={record.line_sha256} "
+                f"reason={record.reason}"
+            )
+        for lo, hi in self.seq_gaps:
+            parts.append(f"seq 断层 {lo}-{hi}" if lo != hi else f"seq 缺号 {lo}")
+        for seq in self.seq_duplicates:
+            parts.append(f"seq 重复 {seq}")
+        # 文案封顶（P3 残余修复）：千行全坏的文件会把无界拼接变成数十 KB 的
+        # 409 detail（撑爆错误弹窗、进不了日志检索）。文案只带前 cap 条 +
+        # 总条数——完整定位记录本就在 store WARNING 日志里，一条不少。
+        cap = 5
+        detail = "；".join(parts[:cap])
+        if len(parts) > cap:
+            detail += f"；…共 {len(parts)} 条（其余 {len(parts) - cap} 条见 store WARNING 日志与完整性报告）"
+        raise EventLogCorruptError(
+            f"Session '{session_id}' 事件日志损坏，恢复已拒绝：{detail}。"
+            "请按 store WARNING 日志的定位记录核对原字节后人工修复文件；修复前"
+            "恢复入口保持拒绝（本错误不可重试）"
+        )
 
 
 @dataclass(frozen=True)
