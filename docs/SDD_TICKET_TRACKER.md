@@ -1,5 +1,7 @@
 # SDD Ticket Tracker
 
+**施工交付（2026-10-23，#1492 / ticket-010 Memory freeze backup）**：分支 `codex/issue-1492-memory-freeze-backup`，代码 tip `a234c6ea`，审查台账提交 `bd22d3b9`，未 push / 未开 PR / 未 merge / 未关 Issue。新增 standalone 冻结、AES-GCM 离线归档、SQLite Online Backup 一致快照、隔离 restore rehearsal 与 runbook；不接入 runtime/retrieval，不执行删除。focused rehearsal **8 passed**，ruff / py_compile / verification map 通过；完整后端 pytest（9155 collected）按要求尝试，30 分钟工具上限超时且无汇总，**不宣称全量通过**。最终 Gate-0 收据待本票文档收口后补入。生产 workspace 停写证据、owner-managed key 注入与实际生产 restore 仍由所有者在场执行；保留截止日 2027-10-23，仅人工复核、不自动销毁。
+
 **等待 merge（2026-10-22，#1437）**：Issue #1437「记忆投影一致性」（F-01 甲案补投影 + F-06 重试不丢 + F-06b 全量重投影）。PR [#1463](https://github.com/EricKingWhy/intelligence-agent/pull/1463) OPEN，base `main`，分支 `claude/1437-projection-consistency`，最终 tip `5aed8704`（被测树 `ffe1203d` / tree `799b5525`），基线 `387bdcc8`。Issue 标签已由 `in-progress` 换为 `等待merge`。**未 merge，合并由维护者执行。**
 
 - **实现面**：`memory` 工具写路径接上投影通道（`reprojection.py` 新增，只读 markdown、只写 SQLite）；派生层新增 `projection_source` / `projection_target` 两列（仅 SQLite，不进冻结 Pydantic 契约）与 pending 账本表；工具投影幂等由部分唯一索引 `memory_v2_one_tool_projection` 保证，降级退回同列无唯一性的普通索引。对账键统一为 `entry_digest`（sha256）。范围锁：`memory_tool.py` 的 `_gate` 区域字节级未变（1198 字节，sha256 `b3002ebea3a67ad7` 前后一致），#1438 边界未触碰。
