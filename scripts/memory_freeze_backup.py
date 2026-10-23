@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import tarfile
 from collections import Counter
@@ -41,6 +42,21 @@ WRITER_CATEGORIES = (
     "external_legacy_process",
     "human_writer",
 )
+WRITER_PROOF_METHODS = {
+    "endpoint-disable",
+    "fixture-no-writer",
+    "manual-pause",
+    "process-stop",
+    "worker-quiesce",
+}
+WRITER_EVIDENCE_TYPES = {
+    "control-plane",
+    "fixture",
+    "manual-confirmation",
+    "process-list",
+    "scheduler-state",
+    "service-state",
+}
 DATABASE_NAMES = ("memory.db", "memory-v2.db")
 DATABASE_SIDECARS = ("-wal", "-shm", "-journal")
 KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -206,6 +222,7 @@ def _database_manifest(path: Path) -> dict[str, Any]:
 
 
 def _resolve_existing(path: Path, label: str) -> Path:
+    _reject_reparse_components(path.expanduser(), label)
     resolved = path.expanduser().resolve()
     if not resolved.exists():
         raise BackupError(f"{label} does not exist: {resolved}")
@@ -217,7 +234,53 @@ def _ensure_not_inside(path: Path, parent: Path, label: str) -> None:
         raise BackupError(f"{label} must be outside the workspace runtime directory")
 
 
+def _is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction) and is_junction():
+        return True
+    try:
+        return bool(path.stat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except (AttributeError, OSError):
+        return False
+
+
+def _reject_reparse_components(path: Path, label: str) -> None:
+    candidate = path.expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    while True:
+        if _is_reparse_point(candidate):
+            raise BackupError(f"{label} cannot contain a symlink, junction, or reparse point: {candidate}")
+        if candidate.parent == candidate:
+            break
+        candidate = candidate.parent
+
+
+def _iter_regular_files(root: Path):
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError as error:
+            raise BackupError(f"cannot enumerate source directory {directory}: {error}") from error
+        for entry in entries:
+            path = Path(entry.path)
+            if _is_reparse_point(path):
+                raise BackupError(f"symlink, junction, or reparse point is not allowed: {path}")
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif entry.is_file(follow_symlinks=False):
+                    yield path
+            except OSError as error:
+                raise BackupError(f"cannot inspect source path {path}: {error}") from error
+
+
 def _prepare_output(path: Path, workspace: Path) -> Path:
+    _reject_reparse_components(path.expanduser(), "backup output")
     resolved = path.expanduser().resolve()
     _ensure_not_inside(resolved, workspace, "backup output")
     if resolved.exists():
@@ -282,13 +345,86 @@ def _validate_writer_proof(proof: Any) -> dict[str, Any]:
         entry = writers[category]
         if not isinstance(entry, dict):
             raise BackupError(f"writer proof entry {category!r} is not an object")
+        if entry.get("category") != category:
+            raise BackupError(f"writer proof entry {category!r} has the wrong category")
         if entry.get("status") not in {"absent", "stopped"}:
             raise BackupError(f"writer {category!r} is not absent or stopped")
-        for field in ("proof", "scope"):
-            if not isinstance(entry.get(field), str) or not entry[field].strip():
-                raise BackupError(f"writer {category!r} lacks a non-empty {field}")
-        evidence = f"{entry['scope']} {entry['proof']}".lower()
-        if any(term in evidence for term in ("file lock", "local lock", "lock-only", "local-only")):
+        if entry.get("method") not in WRITER_PROOF_METHODS:
+            raise BackupError(
+                f"writer {category!r} must declare a supported stop method"
+            )
+        if not isinstance(entry.get("control_action"), str) or not entry["control_action"].strip():
+            raise BackupError(f"writer {category!r} lacks a non-empty control_action")
+        scope = entry.get("scope")
+        if not isinstance(scope, dict):
+            raise BackupError(f"writer {category!r} lacks structured scope")
+        if not isinstance(scope.get("workspace"), str) or not scope["workspace"].strip():
+            raise BackupError(f"writer {category!r} lacks scope workspace")
+        for field in ("hosts", "clones"):
+            values = scope.get(field)
+            if (
+                not isinstance(values, list)
+                or not values
+                or any(not isinstance(value, str) or not value.strip() for value in values)
+            ):
+                raise BackupError(f"writer {category!r} lacks a non-empty scope {field} list")
+        if scope.get("cross_clone_checked") is not True:
+            raise BackupError(f"writer {category!r} scope was not checked across clones")
+        proof_evidence = entry.get("proof")
+        if not isinstance(proof_evidence, dict):
+            raise BackupError(f"writer {category!r} lacks structured proof evidence")
+        if proof_evidence.get("evidence_type") not in WRITER_EVIDENCE_TYPES:
+            raise BackupError(f"writer {category!r} has an unsupported proof evidence type")
+        if proof_evidence.get("observed_state") != entry["status"]:
+            raise BackupError(f"writer {category!r} proof state does not match status")
+        if not isinstance(proof_evidence.get("evidence_ref"), str) or not proof_evidence["evidence_ref"].strip():
+            raise BackupError(f"writer {category!r} lacks a proof evidence reference")
+        verification = entry.get("verification")
+        if not isinstance(verification, dict):
+            raise BackupError(f"writer {category!r} lacks structured verification")
+        if verification.get("active_writers") != 0:
+            raise BackupError(f"writer {category!r} active_writers must be zero")
+        if verification.get("active_writer_processes") != []:
+            raise BackupError(f"writer {category!r} active_writer_processes must be empty")
+        if verification.get("write_activity") != "none":
+            raise BackupError(f"writer {category!r} write_activity must be none")
+        if verification.get("mtime_stable") is not True:
+            raise BackupError(f"writer {category!r} mtime_stable must be true")
+        for field in ("host", "evidence_ref"):
+            if not isinstance(verification.get(field), str) or not verification[field].strip():
+                raise BackupError(f"writer {category!r} lacks verification {field}")
+        if verification["evidence_ref"] != proof_evidence["evidence_ref"]:
+            raise BackupError(f"writer {category!r} proof references do not match")
+        verified_at = verification.get("verified_at")
+        last_write_at = verification.get("last_write_at")
+        for field, value in (("verified_at", verified_at), ("last_write_at", last_write_at)):
+            if not isinstance(value, str):
+                raise BackupError(f"writer {category!r} lacks verification {field}")
+            try:
+                moment = datetime.fromisoformat(value)
+                if moment.tzinfo is None:
+                    raise ValueError("timestamp has no timezone")
+            except ValueError as error:
+                raise BackupError(
+                    f"writer {category!r} verification {field} must be an ISO timestamp with timezone"
+                ) from error
+            if moment > now + timedelta(minutes=5):
+                raise BackupError(f"writer {category!r} verification {field} is in the future")
+        evidence = json.dumps(entry, ensure_ascii=False, sort_keys=True).lower()
+        if any(
+            term in evidence
+            for term in (
+                "file lock",
+                "file-lock",
+                "filesystem locking",
+                "local lock",
+                "local-only",
+                "lock based",
+                "lock-based",
+                "lock-only",
+                "locking only",
+            )
+        ):
             raise BackupError(f"writer {category!r} uses a local file lock as its freeze proof")
     return proof
 
@@ -312,8 +448,8 @@ def _source_inventory(workspace: Path) -> list[dict[str, Any]]:
     def add(relative: str, role: str) -> None:
         relative_path = PurePosixPath(relative)
         source = workspace.joinpath(*relative_path.parts)
-        if source.is_symlink():
-            raise BackupError(f"symlink is not allowed in source inventory: {relative}")
+        if _is_reparse_point(source):
+            raise BackupError(f"symlink, junction, or reparse point is not allowed: {relative}")
         present = source.is_file()
         item: dict[str, Any] = {"relative_path": str(relative_path), "role": role, "present": present}
         if present:
@@ -326,25 +462,22 @@ def _source_inventory(workspace: Path) -> list[dict[str, Any]]:
         for suffix in DATABASE_SIDECARS:
             add(database + suffix, "sqlite-sidecar")
     memory_dir = workspace / "memories"
-    if memory_dir.is_symlink():
-        raise BackupError("memories directory symlink is not allowed")
+    if _is_reparse_point(memory_dir):
+        raise BackupError("memories directory symlink, junction, or reparse point is not allowed")
     add("memories/MEMORY.md", "markdown-main")
     add("memories/USER.md", "markdown-main")
     if memory_dir.exists():
         if not memory_dir.is_dir():
             raise BackupError("memories path is not a directory")
-        for path in memory_dir.rglob("*"):
-            if path.is_symlink():
-                raise BackupError(f"symlink is not allowed in source inventory: {path.name}")
-            if path.is_file():
-                relative = path.relative_to(workspace).as_posix()
-                entries[relative] = {
-                    "relative_path": relative,
-                    "role": _file_role(relative),
-                    "present": True,
-                    "size": path.stat().st_size,
-                    "sha256": _sha256_file(path),
-                }
+        for path in _iter_regular_files(memory_dir):
+            relative = path.relative_to(workspace).as_posix()
+            entries[relative] = {
+                "relative_path": relative,
+                "role": _file_role(relative),
+                "present": True,
+                "size": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            }
     return [entries[key] for key in sorted(entries)]
 
 
@@ -815,7 +948,13 @@ def _seed_database(path: Path, version: int) -> None:
                      100, 'started', '[{"candidate":"blocked-memory"}]', 'forming', '{"count":1}',
                      NULL, NULL, 'worker-a', '2026-10-23T00:05:00+00:00',
                      '2026-10-23T00:00:00+00:00', '2026-10-23T00:00:01+00:00');
+                INSERT INTO memory_v2_jobs VALUES
+                    ('job-2', 'idempotency-2', 'tenant-a', 'user-a', NULL, 'session-2', 'run-2',
+                     100, 'completed', NULL, 'approved', 'completed', 'committed', NULL,
+                     NULL, NULL, '2026-10-23T00:00:00+00:00',
+                     '2026-10-23T00:10:00+00:00');
                 INSERT INTO memory_v2_fts(rowid, content) VALUES (1, 'likes tea');
+                INSERT INTO memory_v2_fts(rowid, content) VALUES (2, 'legacy note');
                 """
             )
         connection.commit()
@@ -837,15 +976,38 @@ def _seed_workspace(workspace: Path) -> dict[str, Any]:
     (memories / "MEMORY.md.bak.20261023").write_text("- old note\n", encoding="utf-8")
     (memories / ".mem_seed.tmp").write_text("temporary write artifact\n", encoding="utf-8")
     (memories / "MEMORY.md.lock").write_text("seed lock evidence\n", encoding="utf-8")
+    checked_at = datetime.now(UTC).isoformat()
     proof = {
         "schema_version": 1,
         "freeze_effective": True,
-        "checked_at": datetime.now(UTC).isoformat(),
+        "checked_at": checked_at,
         "writers": {
             category: {
+                "category": category,
                 "status": "stopped",
-                "scope": "representative seeded workspace",
-                "proof": f"seed fixture: {category} has no live writer process",
+                "method": "fixture-no-writer",
+                "control_action": f"seed fixture starts no {category} writer",
+                "scope": {
+                    "workspace": "representative seeded workspace",
+                    "hosts": ["seed-fixture"],
+                    "clones": ["seed-fixture"],
+                    "cross_clone_checked": True,
+                },
+                "proof": {
+                    "evidence_type": "fixture",
+                    "observed_state": "stopped",
+                    "evidence_ref": f"seed-fixture://writer/{category}",
+                },
+                "verification": {
+                    "host": "seed-fixture",
+                    "active_writers": 0,
+                    "active_writer_processes": [],
+                    "write_activity": "none",
+                    "mtime_stable": True,
+                    "last_write_at": checked_at,
+                    "verified_at": checked_at,
+                    "evidence_ref": f"seed-fixture://writer/{category}",
+                },
             }
             for category in WRITER_CATEGORIES
         },
@@ -916,6 +1078,7 @@ def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[st
     archive = _resolve_existing(archive_arg, "encrypted backup")
     if not archive.is_file():
         raise BackupError(f"encrypted backup is not a file: {archive}")
+    _reject_reparse_components(restore_root_arg.expanduser(), "restore root")
     restore_root = restore_root_arg.expanduser().resolve()
     if restore_root.exists() and any(restore_root.iterdir()):
         raise BackupError(f"restore root must be new or empty: {restore_root}")
@@ -932,6 +1095,7 @@ def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[st
         "archive_sha256": _sha256_file(archive),
         "restore_root": str(restore_root),
         "source_files_match": source_match,
+        "source_file_manifest": manifest["source_files"],
         "database_tables_match": databases_match,
         "database_table_counts": table_counts,
         "database_manifests": database_manifests,

@@ -113,6 +113,7 @@ def test_backup_and_isolated_restore_reconcile_the_seeded_lifecycle(tmp_path: Pa
     assert restore_receipt["database_manifests"]["memory-v2.db"]["tables"]
 
     manifest = json.loads((restore_root / "manifest.json").read_text(encoding="utf-8"))
+    assert restore_receipt["source_file_manifest"] == manifest["source_files"]
     inventory = {item["relative_path"]: item for item in manifest["source_files"]}
     assert inventory["memory-v2.db-wal"]["role"] == "sqlite-sidecar"
     assert inventory["memories/MEMORY.md"]["role"] == "markdown-main"
@@ -139,7 +140,10 @@ def test_backup_and_isolated_restore_reconcile_the_seeded_lifecycle(tmp_path: Pa
     assert tables["memory_v2_records"]["old_keys"]["memory_id"]["non_null_count"] == 2
     assert tables["memory_v2_records"]["provenance"]["source_type"]["non_null_count"] == 2
     assert tables["memory_v2_jobs"]["leases"]["lease_owner"]["non_null_count"] == 1
-    assert tables["memory_v2_jobs"]["status"]["stage"]["non_null_count"] == 1
+    assert tables["memory_v2_jobs"]["status"]["stage"]["non_null_count"] == 2
+    assert tables["memory_v2_jobs"]["status"]["state"]["value_counts"]
+    assert tables["memory_v2_jobs"]["status"]["outcome"]["non_null_count"] == 1
+    assert tables["memory_v2_jobs"]["old_keys"]["idempotency_key"]["non_null_count"] == 2
     assert tables["memory_v2_blocked"]["provenance"]["origin"]["non_null_count"] == 1
 
     for database_name in ("memory.db", "memory-v2.db"):
@@ -226,7 +230,8 @@ def test_writer_proof_cannot_use_a_local_lock_as_evidence(tmp_path: Path) -> Non
     workspace = tmp_path / "workspace"
     assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
     proof = json.loads((workspace / "writer-proof.json").read_text(encoding="utf-8"))
-    proof["writers"]["human_writer"]["proof"] = "local file lock only"
+    proof["writers"]["human_writer"]["proof"]["evidence_ref"] = "filesystem locking only"
+    proof["writers"]["human_writer"]["verification"]["evidence_ref"] = "filesystem locking only"
     proof_path = tmp_path / "lock-only-proof.json"
     proof_path.write_text(json.dumps(proof), encoding="utf-8")
 
@@ -242,3 +247,25 @@ def test_writer_proof_cannot_use_a_local_lock_as_evidence(tmp_path: Path) -> Non
     )
     assert result.returncode != 0
     assert "file lock" in result.stderr.lower()
+
+
+def test_writer_proof_requires_structured_zero_write_verification(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+    proof = json.loads((workspace / "writer-proof.json").read_text(encoding="utf-8"))
+    proof["writers"]["formation"]["verification"]["active_writers"] = 1
+    proof_path = tmp_path / "active-writer-proof.json"
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
+
+    result = run_tool(
+        "backup",
+        "--workspace",
+        str(workspace),
+        "--output",
+        str(tmp_path / "offline" / "memory-backup.iab"),
+        "--writer-proof",
+        str(proof_path),
+        env=key_env(),
+    )
+    assert result.returncode != 0
+    assert "active_writers" in result.stderr

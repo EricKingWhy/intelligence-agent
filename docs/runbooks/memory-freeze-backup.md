@@ -50,20 +50,33 @@ tombstone purge。`seed` 只用于本地代表性演练；真实生产 workspace
   "freeze_effective": true,
   "checked_at": "<UTC timestamp>",
   "writers": {
-    "memory_tool": {"status": "stopped", "scope": "<deployment scope>", "proof": "<evidence>"},
-    "formation": {"status": "stopped", "scope": "<deployment scope>", "proof": "<evidence>"},
-    "approval": {"status": "absent", "scope": "<deployment scope>", "proof": "<evidence>"},
-    "governance": {"status": "stopped", "scope": "<deployment scope>", "proof": "<evidence>"},
-    "external_legacy_process": {"status": "absent", "scope": "<all hosts/clones>", "proof": "<evidence>"},
-    "human_writer": {"status": "stopped", "scope": "<operator scope>", "proof": "<evidence>"}
+    "memory_tool": {
+      "category": "memory_tool", "status": "stopped", "method": "endpoint-disable",
+      "control_action": "<disable the Memory write endpoint>",
+      "scope": {"workspace": "<deployment scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true},
+      "proof": {"evidence_type": "service-state", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"},
+      "verification": {
+        "host": "<host or control plane>", "active_writers": 0, "active_writer_processes": [],
+        "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>",
+        "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"
+      }
+    },
+    "formation": {"category": "formation", "status": "stopped", "method": "worker-quiesce", "control_action": "<stop workers>", "scope": {"workspace": "<deployment scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "process-list", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
+    "approval": {"category": "approval", "status": "absent", "method": "endpoint-disable", "control_action": "<disable approval writes>", "scope": {"workspace": "<deployment scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "control-plane", "observed_state": "absent", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
+    "governance": {"category": "governance", "status": "stopped", "method": "worker-quiesce", "control_action": "<stop maintenance>", "scope": {"workspace": "<deployment scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "scheduler-state", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
+    "external_legacy_process": {"category": "external_legacy_process", "status": "absent", "method": "process-stop", "control_action": "<stop all legacy processes>", "scope": {"workspace": "<all hosts/clones>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "process-list", "observed_state": "absent", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
+    "human_writer": {"category": "human_writer", "status": "stopped", "method": "manual-pause", "control_action": "<pause all human editing>", "scope": {"workspace": "<operator scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "manual-confirmation", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}}
   }
 }
 ```
 
-工具会 fail-closed：六类必须全部出现，状态只能是 `absent` 或 `stopped`，每项必须有
-非空 `scope`/`proof`，`checked_at` 必须是带时区且不早于 24 小时的时间戳，且不会接受
-“local file lock only”作为围住证明。时间窗口是结构性新鲜度检查，不替代所有者对证据内容的
-人工审阅。
+工具会 fail-closed：六类必须全部出现，类别必须与键相等，方法必须是受支持的停写动作，
+状态只能是 `absent` 或 `stopped`，每项必须有非空 `scope`/`proof`/`control_action`，并且
+结构化 verification 必须声明证据主机、`active_writers=0`、`write_activity=none`、最后写入
+时间、复核时间和 owner evidence reference。`checked_at`、`last_write_at`、`verified_at` 都必须
+带时区且不能是未来时间；`checked_at` 不得早于当前时间 24 小时以上。工具也不会接受
+“local file lock only”作为围住证明。时间窗口和零写入声明是结构性门槛，不替代所有者对进程、
+任务、mtime、job lease/终态与人工操作证据的审阅。
 
 ## 本地代表性 rehearsal
 
@@ -92,7 +105,9 @@ $env:MEMORY_BACKUP_KEY = '<base64 encoding of an owner-managed 32-byte key>'
 receipt 必须显示 `encrypted=true`、`snapshot_method=sqlite-online-backup-api`、
 `runtime_loaded=false`、`retrieval_registered=false` 与 `retention_until=2027-10-23`。
 restore receipt 必须显示 source files、database tables、row/table manifests 和 SQLite
-`integrity_check` 全部匹配。加密 manifest 还绑定原 workspace 路径，工具会拒绝把恢复根放回
+`integrity_check` 全部匹配，并内嵌完整 `source_file_manifest`、各表状态/旧键/lease/provenance
+摘要和行哈希。种子 V2 workspace 同时包含带 lease 的 forming job 与带 idempotency key、终态
+及 outcome 的 completed job。加密 manifest 还绑定原 workspace 路径，工具会拒绝把恢复根放回
 原 workspace；输出目录必须是 workspace 运行目录之外的全新隔离位置。
 
 ## 生产执行（待所有者在场）
