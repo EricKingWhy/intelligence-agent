@@ -17,6 +17,10 @@ import { formatDuration } from './format';
 /**
  * run 终态词汇——镜像后端 `session/event.py:RUN_TERMINAL_TYPES`。
  *
+ * **#1498 起实体在 `tui/src/shared/event-semantics.ts`**（TUI 的 `rootDir: "."`
+ * 决定了共享文件只能落在 tui 包内，消融见 #1498 回报）：这里只转出，不再各写一份
+ * Set 字面量——两端因此共用一个判断，改一处两端测试同时变红。
+ *
  * 「这个 run 收口了吗」是**一个**判断，全前端只有这一个集合：抄第二份就会
  * 漏掉后加的类型。T8（#138）新增 `run/interrupted` 时正好踩了这个坑——
  * `isRecoverableRun` / `StepDetail` 的 run 时长 / `useSession` 的终态检测
@@ -28,11 +32,9 @@ import { formatDuration } from './format';
  * 终端帧判定、时长结算、恢复入口全都会据此走错分支。它的**执行区间**收口语义
  * 单独由 `scanRuns` 处理（见那里：暂停也算"这一轮不再是未收口的悬空 run"）。
  */
-export const RUN_TERMINAL_TYPES: ReadonlySet<string> = new Set<string>([
-  EventType.RUN_COMPLETED,
-  EventType.RUN_FAILED,
-  EventType.RUN_INTERRUPTED,
-]);
+import { RUN_TERMINAL_TYPES } from '../../../tui/src/shared/event-semantics.ts';
+
+export { RUN_TERMINAL_TYPES };
 
 export type RunPulseState =
   | 'idle' // no conversation or nothing has happened

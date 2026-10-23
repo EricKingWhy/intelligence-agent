@@ -1,0 +1,1 @@
+2026-10-23	#1502（ticket-020）TermCard 改为消费既有 commandOutputs 的终态 chunks/exitCode/status/streaming；保留 live fallback、stderr/footer/cursor/collapse；双轴审查 Standards/Spec PASS，P2 无尾换行 finding 已修回并复审为 P0–P3=0；focused 36/36，tsc/build 通过；全量 Vitest 仅既有 3 failures，E2E timeout 已如实记录	dec9aa6973ad3c8e76ac8fb2c2b2dfb5357ee244..9a4435286cc68d16ab34b2038a133590513e6537
