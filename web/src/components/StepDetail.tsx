@@ -1366,8 +1366,13 @@ export function ChatTab({
             </span>
           </div>
         )}
+        {/* #1524：本轮的用法计数。数据源 = run 级槽 `usage_total`（run/started 归零、
+            model/completed 累加、run/completed 以权威值覆盖），单位是 **token**——
+            与「字」不是一回事（同一段文本两种语言 token 数可以差几倍），所以标签
+            既标作用域（本轮）也标单位（tokens），不再叫「字数」。
+            缺数据 = 「—」（零伪造）；会话累计在顶栏的 4 张指标卡里，不在这里重复。 */}
         <div className="detail-row">
-          <span className="detail-key">字数</span>
+          <span className="detail-key">本轮 tokens</span>
           <span className="detail-val num">
             {conversation.usage_total && conversation.usage_total.total_tokens !== null
               ? conversation.usage_total.total_tokens.toLocaleString()
@@ -1494,7 +1499,12 @@ export function ChatTab({
                 <span className="detail-val">{c.compacted_turn_count}</span>
               </div>
               <div className="detail-row">
-                <span className="detail-key">字数估算</span>
+                {/* #1524：这是**估算**（压缩入口对 messages 的 token 估算，非供应商
+                    实测 usage），单位也是 token 不是字。标签必须同时说清这两点，
+                    否则读者会拿它跟顶栏的实测 token 数当同一件事对账。 */}
+                <span className="detail-key" title="压缩时对送入摘要上下文的 token 估算值——不是供应商回报的实测 usage，也不是字符数">
+                  估算 tokens
+                </span>
                 <span className="detail-val">{c.token_estimate.toLocaleString()}</span>
               </div>
               {c.fallback_used && (
@@ -1597,16 +1607,19 @@ export function ChatTab({
               </span>
             </div>
           )}
+          {/* #1524：与 RUN 段同一数据源、同一作用域。数字是 token 不是「字」——
+              同一段文本的中文字符数与 token 数可以差几倍，混用会让人以为能互相对账。
+              缺维显示「—」（逐维粘性 null，不补 0）；会话级累计看顶栏指标卡。 */}
           <div className="detail-row">
-            <span className="detail-key">用量</span>
+            <span className="detail-key">本轮 tokens</span>
             <span className="detail-val">
               {conversation.usage_total
-                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'} 字（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
+                ? `${conversation.usage_total.total_tokens?.toLocaleString() ?? '—'}（${conversation.usage_total.prompt_tokens?.toLocaleString() ?? '—'} + ${conversation.usage_total.completion_tokens?.toLocaleString() ?? '—'}）`
                 : '—'}
             </span>
           </div>
           <div className="detail-row">
-            <span className="detail-key">成本</span>
+            <span className="detail-key">本轮成本</span>
             <span className="detail-val">{conversation.cost_usd !== null ? `$${conversation.cost_usd}` : '—'}</span>
           </div>
         </div>

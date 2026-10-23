@@ -810,6 +810,18 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   // #1313 口径 B：新 run 的流式槽（R）归零；会话累计槽（S）**不清零**——
   // 顶栏口径是「会话内所有 run 累计、单调非减」，run 边界不改变已挣得的数字。
   state.run_usage_live = null;
+  // #1524：run 级槽 `usage_total` 也在 run 边界归零。它由本 run 的
+  // model/completed 累加、run/completed 以权威值覆盖——两条都只描述**本 run**；
+  // 此前不清零的后果是第二轮开跑后它仍带着上一轮的权威值，Inspector 的 RUN /
+  // MODEL 段于是显示「上一轮 + 本轮」的跨轮累计（#1313 的根因，本票修数据源
+  // 边界而不是改文案）。会话累计另有 S 槽（session_usage_total），不受影响。
+  state.usage_total = null;
+  // #1524：`cost_usd` 与 `usage_total` 同路数（run/completed 单点覆盖的 run 级事实），
+  // 不同步清零的话 MODEL 段会「本轮 tokens 是新的、成本是上一轮的」——同屏两个
+  // 生命周期对不上。清零后本轮未收口时显示「—」（本 run 还没有权威成本），
+  // 会话级成本另有顶栏「会话成本」指标卡（model/request 逐笔相加）。
+  // trace_id / trace_url 不清：它们是「最近一次可跳转的 trace」，不是本轮计数。
+  state.cost_usd = null;
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
@@ -1690,8 +1702,10 @@ function summarizeModelCompleted(event: AgentEvent): string {
   const model = typeof d.model === 'string' && d.model ? d.model : null;
   // 逐维可空（C6）：total_tokens 未知 ⇒ 该维不展示（绝不打印 "null tok"）；
   // 模型与 tokens 全都拿不到时回落内容长度，避免产出空摘要。
+  // #1524：单位是 token，不是字符（中文 4 字可以是 12 token，反之亦然）。
+  // 回落分支（下面那行）才是字符数——两处单位不同名，读者才能分辨。
   const tokens =
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null;
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null;
   if (model || tokens) {
     return [model, tokens].filter((p): p is string => p !== null).join(' · ');
   }
@@ -1766,7 +1780,8 @@ function summarizeArtifactCreated(event: AgentEvent): string {
 
 function summarizeContextCompacted(event: AgentEvent): string {
   const d = event.data;
-  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} 字`;
+  // #1524：token_estimate 的估算单位是 token（估的是送进摘要的 token 数）。
+  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok（估算）`;
 }
 
 function summarizeOperationReconcileRequired(event: AgentEvent): string {
@@ -1812,7 +1827,7 @@ function summarizeRunCompleted(event: AgentEvent): string {
   const d = event.data;
   const usage = parseUsage(d.usage_total);
   const parts = [
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null,
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null,
     typeof d.cost_usd === 'number' && Number.isFinite(d.cost_usd) ? `$${d.cost_usd}` : null,
   ].filter((p): p is string => p !== null);
   return parts.join(' · ');
