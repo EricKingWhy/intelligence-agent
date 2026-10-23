@@ -21,6 +21,7 @@ import {
   revokeApprovePolicyRule,
   type ApprovePolicyRule,
 } from '../lib/api';
+import { resolveFocusReturnTarget, restoreFocusTarget } from './focusReturn';
 
 interface Props {
   open: boolean;
@@ -94,12 +95,12 @@ function ApprovePolicyPanelBody({
       onOpenAutoFocus={() => {
         const requestedTarget = focusReturnTargetRef?.current ?? null;
         if (focusReturnTargetRef) focusReturnTargetRef.current = null;
-        openerRef.current = focusReturnTarget(requestedTarget ?? document.activeElement);
+        openerRef.current = resolveFocusReturnTarget(requestedTarget ?? document.activeElement);
       }}
       onCloseAutoFocus={(event) => {
-        if (openerRef.current?.isConnected) {
+        if (openerRef.current) {
           event.preventDefault();
-          openerRef.current.focus();
+          restoreFocusTarget(openerRef.current);
         }
       }}
     >
@@ -214,13 +215,4 @@ function ApprovePolicyPanelBody({
       </div>
     </Dialog.Content>
   );
-}
-
-function focusReturnTarget(active: Element | null): HTMLElement | null {
-  if (!(active instanceof HTMLElement)) return null;
-  const menu = active.closest('[role="menu"]');
-  if (!menu) return active;
-  const triggerId = menu.getAttribute('aria-labelledby')?.split(' ')[0];
-  const trigger = triggerId ? document.getElementById(triggerId) : null;
-  return trigger instanceof HTMLElement ? trigger : null;
 }

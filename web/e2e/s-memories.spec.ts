@@ -396,3 +396,40 @@ test('focus: body focus skips a disabled composer when choosing a palette return
   await expect(panel(page)).toBeHidden();
   await expect(page.locator('.appbar-more-trigger')).toBeFocused();
 });
+
+test('focus: a composer disabled while a palette panel is open falls back to the toolbar', async ({
+  page,
+}) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.route('**/api/approve-policy/rules', (route) =>
+    route.fulfill({ status: 200, body: '[]', contentType: 'application/json' }),
+  );
+  await page.goto('/');
+
+  const composer = page.locator('#composer-input');
+  const opener = page.locator('.appbar-more-trigger');
+  for (const [keyword, selector] of [
+    ['memory', '.memory-panel'],
+    ['approval', '.approve-policy-dialog'],
+  ]) {
+    await composer.evaluate((element) => {
+      (element as HTMLTextAreaElement).disabled = false;
+    });
+    await composer.focus();
+    await expect(composer).toBeFocused();
+    await page.keyboard.press('Control+k');
+    await page.locator('.palette-input').fill(keyword);
+    await page.getByRole('option').click();
+
+    const dialog = page.locator(selector);
+    await expect(dialog).toBeVisible();
+    await composer.evaluate((element) => {
+      (element as HTMLTextAreaElement).disabled = true;
+    });
+    await expect(composer).toBeDisabled();
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(opener).toBeFocused();
+  }
+});
