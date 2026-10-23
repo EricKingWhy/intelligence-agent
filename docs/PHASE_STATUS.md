@@ -1,6 +1,6 @@
 # Phase Status — 实施进度追踪
 
-- 2026-10-24：#1513 JWT 深层解析结构化拒绝 / JSONL 有限轮转；基线 `5a8b6c4d`，实现 `42eadaa4`，同步 `origin/main=0f47ed06` 后分支 tip `54a1d4cb`。修前后 HTTP/log 计数、基线 blob 哈希、部署日志容量读数与首轮双轴审查 findings 已归档于 `docs/phase_status/2026-10.md`；17 个聚焦测试已通过，完整后端测试/Gate-0/跟进复审待完成；获准 push + PR，禁止 merge。
+- 2026-10-24：#1513 JWT 深层解析结构化拒绝 / JSONL 有限轮转；基线 `5a8b6c4d`，实现 `42eadaa4`，同步 `origin/main=0f47ed06` 后分支 tip `54a1d4cb`。修前后 HTTP/log 计数、基线 blob 哈希、部署日志容量读数与首轮双轴审查 findings 已归档于 `docs/phase_status/2026-10.md`；Spec 跟进确认 P2/P3 均关闭、无新增 finding；聚焦测试 17 passed。完整后端测试/Gate-0/push/PR 待完成，禁止 merge。
 
 - 2026-10-23：#1485 模型端点元数据/link-local 轻量防误配（SEC-07 PARTIAL，裁决 25 B）实现 + 两轴审查 P0–P4 全修完成，**PR [#1545](https://github.com/EricKingWhy/intelligence-agent/pull/1545) 已开（base=main），未 merge**。分支 `claude/issue-1485-provider-url-guard`，基线 `origin/main=dec9aa69`，代码 tip `916d21f4`（tree `1a9215d4`）。新增 `model/endpoint_guard.py`：解析后地址（IPv4/IPv6 + 内嵌 v4，含 RFC 6052 拆位）与**每一跳重定向**拦截元数据/link-local 段，被拦目标零请求零凭据；`model_endpoint_allowlist` 为按端点所有者例外，回环/RFC1918 日常保存与测试不受影响；拒绝理由经 `misconfiguration_rejection` 与网络抖动区分。沙箱 `shell/ia-test` 全量 `-n 4` = 26 failed / 8877 passed / 258 skipped / 4 errors，基线 `dec9aa69` = 27 failed / 8816 passed / 258 skipped / 4 errors，**逐条对账零新增红**；聚焦三文件 78 passed。Gate-0 7/7 PASS（收据 `docs/gate/916d21f4fd8ae175c99003a05ef1cad4b4c3977e.json`），coverage exit 0。详见 Tracker 与月档。
 
