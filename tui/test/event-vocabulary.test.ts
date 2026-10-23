@@ -37,14 +37,22 @@ function listTsFiles(dir: string): string[] {
 }
 
 /**
- * 把注释替换成等长空白（保留换行与偏移），字符串/模板内容原样保留。
+ * 把注释替换成等长空白（保留换行与偏移），字符串/模板/正则内容原样保留。
  * 守卫钉的是「活代码手抄」；注释里提事件名是合法文档（复核 A1 的 8 处全在注释里）。
- * ponytail: 正则字面量按普通代码扫——本仓没有 `//`/`/*` 形态的正则，
- * 而字符串态已能挡住 `"http://…"` 里的斜杠；真出现再补正则态。
+ * 边界不是「正则里的 `/`」而是「正则里的引号」：`/^['"]+|['"]+$/g` 会让只认字符串态
+ * 的解析器误入引号态、吞掉后续活代码（增量复核 F-1 实证）。故 `/` 按「上一个非空白
+ * 字符属于 `(,=:[!&|?{};+-*%~^<>` 或行首」判为正则开头，正则内再分字符类两态。
+ * ponytail: 不认 `return /re/`（前一个是字母，按除号处理）；本仓唯一的这种写法
+ * （`src/lib/wsl.ts:22`）正则内无引号/注释符，无害；真需要再加关键字判定。
  */
+const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%~^<>";
+
 function stripComments(text: string): string {
-  type Mode = "code" | "line" | "block" | "double" | "single" | "template";
+  type Mode = "code" | "line" | "block" | "double" | "single" | "template" | "regex";
   let mode: Mode = "code";
+  let inClass = false;
+  // 上一个非空白字符；行首为 ""。只用来判 `/` 是正则开头还是除号。
+  let prev = "";
   let out = "";
   for (let i = 0; i < text.length; i++) {
     const ch = text[i] ?? "";
@@ -62,15 +70,24 @@ function stripComments(text: string): string {
         i++;
         continue;
       }
+      if (ch === "/" && (prev === "" || REGEX_PRECEDERS.includes(prev))) {
+        mode = "regex";
+        inClass = false;
+        out += ch;
+        continue;
+      }
       if (ch === '"') mode = "double";
       else if (ch === "'") mode = "single";
       else if (ch === "`") mode = "template";
+      if (ch === "\n") prev = "";
+      else if (!/\s/.test(ch)) prev = ch;
       out += ch;
       continue;
     }
     if (mode === "line") {
       if (ch === "\n") {
         mode = "code";
+        prev = "";
         out += ch;
       } else out += " ";
       continue;
@@ -82,7 +99,36 @@ function stripComments(text: string): string {
         i++;
         continue;
       }
-      out += ch === "\n" ? "\n" : " ";
+      if (ch === "\n") {
+        prev = "";
+        out += ch;
+        continue;
+      }
+      out += " ";
+      continue;
+    }
+    if (mode === "regex") {
+      // 正则内容原样保留；字符类里的 `/` 不是结束符，转义对整体跳过
+      if (ch === "\\") {
+        out += ch + (next ?? "");
+        i++;
+        continue;
+      }
+      if (inClass) {
+        if (ch === "]") inClass = false;
+        out += ch;
+        continue;
+      }
+      if (ch === "[") {
+        inClass = true;
+        out += ch;
+        continue;
+      }
+      if (ch === "/") {
+        mode = "code";
+        prev = "/";
+      }
+      out += ch;
       continue;
     }
     // 字符串/模板：内容必须原样保留（事件值字面量就在里面），只跳过转义对
@@ -97,6 +143,7 @@ function stripComments(text: string): string {
       (mode === "template" && ch === "`")
     ) {
       mode = "code";
+      prev = ch;
     }
     out += ch;
   }
@@ -119,6 +166,18 @@ test("生成物带 GENERATED 头与再生成命令（不是手写文件）", () 
 test("EVENT 是生成物的 re-export，取值对象相同", () => {
   assert.equal(EVENT, GeneratedEventType, "EVENT 必须直接是生成物，不得本地另写一份");
   assert.deepEqual({ ...EVENT }, { ...GeneratedEventType });
+});
+
+test("stripComments 认正则字面量里的引号（增量复核 F-1）", () => {
+  // 正则是活代码：里面的引号不能开字符串态，否则会吞掉其后的活代码、又留下其前的注释。
+  const src = `const a = x.replace(/^['"]+|['"]+$/g, "");\nconst b = "run/paused"; // 注释 "x/y"\n`;
+  const out = stripComments(src);
+  assert.equal(out.length, src.length, "只许等长空白化，不许增删字符");
+  assert.ok(out.includes(`"run/paused"`), "正则后面的活代码字面量必须保留");
+  assert.ok(!out.includes(`"x/y"`), "注释里的字面量必须被剥除");
+  // 真实夹具：`src/lib/image-paste.ts` 的 `/^['"]+|['"]+$/g` 曾让 `"file://"` 被空白化。
+  const real = stripComments(readFileSync(join(SRC_ROOT, "lib", "image-paste.ts"), "utf8"));
+  assert.ok(real.includes(`"file://"`), "正则同行之后的字符串必须原样保留");
 });
 
 test("src/ 下（生成物之外）不再出现事件值字面量", () => {
