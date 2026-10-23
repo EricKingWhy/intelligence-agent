@@ -625,6 +625,16 @@ class _EncryptedReader:
             self.source.close()
             raise
 
+    def _finalize(self) -> None:
+        if self.finalized:
+            return
+        try:
+            self.decryptor.finalize()
+            self.finalized = True
+        except Exception as error:
+            self.close()
+            raise BackupError("encrypted backup authentication failed") from error
+
     def read(self, size: int = -1) -> bytes:
         if size == 0 or self.finalized:
             return b""
@@ -644,13 +654,20 @@ class _EncryptedReader:
             self.close()
             raise BackupError("encrypted backup authentication failed") from error
 
+    def finish(self) -> None:
+        while self.remaining:
+            self.read(min(self.remaining, 1024 * 1024))
+        self._finalize()
+
     def close(self) -> None:
         self.source.close()
 
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_args: object) -> None:
+    def __exit__(self, exception_type: object, *_args: object) -> None:
+        if exception_type is None:
+            self.finish()
         self.close()
 
 
@@ -711,7 +728,7 @@ def _restore_stream(archive_path: Path, destination: Path, key: bytes) -> tuple[
                 proof = _validate_writer_proof(
                     proof_value,
                     require_fresh=False,
-                    allow_fixture=manifest["writer_proof_mode"] == "fixture",
+                    allow_fixture=manifest.get("writer_proof_mode") in {None, "fixture"},
                 )
                 seen.add(name)
                 continue
@@ -765,7 +782,7 @@ def _validate_manifest(manifest: Any) -> None:
         raise BackupError("restored manifest has no workspace identity")
     if manifest.get("runtime_loaded") is not False or manifest.get("retrieval_registered") is not False:
         raise BackupError("restored manifest claims runtime or retrieval registration")
-    if manifest.get("writer_proof_mode") not in {"fixture", "owner"}:
+    if manifest.get("writer_proof_mode") not in {None, "fixture", "owner"}:
         raise BackupError("restored manifest has an invalid writer proof mode")
     if manifest.get("writer_categories") != list(WRITER_CATEGORIES):
         raise BackupError("restored manifest has an incomplete writer category list")
@@ -1133,7 +1150,7 @@ def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[st
         "manifest_match": True,
         "retention_until": manifest["retention_until"],
         "writer_categories": manifest["writer_categories"],
-        "writer_proof_mode": manifest["writer_proof_mode"],
+        "writer_proof_mode": manifest.get("writer_proof_mode", "legacy"),
         "runtime_loaded": False,
         "retrieval_registered": False,
         "proof_schema_version": proof["schema_version"],
