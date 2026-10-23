@@ -1099,6 +1099,7 @@ version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "jsonschema" },
     { name = "keyring" },
@@ -1145,6 +1146,7 @@ dev = [
 requires-dist = [
     { name = "aioboto3", marker = "extra == 'artifact'", specifier = ">=13.0" },
     { name = "aiosqlite", specifier = ">=0.21.0" },
+    { name = "cryptography", specifier = ">=50.0.1" },
     { name = "docker", marker = "extra == 'sandbox'", specifier = ">=7" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "jsonschema", specifier = ">=4.23.0" },
