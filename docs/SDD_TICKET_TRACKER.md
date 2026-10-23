@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**等待 merge（2026-10-24，#1513；Issue CLOSED；PR [#1559](https://github.com/EricKingWhy/intelligence-agent/pull/1559) OPEN）**：Issue [#1513](https://github.com/EricKingWhy/intelligence-agent/issues/1513)「JWT 深层解析结构化拒绝与诊断日志有限保留」。分支 codex/issue-1513-jwt-log，提交 b22b71cd5851dd24983f9ba1756d42cab1a2e514，base main=fe3d9bd8；未合并。Issue 标签为 bug / P2 / 等待merge，集成负责人 EricKingWhy。票内双轴 review findings 清零，聚焦测试 17 passed，Gate-0 7/7，coverage exit 0。全量结果与固定基线逐节点对账均见月档：分支独有失败 0；Docker 环境不可用，全量未通过。
+**等待 merge（2026-10-24，#1513；Issue CLOSED；PR [#1559](https://github.com/EricKingWhy/intelligence-agent/pull/1559) OPEN）**：Issue [#1513](https://github.com/EricKingWhy/intelligence-agent/issues/1513)「JWT 深层解析结构化拒绝与诊断日志有限保留」。分支 codex/issue-1513-jwt-log，验证记录提交 b22b71cd5851dd24983f9ba1756d42cab1a2e514，base main=fe3d9bd8；未合并。Issue 标签为 bug / P2 / 等待merge，集成负责人 EricKingWhy。票内双轴 review findings 清零，聚焦测试 17 passed，Gate-0 7/7，coverage exit 0。全量结果与固定基线逐节点对账均见月档：分支独有失败 0；Docker 环境不可用，全量未通过。
 
 **等待 merge（2026-10-24，#1432；Issue CLOSED；PR [#1558](https://github.com/EricKingWhy/intelligence-agent/pull/1558) OPEN）**：CopyButton 仅在剪贴板写入成功时显示成功态，并在重试前清除旧成功态。分支 `codex/issue-1432-copybutton`，基线 `origin/main=13a96482`，最终 tip `60a106ab`。票内组件测试 1/1、Playwright 双视口 2/2；全量 Vitest 有 2 个范围外失败；Gate-0 6/7，事件生成物守卫失败。详见十月归档。
 

@@ -1,6 +1,6 @@
 # Phase Status — 实施进度追踪
 
-- 2026-10-24：#1513 已交付 PR [#1559](https://github.com/EricKingWhy/intelligence-agent/pull/1559) OPEN（base main=fe3d9bd8，head b22b71cd），Issue CLOSED、标签 bug / P2 / 等待merge；未合并，集成负责人 EricKingWhy。分支 codex/issue-1513-jwt-log。Gate-0 7/7、聚焦测试 17 passed、coverage exit 0；全量测试及固定基线对账详见月档，分支独有失败为 0，但 Docker 环境不可用导致全量未通过。
+- 2026-10-24：#1513 已交付 PR [#1559](https://github.com/EricKingWhy/intelligence-agent/pull/1559) OPEN（base main=fe3d9bd8），Issue CLOSED、标签 bug / P2 / 等待merge；未合并，集成负责人 EricKingWhy。分支 codex/issue-1513-jwt-log。Gate-0 7/7、聚焦测试 17 passed、coverage exit 0；全量测试及固定基线对账详见月档，分支独有失败为 0，但 Docker 环境不可用导致全量未通过。
 - 2026-10-24：#1432 完成，Issue CLOSED / `等待merge`；PR [#1558](https://github.com/EricKingWhy/intelligence-agent/pull/1558) OPEN，**未合并**。分支 `codex/issue-1432-copybutton`，基线 `origin/main=13a96482`，tip `60a106ab`。组件 Vitest 1/1、Playwright 双视口 2/2、双轴审查 PASS；全量 Vitest 2,640 passed / 1 skipped / 2 个无关失败。Gate-0 6/7，唯一失败是既有 `memory/human_blocked` 事件生成物漂移。详见 Tracker 与月档。
 - 2026-10-23：#1552 已交付到 PR [#1557](https://github.com/EricKingWhy/intelligence-agent/pull/1557) OPEN（base `main`=`bd97fbfd`，创建时 head `817e5e6a`），未 merge。Gate-0 7/7 PASS，收据 `docs/gate/2dc04b755d5647f63c310ca6a4034e8cc3000255.json`；聚焦测试 71 passed，双轴 review PASS（P0–P4=0）。服务端 gate0 PASS，E2E 冒烟 pending；完整 pytest 未运行，较宽 tests/web 验证限制见月档。详见 Tracker/月档。
 
