@@ -1628,6 +1628,10 @@ class AppState:
         把 wiring 交给一个已关停的 app。
         """
         self._closed = True
+        # 归档是派生索引；先摘掉 store 观察者并关闭它，避免后续关停步骤失败时
+        # 仍把 SessionArchive 的线程连接留在进程里。close() 自身会等待正在写入的
+        # 观察者操作结束，因此不会关闭仍被其他 owner 使用的连接。
+        self.session_archive_observer.close()
         # #1296：先停值班触发器，避免 shutdown 期间再派发新 session。
         await self.watchtower.stop()
         # #1320：再停超时 ticker。**不**直接 cancel：它可能正 await `on_expire`
@@ -2522,6 +2526,7 @@ def create_app(
         # **之后**：逃生门降级时那条 WARNING 才能落进 agent.jsonl，而不是只掉到
         # stderr（AC7 要求逃生门在日志里显著留痕）。
         instance_lock = InstanceLock(settings.workspace_dir).acquire()
+        shutdown_complete = False
         try:
             # Phase Multiturn T8（#138）：启动崩溃扫描——无终态 run 补记
             # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
@@ -2594,9 +2599,17 @@ def create_app(
                 yield
             finally:
                 await state.shutdown()
+                shutdown_complete = True
                 # 旁路收尾（ADR-0018 D3）：服务停机前尽力发送剩余 Langfuse span
                 # （有超时上限，不阻塞退出）。
                 flush_process_sink()
+        except BaseException:
+            # 启动阶段也可能在 ensure_stores() 等步骤失败；这条路径尚未进入
+            # yield 周围的 finally，但 AppState 已经创建并可能物化归档连接。
+            if not shutdown_complete:
+                await state.shutdown()
+                flush_process_sink()
+            raise
         finally:
             # 放在 shutdown 之后：仍在关连接时不该让第二个进程进来接手。
             instance_lock.release()

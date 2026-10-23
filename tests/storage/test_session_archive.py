@@ -910,6 +910,193 @@ class TestStoreObserverWiring:
         assert len({id(arc) for arc in results}) == 1, "所有线程必须拿到同一实例"
         assert observer.archive is results[0]
 
+    def test_close_rejects_future_access_from_other_thread(self, tmp_path: Path) -> None:
+        """close 后，曾借到连接的工作线程也不得继续使用已关闭的归档。"""
+        archive = SessionArchive(
+            tmp_path / "sessions" / "state.db",
+            cjk_so_path=tmp_path / "missing.so",
+        )
+        archive.initialize()
+        ready = threading.Event()
+        release = threading.Event()
+        outcomes: list[str] = []
+
+        def worker() -> None:
+            archive.ensure_session("worker", source="interactive", started_at=time.time())
+            ready.set()
+            release.wait(timeout=5)
+            try:
+                archive.ensure_session(
+                    "after-close", source="interactive", started_at=time.time(),
+                )
+            except RuntimeError:
+                outcomes.append("closed")
+            else:
+                outcomes.append("open")
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert ready.wait(timeout=5)
+        archive.close()
+        release.set()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        assert outcomes == ["closed"]
+        archive.close()
+
+    def test_close_waits_for_active_worker_operation(self, tmp_path: Path) -> None:
+        """连接仍在执行真实 SQLite 写入时，close 不得抢先关闭它。"""
+        archive = SessionArchive(
+            tmp_path / "active" / "state.db",
+            cjk_so_path=tmp_path / "missing.so",
+        )
+        archive.initialize()
+        archive.ensure_session("active", source="interactive", started_at=time.time())
+        started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                conn = archive._conn
+
+                def trace(_statement: str) -> None:
+                    started.set()
+                    release.wait(timeout=5)
+
+                conn.set_trace_callback(trace)
+                archive.append_message("active", "user", "in flight", timestamp=time.time())
+            except BaseException as exc:  # noqa: BLE001 - test must expose close races
+                errors.append(exc)
+
+        worker_thread = threading.Thread(target=worker)
+        worker_thread.start()
+        assert started.wait(timeout=5)
+
+        def close_archive() -> None:
+            archive.close()
+            closed.set()
+
+        close_thread = threading.Thread(target=close_archive)
+        close_thread.start()
+        assert not closed.wait(timeout=0.1), "close must wait for the active SQLite operation"
+        release.set()
+        worker_thread.join(timeout=5)
+        close_thread.join(timeout=5)
+
+        assert not worker_thread.is_alive()
+        assert not close_thread.is_alive()
+        assert errors == []
+        assert closed.is_set()
+
+    def test_close_releases_real_worker_handle_curve(self, tmp_path: Path) -> None:
+        """Windows regression evidence: worker-owned handles return to a flat curve."""
+        if sys.platform != "win32":
+            pytest.skip("Windows process handle evidence is required for this regression")
+
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_current_process = kernel32.GetCurrentProcess
+        get_current_process.restype = ctypes.c_void_p
+        get_process_handle_count = kernel32.GetProcessHandleCount
+        get_process_handle_count.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong),
+        ]
+        get_process_handle_count.restype = ctypes.c_bool
+
+        def handle_count() -> int:
+            count = ctypes.c_ulong()
+            ok = get_process_handle_count(
+                get_current_process(), ctypes.byref(count),
+            )
+            assert ok
+            return int(count.value)
+
+        curves: list[dict[str, int]] = []
+        for workers in (1, 2, 4, 8, 16):
+            archive = SessionArchive(
+                tmp_path / f"curve-{workers}" / "state.db",
+                cjk_so_path=tmp_path / "missing.so",
+            )
+            archive.initialize()
+            baseline = handle_count()
+            ready = [threading.Event() for _ in range(workers)]
+            release = threading.Event()
+            errors: list[BaseException] = []
+
+            def worker(
+                index: int, *, _archive=archive, _ready=ready,
+                _release=release, _errors=errors,
+            ) -> None:
+                try:
+                    _archive.ensure_session(
+                        f"worker-{index}", source="interactive", started_at=time.time(),
+                    )
+                    _ready[index].set()
+                    _release.wait(timeout=5)
+                except BaseException as exc:  # noqa: BLE001 - test must expose leaks
+                    _errors.append(exc)
+
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
+            for thread in threads:
+                thread.start()
+            assert all(event.wait(timeout=5) for event in ready)
+            after_workers = handle_count()
+            archive.close()
+            after_close = handle_count()
+            release.set()
+            for thread in threads:
+                thread.join(timeout=5)
+            assert all(not thread.is_alive() for thread in threads)
+            assert errors == []
+            curves.append({
+                "workers": workers,
+                "baseline": baseline,
+                "after_workers": after_workers,
+                "after_close": after_close,
+                "after_workers_exit": handle_count(),
+            })
+
+        releases = [curve["after_workers"] - curve["after_close"] for curve in curves]
+        assert all(
+            released >= curve["workers"]
+            for curve, released in zip(curves, releases, strict=True)
+        ), f"close did not release worker-owned handles: {curves}"
+
+    def test_owned_observer_close_detaches_and_closes_archive(self, tmp_path: Path) -> None:
+        from agent_harness.session.event import USER_MESSAGE
+
+        store = self._store(tmp_path)
+        observer = install_session_archive(store, tmp_path / "owned" / "state.db")
+        store.append_event(
+            "owned", SessionEvent(type=USER_MESSAGE, session_id="owned", seq=0,
+                                   data={"content": "owned"}),
+        )
+        archive = observer.archive
+        observer.close()
+        observer.close()
+
+        assert store._event_observer is None
+        with pytest.raises(RuntimeError, match="closed"):
+            archive.get_messages("owned")
+
+    def test_borrowed_observer_close_does_not_close_archive(self, tmp_path: Path) -> None:
+        archive = SessionArchive(
+            tmp_path / "borrowed" / "state.db",
+            cjk_so_path=tmp_path / "missing.so",
+        )
+        archive.initialize()
+        observer = SessionArchiveObserver(archive)
+        observer.attach(self._store(tmp_path))
+        observer.close()
+
+        archive.ensure_session("borrowed", source="interactive", started_at=time.time())
+        assert archive.get_session("borrowed") is not None
+        archive.close()
+
 
 # ------------------------------------------- 修复轮 B：检索语义（Hermes 对齐） ---
 

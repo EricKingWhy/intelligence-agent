@@ -1285,7 +1285,9 @@ async def run(
         store = JsonlSessionStore(root=workspace_root / "sessions")
         # #1389：会话全文存档（派生检索索引）。CLI `run` 不经 RunManager，
         # store 级观察者是本路径唯一覆盖点。
-        install_session_archive(store, workspace_root / "sessions" / "state.db")
+        archive_observer = install_session_archive(
+            store, workspace_root / "sessions" / "state.db",
+        )
         _, wiring = await assemble_wiring(settings, sessions=store)
         # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
         # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
@@ -1405,6 +1407,7 @@ async def run(
                     pause_data = event.data
         finally:
             memory_session_var.reset(session_token)
+            archive_observer.close()
         if pause_data is not None:
             # 恢复指令要给出**本会话 id**——暂停摘要是事件的纯函数（不含会话上下文），
             # 而 CLI 的一次性命令此前从不打印 session_id。提示读的是 durable 事件的
