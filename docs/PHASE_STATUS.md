@@ -1,6 +1,6 @@
 # Phase Status — 实施进度追踪
 
-- 2026-10-24：#1513 JWT 深层解析结构化拒绝 / JSONL 有限轮转；基线 `5a8b6c4d`，实现 `42eadaa4`，同步 `origin/main=0f47ed06` 后分支 tip `4a9200fd`。修前后 HTTP/log 计数与双轴审查 findings 关闭；聚焦测试 17 passed；Gate-0 7/7 PASS，收据及完整后端测试残余见 `docs/phase_status/2026-10.md`。完整套件未全绿；推送/PR 待完成，禁止 merge。
+- 2026-10-24：#1513 JWT 深层解析结构化拒绝 / JSONL 有限轮转；基线 `5a8b6c4d`，实现 `42eadaa4`，已同步 `origin/main=fe3d9bd8`，tip `a84b0bd5`。双轴 review findings 清零；同步后聚焦测试 17 passed、Ruff/diff-check 通过、Gate-0 7/7、coverage exit 0。全量 pytest 当前树 exit 1，失败节点尚未分类，不能宣称通过；详见月档。push/PR 待完成，禁止 merge。
 - 2026-10-24：#1432 完成，Issue CLOSED / `等待merge`；PR [#1558](https://github.com/EricKingWhy/intelligence-agent/pull/1558) OPEN，**未合并**。分支 `codex/issue-1432-copybutton`，基线 `origin/main=13a96482`，tip `60a106ab`。组件 Vitest 1/1、Playwright 双视口 2/2、双轴审查 PASS；全量 Vitest 2,640 passed / 1 skipped / 2 个无关失败。Gate-0 6/7，唯一失败是既有 `memory/human_blocked` 事件生成物漂移。详见 Tracker 与月档。
 - 2026-10-23：#1552 已交付到 PR [#1557](https://github.com/EricKingWhy/intelligence-agent/pull/1557) OPEN（base `main`=`bd97fbfd`，创建时 head `817e5e6a`），未 merge。Gate-0 7/7 PASS，收据 `docs/gate/2dc04b755d5647f63c310ca6a4034e8cc3000255.json`；聚焦测试 71 passed，双轴 review PASS（P0–P4=0）。服务端 gate0 PASS，E2E 冒烟 pending；完整 pytest 未运行，较宽 tests/web 验证限制见月档。详见 Tracker/月档。
 

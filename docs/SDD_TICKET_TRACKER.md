@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**施工中（2026-10-24，#1513；实现及双轴复核完成）**：Issue [#1513](https://github.com/EricKingWhy/intelligence-agent/issues/1513)「JWT 深层解析结构化拒绝与诊断日志有限保留」。分支 `codex/issue-1513-jwt-log`，基线 `5a8b6c4d`，实现提交 `42eadaa4`，同步 `origin/main=0f47ed06`（merge `54a1d4cb`）；Standards PASS，Spec 跟进确认 findings 清零；聚焦测试 17 passed，Gate-0 7/7 PASS（收据见月档）。完整后端测试 8606 passed、404 failed、186 skipped、43 deselected、4 errors；4 个错误含 Docker Engine 不可用，404 项未逐条归类。推送/PR 待完成；不 merge。
+**施工中（2026-10-24，#1513；同步后全量回归红项取证中）**：Issue [#1513](https://github.com/EricKingWhy/intelligence-agent/issues/1513)「JWT 深层解析结构化拒绝与诊断日志有限保留」。分支 `codex/issue-1513-jwt-log`，起始基线 `5a8b6c4d`，实现提交 `42eadaa4`，已同步 `origin/main=fe3d9bd8`（merge `a84b0bd5`）。Standards / Spec 双轴复核 findings 已清零；同步后聚焦测试 17 passed（10.59s），Ruff 与 diff-check 通过，Gate-0 7/7 PASS（收据 `docs/gate/a84b0bd578290d3d964ede1ab6460951f3c54c1c.json`），coverage exit 0。同步后全量测试运行 2431.98s、exit 1；执行记录被截断，失败数与节点未保存，已见 Docker named-pipe 错误及多处 F 标记，余项尚未归类，不能称全量通过。正在补齐可复核报告并与固定基线对照；推送/PR 尚未完成，不 merge。
 
 **等待 merge（2026-10-24，#1432；Issue CLOSED；PR [#1558](https://github.com/EricKingWhy/intelligence-agent/pull/1558) OPEN）**：CopyButton 仅在剪贴板写入成功时显示成功态，并在重试前清除旧成功态。分支 `codex/issue-1432-copybutton`，基线 `origin/main=13a96482`，最终 tip `60a106ab`。票内组件测试 1/1、Playwright 双视口 2/2；全量 Vitest 有 2 个范围外失败；Gate-0 6/7，事件生成物守卫失败。详见十月归档。
 
