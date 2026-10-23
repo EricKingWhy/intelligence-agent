@@ -309,10 +309,10 @@ def _load_writer_proof(path: Path) -> dict[str, Any]:
         proof = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise BackupError(f"cannot read writer proof: {error}") from error
-    return _validate_writer_proof(proof)
+    return _validate_writer_proof(proof, require_fresh=True)
 
 
-def _validate_writer_proof(proof: Any) -> dict[str, Any]:
+def _validate_writer_proof(proof: Any, *, require_fresh: bool) -> dict[str, Any]:
     if not isinstance(proof, dict) or proof.get("schema_version") != 1:
         raise BackupError("writer proof must have schema_version=1")
     if proof.get("freeze_effective") is not True:
@@ -327,7 +327,9 @@ def _validate_writer_proof(proof: Any) -> dict[str, Any]:
     except ValueError as error:
         raise BackupError("writer proof checked_at must be an ISO timestamp with timezone") from error
     now = datetime.now(UTC)
-    if checked_moment > now + timedelta(minutes=5) or now - checked_moment > timedelta(days=1):
+    if checked_moment > now + timedelta(minutes=5) or (
+        require_fresh and now - checked_moment > timedelta(days=1)
+    ):
         raise BackupError("writer proof checked_at is outside the one-day evidence window")
     writers = proof.get("writers")
     if not isinstance(writers, dict):
@@ -693,7 +695,7 @@ def _restore_stream(archive_path: Path, destination: Path, key: bytes) -> tuple[
                     proof_value = json.loads(extracted.read().decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
                     raise BackupError("backup writer proof is not valid JSON") from error
-                proof = _validate_writer_proof(proof_value)
+                proof = _validate_writer_proof(proof_value, require_fresh=False)
                 seen.add(name)
                 continue
             allowed = _allowed_archive_members(manifest)
@@ -954,7 +956,7 @@ def _seed_database(path: Path, version: int) -> None:
                      NULL, NULL, '2026-10-23T00:00:00+00:00',
                      '2026-10-23T00:10:00+00:00');
                 INSERT INTO memory_v2_fts(rowid, content) VALUES (1, 'likes tea');
-                INSERT INTO memory_v2_fts(rowid, content) VALUES (2, 'legacy note');
+                INSERT INTO memory_v2_fts(rowid, content) VALUES (2, 'old fact');
                 """
             )
         connection.commit()

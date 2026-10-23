@@ -153,6 +153,12 @@ def test_backup_and_isolated_restore_reconcile_the_seeded_lifecycle(tmp_path: Pa
             assert connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
             ).fetchone()[0] > 0
+            if database_name == "memory-v2.db":
+                assert connection.execute(
+                    "SELECT rowid, content FROM memory_v2_fts ORDER BY rowid"
+                ).fetchall() == connection.execute(
+                    "SELECT rowid, content FROM memory_v2_records ORDER BY rowid"
+                ).fetchall()
 
     assert not archive.is_relative_to(workspace)
     assert not restore_root.is_relative_to(workspace)
