@@ -265,6 +265,7 @@ class HostEndpointInfo:
 
     pid: int
     port: int
+    host: str = "127.0.0.1"
     protocol_version: int = HOST_PROTOCOL_VERSION
     auth_required: bool = True
     owner: str = ""
@@ -336,6 +337,7 @@ def read_endpoint(root: str | os.PathLike[str]) -> HostEndpointInfo | None:
         info = HostEndpointInfo(
             pid=int(payload["pid"]),
             port=int(payload["port"]),
+            host=str(payload.get("host", "127.0.0.1")) or "127.0.0.1",
             protocol_version=int(payload.get("protocol_version", 0)),
             auth_required=bool(payload.get("auth_required", True)),
             owner=str(payload.get("owner", "")),
@@ -801,7 +803,7 @@ def serve_once(
             time.sleep(_ATTACH_POLL_INTERVAL)
         if last is not None and last.status is AttachStatus.AUTH_FAILED and last.endpoint:
             raise HostServiceError(
-                f"本机服务已在 127.0.0.1:{last.endpoint.port} 运行，但当前用户没有可用的"
+                f"本机服务已在 {_loopback_url(last.endpoint.host, last.endpoint.port, '')} 运行，但当前用户没有可用的"
                 f" host token（凭据通道可能属于另一 OS 用户）：{last.detail}。"
                 "已拒绝另起第二个写者。"
             ) from error
@@ -860,7 +862,12 @@ def serve_once(
         else:
             raise RuntimeError("服务 60s 未完成启动")
         port = int(server.servers[0].sockets[0].getsockname()[1])
-        endpoint = HostEndpointInfo(pid=os.getpid(), port=port, service_uuid=service_uuid)
+        endpoint = HostEndpointInfo(
+            pid=os.getpid(),
+            port=port,
+            host=normalized_host,
+            service_uuid=service_uuid,
+        )
         token_store.set_token(root, token)
         publish_endpoint(root, endpoint)
         # 启动自验：与附着方完全同一条探针（健康面形状 + 限权 token 鉴权）。
@@ -932,7 +939,7 @@ def describe_lock_error_with_attach(root: str | os.PathLike[str], error: Instanc
     if result.status is AttachStatus.ATTACHABLE and result.endpoint is not None:
         return (
             f"{error}\n"
-            f"  已有本机服务在运行：http://127.0.0.1:{result.endpoint.port}"
+            f"  已有本机服务在运行：{_loopback_url(result.endpoint.host, result.endpoint.port, '')}"
             "—— 请附着该服务（同一数据根不允许第二个写者）。"
         )
     return str(error)

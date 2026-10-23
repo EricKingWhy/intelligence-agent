@@ -159,12 +159,14 @@ def configured_control_plane_origins(raw: str) -> frozenset[str]:
 
 
 def configured_control_plane_hosts(raw: str) -> frozenset[str]:
-    """解析显式 Host；Host 配置按规范化后的完整 host[:port] 精确匹配。"""
+    """解析显式 Host；拒绝 ``*`` / ``null``，其余按完整 host[:port] 精确匹配。"""
     configured: set[str] = set()
     for item in raw.split(","):
         value = item.strip()
         if not value:
             continue
+        if value.casefold() in {"*", "null"}:
+            raise ValueError(f"invalid CONTROL_PLANE_ALLOWED_HOSTS entry: {value!r}")
         parsed = _parse_host(value)
         if parsed is None:
             raise ValueError(f"invalid CONTROL_PLANE_ALLOWED_HOSTS entry: {value!r}")
@@ -199,8 +201,13 @@ def check_trusted_host(
     scope: object,
     *,
     allowed_hosts: Collection[str] = (),
+    allow_testserver: bool = False,
 ) -> str | None:
-    """中央 Host 闸：精确 loopback / 显式 Host，拒绝 DNS rebinding 形状。"""
+    """中央 Host 闸：精确 loopback / 显式 Host，拒绝 DNS rebinding 形状。
+
+    ``testserver`` is an explicit in-process test seam only; production callers leave
+    ``allow_testserver`` false, so the real socket path never trusts that hostname.
+    """
     raw_scope = scope if isinstance(scope, dict) else {}
     values = [
         value.decode("latin-1") if isinstance(value, bytes) else str(value)
@@ -219,13 +226,12 @@ def check_trusted_host(
         if isinstance(server, (tuple, list)) and server
         else ""
     )
-    # Starlette TestClient 的 in-process server 名称不是网络部署入口；保留它只
-    # 让 ASGI 单测仍能观测真实请求边界，真实 uvicorn scope 不会使用该名称。
     if (
         hostname not in _LOCAL_HOSTNAMES
         and canonical not in allowed_hosts
         and not (
-            hostname == _TEST_ASGI_HOSTNAME
+            allow_testserver
+            and hostname == _TEST_ASGI_HOSTNAME
             and server_hostname in {"", _TEST_ASGI_HOSTNAME}
         )
     ):
@@ -292,9 +298,7 @@ def require_trusted_origin(request: Request) -> None:
     reason = check_trusted_origin(
         request.headers.get("origin"),
         jwt_secret_configured=bool(state.settings.jwt_secret),
-        allowed_origins=configured_control_plane_origins(
-            state.settings.control_plane_allowed_origins
-        ),
+        allowed_origins=getattr(request.app.state, "allowed_origins", ()),
     )
     if reason is not None:
         raise HTTPException(status_code=403, detail=reason)

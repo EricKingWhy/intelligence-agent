@@ -409,7 +409,9 @@ async def test_string_payload_visible_through_web_memory_api(tmp_path, monkeypat
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=_JWT_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     with TestClient(app) as client:
         _registry, wiring = await client.app.state.agent.get_wiring()
         service = wiring.memory_v2

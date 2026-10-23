@@ -40,7 +40,7 @@ def _app(tmp_path: Path, **overrides):
         model_api_key="sk-test",
         **overrides,
     )
-    return create_app(settings, enable_cors=False)
+    return create_app(settings, enable_cors=False, allow_testserver=True)
 
 
 def _client(tmp_path: Path, **overrides) -> TestClient:

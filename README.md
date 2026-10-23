@@ -144,6 +144,16 @@ curl -N -X POST 'http://127.0.0.1:8000/api/sessions?launch=false' \
 | `AUTO_COMPACT_THRESHOLD` | 自动压缩触发阈值（默认 0.70） |
 | `HARD_GUARD_THRESHOLD` | 上下文硬守卫（默认 0.85） |
 
+控制面默认仅接受 loopback 的 `Host` 与浏览器来源。非回环部署必须显式填写
+`CONTROL_PLANE_ALLOWED_HOSTS`，按逗号分隔列出精确的 `host[:port]`；
+`CONTROL_PLANE_ALLOWED_ORIGINS` 是额外允许的完整浏览器 Origin，按逗号分隔，
+不能使用 `*` 或 `null`。例如：
+
+```dotenv
+CONTROL_PLANE_ALLOWED_HOSTS=control.example:8443
+CONTROL_PLANE_ALLOWED_ORIGINS=https://desktop.example
+```
+
 完整列表见 `.env.example`，包括 `MILVUS_*`（记忆）、`ARTIFACT_STORE_*`（产物）与沙箱选项。
 
 ## HTTP API

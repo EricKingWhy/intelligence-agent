@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_harness import host_service
 from agent_harness.config import Settings
 from agent_harness.host_service import (
     HOST_PROTOCOL_VERSION,
@@ -24,12 +25,15 @@ from agent_harness.host_service import (
     HOST_SKILLS_PROOF_HEADER,
     HOST_SKILLS_RESPONSE_PROOF_HEADER,
     HOST_SKILLS_TIMESTAMP_HEADER,
+    AttachResult,
     AttachStatus,
     HostEndpointInfo,
     HostServiceError,
     HostTokenStore,
+    _loopback_url,
     attach_probe,
     clear_endpoint,
+    describe_lock_error_with_attach,
     host_skills_request_proof,
     host_skills_response_proof,
     host_token_username,
@@ -38,6 +42,7 @@ from agent_harness.host_service import (
     read_endpoint,
     serve_once,
 )
+from agent_harness.instance_lock import InstanceLockError
 from agent_harness.model.provider_store import MemoryCredentialStore
 
 
@@ -180,6 +185,7 @@ def test_endpoint_roundtrip_clear_and_no_secret(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.pid == 4242
     assert loaded.port == 51820
+    assert loaded.host == "127.0.0.1"
     assert loaded.protocol_version == HOST_PROTOCOL_VERSION
     assert loaded.auth_required is True
 
@@ -197,6 +203,21 @@ def test_endpoint_read_corrupt_file_is_absent(tmp_path: Path) -> None:
     root.mkdir()
     (root / ".host-service.json").write_text("{not json", encoding="utf-8")
     assert read_endpoint(root) is None
+
+
+def test_loopback_url_and_cli_attach_message_use_bound_ipv6_host(monkeypatch) -> None:
+    endpoint = HostEndpointInfo(pid=1, port=51820, host="::1")
+    assert _loopback_url(endpoint.host, endpoint.port, "") == "http://[::1]:51820"
+
+    monkeypatch.setattr(
+        host_service,
+        "attach_probe",
+        lambda *args, **kwargs: AttachResult(AttachStatus.ATTACHABLE, endpoint),
+    )
+    message = describe_lock_error_with_attach(
+        "workspace", InstanceLockError("lock held")
+    )
+    assert "http://[::1]:51820" in message
 
 
 # ── token 限权通道（REUSE Credentials seam，测试注入内存后端） ────────────────
@@ -501,7 +522,9 @@ def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(
             pytest.fail("60s 内未达到 ATTACHABLE")
 
         # 就绪面：端点已发布、token 已入限权通道。
-        assert read_endpoint(root) is not None
+        endpoint = read_endpoint(root)
+        assert endpoint is not None
+        assert endpoint.host == host
         assert HostTokenStore(backend).get_token(root)
 
         stop.set()

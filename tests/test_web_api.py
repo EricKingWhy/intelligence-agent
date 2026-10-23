@@ -52,7 +52,9 @@ def app(tmp_path):
     model_api_key 提供占位值：装配走真实 factory（批次 A），ModelConfig
     需要 key 才能构造（模型调用本身由测试替换替身）。"""
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
-    return create_app(settings, enable_cors=False)
+    return create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
 
 
 @pytest.fixture
@@ -101,7 +103,9 @@ def test_list_sessions_empty(client):
 def test_list_sessions_returns_existing(tmp_path):
     """先往 store 写一个 session，列表应返回。"""
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
     session = Session.start(store)
     session.append(event_type=SESSION_STARTED, data={"reason": "test"})
@@ -118,7 +122,9 @@ def test_list_sessions_carries_first_user_message(tmp_path):
     """Gap 3 (P0)：列表 payload 每行带首条 user/message content（截断 128），
     前端零额外请求渲染标题；无 user message 返回 null。"""
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
     long_text = "帮我写一个 Python 函数" * 30  # 330 字符，应被截断到 128
     session = Session.start(store)
@@ -142,7 +148,9 @@ def test_list_sessions_carries_terminal_trace_id(tmp_path):
     run 在途（末事件非终结）时为 null——前端据此显示「未追踪」，不伪造。
     """
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     session = Session.start(store)
@@ -169,7 +177,9 @@ def test_list_sessions_carries_terminal_trace_url(tmp_path):
     「有终结 trace 的行拿到真实 URL」才能抓住漏映射。
     """
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     session = Session.start(store)
@@ -208,7 +218,9 @@ def test_get_events_404(client):
 
 def test_get_events_ok(tmp_path):
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
     session = Session.start(store)
     client = TestClient(app)
@@ -274,7 +286,9 @@ def _assert_rejection_left_no_trace(app: Any) -> None:
 def test_create_session_rejects_absolute_workspace_path(tmp_path):
     """绝对路径（workspaces_root 外 / 盘符路径）→ 422，且任何位置都不建目录。"""
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     client = TestClient(app)
     outside_abs = str(tmp_path / "outside-abs")  # workspace_dir 内、workspaces_root 外
     drive_abs = tmp_path.drive + "\\evil-drive-abs"  # 盘符绝对路径（如 D:\evil-drive-abs）
@@ -330,7 +344,9 @@ def test_create_session_rejects_empty_task(tmp_path):
     `min_length=1` 校验保留；launch=true（默认）时缺 task 也在 handler 层 422
     （tests/session/test_launch_false.py 锁新契约）。"""
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     client = TestClient(app)
     resp = client.post("/api/sessions", json={"task": ""})
     assert resp.status_code == 422
@@ -341,7 +357,9 @@ def test_create_session_rejects_missing_task_on_launch(tmp_path):
     """#204：launch=true（默认）时缺 task → 422（既有"task 必填"契约不变，
     只是校验点从 pydantic min_length 移到 handler 的互斥分支），不留落盘痕迹。"""
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     client = TestClient(app)
     resp = client.post("/api/sessions", json={})
     assert resp.status_code == 422
@@ -361,7 +379,9 @@ def test_create_session_rejects_invalid_local_fuse(tmp_path):
     422 也在那个文件（#320：`extra="forbid"`）。
     """
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     client = TestClient(app)
     for turns in (0, 1000):
         resp = client.post(
@@ -452,7 +472,9 @@ async def test_get_wiring_after_shutdown_raises(tmp_path):
 def test_read_endpoints_with_multi_event_session(tmp_path):
     """回归锚：多事件 session 下两个读端点仍 200 且响应形状不变。"""
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
     session = Session.start(store)
     for i in range(5):
@@ -475,7 +497,9 @@ def test_read_endpoints_offload_store_reads_off_event_loop(tmp_path, monkeypatch
     以此区分「卸载了」和「没卸载」。
     """
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
     session = Session.start(store)
     session.append(event_type=USER_MESSAGE, data={"content": "hi"})
@@ -629,7 +653,9 @@ async def test_disconnect_leaves_run_running_and_cancel_stops_it(tmp_path):
                 self.cancelled.set()
 
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
 
     def _build_stub(runtime):
         async def _build(**kwargs):
@@ -700,7 +726,9 @@ def test_get_events_rejects_path_traversal(tmp_path):
     （_validate_workspace_name）同一安全边界，session_id 同样是名字不是路径。
     """
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path))
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     client = TestClient(app)
     # 注：裸 ".." / "." 会被 httpx 客户端在 URL 归一化阶段消解、到不了 app；
     # 服务端字符集校验（[A-Za-z0-9_-]+）对它们同样拒绝，这里只测能到达 app 的形态。
@@ -741,7 +769,9 @@ def test_build_runtime_wires_recovery_stores(tmp_path):
     from agent_harness.storage import OnStableBoundary
 
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     state = app.state.agent
     workspace = state.workspaces_root / "sess-wiring"
     stores = state.stores
@@ -770,7 +800,9 @@ def test_create_session_persists_workspace_mapping(tmp_path):
     from unittest.mock import patch as _patch
 
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     state = app.state.agent
     with _patch("agent_harness.assembly.create_chat_model",
                 return_value=ScriptedModel([AIMessage(content="done")])):

@@ -19,7 +19,7 @@ import sqlite3
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
@@ -2225,19 +2225,32 @@ class ControlPlaneBoundaryMiddleware:
     显式配置项。无 Origin 只表示非浏览器形态，仍必须通过 Host 闸。
     """
 
-    def __init__(self, app: Any, settings: Settings) -> None:
+    def __init__(
+        self,
+        app: Any,
+        settings: Settings,
+        *,
+        allowed_hosts: Collection[str] | None = None,
+        allowed_origins: Collection[str] | None = None,
+        allow_testserver: bool = False,
+    ) -> None:
         self.app = app
         self._settings = settings
+        self._allow_testserver = allow_testserver
         from agent_harness.web.projects import (
             configured_control_plane_hosts,
             configured_control_plane_origins,
         )
 
-        self._allowed_hosts = configured_control_plane_hosts(
-            settings.control_plane_allowed_hosts
+        self._allowed_hosts = frozenset(
+            configured_control_plane_hosts(settings.control_plane_allowed_hosts)
+            if allowed_hosts is None
+            else allowed_hosts
         )
-        self._allowed_origins = configured_control_plane_origins(
-            settings.control_plane_allowed_origins
+        self._allowed_origins = frozenset(
+            configured_control_plane_origins(settings.control_plane_allowed_origins)
+            if allowed_origins is None
+            else allowed_origins
         )
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
@@ -2247,7 +2260,11 @@ class ControlPlaneBoundaryMiddleware:
 
         from agent_harness.web.projects import check_trusted_host, check_trusted_origin
 
-        host_reason = check_trusted_host(scope, allowed_hosts=self._allowed_hosts)
+        host_reason = check_trusted_host(
+            scope,
+            allowed_hosts=self._allowed_hosts,
+            allow_testserver=self._allow_testserver,
+        )
         origins = Headers(scope=scope).getlist("origin")
         if len(origins) > 1:
             origin_reason = "拒绝请求：Origin 不得重复出现。"
@@ -2307,14 +2324,18 @@ class AuthSeamMiddleware:
         app: Any,
         settings: Settings,
         host_service_token: str | None = None,
+        *,
+        allowed_origins: Collection[str] | None = None,
     ) -> None:
         self.app = app
         self._settings = settings
         self._host_service_token = host_service_token
         from agent_harness.web.projects import configured_control_plane_origins
 
-        self._allowed_origins = configured_control_plane_origins(
-            settings.control_plane_allowed_origins
+        self._allowed_origins = frozenset(
+            configured_control_plane_origins(settings.control_plane_allowed_origins)
+            if allowed_origins is None
+            else allowed_origins
         )
         self._host_skills_nonce_lock = threading.Lock()
         self._host_skills_used_nonces: dict[str, float] = {}
@@ -2561,11 +2582,25 @@ def create_app(
     *,
     enable_cors: bool = True,
     host_service_token: str | None = None,
+    allow_testserver: bool = False,
 ) -> FastAPI:
-    """装配 FastAPI 应用。测试可注入 test settings；生产默认从 .env 读。"""
+    """装配 FastAPI 应用。
+
+    ``allow_testserver`` is an explicit in-process test injection. Production
+    callers use the default, which does not trust Starlette's ``testserver`` host.
+    """
     if settings is None:
         settings = Settings()
 
+    from agent_harness.web.projects import (
+        configured_control_plane_hosts,
+        configured_control_plane_origins,
+    )
+
+    allowed_hosts = configured_control_plane_hosts(settings.control_plane_allowed_hosts)
+    allowed_origins = configured_control_plane_origins(
+        settings.control_plane_allowed_origins
+    )
     state = AppState(settings)
 
     # lifespan 替代 on_event：进程退出时关闭 Memory 子系统，避免泄露外部连接。
@@ -2671,6 +2706,8 @@ def create_app(
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
     app.state.host_service_token = host_service_token
+    app.state.allowed_hosts = allowed_hosts
+    app.state.allowed_origins = allowed_origins
 
     # #517 BUG-06：未捕获异常的全局兜底。Starlette 默认给 text/plain 的
     # "Internal Server Error"（TestClient 则直接 re-raise），前端按 JSON 解析
@@ -3031,25 +3068,21 @@ def create_app(
         AuthSeamMiddleware,
         settings=settings,
         host_service_token=host_service_token,
+        allowed_origins=allowed_origins,
     )
 
     if enable_cors:
         # #1483：本机开发仍支持 Vite 直连，但来源必须是精确 loopback hostname
         # 或显式配置值；不再用 ``*``。方法 / 请求头也只列出当前 Web API 的实际
         # 浏览器面，CORS 只是浏览器可读性边界，认证与动作授权仍在各自 seam。
-        from agent_harness.web.projects import (
-            LOCAL_CONTROL_PLANE_ORIGIN_REGEX,
-            configured_control_plane_origins,
-        )
+        from agent_harness.web.projects import LOCAL_CONTROL_PLANE_ORIGIN_REGEX
 
         # 放在认证层外：浏览器预检（OPTIONS）天然不携带 Bearer，认证层在内层时
         # 预检直接 401，配置 JWT_SECRET 后跨域 dev 模式整体失效。预检放行不削弱
         # 认证——真实数据请求仍逐个过认证层；更外层的中央边界随后统一校验 Host。
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=sorted(
-                configured_control_plane_origins(settings.control_plane_allowed_origins)
-            ),
+            allow_origins=sorted(allowed_origins),
             allow_origin_regex=LOCAL_CONTROL_PLANE_ORIGIN_REGEX,
             allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             allow_headers=["Accept", "Authorization", "Content-Type"],
@@ -3058,7 +3091,13 @@ def create_app(
 
     # 最后添加 = 最外层。即使 CORS 处理了预检，Host / Origin 仍先过中央边界；
     # enable_cors=False 的本机脚本 / serve 路径也不能绕开该边界。
-    app.add_middleware(ControlPlaneBoundaryMiddleware, settings=settings)
+    app.add_middleware(
+        ControlPlaneBoundaryMiddleware,
+        settings=settings,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+        allow_testserver=allow_testserver,
+    )
 
     # ── 路由 ──
 
@@ -3117,7 +3156,8 @@ def create_app(
         Prometheus 文本暴露格式（v0.0.4）；Diagnostic 层，Event≠Log，不进
         SessionEvent。读取零副作用（gc 扫描在 worker 线程），单项采集失败
         ⇒ 该指标整行缺席（缺席≠占位值），不影响任何业务路径（不变量 #21）。
-        默认无鉴权——与 /api/health 同一口径（AC5，不引入开关）。
+        本地信任模式下与 /api/health 同一口径；配置 JWT_SECRET 后由认证层接管，
+        未携带有效凭据返回 401。
         """
         return Response(
             content=await collect_process_metrics(),

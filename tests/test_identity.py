@@ -58,7 +58,9 @@ def test_auth_seam_sets_contextvar(tmp_path):
     from datetime import UTC, datetime
 
     secret = "test-signing-secret-at-least-32-characters"
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
+    allow_testserver=True,
+    )
 
     @app.get("/identity-probe")
     async def probe():
@@ -80,7 +82,9 @@ def test_auth_seam_sets_contextvar(tmp_path):
 
 
 def test_no_secret_does_not_trust_bearer_identity(tmp_path):
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)),
+    allow_testserver=True,
+    )
 
     @app.get("/identity-probe")
     async def probe():
@@ -102,7 +106,9 @@ def test_auth_fail_closed_when_secret_configured(tmp_path):
     from datetime import UTC, datetime
 
     secret = "test-signing-secret-at-least-32-characters"
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
+    allow_testserver=True,
+    )
 
     @app.get("/identity-probe")
     async def probe():
@@ -126,7 +132,9 @@ def test_auth_unset_secret_warns_loudly(tmp_path, caplog):
     发出响亮的启动告警——静默 fail-open 是 R6-4 的核心危害。"""
     import logging
 
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)),
+    allow_testserver=True,
+    )
 
     @app.get("/identity-probe")
     async def probe():
@@ -149,7 +157,9 @@ def test_cors_preflight_survives_auth_when_secret_configured(tmp_path):
     from datetime import UTC, datetime
 
     secret = "test-signing-secret-at-least-32-characters"
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
+    allow_testserver=True,
+    )
     with TestClient(app) as client:
         preflight = client.options(
             "/api/health",

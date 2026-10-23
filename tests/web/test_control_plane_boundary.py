@@ -10,15 +10,21 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi import Depends
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from agent_harness.config import Settings
 from agent_harness.web.app import create_app
+from agent_harness.web.projects import check_trusted_host, require_trusted_origin
 
 _LOCAL_ORIGIN = "http://localhost:5173"
 _LOCAL_HOST = "127.0.0.1:8000"
 _PRIVATE_PATH = "/newly-mounted-private-api"
+
+# P2-2 regression: async HTTP tests must use a real loopback Host instead of
+# synthetic ``test``/``restart.test`` names, so this boundary test remains the
+# canonical check that non-loopback synthetic Host values are rejected.
 
 
 def _app(tmp_path: Path, *, enable_cors: bool = False):
@@ -26,6 +32,7 @@ def _app(tmp_path: Path, *, enable_cors: bool = False):
     app = create_app(
         Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=enable_cors,
+        allow_testserver=True,
     )
 
     @app.get(_PRIVATE_PATH)
@@ -51,6 +58,8 @@ def test_central_boundary_protects_a_newly_mounted_route(tmp_path: Path) -> None
             "https://evil.example",
             "http://localhost.evil.example",
             "http://127.0.0.1.evil.example",
+            "http://evil-localhost:5173",
+            "http://xlocalhost",
             "null",
             "file://localhost",
         ):
@@ -184,6 +193,7 @@ def test_extra_origin_and_host_require_explicit_configuration(tmp_path: Path) ->
             control_plane_allowed_hosts="control.example:8443",
         ),
         enable_cors=True,
+        allow_testserver=True,
     )
 
     @app.get(_PRIVATE_PATH)
@@ -229,8 +239,64 @@ def test_wildcard_extra_origin_is_rejected_at_app_creation(tmp_path: Path) -> No
                 _env_file=None,
                 workspace_dir=str(tmp_path),
                 control_plane_allowed_origins="*",
-            )
+            ),
+            allow_testserver=True,
         )
+
+
+@pytest.mark.parametrize("value", ["*", "null"])
+def test_wildcard_or_null_extra_host_is_rejected_at_app_creation(
+    tmp_path: Path, value: str
+) -> None:
+    with pytest.raises(ValueError, match="CONTROL_PLANE_ALLOWED_HOSTS"):
+        create_app(
+            Settings(
+                _env_file=None,
+                workspace_dir=str(tmp_path),
+                control_plane_allowed_hosts=value,
+            ),
+            allow_testserver=True,
+        )
+
+
+def test_testserver_host_requires_explicit_test_injection() -> None:
+    scope = {
+        "headers": [(b"host", b"testserver")],
+        "server": ["testserver", 80],
+    }
+    assert check_trusted_host(scope) is not None
+    assert check_trusted_host(scope, allow_testserver=True) is None
+
+
+def test_request_origin_uses_create_app_cache(tmp_path: Path, monkeypatch) -> None:
+    app = create_app(
+        Settings(
+            _env_file=None,
+            workspace_dir=str(tmp_path),
+            control_plane_allowed_origins="https://desktop.example",
+        ),
+        enable_cors=False,
+        allow_testserver=True,
+    )
+
+    @app.get("/cached-origin-probe")
+    async def cached_origin_probe(_: None = Depends(require_trusted_origin)) -> dict[str, bool]:
+        return {"ok": True}
+
+    def _unexpected_reparse(raw: str):
+        raise AssertionError(f"configured origins reparsed during request: {raw!r}")
+
+    import agent_harness.web.projects as projects_module
+
+    monkeypatch.setattr(
+        projects_module, "configured_control_plane_origins", _unexpected_reparse
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/cached-origin-probe",
+            headers={"Origin": "https://desktop.example"},
+        )
+    assert response.status_code == 200, response.text
 
 
 def test_websocket_central_boundary_rejects_forged_host(tmp_path: Path) -> None:
