@@ -289,6 +289,11 @@ class Settings(BaseSettings):
     provider_store_path: str = str(Path.home() / ".agent-harness" / "model-providers.json")
     # 连接测试超时（秒，§6.2）：固定参数之一，默认 15s——测试不该等 300s。
     model_test_timeout_seconds: float = 15.0
+    # #1485 端点误配置守卫（裁决 25 B）：默认拦云元数据 / link-local，loopback 与
+    # RFC1918 照旧放行。所有者自用端点确实落在这两类网段时，在此显式登记例外
+    # （逗号分隔 `host` 或 `host:port`；IPv6 带端口写 `[fe80::1]:8080`）。
+    # 只认 env/.env——web 请求体 `extra="forbid"`，外部输入改不了这一项。
+    model_endpoint_allowlist: str = ""
 
     # Langfuse 旁路观测（ADR-0018 D2/D6，首个 OPTIONAL_OBSERVABILITY 实现）：
     # key 空 = 旁路完全缺席（懒加载，零 import 开销）。key 同 SecretStr 脱敏待遇。
@@ -332,6 +337,19 @@ class Settings(BaseSettings):
                 "ask_user_question_timeout must be one of "
                 f"{sorted(ASK_USER_QUESTION_TIMEOUT_TIERS)}, got {value}"
             )
+        return value
+
+    @field_validator("model_endpoint_allowlist")
+    @classmethod
+    def _validate_endpoint_allowlist(cls, value: str) -> str:
+        """#1485 端点例外在构造期（= 启动期）校验：配错就起不来，而不是静默永不命中。
+
+        解析规则单点在 `model.endpoint_guard`（运行期读的是同一份字符串）；延迟
+        import 与该模块的既有用法一致（`model/*` 反向依赖 `config`，顶部 import 会成环）。
+        """
+        from agent_harness.model.endpoint_guard import validate_allowlist
+
+        validate_allowlist(value)
         return value
 
     @field_validator("attachment_allowed_media_types")
