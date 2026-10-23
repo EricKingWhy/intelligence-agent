@@ -18,7 +18,7 @@
 
 ### 1.1 Current state
 
-The product already has a replaceable Memory Capability, SQLite record storage, a Milvus vector index, an outbox relay, automatic run-end extraction, automatic context injection, memory tools, and basic list/delete Web UI. (Planning-time snapshot: the content authority has since moved to Markdown files — see §6.6 and §12.)
+The product already has a replaceable Memory Capability, SQLite record storage, a Milvus vector index, an outbox relay, automatic run-end extraction, automatic context injection, memory tools, and basic list/delete Web UI. (Planning-time snapshot: the content authority has since moved to Markdown files — see §6.6 and §12. The Milvus vector index and the SQLite record store are post-pivot Knowledge/RAG and migration concerns, not memory content authority.)
 
 The current automatic path does not meet a production long-term-memory bar:
 
@@ -27,11 +27,11 @@ The current automatic path does not meet a production long-term-memory bar:
 - the current USER/SESSION split allows session-scoped records to be treated as long-term memory even though SessionEvent history already owns short-term conversation state;
 - run-end writeback is process-owned work and is not proven recoverable after a crash;
 - formation, quality adjudication, consolidation, retry, fallback, provenance, sensitivity, lifecycle, and user governance are not expressed by one strict contract;
-- retrieval is primarily dense-vector based and does not provide the approved profile/collection budgets, cross-session project scoping, or a user-visible explanation of why a record was recalled;
+- retrieval is primarily dense-vector based and does not provide the approved profile/collection budgets, cross-session recall quality, or a user-visible explanation of why a record was recalled;
 - the current management API/UI is list/delete only;
 - existing long-term-memory data is acknowledged to be polluted and must not be migrated into the new store.
 
-Markdown files remain the authoritative memory-content store (`MEMORY.md` for collection content, `USER.md` for the profile), written only through the single `MemoryCommit` seam. FTS/index/outbox and the Milvus vector index are derived and rebuildable from those files. SessionEvent history, checkpoints, artifacts, and Knowledge are separate domains and must not be reclassified as long-term memory.
+Markdown files remain the authoritative memory-content store (`MEMORY.md` for collection content, `USER.md` for the profile), written only through the single `MemoryCommit` seam (target contract; built by #1494). FTS, the in-process index, and the outbox are derived and rebuildable from those files. Memory owns no vector index: Milvus stays a Knowledge/RAG vector store and is not a long-term-memory owner (ADR-0056 §2; #1496 AC1). SessionEvent history, checkpoints, artifacts, and Knowledge are separate domains and must not be reclassified as long-term memory.
 
 ### 1.2 Problem
 
@@ -71,14 +71,14 @@ The final cutover makes the new Markdown-backed path the only runtime source. Ol
 
 ## Solution
 
-Introduce a V2 long-term-memory lifecycle behind the existing Memory Capability/provider boundary. Eligible completed runs create a durable background job. Formation first decides whether durable information exists and emits bounded typed candidates. Adjudication then compares each candidate with authorized active memory and selects ADD, UPDATE, INVALIDATE, or NOOP. Runtime code validates every result, owns identity/policy/budgets, and commits accepted changes through the single `MemoryCommit` seam into the Markdown files; FTS/index/outbox and Milvus are updated as derived state.
+Introduce a V2 long-term-memory lifecycle behind the existing Memory Capability/provider boundary. Eligible completed runs create a durable background job. Formation first decides whether durable information exists and emits bounded typed candidates. Adjudication then compares each candidate with authorized active memory and selects ADD, UPDATE, INVALIDATE, or NOOP. Runtime code validates every result, owns identity/policy/budgets, and commits accepted changes through the single `MemoryCommit` seam into the Markdown files; FTS, the in-process index, and the outbox are updated as derived state.
 
 Recall combines a small trusted profile from `USER.md` with hybrid retrieval over `MEMORY.md` content. Users retain explicit search/remember/forget tools and gain full API/Web governance. Observability is metadata-only. After the V2 path is integrated and verified, a cutover makes it the only runtime source and the old store becomes a read-only archive.
 
 ## User Stories
 
 1. As a user, I want stable preferences I state to be available in later conversations without repeating them.
-2. As a user, I want reusable project facts and successful operating procedures to be recalled only inside the correct project.
+2. As a user, I want reusable project facts and successful operating procedures to be recalled across my conversations, without the memory system partitioning or filtering them by project identity.
 3. As a user, I want one-off answers, transient errors, raw tool output, and ordinary conversation filler to be skipped rather than polluting my memory.
 4. As a user, I want the system to remember automatically without asking me to approve every ordinary memory.
 5. As a user, I want secrets never stored, and sensitive information stored only when I explicitly ask for it.
@@ -128,7 +128,7 @@ Memory content is a **single-user, local file asset**. It is not routed by tenan
 - The former tenant/user/project values on existing records are retained only as **read-only migration source labels** (ADR-0056 §3.7) and never enter the runtime path. They must not be renamed to a replacement routing key and re-introduced.
 - A semantic `project_fact` keeps its kind and its "belongs to one project's work" meaning in its payload; it is validated as a payload category, not by routing.
 - `source_session_id` is provenance only. It must never restrict recall and must not recreate SESSION-scoped long-term memory.
-- Isolation is now enforced by process/file boundary (single-user local deployment) plus the write-scan, read-scan, pin, and revision checks — not by identity routing.
+- Isolation is enforced by the process/file boundary (single-user local deployment) plus the write-scan, read-scan, pin, and revision checks — not by identity routing. Today the identity-free path is the target contract being built by #1494/#1496; until it lands, this bullet states the contract the revision must reach, not a description of shipped behavior.
 
 ### 4.4 Trust and source
 
@@ -152,7 +152,7 @@ A USER/profile fact requires a direct user statement or an explicit user confirm
 
 ### 5.2 Formation and adjudication
 
-1. **Given** an eligible run, **when** formation executes, **then** the model receives only the approved safe projection: the current run, at most eight prior user/assistant messages, at most ten similar active memories, tool names/status/structured summaries, artifact references, and a `trusted_context.project_available` boolean. Session and event identifiers and any migration labels are runtime-owned and are not sent to the model.
+1. **Given** an eligible run, **when** formation executes, **then** the model receives only the approved safe projection: the current run, at most eight prior user/assistant messages, at most ten similar active memories, tool names/status/structured summaries, and artifact references. Session and event identifiers and any migration labels are runtime-owned and are not sent to the model. No identity, project, or routing field is part of the projection (ruling 7).
 2. **Given** raw large tool output, artifact content, credentials, hidden reasoning, or unrestricted full history exists, **when** the formation prompt is built, **then** that material is absent.
 3. **Given** formation returns candidates, **when** runtime validation executes, **then** no more than five candidates are accepted: Semantic at most three, Episodic at most two, Procedural at most one, total at most five.
 4. **Given** a candidate exceeds a per-kind or total cap, **when** candidates are selected, **then** candidates are ranked by durable value and the lower-ranked excess candidates are discarded before adjudication.
@@ -164,15 +164,15 @@ A USER/profile fact requires a direct user statement or an explicit user confirm
 1. **Given** a transient primary-model failure, **when** the memory job executes, **then** `memory.primary` receives one initial attempt plus at most two retries.
 2. **Given** primary attempts are exhausted, **when** budget remains, **then** `memory.fallback` receives one initial attempt plus at most one retry.
 3. `memory.primary` and `memory.fallback` map to locally configured provider aliases whose targets are operator-configurable (default mapping preserved: `memory.primary` → `senseaudio`, `memory.fallback` → `qwen`). An operator MAY point either role at any provider available through the existing model-provider configuration surface (a built-in preset or a user-registered OpenAI-compatible provider). The role mapping is application-level (deployer-configured, effective after restart). Credentials and endpoint values remain local ignored configuration and never enter repository documents, issues, logs, or traces.
-4. Non-transient validation, authentication, permission, and policy failures are not retried. When such a failure is a deterministic provider-class failure of `memory.primary` (for example an HTTP 400 that is not a transient/network error) and the per-user memory fallback switch is enabled (default: enabled; panel-configurable and effective at runtime), the job MAY switch to `memory.fallback` once (the fallback then follows its ordinary retry budget), provided the fallback role resolves to a different provider, endpoint, or model. Otherwise the job terminates degraded without switching to `memory.fallback` — this covers the switch being disabled, no fallback role being configured, and the fallback resolving to the same target. Schema/parse failures and post-parse semantic guard failures remain immediately terminal; when the switch is disabled, behavior is byte-for-byte the current policy.
+4. Non-transient validation, authentication, permission, and policy failures are not retried. When such a failure is a deterministic provider-class failure of `memory.primary` (for example an HTTP 400 that is not a transient/network error) and the local memory fallback switch is enabled (default: enabled; one value for this deployment, not per identity; panel-configurable and effective at runtime), the job MAY switch to `memory.fallback` once (the fallback then follows its ordinary retry budget), provided the fallback role resolves to a different provider, endpoint, or model. Otherwise the job terminates degraded without switching to `memory.fallback` — this covers the switch being disabled, no fallback role being configured, and the fallback resolving to the same target. Schema/parse failures and post-parse semantic guard failures remain immediately terminal; when the switch is disabled, behavior is byte-for-byte the current policy.
 5. One job has a 120-second wall-clock deadline, at most five model calls, at most 32,000 cumulative input tokens, and at most 4,000 output tokens per call.
-6. Jobs are serialized per user. Global formation concurrency defaults to four and is configurable.
+6. Jobs are serialized within the single local memory space. Global formation concurrency defaults to four and is configurable.
 
 ### 5.4 Versioning, contradiction, and deletion
 
 1. **Given** a new fact supersedes an active memory, **when** `UPDATE` is applied, **then** a new version becomes active and the previous version becomes `superseded`; the previous content remains available in version history.
 2. **Given** a fact is no longer true without a replacement, **when** `INVALIDATE` is applied, **then** the active record becomes `invalidated` and is excluded from recall.
-3. **Given** the user deletes a memory, **when** deletion commits, **then** content and evidence excerpts are removed immediately from the Markdown files and from every derived index (FTS/in-process index/outbox/Milvus). A content-free tombstone retains only IDs, source labels, timestamps, deletion reason, and hashes for 30 days, after which it is purged. The tombstone has its own non-SQLite owner (ADR-0056 §3.5) and continues to reject stale-input replay.
+3. **Given** the user deletes a memory, **when** deletion commits, **then** content and evidence excerpts are removed immediately from the Markdown files and from every derived index (FTS/in-process index/outbox). A content-free tombstone retains only IDs, source labels, timestamps, deletion reason, and hashes for 30 days, after which it is purged. The tombstone has its own non-SQLite owner (ADR-0056 §3.5) and continues to reject stale-input replay.
 4. **Given** an outbox relay or background worker restarts after deletion, **when** it replays outstanding operations, **then** deleted or pre-cutover content cannot be recreated.
 
 ### 5.5 Recall
@@ -205,7 +205,7 @@ A USER/profile fact requires a direct user statement or an explicit user confirm
 
 ### 6.1 Durable memory envelope
 
-Every V2 memory record has these required fields:
+Every V2 memory record has these fields. All are required unless the row marks one as conditional:
 
 | Field | Contract |
 | --- | --- |
@@ -222,8 +222,8 @@ Every V2 memory record has these required fields:
 | `source_session_id` | Origin-only session identifier |
 | `source_event_ids` | Non-empty ordered set for automatic memories; may be empty only for direct UI edits without a session |
 | `evidence` | One or more `{role, excerpt, hash}` items; excerpt max 300 characters; deleted tombstones retain hash only |
-| `migration_labels` | Read-only provenance labels inherited from the pre-pivot store (`tenant`/`user`/`project` values). Not a routing key, not written by runtime, not consulted for recall (ADR-0056 §3.7) |
-| `revision` | Current committed file revision this record was published at; used by the `MemoryCommit` receipt to detect conflicts |
+| `migration_labels` | **Conditional** (migrated records only): read-only provenance labels inherited from the pre-pivot store (`tenant`/`user`/`project` values). Not a routing key, not written by runtime, not consulted for recall, and absent on newly formed records (ADR-0056 §3.7) |
+| `revision` | **Conditional** (published records only): the committed file revision this record was published at, written by the `MemoryCommit` seam, used by its receipt to detect conflicts. Not a formation input |
 | `valid_at`, `invalidated_at`, `superseded_by` | Temporal/version fields; nullable when not applicable |
 | `created_at`, `updated_at` | Server-owned timestamps |
 
@@ -266,7 +266,7 @@ reason_code: durable_new | enrich_existing | contradicts_existing |
 
 Existing authenticated `/api/memories` list/delete behavior remains compatible while responses gain V2 fields.
 
-- `GET /api/memories`: supports `q`, `kind`, `status`, `tier`, `limit`, and `offset`; returns the records readable from the current Markdown content and its version history.
+- `GET /api/memories`: supports `q`, `kind`, `status`, `tier`, `limit`, and `offset`; returns the records readable from the current Markdown content. Version history is served from the record's own current/previous-version data; where it is persisted is decided by #1494 and is not asserted here.
 - `GET /api/memories/{id}`: returns the visible current record and provenance summary.
 - `GET /api/memories/{id}/versions`: returns visible versions in descending version order, excluding deleted content.
 - `PATCH /api/memories/{id}`: accepts editable content plus the matching typed payload and creates a new `user_edit` version.
@@ -303,7 +303,7 @@ Each fact class has one named owner; there is no single unified store and no def
 - **Tombstone**: the deletion-suppression owner keeps deletion reason, content/source hashes, and expiry; it continues to reject stale-input replay.
 - **Receipt / reconcile**: the commit-recovery owner keeps operation id, per-target previous/new digests, and the PREPARED / PUBLISHED / COMMITTED / NEED_RECONCILE state machine (names finalized in #1494). Uncertainty ⇒ NEED_RECONCILE.
 - **History / provenance**: a read-only migration archive (encrypted backup, retained until 2027-10-23) plus a mapping table; both are off the runtime path.
-- **Derived index / outbox**: FTS, in-process index, and outbox are rebuildable from the current Markdown content only; they own no current fact, and their survival is decided with the retirement step (ruling 16). Milvus stores derived vectors plus minimum filter/projection fields and is rebuildable the same way.
+- **Derived index / outbox**: FTS, in-process index, and outbox are rebuildable from the current Markdown content only; they own no current fact, and their survival is decided with the retirement step (ruling 16; ADR-0056 §3.8). No vector index belongs to Memory: Milvus is a Knowledge/RAG store and is out of this owner table.
 - LangMem is an optional adapter used for typed formation/consolidation; it does not own persistence, identity, retry, fallback, policy, or lifecycle.
 - Langfuse is observational only and cannot be required for Core success.
 
@@ -320,7 +320,7 @@ Each fact class has one named owner; there is no single unified store and no def
 7. The retry, fallback, token, deadline, concurrency, candidate, content, evidence, and injection budgets in this PRD.
 8. Secret prohibition, sensitive-data consent, non-privileged recall, and user-edit authority.
 9. Versioning, supersession/invalidation, deletion tombstones, and complete user governance.
-10. Clean-slate deletion of old long-term-memory data without a content backup.
+10. Old long-term-memory data is retained as an encrypted, read-only archive to a defined retention date (2027-10-23). Destructive deletion is **not** authorized by this PRD: it requires a separate ruling (ruling 6). This supersedes the former clean-slate deletion constraint, whose authorization is not inherited.
 11. Real final Gate only after all implementation tickets are integrated.
 
 ### 7.2 BOUNDED
@@ -347,7 +347,7 @@ Each fact class has one named owner; there is no single unified store and no def
 1. **Memory Capability/provider seam:** typed lifecycle, versioning, tier semantics, Markdown content authority via the commit seam, derived-index rebuildability, and provider replacement.
 2. **Real AgentRuntime + SessionEvent recovery seam:** trigger eligibility, durable background job, retry/fallback, crash/restart, idempotency, and event contracts.
 3. **FastAPI + Web UI seam:** governance API contracts plus accessible user workflows at both supported viewport sizes.
-4. **Real integration/evaluation seam:** real configured memory models, dedicated Milvus collection, metadata-only Langfuse, quality corpus, public baseline, and cleanup proof.
+4. **Real integration/evaluation seam:** real configured memory models, metadata-only Langfuse, quality corpus, public baseline, and cleanup proof. Memory owns no vector collection; Milvus is exercised only as a Knowledge/RAG store.
 
 ### 8.2 Blocking project gates
 
@@ -372,7 +372,7 @@ Run LoCoMo- and LongMemEval-compatible evaluation and record answer quality, sto
 
 ### 8.4 Real Gate hygiene
 
-- Use a dedicated, uniquely named Milvus memory collection and clean it after verification.
+- Memory creates and owns no vector collection. Knowledge/RAG Milvus collections are cleaned back to their baseline after verification.
 - Preserve the Langfuse test dataset, experiment, and trace as release evidence; verify no unexpected duplicate records.
 - Langfuse records metadata and hashes only. Synthetic evaluation inputs may be retained; real user content may not.
 - Credentials are checked only for presence. Values are never printed.
@@ -389,7 +389,7 @@ Run LoCoMo- and LongMemEval-compatible evaluation and record answer quality, sto
 7. API and Web UI tests prove list/search/filter/source/version/edit/delete/bulk-delete/settings/why-recalled workflows, including authorization and both supported viewports.
 8. Secret and prompt-injection probes prove stored memory cannot grant permission or enter privileged instruction channels.
 9. Cutover proves the runtime no longer reads the pre-pivot store: every write goes through the commit seam to Markdown, every recall is served from current Markdown content plus a rebuildable index, and the old store is preserved only as the approved encrypted read-only archive. SessionEvents, chats, checkpoints, artifacts, Knowledge, datasets, and credentials remain intact. Old SQLite/Profile/job/outbox data must not be deleted under the original clean-slate authorization.
-10. The real Gate leaves Milvus/Knowledge/Qiniu temporary test data at zero while preserving the approved Langfuse evidence.
+10. The real Gate leaves Knowledge/RAG and Qiniu temporary test data at zero while preserving the approved Langfuse evidence.
 11. Relevant ADRs are added or superseded so the memory content/operational-state owner boundary, tombstone semantics, provider ownership, retrieval behavior, and the retirement of identity routing do not conflict with ADR-0008, ADR-0009, ADR-0024, ADR-0026, ADR-0031, or ADR-0056.
 12. Ruff, backend full pytest, review coverage, frontend typecheck, Vitest, Oxlint, production build, and full two-viewport Playwright gates pass on the integrated tree.
 
@@ -401,7 +401,7 @@ Run LoCoMo- and LongMemEval-compatible evaluation and record answer quality, sto
 4. #300 / MEM-V2-4 — Explicit commands and governance API.
 5. #301 / MEM-V2-5 — Memory management Web UI.
 6. #302 / MEM-V2-6 — Privacy observability and quality evaluation.
-7. #303 / MEM-V2-7 — Clean-slate cutover and legacy-path retirement.
+7. #303 / MEM-V2-7 — Clean-slate cutover and legacy-path retirement. *(Historical label only: the clean-slate deletion authorization this ticket carried is superseded — see §7.1 item 10 and ruling 6.)*
 8. #304 / MEM-V2-8 — Final real Gate and release evidence.
 
 Dependency order is defined in the ticket documents and their GitHub issue bodies.

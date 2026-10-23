@@ -92,6 +92,8 @@ Pi 当前核心价值适合借鉴：
 `REUSE + ADAPT`（可选 Adapter，不再是默认 MemoryProvider）
 - 仅作为 MemoryProvider 的一种可选实现；当前默认是仓内 Markdown 文件存储
   （`MEMORY.md` / `USER.md`，见 06 §6）——ADR-0056 §7 取代了「LangMem 为默认」的旧表述
+- 现状注记：`factories.py` 的 `{"builtin","langmem"}` 白名单里 `langmem` 仍映射到同一个
+  Markdown 实现（历史别名），因此「可选 Adapter」是方向而非已落地的第二实现
 - 必须经 `MemoryCapability / MemoryContextProvider`
 - Core 禁止 import LangMem concrete class
 

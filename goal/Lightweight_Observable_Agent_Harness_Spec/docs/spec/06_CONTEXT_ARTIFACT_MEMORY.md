@@ -125,16 +125,17 @@ Core 不直接依赖 LangMem、Mem0 或自研实现。
 ```text
 MemoryProvider
 ├─ MarkdownMemoryStore  # 当前默认：MEMORY.md / USER.md 文件内容权威
-├─ LangMemProvider      # 可选 Adapter（V1 历史默认，其默认地位被 ADR-0056 §7 取代）
+├─ LangMemProvider      # 可选 Adapter（V1 历史默认，其默认地位被 ADR-0056 §7 取代；
+│                       #  当前 `langmem` 名仍是同一 Markdown 实现的历史别名）
 ├─ Mem0Provider         # future
 └─ CustomProvider       # future
 ```
 
 当前默认实现是仓内 Markdown 文件存储（`memory/v2/markdown_store.py`）：`MEMORY.md` 承载
 collection 内容，`USER.md` 承载 profile 内容。内容的**唯一可变事实入口**是统一提交 seam
-（`MemoryCommit`，#1494）；Tool、service、formation、审批与批量删除都只向它交意图，
-不得自带第二套写序（ADR-0056 §3.1）。检索索引与 outbox 是可重建派生态，不拥有任何当前事实
-（ADR-0056 §3.8）。
+（`MemoryCommit`，目标合同，由 #1494 建立）；Tool、service、formation、审批与批量删除都只向它
+交意图，不得自带第二套写序（ADR-0056 §3.1）。检索索引与 outbox 是可重建派生态，不拥有任何
+当前事实（ADR-0056 §3.8）。
 
 建议抽象能力（供非文件 Provider 参考，不要求当前文件实现逐一对齐）：
 
