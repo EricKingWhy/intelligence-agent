@@ -629,7 +629,7 @@ class MemoryV2Service:
         texts.extend(item.excerpt for item in draft.evidence)
         if find_secret(*texts) is not None:
             raise MemoryContentRejected(
-                "该内容匹配凭证或密钥规则，不能写入长期记忆。",
+                SECRET_CONTENT_REJECTION,
                 MemoryRejectionReason.SECRET_CONTENT,
             )
         for text in texts:
@@ -644,11 +644,17 @@ class MemoryRejectionReason(str, Enum):
     """内容被拒的稳定归因码（进 `MemoryContentRejected.reason_code`）。
 
     字面量是**观测契约**的一部分：金标判定与排障都按它对账，不随中文文案变动
-    （文案会为了可读性改写，码不会——#1440 C 案）。
+    （文案会为了可读性改写，码不会——#1440 C 案）。码值由
+    `tests/evaluation/test_memory_v2_gold_reason_contract.py` 的字面量断言钉住。
     """
 
     SECRET_CONTENT = "secret_content"
     THREAT_PATTERN = "threat_pattern"
+
+
+#: 凭证拒绝的中文真因文案：入口 `_reject_secret` 与显式路径 `tools.py` 共用一份，
+#: 两处措辞才不会有第二份真源（#1440 C 案）。**文案可变、`reason_code` 不变**。
+SECRET_CONTENT_REJECTION = "该内容匹配凭证或密钥规则，不能写入长期记忆。"
 
 
 class MemoryContentRejected(PermissionError):

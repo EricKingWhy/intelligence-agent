@@ -19,6 +19,7 @@ from agent_harness.memory.audit import (
 )
 from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.v2.capability import (
+    SECRET_CONTENT_REJECTION,
     MarkdownBudgetExhausted,
     MemoryContentRejected,
     MemoryRejectionReason,
@@ -288,7 +289,7 @@ class RememberMemoryV2Tool(Tool):
             if find_secret(source_text, args.content) is not None:
                 # #1440 C 案：与 `_reject_secret` 同源同一异常，reason_code 才只有一份。
                 raise MemoryContentRejected(
-                    "该内容匹配凭证或密钥规则，不能写入长期记忆。",
+                    SECRET_CONTENT_REJECTION,
                     MemoryRejectionReason.SECRET_CONTENT,
                 )
             trusted = trusted_identity_for_session(session_id, self._workspace_index)
@@ -330,7 +331,11 @@ class RememberMemoryV2Tool(Tool):
             reason_code = getattr(error, "reason_code", None)
             return ToolResult.failure(
                 message=str(error), error_code=ErrorCode.PERMISSION_DENIED,
-                metadata={"reason_code": reason_code.value} if reason_code else {},
+                # `.value` 经 getattr：码可能是裸字符串（构造兼容面），不能 AttributeError。
+                metadata=(
+                    {"reason_code": str(getattr(reason_code, "value", reason_code))}
+                    if reason_code is not None else {}
+                ),
             )
         except MarkdownBudgetExhausted as error:
             # #1440 F-12：预算超限是**永久条件**（重试落在同一条上限上），且三段式

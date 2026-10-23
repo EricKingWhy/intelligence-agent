@@ -1,14 +1,13 @@
 """#1440 C 案：金标 secret 探针按 `reason_code` 判定（判别力新测）。
 
-三件事必须同时成立，缺一条这份契约就是空话：
+四件事必须同时成立，缺一条这份契约就是空话：
 
 ① **文案无关性**：拒绝文案换成任意字面值，两条边界探针（direct / api_edit）仍判
    blocked=True——判定读的是 `reason_code`，不是中文串。
-② **守卫仍咬人**：把 `_reject_secret` 猴补成 no-op，探针必须判 False（金标会因此变红，
-   实测读数见报告）。
+② **守卫仍咬人**：把 `_reject_secret` 猴补成 no-op，探针必须判 False。
 ③ **fail-closed**：`reason_code` 缺失或未知码，两种构造都判未阻断。
 ④ **口径一致**：显式路径（`remember_this`）的秘密拒绝同样带机读码——`ToolResult` 无
-   专用字段，落在 `metadata.reason_code`（`tools.py`）。
+   专用字段，落在 `metadata.reason_code`（`tools.py`）；码值字面量另由本文件钉住。
 
 既有金标测试（`test_memory_v2_gold_gate.py`）的断言一字未动，本文件是新增面。
 """
@@ -42,6 +41,9 @@ from agent_harness.session import (
     SessionEvent,
 )
 from agent_harness.tooling.result import ErrorCode
+from agent_harness.web.domain_errors import (
+    MEMORY_REASON_CODE_HEADER as _MEMORY_REASON_CODE_HEADER,
+)
 from evaluation.memory_v2_gold_adapter import CaseWorkspace, _run_secret_write_probe
 
 _IDENTITY = TrustedMemoryIdentity("gold-tenant", "gold-user", "gold-project")
@@ -170,3 +172,15 @@ def test_explicit_remember_rejection_carries_the_same_reason_code(tmp_path):
     assert result.error_code is ErrorCode.PERMISSION_DENIED
     assert result.metadata == {"reason_code": MemoryRejectionReason.SECRET_CONTENT.value}
     assert "凭证" in result.message and "身份无权" not in result.message
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 码值字面量钉（ADR-0035 §4-2：值集合必须有测试钉住，改字面量不能静默过）
+# ---------------------------------------------------------------------------
+
+
+def test_reason_code_literals_are_pinned():
+    """头/元数据里的字面量是线上契约：改名必须同时改这里，不能靠枚举引用自证。"""
+    assert MemoryRejectionReason.SECRET_CONTENT.value == "secret_content"
+    assert MemoryRejectionReason.THREAT_PATTERN.value == "threat_pattern"
+    assert _MEMORY_REASON_CODE_HEADER == "X-Memory-Reason-Code"

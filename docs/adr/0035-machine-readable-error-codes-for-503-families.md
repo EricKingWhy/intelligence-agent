@@ -120,3 +120,10 @@ artifact 内容端点的 503：
    **仍是"两侧各自自证"**——`tests/capability/test_phase7_gate.py` 自己也写着"改名不会让任何门禁
    变红"。同一套闸门可以照搬（读前端 `MEMORY_INIT_FAILED` 与 `DegradeReason` 的值集合），
    属已关单票的加固，本票不越界做。
+6. **memory 内容拒绝（403）的码走响应头，不走 `detail` 对象**（#1440 C 案，登记偏离 §2.1）：
+   该族的 `detail` 必须保持**纯字符串**——`tests/web/test_memory_api.py` 与前端都按字符串读
+   （`"凭证" in detail`），改成 `{code, message}` 就是 403 响应体形状变更，超出该票授权面。
+   因此码由响应头 `X-Memory-Reason-Code` 承载（常量 `web/domain_errors.py::MEMORY_REASON_CODE_HEADER`，
+   已登记进 `web/app.py::EXPOSED_CUSTOM_RESPONSE_HEADERS` 供跨域读取），**值集合与 §2.1 同一纪律**：
+   码值字面量由 `tests/evaluation/test_memory_v2_gold_reason_contract.py` 钉住，缺码/未知码一律
+   按"未阻断"fail-closed。§2.1 的形状仍是 503 家族的默认；本族是 403，且受既存响应体断言约束。

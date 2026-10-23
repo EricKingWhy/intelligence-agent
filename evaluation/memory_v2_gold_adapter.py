@@ -50,7 +50,11 @@ from agent_harness.memory.v2 import (
     TrustedMemoryIdentity,
 )
 from agent_harness.memory.v2._sqlite import connect
-from agent_harness.memory.v2.capability import MemoryRejectionReason, MemoryV2Service
+from agent_harness.memory.v2.capability import (
+    SECRET_CONTENT_REJECTION,
+    MemoryRejectionReason,
+    MemoryV2Service,
+)
 from agent_harness.memory.v2.eligibility import (
     MEMORY_OPT_OUT_FIELD,
     decide_run_end_eligibility,
@@ -524,9 +528,11 @@ _INELIGIBLE_SCRIPTS: dict[str, dict[str, Any]] = {
 #: The explicit-command secret probe: the tool boundary must refuse to persist it.
 _EXPLICIT_SECRET_PROBE = "explicit_remember_secret_probe"
 #: `RememberMemoryV2Tool`'s refusal text when it matched the secret rule. Both the
-#: "no explicit instruction" and "secret" refusals use PERMISSION_DENIED, so the
-#: message is the only discriminator the tool's return exposes (tools.py:207-211).
-_EXPLICIT_SECRET_REFUSAL = "该内容匹配凭证或密钥规则，不能写入长期记忆。"
+#: "no explicit instruction" and "secret" refusals use PERMISSION_DENIED. The tool now
+#: also returns `metadata["reason_code"]` (#1440 C case), but this explicit-path verdict
+#: still reads the message: the C-case ticket scoped the code-based judgement to the
+#: create/update/HTTP probes, so switching this one is a separate decision.
+_EXPLICIT_SECRET_REFUSAL = SECRET_CONTENT_REJECTION
 
 
 def _trusted_identity(case_id: str) -> TrustedMemoryIdentity:
