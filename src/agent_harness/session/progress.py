@@ -400,10 +400,6 @@ def _render_line(prefix: str, value: Any) -> str:
 # ── 渲染 ───────────────────────────────────────────────────────────────────
 
 
-def _bullets(items) -> list[str]:
-    return [f"- {item}" for item in items] if items else [f"- {_NONE_LINE}"]
-
-
 def _v(value: Any) -> str:
     """任何进正文的动态字符串的唯一出口（脱敏或整段缺项）。"""
     if value is None:
