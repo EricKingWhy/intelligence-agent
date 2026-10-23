@@ -3504,6 +3504,8 @@ def _main_memory(argv: list[str]) -> None:
     - `memory reject <id>`：明确丢弃；
     - `memory blocked` / `promote <id>` / `discard <id>`（#1461）：后台 formation 被审批门
       拦下的写入的两段式处置——列表、放行重放、丢弃。
+    - `memory reproject [--target memory|user]`（#1482）：派生层与 markdown 权威面对账，
+      即 `store.py` 降级 warning 里那句运维指令的真实入口。
 
     与 web 的 `/api/memory-pending*` 是**同一条**领域路径（`StagedWriteStore`），CLI 只
     做渲染。身份取本进程的 `get_identity_context()`（单用户部署下即 local/local），与
@@ -3528,6 +3530,13 @@ def _main_memory(argv: list[str]) -> None:
     journey.add_argument("--limit", type=int, default=50)
     subcommands.add_parser(
         "migrate", help="把 SQLite 里的 active 记忆一次性导出到 memories/*.md（幂等）",
+    )
+    reproject = subcommands.add_parser(
+        "reproject", help="把派生层与 memories/*.md 对账（收敛重复投影与积压账本）",
+    )
+    reproject.add_argument(
+        "--target", choices=("memory", "user"), default=None,
+        help="只对账一个文件；缺省两个都跑",
     )
     args = parser.parse_args(argv)
     settings = Settings()
@@ -3582,6 +3591,35 @@ async def _memory_command(
     service = await build_memory_v2_service(settings)
     staged = service.staged
     trusted = trusted_identity_for_session("", None)
+    if args.command == "reproject":
+        # #1482 Finding 二甲案：给降级 warning 指的那句运维指令接一个真实入口。
+        # 与 migrate 分支不同——reproject 必须读活账本与派生层，所以走 `build_memory_v2_service`
+        # 装配（与 pending/approve 同形）。
+        if service.markdown is None:
+            # 没有权威面就没有可对账的东西：全零摘要会装作成功，直接报错。
+            return "reproject 失败：本部署未装配 markdown 权威面（memories/*.md）。", True
+        lines = ["记忆投影对账："]
+        failed_targets: list[str] = []
+        for target in ([args.target] if args.target else ["memory", "user"]):
+            summary = await service.reproject(trusted, target)
+            lines.append(
+                f"  {target}: created={summary['created']} deleted={summary['deleted']} "
+                f"pending={summary['pending']} desired={summary['desired']}"
+            )
+            if target in summary["unreadable"]:
+                lines.append(f"    {target}: 文件读不出来，本轮未对账（修好文件后重跑）")
+                failed_targets.append(f"{target} 不可读")
+            if summary["remaining"]:
+                lines.append(f"    账本仍有 {summary['remaining']} 行待收敛")
+                failed_targets.append(f"{target} 账本积压 {summary['remaining']} 行")
+            if summary["pending"]:
+                failed_targets.append(f"{target} 仍有待投影项")
+                for skipped_target, _digest, reason in summary["skipped"]:
+                    lines.append(f"    跳过（{skipped_target}）：{reason}")
+        if failed_targets:
+            lines.append("未收敛：" + "；".join(dict.fromkeys(failed_targets)))
+            return "\n".join(lines), True
+        return "\n".join(lines), False
     if args.command == "journey":
         # #1353 M10：与 GET /api/memory-journey 同一条领域路径（版本链 → 卡片）。
         from agent_harness.memory.v2.journey import build_journey

@@ -178,7 +178,10 @@ class MemoryV2Service:
         """
         markdown = self._markdown
         if markdown is None:
-            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+            return {
+                "desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False,
+                "unreadable": [],
+            }
         summary = await reprojection.apply_write(
             self._store, markdown, target, response, trusted,
             operations=operations, content=content,
@@ -191,12 +194,22 @@ class MemoryV2Service:
     async def reproject(
         self, trusted: TrustedMemoryIdentity, target: str,
     ) -> dict[str, Any]:
-        """F-06b 运维/漂移入口：先把 pending 账本排空，再全量对账该 target。"""
+        """F-06b 运维/漂移入口：先把 pending 账本排空，再全量对账该 target。
+
+        返回 summary 额外带两项供 CLI 判失败（#1482 Finding 二）：`unreadable`（本轮没读到
+        的 target，来自 `reproject_target`）与 `remaining`（排空后仍在账本里的行数——服务层
+        没有其它可读面，不透传的话"账本有积压"在入口侧不可见）。
+        """
         markdown = self._markdown
         if markdown is None:
-            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
-        await reprojection.drain_pending(self._store, markdown, trusted)
-        return await reprojection.reproject_target(self._store, markdown, trusted, target)
+            return {
+                "desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False,
+                "unreadable": [], "remaining": 0,
+            }
+        drain = await reprojection.drain_pending(self._store, markdown, trusted)
+        summary = await reprojection.reproject_target(self._store, markdown, trusted, target)
+        summary["remaining"] = drain["remaining"]
+        return summary
 
     # ----------------------------------------------------------------------------------
     # markdown 权威面（#1353 §2）
