@@ -238,34 +238,51 @@ class TestSaveTimeRejection:
         """超长数字串不是地址；守卫只能判"放行"，不能把保存打成 500。"""
         assert url_rejection(url) is None, url
 
-    def test_legacy_parser_matches_inet_aton_on_sample(self):
-        """常见 legacy forms 与本机 ``socket.inet_aton`` 对照。
+    def test_legacy_parser_matches_fixed_samples(self):
+        """Pin legacy numeric forms to platform-independent expected addresses.
 
-        算法固定采用 POSIX ``inet_aton`` 语义；部分平台接受集更窄，因此最大八进制
-        单段写法另用固定预期验证，不让 Windows 的差异改变跨平台结果。
+        The custom parser is deterministic by design. The host's socket.inet_aton
+        varies across operating systems for legacy forms, so it is not an oracle.
         """
         samples = [
-            "0xa9fea9fe", "0x00a9fea9fe", "0xA9FEA9FE", "2852039166",
-            "0251.0376.0251.0376", "00000251.0376.0251.0376", "169.254.0xa9.0xfe",
-            "0x7f.1", "0x007f.1", "2130706433", "0177.0.0.1", "127.1",
-            "0", "00", "0x0000", "0x00000000000000a9fea9fe",
-            "0x", "09", "0009", "256.1.1.1", "1.2.3.4.5", "0xa9fea9fe.com",
-            "4294967296", "1.16777216",
-            # 剥前导零不能"补出"合法写法：``00X4`` 不是任何进制（inet_aton 也拒）。
-            "00X4", "00XB0", "000x7f.1",
-            # 全零十六进制段也走剥零：``0x`` + ≥9 个 0 的段 aton 认（= 0 字节），
-            # 剥完不能回退原串（那样长度超限 ⇒ 判成域名 ⇒ link-local 保存期放行）。
-            "0x" + "0" * 9, "169.254.0x000000000.1",
+            ("0xa9fea9fe", "169.254.169.254"),
+            ("0x00a9fea9fe", "169.254.169.254"),
+            ("0xA9FEA9FE", "169.254.169.254"),
+            ("2852039166", "169.254.169.254"),
+            ("0251.0376.0251.0376", "169.254.169.254"),
+            ("00000251.0376.0251.0376", "169.254.169.254"),
+            ("169.254.0xa9.0xfe", "169.254.169.254"),
+            ("0x7f.1", "127.0.0.1"),
+            ("0x007f.1", "127.0.0.1"),
+            ("2130706433", "127.0.0.1"),
+            ("0177.0.0.1", "127.0.0.1"),
+            ("127.1", "127.0.0.1"),
+            ("037777777777", "255.255.255.255"),
+            ("0", "0.0.0.0"),
+            ("00", "0.0.0.0"),
+            ("0x0000", "0.0.0.0"),
+            ("0x00000000000000a9fea9fe", "169.254.169.254"),
+            ("0x", None),
+            ("09", None),
+            ("0009", None),
+            ("256.1.1.1", None),
+            ("1.2.3.4.5", None),
+            ("0xa9fea9fe.com", None),
+            ("4294967296", None),
+            ("1.16777216", None),
+            ("00X4", None),
+            ("00XB0", None),
+            ("000x7f.1", None),
+            ("0x" + "0" * 9, "0.0.0.0"),
+            ("169.254.0x000000000.1", "169.254.0.1"),
         ]
-        for host in samples:
-            try:
-                expected = ipaddress.IPv4Address(socket.inet_aton(host))
-            except OSError:
-                expected = None
+        for host, expected_text in samples:
+            expected = (
+                ipaddress.IPv4Address(expected_text)
+                if expected_text is not None
+                else None
+            )
             assert endpoint_guard._legacy_ipv4(host) == expected, host
-        assert endpoint_guard._legacy_ipv4("037777777777") == ipaddress.IPv4Address(
-            "255.255.255.255",
-        )
 
     def test_store_create_rejects_metadata_target_with_guard_message(self, tmp_path):
         store = ProviderStore(tmp_path / "p.json", MemoryCredentialStore())
@@ -513,7 +530,8 @@ class TestRequestTimeGuard:
 
     @pytest.mark.asyncio
     async def test_legacy_numeric_loopback_still_reaches_the_endpoint(self, fake_resolver):
-        """`0x7f.1` 之类是 loopback：裁决 25 B 放行，请求照常到达（不被新规则误伤）。"""
+        """A legacy loopback URL remains allowed and reaches the fake endpoint."""
+        fake_resolver["0x7f.1"] = ["127.0.0.1"]
         recorder = _Recorder()
         model = _model("http://0x7f.1:11434/v1")
         _install(model, recorder)
