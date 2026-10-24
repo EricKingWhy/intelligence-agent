@@ -208,6 +208,10 @@ async def _retract(
     任一文件读不出来就整体判"未知"并跳过删除（审查 Corr C2）。
     ``present`` 是调用方已经算好的两文件摘要并集（批量路径复用，避免 O(n·m)，审查 N7）；
     ``unreadable`` 是与它同一次读产出的归因名单，给了就不再读盘（#1573）。
+
+    两个形参的契约：``present is not None`` 时 ``unreadable`` 被忽略（并集已由同一次读算好）；
+    ``present is None`` 时 ``[]`` 与 ``None`` 等价——都表示「没给名单」，都会重读一次盘。现有
+    两个调用方各自从同一次 ``_known_entries`` 派生，因此恒满足这条不变量。
     """
     digest = entry_digest(content)
     if present is None:
@@ -462,6 +466,9 @@ async def reproject_target(
     if disk is None:
         # 读不出来就别对账：拿空集合当"markdown 空了"会把派生层整片删掉（审查 Corr C2）。
         # 但必须让调用方看见这是"没读到"而不是"已经一致"——否则 CLI 报全零假成功。
+        # 非法 target 也落这里（`files.get` 取不到 ⇒ 早退归入 unreadable）：基线会一路走到
+        # `enqueue_projection` 抛 ValueError，本票起改为如实报不可读（#1573 复审 P4-3）。
+        # 生产不可达：`--target` 有 choices 限制，这里只是防御性行为变化，不另加校验分支。
         logger.warning("memory reprojection skipped: %s is unreadable", target)
         summary.mark_unreadable(target)
         return summary

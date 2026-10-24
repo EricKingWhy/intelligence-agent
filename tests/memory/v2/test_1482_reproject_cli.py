@@ -356,12 +356,11 @@ def test_markdown_readable_with_the_other_file_unreadable_does_not_blame_the_wro
     assert _pending_count(db_path) == 1
 
 
-
 # --------------------------------------------------------------------- #1573
 
 
 def _probe_disk_reads(
-    monkeypatch, memories: Path, *, user_unreadable_reads: int,
+    monkeypatch, *, user_unreadable_reads: int,
 ) -> dict[str, int]:
     """按文件统计本轮读盘次数，并让 USER.md 前 N 次读返回「存在但读不出来」。#1573
 
@@ -396,9 +395,10 @@ def test_apply_write_path_reads_the_disk_once_per_file_and_names_the_unreadable_
 ) -> None:
     """#1573 AC1 路径一（`retract_entry` / `apply_write`）：只读一次盘，归因不二次读。
 
-    当前实现：`_retract` 判 `unknown` 读一次两文件，`count_retraction` 的
-    `_unreadable_files` 再读一次——USER.md 在两次之间恢复可读 ⇒ `pending=True`、
-    `unreadable=[]`（CLI 不报是哪个文件读不出来），且两文件各读 2 次。
+    修复前（#1573 基线）：`_retract` 判 `unknown` 读一次两文件，`count_retraction` 再走
+    一次独立的归因读盘（当时的 `_unreadable_files` 已随 #1573 退役）——USER.md 在两次
+    之间恢复可读 ⇒ `pending=True`、`unreadable=[]`（CLI 不报是哪个文件读不出来），且
+    两文件各读 2 次。
     """
     settings = _settings(tmp_path)
     db_path = Path(settings.workspace_dir) / "memory-v2.db"
@@ -416,7 +416,7 @@ def test_apply_write_path_reads_the_disk_once_per_file_and_names_the_unreadable_
         return store
 
     store = asyncio.run(_seed())
-    counts = _probe_disk_reads(monkeypatch, memories, user_unreadable_reads=1)
+    counts = _probe_disk_reads(monkeypatch, user_unreadable_reads=1)
 
     summary = asyncio.run(reprojection.apply_write(
         store, MarkdownMemoryStore(memories), "memory",
@@ -432,9 +432,9 @@ def test_reproject_target_path_reads_the_disk_once_per_file_and_names_the_unread
 ) -> None:
     """#1573 AC1 路径二（`reproject_target`，CLI 对账最直接的症候）。
 
-    当前实现：目标文件读一次、`_known_entries` 再读一次、`files is None` 又让 `_retract`
-    读一次、`count_retraction` 归因再读一次——USER.md 若在中间恢复可读，这一轮既可能
-    假删共享行，也会把归因名单抹成空。
+    修复前（#1573 基线）：目标文件读一次、`_known_entries` 再读一次、`files is None` 又让
+    `_retract` 读一次、`count_retraction` 归因再读一次——USER.md 若在中间恢复可读，这一轮
+    既可能假删共享行，也会把归因名单抹成空。
     """
     settings = _settings(tmp_path)
     db_path = Path(settings.workspace_dir) / "memory-v2.db"
@@ -452,7 +452,7 @@ def test_reproject_target_path_reads_the_disk_once_per_file_and_names_the_unread
         return store
 
     store = asyncio.run(_seed())
-    counts = _probe_disk_reads(monkeypatch, memories, user_unreadable_reads=1)
+    counts = _probe_disk_reads(monkeypatch, user_unreadable_reads=1)
 
     summary = asyncio.run(
         reprojection.reproject_target(store, MarkdownMemoryStore(memories), TRUSTED, "memory"))
@@ -460,6 +460,7 @@ def test_reproject_target_path_reads_the_disk_once_per_file_and_names_the_unread
     _unreadable_window_summary(summary)
     # 基线常数：全轮每个文件各读一次（目标条目与并集同出一次遍历，`_retract` 不读）。
     assert counts == {"MEMORY.md": 1, "USER.md": 1}, counts
+
 
 def test_entry_exits_non_zero_when_markdown_is_not_assembled(
     tmp_path, monkeypatch, capsys,
