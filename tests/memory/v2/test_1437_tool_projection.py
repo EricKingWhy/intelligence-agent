@@ -373,8 +373,11 @@ async def test_remove_keeps_the_row_while_the_other_file_still_has_it(tmp_path) 
     await service.reproject(TRUSTED, "user")
     assert len(await store.list_active(TRUSTED, limit=10)) == 1
 
-    assert (await tool.execute(_MemoryArgs(
-        action="remove", target="memory", old_text="两个文件都有这句话"))).ok is True
+    result = await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="两个文件都有这句话"))
+    assert result.ok is True
+    # 票面 AC3 第三句：真 `kept` 不是"没收敛"，回执必须是 done（#1482 F5）。
+    assert result.data["projection"] == "done"
 
     assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
         "两个文件都有这句话"]
@@ -774,7 +777,9 @@ async def test_unreadable_other_file_blocks_retraction_instead_of_trusting_the_s
 
     # 全量对账同理：读不出来就别删。
     assert await reprojection.reproject_target(store, markdown, TRUSTED, "user") == {
-        "created": 0, "deleted": 0, "skipped": [], "pending": False, "desired": 0}
+        "created": 0, "deleted": 0, "skipped": [], "pending": False, "desired": 0,
+        # #1482 Finding 二：「没读到」与「已经一致」必须可区分，CLI 才有非零退出的依据。
+        "unreadable": ["user"]}
     assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
         "不可读时的句子"]
 
@@ -834,3 +839,142 @@ async def test_reproject_on_either_target_reclaims_a_shared_row(tmp_path) -> Non
 
     assert summary["deleted"] == 1, summary
     assert await store.list_active(TRUSTED, limit=10) == []
+
+
+# --------------------------------- #1482 Finding 一：撤回判不出时留账本、不谎报 done
+
+
+def _unreadable(path: Path):
+    """把指定文件钉成"存在但读不出来"（`disk_entries` 因此返回 ``None``）。"""
+    real = MarkdownMemoryStore.read_raw_checked
+
+    def flaky(candidate):
+        return ("", False) if Path(candidate) == Path(path) else real(candidate)
+
+    return staticmethod(flaky)
+
+
+async def _seed_shared_entry_with_unreadable_user(tmp_path, monkeypatch):
+    """造法同 :746：另一进程把同一句写进 USER.md，再把 USER.md 钉成不可读。"""
+    store, markdown, service = await build(tmp_path)
+    tool = MemoryTool(markdown, service=service)
+    assert (await tool.execute(_MemoryArgs(
+        action="add", target="memory", content="瞬时不可读句"))).ok is True
+    other = MarkdownMemoryStore(markdown.directory)
+    await other.add("user", "瞬时不可读句")
+    monkeypatch.setattr(
+        MarkdownMemoryStore, "read_raw_checked",
+        _unreadable(markdown.path_for("user")),
+    )
+    return store, markdown, service, tool
+
+
+async def test_unreadable_other_file_leaves_a_ledger_row_and_reports_pending(
+    tmp_path, monkeypatch,
+) -> None:
+    """#1482 AC1：判不出（另一个文件读不出来）必须留账本并回执 pending，不许冒充 kept/done。
+
+    (a) 派生行仍在（不误删，真 `kept` 语义不回归）；(b) 直查账本表见到
+    `UnreadableMarkdown` / `attempts == 1`（公开 API 的 SELECT 不含 `last_error`，不能拿它断）；
+    (c) 工具回执 `projection == "pending"`。
+    """
+    store, _markdown, _service, tool = await _seed_shared_entry_with_unreadable_user(
+        tmp_path, monkeypatch)
+
+    result = await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="瞬时不可读句"))
+
+    assert result.ok is True, result
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "瞬时不可读句"]
+    rows = _pending_rows(store.database_path)
+    assert len(rows) == 1, rows
+    target, digest, content, attempts, last_error = rows[0]
+    assert (target, content, digest) == ("memory", "瞬时不可读句", entry_digest("瞬时不可读句"))
+    assert last_error == "UnreadableMarkdown"
+    assert attempts == 1
+    assert result.data["projection"] == "pending"
+
+
+async def test_recovered_file_converges_the_orphan_on_the_next_drain(tmp_path, monkeypatch) -> None:
+    """#1482 AC2：文件恢复可读后，一次成功的写入触发既有 drain ⇒ 派生行删除、账本清空。"""
+    store, markdown, service, tool = await _seed_shared_entry_with_unreadable_user(
+        tmp_path, monkeypatch)
+    assert (await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="瞬时不可读句"))).ok is True
+    assert len(_pending_rows(store.database_path)) == 1
+
+    monkeypatch.undo()  # USER.md 恢复可读；它里面那句此刻也已被另一进程删掉
+    MarkdownMemoryStore(markdown.directory).path_for("user").write_text("", encoding="utf-8")
+    markdown.load_from_disk()
+
+    assert (await tool.execute(_MemoryArgs(
+        action="add", target="memory", content="另一句"))).ok is True
+
+    assert _pending_rows(store.database_path) == []
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == ["另一句"]
+    hits = await service.hybrid_search(
+        "瞬时不可读句", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
+    )
+    assert hits == []
+
+
+async def test_repeated_drain_against_an_unreadable_file_keeps_the_ledger_row(
+    tmp_path, monkeypatch,
+) -> None:
+    """#1482 AC2b：文件持续读不出来时连跑两次 drain ⇒ 账本行仍在、attempts 递增、不抛异常。
+
+    remove 自己那次撤回已经记过一笔（attempts=1），所以两轮 drain 之后是 3——票面的
+    「递增到 2」是按账本从 0 起算；这里按实际读数断言**每轮 +1**。
+    """
+    store, markdown, _service, tool = await _seed_shared_entry_with_unreadable_user(
+        tmp_path, monkeypatch)
+    assert (await tool.execute(_MemoryArgs(
+        action="remove", target="memory", old_text="瞬时不可读句"))).ok is True
+    assert _pending_rows(store.database_path)[0][3] == 1
+
+    first = await reprojection.drain_pending(store, markdown, TRUSTED)
+    assert _pending_rows(store.database_path)[0][3] == 2
+    second = await reprojection.drain_pending(store, markdown, TRUSTED)
+
+    assert first["remaining"] == 1, first
+    assert second["remaining"] == 1, second
+    rows = _pending_rows(store.database_path)
+    assert len(rows) == 1, rows
+    assert rows[0][0] == "memory"
+    assert rows[0][3] == 3  # 撤回 1 次 + 两次 drain 各 1 次；行仍在
+    assert rows[0][4] == "UnreadableMarkdown"
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "瞬时不可读句"]
+
+
+async def test_reproject_on_a_readable_target_keeps_the_ledger_when_the_other_file_is_unreadable(
+    tmp_path, monkeypatch,
+) -> None:
+    """#1482 F1：**目标文件可读**、另一文件读不出来时，`reproject_target` 也不得清账本。
+
+    既有用例（`:746`）走的是目标文件本身不可读的早退分支，碰不到删行循环里的清账本判据。
+    这里让 memory 侧可读、USER.md 不可读，并对一个 memory target 的孤儿行做全量对账：
+    判不出「另一个文件还有没有」就不能删行、不能清账（否则文件恢复后 drain 无行可做，
+    孤儿派生行永久存活）。
+    """
+    store, markdown, _service = await build(tmp_path)
+    await store.create(
+        reprojection.draft_for("memory", "孤儿句"), TRUSTED,
+        projection_source="tool", projection_target="memory")
+    await store.enqueue_projection(TRUSTED, "memory", "孤儿句")
+    monkeypatch.setattr(
+        MarkdownMemoryStore, "read_raw_checked",
+        _unreadable(markdown.path_for("user")),
+    )
+
+    summary = await reprojection.reproject_target(store, markdown, TRUSTED, "memory")
+
+    assert summary["deleted"] == 0, summary
+    assert summary["unreadable"] == ["user"], summary  # 归因给真正读不出的文件
+    rows = _pending_rows(store.database_path)
+    assert len(rows) == 1, rows
+    assert (rows[0][0], rows[0][1], rows[0][4]) == (
+        "memory", entry_digest("孤儿句"), "UnreadableMarkdown")
+    assert [record.content for record in await store.list_active(TRUSTED, limit=10)] == [
+        "孤儿句"]
