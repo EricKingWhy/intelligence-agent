@@ -447,6 +447,13 @@ class TestPermissionRuleEngineIntegration:
             "head --files0-from=x",
             "diff --from-file=/etc/passwd",
             "date -f/etc/passwd",
+            # GNU 长选项无歧义前缀缩写。
+            "wc -c --files0=list.txt",
+            "wc -c --files0-fro=list.txt",
+            "wc -c --files0-fro list.txt",
+            # 表外文件承载选项的附着短旗值。
+            "diff -X/etc/passwd a.txt b.txt",
+            "file -m/etc/passwd README.md",
         ],
     )
     @pytest.mark.asyncio

@@ -138,6 +138,81 @@ class TestBashClassification:
     @pytest.mark.parametrize(
         "command",
         [
+            # GNU getopt_long 接受无歧义前缀；`--files0` 就是 `--files0-from`。
+            "wc -c --files0=list.txt",
+            "wc -c --files0-fro=list.txt",
+            "wc -c --files0-fro list.txt",
+        ],
+    )
+    def test_long_option_abbreviations_require_approval(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 短旗附着值与空格形一样能承载工作区外路径。
+            "diff -X/etc/passwd a.txt b.txt",
+            "file -m/etc/passwd README.md",
+            "diff --exclude-from=/etc/passwd a.txt b.txt",
+            "file --magic-file=/etc/passwd README.md",
+            "tree --fromfile=/etc/passwd",
+            "tree --fromfile /etc/passwd",
+            # 相对值：路径判定看不出越界，只有选项表本身能拦（文件内容可再指向外部）。
+            "diff -Xexcl.txt a.txt b.txt",
+            "file -mmagic.mgc README.md",
+            "tree --fromfile=list.txt",
+        ],
+    )
+    def test_attached_file_option_values_require_approval(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 票面要求的两条之一：`file --magic-file=` 现已进表（P1-3）由表拦，
+            # `cat/stat --nope=` 是真正的表外选项，只由 `=` 提取段拦住。
+            "file --magic-file=/etc/passwd README.md",
+            "cat --nope=/etc/passwd",
+            "stat --nope=/etc/passwd",
+        ],
+    )
+    def test_equals_attached_value_is_a_path_candidate(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 盘符判定只看 token 开头：参数中间的冒号不是盘符。
+            "cat notes:2026.txt",
+            "grep -n TODO: src/app.py",
+            'grep -rn "key:" .',
+            "echo done:",
+        ],
+    )
+    def test_colon_inside_argument_is_not_a_drive_letter(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 短旗簇逐字符扫描：`-e`/`-i` 的取值不是文件承载选项；
+            # `-if` 仍在簇内触达 `-f`，附着值走路径判定。
+            "grep -efile README.md",
+            "grep -ifile README.md",
+            "date -Iseconds",
+            "date -Idate",
+        ],
+    )
+    def test_short_flag_values_remain_allowed(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    @pytest.mark.parametrize("command", ["grep -if/etc/passwd .", "file -Nm/etc/passwd"])
+    def test_attached_value_inside_cluster_is_path_checked(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             "find .",
             "find . -maxdepth 2 -type f -print",
             "find . -name '*.py' -print0",

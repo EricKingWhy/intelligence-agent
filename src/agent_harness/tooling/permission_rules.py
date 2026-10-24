@@ -219,14 +219,34 @@ _READONLY_WRITE_OPTIONS = {
 }
 # 文件承载选项的内容可能再提供路径或模式，无法在这个轻量分类器中证明为安全。
 # 因而这些选项统一进入 ASK；短旗附着值和 `--option=value` 也由同一张表识别。
+# 长选项名同时按 GNU getopt_long 的无歧义前缀缩写匹配（`--files0` == `--files0-from`）。
 _READONLY_FILE_OPTIONS = {
     "wc": frozenset({"--files0-from"}),
     "grep": frozenset({"-f", "--file", "--exclude-from"}),
-    "file": frozenset({"-f", "--files-from"}),
+    "file": frozenset({"-f", "--files-from", "-m", "--magic-file"}),
     "head": frozenset({"--files0-from"}),
-    "diff": frozenset({"--from-file", "--to-file"}),
+    "diff": frozenset({"-X", "--exclude-from", "--from-file", "--to-file"}),
     "date": frozenset({"-f", "--file"}),
+    "tree": frozenset({"--fromfile"}),
 }
+#: 附着值是**匹配模式**而不是待读路径清单的短旗：`grep -ifile` 是 `-i -f ile`，
+#: `ile` 里只有模式，不会引出更多文件读取，因此它的附着值只做路径判定
+#: （`grep -f/etc/passwd` 仍是 ASK）。空格形保持保守 ASK，不放宽既有 ALLOW 面。
+_PATTERN_FILE_FLAGS = {"grep": frozenset({"f"})}
+#: 每个命令里自带取值的短旗：短旗簇扫到它即停，其后字符是它的值而不是新旗。
+#: 缺项按"该旗不带值"处理（继续扫）；漏判方向是多看一个候选路径，不是少看。
+#: `diff -c`/`-u` 本身不带值（只有 `-C`/`-U` 带），故不在表里。
+_SHORT_VALUE_OPTIONS = {
+    "grep": frozenset("efmABCdD"),
+    "date": frozenset("dfrs"),
+    # GNU diff 取值的短旗：-C/-U/-W NUM、-F/-I RE、-S/-X FILE、-x PAT、-D NAME、-L LABEL。
+    # -c/-u 不带值（只有大写 -C/-U 带），所以不在表里。
+    "diff": frozenset("CSUWFIXxDL"),
+    "file": frozenset("fmFPe"),
+}
+#: 真实存在且恰好是某个文件承载选项前缀的非文件长选项：GNU 精确名优先于缩写，
+#: 不能因为 `--exclude-from` 就以 `--exclude` 前缀误伤 `grep/diff --exclude=PAT`。
+_EXACT_NON_FILE_OPTIONS = frozenset({"--exclude"})
 _DATE_QUERY_FLAGS = frozenset({"-u", "-R", "-I"})
 _HOSTNAME_QUERY_FLAGS = frozenset({"-a", "-A", "-d", "-f", "-i", "-I", "-s", "-y"})
 
@@ -313,7 +333,10 @@ def _readonly_arguments_are_safe(
         return all(arg in _HOSTNAME_QUERY_FLAGS for arg in args)
     if first == "date":
         # 只接受纯查询旗与格式串；设置日期的短旗簇/长旗均不在白名单内。
-        return all(arg.startswith("+") or arg in _DATE_QUERY_FLAGS for arg in args)
+        # `-I` 的紧凑取值为 GNU 合法子集（`-Iseconds` / `-Idate`），仍只输出时间。
+        return all(
+            arg.startswith(("+", "-I")) or arg in _DATE_QUERY_FLAGS for arg in args
+        )
     return True
 
 
@@ -331,24 +354,61 @@ def _has_readonly_write_option(first: str, args: list[str]) -> bool:
 
 
 def _has_readonly_file_option(first: str, args: list[str]) -> bool:
-    """识别会从文件读取路径/模式的选项，包括合并短旗和附着值。"""
-    options = _READONLY_FILE_OPTIONS.get(first, frozenset())
-    short_flags = {
-        option[1]
-        for option in options
-        if len(option) == 2 and option.startswith("-")
+    """识别会从文件读取路径/模式的选项，包括合并短旗和附着值。
+
+    长选项按 GNU ``getopt_long`` 的无歧义前缀缩写匹配；短旗簇逐字符扫描，遇到
+    自带取值的旗即停——它的附着值交给 :func:`_path_candidates` 做路径判定
+    （``grep -ifile`` 是 ``-i -f ile``，不是 ``-i -f -i -l -e``）。
+    """
+    long_options = {
+        option
+        for option in _READONLY_FILE_OPTIONS.get(first, frozenset())
+        if option.startswith("--")
     }
     for arg in args:
-        if arg in options or any(arg.startswith(f"{option}=") for option in options):
-            return True
-        if (
-            short_flags
-            and arg.startswith("-")
-            and not arg.startswith("--")
-            and any(flag in arg[1:] for flag in short_flags)
-        ):
-            return True
+        if not arg.startswith("-") or arg == "-":
+            continue
+        if arg.startswith("--"):
+            if _matches_file_option(arg.split("=", 1)[0], long_options):
+                return True
+            continue
+        # 附着值同样是该选项的输入文件（`file -flist.txt` 的清单可再指向任意路径）。
+        # 只有模式来源的附着值（`grep -ifile`）例外，交给路径判定。
+        flag, attached = _scan_short_cluster(first, arg)
+        if flag is None:
+            continue
+        if attached is not None and flag in _PATTERN_FILE_FLAGS.get(first, frozenset()):
+            continue
+        return True
     return False
+
+
+def _matches_file_option(name: str, options: set[str]) -> bool:
+    """长选项是否指向文件承载选项；含 GNU 双向无歧义前缀缩写。"""
+    if name in _EXACT_NON_FILE_OPTIONS:
+        return False
+    return any(
+        name == option or option.startswith(name) or name.startswith(option)
+        for option in options
+    )
+
+
+def _scan_short_cluster(first: str, arg: str) -> tuple[str | None, str | None]:
+    """扫描 ``-abcVALUE``：返回（命中的文件承载旗, 其附着值）。
+
+    遇到自带取值的旗即停，其后字符是它的值而不是新旗。
+    """
+    file_flags = {
+        option[1]
+        for option in _READONLY_FILE_OPTIONS.get(first, frozenset())
+        if len(option) == 2 and option.startswith("-")
+    }
+    value_flags = _SHORT_VALUE_OPTIONS.get(first, frozenset())
+    body = arg[1:]
+    for index, char in enumerate(body):
+        if char in value_flags:
+            return (char if char in file_flags else None), (body[index + 1:] or None)
+    return None, None
 
 
 def _has_outside_path_syntax(first: str, args: list[str], command: str) -> bool:
@@ -356,7 +416,7 @@ def _has_outside_path_syntax(first: str, args: list[str], command: str) -> bool:
     if (
         "../" in command
         or "..\\" in command
-        or _has_windows_absolute_path(command)
+        or _has_windows_absolute_path(command, args)
     ):
         return True
     return any(_looks_like_outside_path(value) for value in _path_candidates(first, args))
@@ -364,32 +424,25 @@ def _has_outside_path_syntax(first: str, args: list[str], command: str) -> bool:
 
 def _path_candidates(first: str, args: list[str]):
     """返回参数本身及选项中的附着值，避免值绕过路径判定。"""
-    options = _READONLY_FILE_OPTIONS.get(first, frozenset())
-    short_flags = {
-        option[1]
-        for option in options
-        if len(option) == 2 and option.startswith("-")
-    }
     for arg in args:
         yield arg
         if "=" in arg:
             yield arg.split("=", 1)[1]
-        if short_flags and arg.startswith("-") and not arg.startswith("--"):
-            for index in range(1, len(arg)):
-                if arg[index] in short_flags and index + 1 < len(arg):
-                    yield arg[index + 1:]
-                    break
+        elif arg.startswith("-") and not arg.startswith("--"):
+            _flag, attached = _scan_short_cluster(first, arg)
+            if attached:
+                yield attached
 
 
-def _has_windows_absolute_path(command: str) -> bool:
-    """识别 shlex 会吞掉反斜杠的 Windows 路径或转义语法。"""
+def _has_windows_absolute_path(command: str, args: list[str]) -> bool:
+    """识别 shlex 会吞掉反斜杠的 Windows 路径或转义语法。
+
+    盘符只看每个 token 的开头（``C:x``）；参数中间的冒号是普通文件名/模式
+    （``notes:2026.txt``、``TODO:``），不当作盘符。
+    """
     if "\\" in command:
         return True
-    return any(
-        command[index].isalpha()
-        and command[index + 1] == ":"
-        for index in range(len(command) - 1)
-    )
+    return any(len(arg) >= 2 and arg[0].isalpha() and arg[1] == ":" for arg in args)
 
 
 def _looks_like_outside_path(value: str) -> bool:
