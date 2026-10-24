@@ -112,8 +112,8 @@ from agent_harness.context.builder import (
     ProtectedFactBudgetExceededError,
 )
 from agent_harness.context.compactor import (
-    _TRANSIENT_ERROR_CLASSES,
     CompactionPostWriteError,
+    is_transient_error_class,
 )
 from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
@@ -949,7 +949,8 @@ def _is_retriable_compaction_failure(error: ContextWindowExceededError) -> bool:
     "再压一次"只在**摘要尝试被模型侧抖动打掉**时有意义（超时 / 传输 / 输出不成
     摘要 / 校验闸门拒绝）。其余每一条都是**结构性**的，再压必然同结果：
 
-    · 结构性词条（`_TRANSIENT_ERROR_CLASSES` 的补集，见 compactor 侧二分）；
+    · 结构性词条（compactor `is_transient_error_class` 的假集——二分归
+      compactor 所有）；
     · `ProtectedFactBudgetExceededError`（保护事实超独立预算，与摘要无关）；
     · `CompactionPostWriteError`（bracket **已落盘**，历史已变，重试会写出第二对）；
     · `failures` 为空（异常不是从压缩链出来的，无从判断）。
@@ -970,7 +971,7 @@ def _is_retriable_compaction_failure(error: ContextWindowExceededError) -> bool:
         return False
     failures = [f for f in (error.failures or ()) if f.attempt >= 1]
     return bool(failures) and all(
-        failure.error_class in _TRANSIENT_ERROR_CLASSES for failure in failures
+        is_transient_error_class(failure.error_class) for failure in failures
     )
 
 
@@ -1851,6 +1852,11 @@ class AgentRuntime:
             if not resuming:
                 # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
                 # 续跑执行没有新的 run/started（逻辑 run 是同一个），跳过镜像。
+                # #1547（审查 F3）：run/started 是同步 append，同实例有更低 seq 的
+                # 在途写者时会被闸门暂存到 `begin_run` 返回之后；`next()` 无默认
+                # 值，快照里缺它就 StopIteration→RuntimeError（PEP 479）杀死整个
+                # run。先等闸门清空再扫。
+                await session.wait_gate_settled()
                 run_started = next(
                     e for e in session.since(arms.memory_event_start) if e.type == RUN_STARTED
                 )
@@ -2643,6 +2649,11 @@ class AgentRuntime:
                     current_constraint_tool_context_var.reset(tool_context_token)
                 # 执行期间追加的事件（tool/output_delta 等）镜像给流式消费者；
                 # web 订阅者经 session listener 实时收到（seq 幂等合并不重复）。
+                # #1547：exec 子调用在 worker 线程同步落 `tool/result`，其投递可能
+                # 被更低 seq 的在途写者推迟到 `execute_batch` 返回之后——一次性
+                # `since()` 快照（无 listener 通道补偿，尤其下方预算记账）先等
+                # 闸门清空再取，否则 `budget_delta` 会从账上永久消失。
+                await session.wait_gate_settled()
                 for event in session.since(tool_event_start):
                     yield to_agent_event(event)
                 # session 树账的工具计数点（`#318`）：从本批 `tool/result` 的

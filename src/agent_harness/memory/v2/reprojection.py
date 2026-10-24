@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 SKIP_TOO_LONG = "content_too_long"
 SKIP_POLICY = "rejected_by_policy"
 
+#: 撤回判定读不出另一个文件时的失败类型名（进账本 `last_error`，不含内容）。
+UNREADABLE = "UnreadableMarkdown"
+
 #: 与 `_RememberV2Args` 的默认值一致（`tools.py`）；不新增配置项。
 _IMPORTANCE = 0.8
 _STRENGTH = 0.8
@@ -112,6 +115,11 @@ def _known_entries(markdown: MarkdownMemoryStore) -> list[list[str]] | None:
     return files
 
 
+def _unreadable_files(markdown: MarkdownMemoryStore) -> list[str]:
+    """真正读不出来的文件名——归因用，不能拿「正在对账的 target」冒充（#1482 F2）。"""
+    return [name for name in ("memory", "user") if markdown.disk_entries(name) is None]
+
+
 async def project_entry(
     store: SqliteMemoryV2Store, target: str, content: str,
     trusted: TrustedMemoryIdentity, *, session_id: str | None = None,
@@ -154,6 +162,8 @@ async def retract_entry(
     - ``absent``：没有可删的行（没投影过 / 已被删）；
     - ``kept``：**另一个文件**仍有同一段文本，跳过删除——工具行可以同时服务两个文件，
       按一个文件的删除去删共享行会让另一个文件在检索层凭空消失（审查 Corr P2-1）；
+    - ``unknown``：**有一个文件读不出来**，判不了「还有没有」——已写进待投影账本并留失败
+      类型 ``UnreadableMarkdown``，文件恢复后由既有 drain 收敛（#1482 Finding 一）；
     - ``pending``：删除失败，已写进待投影账本等下一轮重试（审查 Std P2-3）。
 
     服务来源行即使内容相同也不动：`find_tool_by_digest` 只认 `projection_source='tool'`。
@@ -190,7 +200,14 @@ async def _retract(
     if present is None:
         files = _known_entries(markdown)
         if files is None:
-            return "kept", None
+            # 读不出来 ≠ 确实还在：`kept` 会让调用方当作"这次别删"放过它，账本里也不留痕，
+            # 派生行就永久复活且工具报 done（#1482 Finding 一）。记账由这里统一做，
+            # 三个调用点只认返回值、不各写一遍。
+            await store.enqueue_projection(trusted, target, content)
+            await store.record_projection_failure(trusted, target, digest, UNREADABLE)
+            logger.warning(
+                "memory retraction unknown (%s/%s): %s", target, digest[:12], UNREADABLE)
+            return "unknown", UNREADABLE
         present = {entry_digest(entry) for entries in files for entry in entries}
     if digest in present:
         return "kept", None
@@ -212,19 +229,45 @@ async def _retract(
 
 
 class _Summary(dict):
-    """投影结果汇总；`pending` 只在有失败时置真，`desired` 只在全量对账时有意义。"""
+    """投影结果汇总；`pending` 只在有失败时置真，`desired` 只在全量对账时有意义。
+
+    `unreadable` 列出本轮**读不出**的文件（`memory` / `user`，不是"正在对账的 target"）：
+    那种轮次删/增都判不了，与"真空"必须可区分，否则 CLI 会把一次没读到文件的对账报成
+    "一切正常"（#1482 Finding 二）。归因必须指向真正读不出的那个文件，否则运维会去修错文件
+    （#1482 F2）。
+    """
 
     def __init__(self) -> None:
-        super().__init__(created=0, deleted=0, skipped=[], pending=False, desired=0)
+        super().__init__(
+            created=0, deleted=0, skipped=[], pending=False, desired=0, unreadable=[])
+        #: 本轮不可读文件集的归因快照（首次归因时算一次，之后复用）——#1482 A2：
+        #: 逐行重读两文件是 O(n) 次重复磁盘读，还会让同一轮内不同行归因不一致。
+        self._unreadable_snapshot: list[str] | None = None
 
     def skipped_add(self, target: str, content: str, reason: str) -> None:
         self["skipped"].append([target, entry_digest(content), reason])
 
-    def count_retraction(self, outcome: str) -> None:
+    def mark_unreadable(self, target: str) -> None:
+        if target not in self["unreadable"]:
+            self["unreadable"].append(target)
+
+    def count_retraction(
+        self, outcome: str, target: str, markdown: MarkdownMemoryStore,
+    ) -> None:
         if outcome == "deleted":
             self["deleted"] += 1
         elif outcome == "pending":
             self["pending"] = True
+        elif outcome == "unknown":
+            # 读不出来 = 这一轮没收敛：与 `pending` 同等对待（回执不许报 done）。
+            self["pending"] = True
+            # 归因给**真正**读不出来的文件，不是正在对账的 target：另一侧读不出来时
+            # 本 target 的文件其实好好的，报成它不可读会把运维引向错文件（#1482 F2）。
+            # 每轮只读一次盘、同一实例内复用（#1482 A2）——`markdown` 必填，没有旧错位口径的回退。
+            if self._unreadable_snapshot is None:
+                self._unreadable_snapshot = _unreadable_files(markdown)
+            for name in self._unreadable_snapshot:
+                self.mark_unreadable(name)
 
 
 async def _project(
@@ -280,6 +323,8 @@ async def apply_write(
         summary["deleted"] += full["deleted"]
         summary["skipped"].extend(full["skipped"])
         summary["pending"] = full["pending"]
+        for name in full["unreadable"]:
+            summary.mark_unreadable(name)
         return summary
 
     if operations is not None:
@@ -289,11 +334,12 @@ async def apply_write(
             action = operation.get("action")
             if index in removed:
                 summary.count_retraction(await retract_entry(
-                    store, markdown, target, removed[index], trusted, reason="markdown_removed"))
+                    store, markdown, target, removed[index], trusted,
+                    reason="markdown_removed"), target, markdown)
             if index in replaced:
                 summary.count_retraction(await retract_entry(
                     store, markdown, target, replaced[index], trusted,
-                    reason="markdown_replaced"))
+                    reason="markdown_replaced"), target, markdown)
             if action in ("add", "replace"):
                 await _project(
                     store, target, operation.get("content") or "", trusted,
@@ -302,11 +348,13 @@ async def apply_write(
 
     if removed_entry := response.get("removed_entry"):
         summary.count_retraction(await retract_entry(
-            store, markdown, target, removed_entry, trusted, reason="markdown_removed"))
+            store, markdown, target, removed_entry, trusted, reason="markdown_removed"),
+            target, markdown)
         return summary
     if replaced_entry := response.get("replaced_entry"):
         summary.count_retraction(await retract_entry(
-            store, markdown, target, replaced_entry, trusted, reason="markdown_replaced"))
+            store, markdown, target, replaced_entry, trusted, reason="markdown_replaced"),
+            target, markdown)
     if content:
         await _project(
             store, target, content, trusted,
@@ -362,6 +410,11 @@ async def drain_pending(
                 if outcome == "kept":
                     # 另一个文件还有它：账本行表达"待收敛"仍然成立，留给下一轮。
                     continue
+                if outcome == "unknown":
+                    # 另一文件仍读不出来：账本行由 `_retract` 记过账（attempts 已递增），
+                    # 这一轮不判、不清账，留给下一轮（#1482 Finding 一）。
+                    errors.append([target, digest, error_type or UNREADABLE])
+                    continue
         except Exception as error:  # noqa: BLE001 — 一条失败不能挡住后面的行
             errors.append([target, digest, type(error).__name__])
             await store.record_projection_failure(trusted, target, digest, type(error).__name__)
@@ -389,7 +442,9 @@ async def reproject_target(
     disk = markdown.disk_entries(target)
     if disk is None:
         # 读不出来就别对账：拿空集合当"markdown 空了"会把派生层整片删掉（审查 Corr C2）。
+        # 但必须让调用方看见这是"没读到"而不是"已经一致"——否则 CLI 报全零假成功。
         logger.warning("memory reprojection skipped: %s is unreadable", target)
+        summary.mark_unreadable(target)
         return summary
     entries = {entry_digest(entry): entry for entry in disk}
     summary["desired"] = len(entries)
@@ -414,10 +469,11 @@ async def reproject_target(
             store, markdown, target, content, trusted,
             reason="markdown_removed", present=present)
         if outcome in ("deleted", "absent"):
-            # `kept`/`pending` 都不清账本，口径与 `retract_entry`、`drain_pending` 一致：
-            # `kept` 只说明「这次别删」，不说明「已经一致」（审查 Corr N4 / C3）。
+            # `kept`/`pending`/`unknown` 都不清账本，口径与 `retract_entry`、`drain_pending`
+            # 一致：`kept` 只说明「这次别删」，`unknown` 是「没读到」，都不说明「已经一致」
+            # （审查 Corr N4 / C3、#1482 Finding 一）。
             await store.clear_projection(trusted, target, digest)
-        summary.count_retraction(outcome)
+        summary.count_retraction(outcome, target, markdown)
     return summary
 
 

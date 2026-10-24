@@ -27,6 +27,7 @@ def _client(tmp_path) -> TestClient:
             enable_cors=False,
         ),
         enable_cors=False,
+        allow_testserver=True,
     )
     return TestClient(app)
 

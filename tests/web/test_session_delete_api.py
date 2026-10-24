@@ -52,7 +52,7 @@ def _app(tmp_path: Path, **overrides):
         model_api_key="sk-test",
         **overrides,
     )
-    return create_app(settings, enable_cors=False)
+    return create_app(settings, enable_cors=False, allow_testserver=True)
 
 
 def _client(tmp_path: Path, **overrides) -> TestClient:
@@ -691,6 +691,7 @@ def test_hard_delete_reclaims_owned_docker_resources_and_retries(
             model_api_key="sk-test",
         ),
         enable_cors=False,
+        allow_testserver=True,
     )
 
     session_id: str | None = None
@@ -828,6 +829,7 @@ def test_restore_and_hard_delete_are_serialized_on_the_workspace_lock(
             model_api_key="sk-test",
         ),
         enable_cors=False,
+        allow_testserver=True,
     )
 
     session_id: str | None = None
@@ -1029,6 +1031,7 @@ def test_restore_after_hard_delete_fails_closed_without_recreating_the_volume(
             model_api_key="sk-test",
         ),
         enable_cors=False,
+        allow_testserver=True,
     )
 
     session_id: str | None = None

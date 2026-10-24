@@ -900,7 +900,7 @@ def test_attach_mcp_section_does_not_leak_its_internal_finding_marker(tmp_path: 
     """#975：安装闸门的分档信号是**预检内部**的路由标记，不得进可见 JSON。
 
     `narrow` 用它把"本仓首版不支持的能力"与"描述写坏"分档给 `_blocks_install`；它是
-    实现细节，不属于 error 契约（`_add_error` 的 {code, path, message}）。一旦它成了
+    实现细节，不属于 error 契约（`add_inspection_error` 的 {code, path, message}）。一旦它成了
     error 字典的键，就会随 `attach_mcp_section` 的返回序列化出去。用整份报告的 JSON 判，
     逐键点检漏一个就绿了。
     """

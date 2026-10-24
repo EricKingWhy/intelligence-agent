@@ -72,7 +72,7 @@ def _client(tmp_path: Path, **overrides: Any) -> TestClient:
         agent_models=overrides.pop("agent_models", _VISION_CATALOG),
         **overrides,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _create_session(client: TestClient) -> str:

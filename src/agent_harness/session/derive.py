@@ -321,21 +321,23 @@ def serialize_protected_facts(facts: list[ProtectedFact]) -> str:
 #: 不改注册表身份，已持久化的 supersedes 引用不断链）；全文逐字活在转录；
 #: ≤2000 的值经 #556 裁决 C 进摘要 §1（当前生效目标），超长的由本截断标记
 #: 自带 source_event_id 回读指针（摘要 §1 不再承载超长全文）。
-_USER_GOAL_VALUE_MAX_CHARS = 2000
+#: #1539：转正为公开合同——消费方（context/compactor 摘要 §1、session/progress
+#: 渲染）此前 import 私有名，属跨包私有穿透；上限与截断标记语义只有这一份。
+USER_GOAL_VALUE_MAX_CHARS = 2000
 
 
-def _bounded_goal_value(content: str, source_event_id: str | None) -> str:
-    """超长目标截到 2000 字符并给回读指针。
+def bounded_goal_value(content: str, source_event_id: str | None) -> str:
+    """超长目标截到 2000 字符并给回读指针（#1539 转正公开）。
 
     没有 ``source_event_id``（目标回落到 legacy ``task_text``，或 goal 事件本身）时
     **不印空指针**——``source_event_id=`` 指向空串会让模型去回读一个不存在的 id。
     """
-    if not isinstance(content, str) or len(content) <= _USER_GOAL_VALUE_MAX_CHARS:
+    if not isinstance(content, str) or len(content) <= USER_GOAL_VALUE_MAX_CHARS:
         return content
     pointer = f"，见来源事件 source_event_id={source_event_id}" if source_event_id else ""
     return (
-        content[:_USER_GOAL_VALUE_MAX_CHARS]
-        + f"…［已截断：显示前{_USER_GOAL_VALUE_MAX_CHARS}字符，"
+        content[:USER_GOAL_VALUE_MAX_CHARS]
+        + f"…［已截断：显示前{USER_GOAL_VALUE_MAX_CHARS}字符，"
         + f"全文共{len(content)}字符{pointer}］"
     )
 
@@ -932,7 +934,7 @@ def derive_protected_facts(events: list[SessionEvent]) -> list[ProtectedFact]:
                 ProtectedFact(
                     fact_id=_expected_fact_id(fact_data),
                     type="user_goal",
-                    value=_bounded_goal_value(goal_value, event.event_id),
+                    value=bounded_goal_value(goal_value, event.event_id),
                     source_event_id=event.event_id,
                     source_seq=event.seq,
                     status="active",

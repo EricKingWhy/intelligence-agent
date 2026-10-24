@@ -610,6 +610,18 @@ export function raceEarlyResponse(
   ]);
 }
 
+/** #1504 C4：本会话投影的真实 max seq（launched/ack 系接流的续传游标）。
+ *  #1504 前同一段推导在 4 个接流点逐字重复；收成模块级纯函数——游标必须取自
+ *  **本会话**的对话状态（seq 每会话单调，契约 C5），不能读 lastAppliedSeqRef
+ *  那个跨会话槽位：历史装载不刷新它，串读到别的会话的游标会把本会话的事件
+ *  整段跳掉。会话不匹配/无投影时 -1（从头发，由 seenSeqs 幂等门吸收重复）。
+ *  为什么必须带游标（不能从头发）：WS 快照会重放**整段历史**，其中上一轮的
+ *  终态事件会让 onEvent 把 terminalSeen 置真（在 seenSeqs 去重门**之前**），
+ *  于是新 run 还没跑完本地就认为「已收口」——中途断流不再重连、停摆检查失效。 */
+function cursorOf(conv: ConversationState | null, sessionId: string): number {
+  return conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+}
+
 /** #561（UI-01）：viewing 态外部 run 发现轮询的间隔（毫秒）。
  *
  * Inspector 只在「选中瞬间」检查过一次 `hasUnterminatedRun`（历史装载 effect）；
@@ -1055,6 +1067,15 @@ export function useSession() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, []);
 
+  /** #1504 C4：`wsStreamResponse` 的**唯一直呼点**（重构前 8 处）。liveness
+   *  第三参（#420 AC1 的停摆活性观察者）在此内聚——接流路径只能经
+   *  `openLiveStream` / attach 机器内部的 `reattachStream` 走到这里，#440 那种
+   *  「某个接流点漏传第三参 ⇒ 审批等待期 10s 假停摆」的事故形状从结构上消除。 */
+  const openWsStream = useCallback(
+    (sid: string, afterSeq: number): Response => wsStreamResponse(sid, afterSeq, markStreamFrame),
+    [markStreamFrame],
+  );
+
   /** SSE 流消费机器——submitTask 和 sendMessage 共用。
    *  P1-3 合帧 + T7 后台降渲染 + T4 重连状态机全部内联于此。
    *  initialConv：新会话传 null（首帧惰性初始化）；续聊传当前 conversation（追加）。
@@ -1279,6 +1300,18 @@ export function useSession() {
           sseRef.current = consumeSSE(streamRes, onEvent, onStreamEnd, onStreamError);
         };
 
+        /** #1504 C4：机器内部的**再接流**（重连 / truncated 重建共用）——经唯一
+         *  开流点 `openWsStream`；代际闸在开流后复核（迟到的旧流不落地），且
+         *  过期时**不释放单飞**（代际已换代 = 新流的世界不归这条链管，释放会
+         *  撞掉新流自己的 hold/pending）。单飞释放只在「开流成功且代际仍是我」
+         *  时发生——此前这条次序散在两处调用点，如今是这里的单一不变量。 */
+        const reattachStream = (sid: string, after: number): void => {
+          const streamRes = openWsStream(sid, after);
+          if (streamGenRef.current !== gen) return;
+          reconnectRef.current.release();
+          attach(streamRes, { awaitingEvidence: true });
+        };
+
         // 单飞守卫（Standards 轴 P1）：同一流实例任一时刻最多一条重连链——
         // 同批多帧 gap / 停摆心跳 / visibility 检查都汇入 scheduleReconnect，
         // 挂起期间重复触发在 request 内短路（对齐 sse.ts cancelled 的单流
@@ -1328,10 +1361,7 @@ export function useSession() {
                 // 「run 还在跑」的长流，用 HTTP SSE 会一并继承交付层攒包的毛病
                 // ——重连成功却要等 run 结束才看到帧。WS 不可用时由
                 // wsStreamResponse 内部降级回 SSE（见 lib/wsStream.ts）。
-                const streamRes = wsStreamResponse(sid as string, after, markStreamFrame);
-                if (streamGenRef.current !== gen) return;
-                reconnectRef.current.release();
-                attach(streamRes, { awaitingEvidence: true });
+                reattachStream(sid as string, after);
               } catch (e) {
                 reconnectRef.current.release(); // 放回调度口（额度仍受 decideStreamEnd 约束）
                 scheduleReconnect(sid, (e as Error).message || reason);
@@ -1360,10 +1390,7 @@ export function useSession() {
               // 续传同样走 WS：重建之后要补的那一截还是「run 在跑」的长流。
               // 条交给「首帧」收（重建期间那条由上面的 setReconnecting(true)
               // 亮着）——续传流若一直不吐帧，条留在场才是对的。
-              const streamRes = wsStreamResponse(sid, maxSeq ?? -1, markStreamFrame);
-              if (streamGenRef.current !== gen) return;
-              reconnectRef.current.release();
-              attach(streamRes, { awaitingEvidence: true });
+              reattachStream(sid, maxSeq ?? -1);
             } catch (e) {
               reconnectRef.current.release();
               scheduleReconnect(sid, (e as Error).message || 'full rebuild failed');
@@ -1386,7 +1413,46 @@ export function useSession() {
 
         sseRef.current = consumeSSE(res, onEvent, onStreamEnd, onStreamError);
     },
-    [refreshSessions, markStreamFrame],
+    [refreshSessions, openWsStream],
+  );
+
+  /** #1504 C4：业务侧的**唯一开流入口**——代际闸（开流前后各一次：迟到的旧流
+   *  不落地、也不覆盖 sseRef/coalescerRef 等新流的槽位）、liveness 第三参、
+   *  挂流复位全部内聚于此；调用方只描述「这条流是什么」（目标会话 + 续传游标
+   *  + 初始投影 + 语义选项），不再各自拼装 wsStreamResponse 三参与代际次序
+   *  （#440 事故的接口摩擦根源）。返回 false = 代际已换代，调用方静默退场即可。
+   *  例外（不属于 WS 开流）：窗内直收的 SSE Response——submitTask /
+   *  sendFollowUp / resumePausedRun / flushQueue 各自 POST 直接回来的
+   *  `text/event-stream` 响应——仍直呼 attachLiveStream，那是 POST 自己的
+   *  传输，不是这里开的流。 */
+  const openLiveStream = useCallback(
+    (spec: {
+      sid: string;
+      /** 续传游标（-1 = 从头快照），推导见模块级 cursorOf。首帧 seq 应为
+       *  afterSeq+1 起步（快照起点对齐）：lastAppliedSeqRef 与它的对齐由
+       *  调用方负责——写早或写进成功分支均可，同一同步块内首帧必晚于它。 */
+      afterSeq: number;
+      /** 调用方已推进并捕获的流代际。 */
+      gen: number;
+      initialConv?: ConversationState | null;
+      /** BUG-006：刷新后恢复的流（零帧收流语义，见 attachLiveStream）。 */
+      resume?: boolean;
+    }): boolean => {
+      if (streamGenRef.current !== spec.gen) return false;
+      const res = openWsStream(spec.sid, spec.afterSeq);
+      // 开流与落流同拍复核代际（pi-mono connection.ts 的形状：#sequence 递增
+      // 处开流、落流处再校验）——同同步块内实际不可换代，防的是未来这里被
+      // 插进 await 时的静默污染。
+      if (streamGenRef.current !== spec.gen) return false;
+      attachLiveStream(
+        res,
+        spec.gen,
+        spec.initialConv ?? null,
+        spec.resume ? { resume: true } : undefined,
+      );
+      return true;
+    },
+    [attachLiveStream, openWsStream],
   );
 
   /** Submit a new task. Creates a fresh session and streams the response.
@@ -1549,7 +1615,7 @@ export function useSession() {
         // 而它在首帧到达前一直是 null（本函数开头清空的）。空流收尾时若仍为
         // null，重连决策会把「不认识这个会话」判成 give-up（假错误横幅）。
         liveSidRef.current = sid;
-        attachLiveStream(wsStreamResponse(sid, -1, markStreamFrame), gen, null);
+        openLiveStream({ sid, afterSeq: -1, gen, initialConv: null });
         return null;
       } catch (e) {
         // 过期请求迟到失败：丢弃，不污染新会话（调用方也不该当成功——返回一句
@@ -1577,7 +1643,7 @@ export function useSession() {
         return message;
       }
     },
-    [refreshSessions, attachLiveStream, markStreamFrame, reportDetachedFailure],
+    [refreshSessions, attachLiveStream, openLiveStream, reportDetachedFailure],
   );
 
   /** 刷新后接回**仍在服务端运行的** run（BUG-006）。
@@ -1632,8 +1698,7 @@ export function useSession() {
         // sid 与游标都已知 → 直接走 WS（快照按 afterSeq 只补本地缺的那一截）。
         // 会话已删的 404 语义由历史装载路径兜住：mode 变更会重跑装载，
         // `getSessionEvents` 404 → NotFoundError → 清键 + 回 idle（见下方原注释）。
-        if (streamGenRef.current !== gen) return;
-        attachLiveStream(wsStreamResponse(sid, afterSeq, markStreamFrame), gen, initialConv, { resume: true });
+        if (!openLiveStream({ sid, afterSeq, gen, initialConv, resume: true })) return;
       } catch (e) {
         if (streamGenRef.current !== gen) return;
         // 历史已渲染，这里只报告「继续接收」失败——不把视图打回空态。
@@ -1641,7 +1706,7 @@ export function useSession() {
         setError(`继续接收失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, markStreamFrame],
+    [openLiveStream],
   );
   useEffect(() => {
     resumeLiveStreamRef.current = resumeLiveStream;
@@ -1876,10 +1941,9 @@ export function useSession() {
                terminalSeen 提前置真）。 */
             sseRef.current?.cancel(); // 旧流已被入口代际作废，先收掉它的订阅
             sseRef.current = null;
-            const conv = conversationRef.current;
-            const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+            const cursor = cursorOf(conversationRef.current, sessionId);
             lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
-            attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), myGen, conversationRef.current);
+            if (!openLiveStream({ sid: sessionId, afterSeq: cursor, gen: myGen, initialConv: conversationRef.current })) return true;
             setRecoverState(RECOVER_IDLE); // #1029 P4：queued/steered 收据 = 已受理 ⇒ 陈旧裁决态退场
             return true;
           }
@@ -2004,19 +2068,12 @@ export function useSession() {
         // **无条件覆写**会话级游标与流引用，把一条失效的流挂到新会话身上（submitTask
         // 与 resumeLiveStream 在同一位置都有这道闸，本函数此前漏了）。
         if (streamGenRef.current !== myGen) return true; // 过期投递：不复活文本
-        // 游标必须带（不能从头发）：WS 快照会重放**整段历史**，而其中上一轮的
-        // 终态事件会让 onEvent 把 terminalSeenRef 置真（那一步在 seenSeqs 去重门
-        // **之前**，重放的旧终态照样算数）。于是新 run 还没跑完，本地就认为
-        // 「已收口」——中途断流不再重连、停摆检查也失效，用户被静默丢在半路。
-        //
-        // 游标取自**本会话**的对话状态（seq 每会话单调，契约 C5）：不能读
-        // lastAppliedSeqRef——它是跨会话的单个槽位、历史装载不刷新它，读到别的
-        // 会话的游标会把本会话的事件整段跳掉。会话不匹配时退回 -1（从头发，
-        // 由 seenSeqs 幂等门吸收重复）。
-        const conv = conversationRef.current;
-        const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+        // 游标必须带、且取**本会话**投影——完整理由见模块级 cursorOf 的说明
+        // （快照重放旧终态会把 terminalSeen 提前置真；lastAppliedSeqRef 是跨会话
+        // 槽位不能读）。
+        const cursor = cursorOf(conversationRef.current, sessionId);
         lastAppliedSeqRef.current = cursor; // 与快照起点对齐：下一个 seq 即 cursor+1，不误判 gap
-        attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), myGen, conversationRef.current);
+        if (!openLiveStream({ sid: sessionId, afterSeq: cursor, gen: myGen, initialConv: conversationRef.current })) return true;
         setRecoverState(RECOVER_IDLE); // #1029 P4：窗外判 launched 同样是受理成功 ⇒ 陈旧裁决态退场
         return true; // 窗外 = 判定为正常流式：请求已被受理，composer 可以清空
       };
@@ -2051,7 +2108,7 @@ export function useSession() {
         return false; // 任一失败路径：文本必须留在 composer（11 §6.1 第 164 行）
       }
     },
-    [attachLiveStream, markStreamFrame, reportDetachedFailure],
+    [attachLiveStream, openLiveStream, reportDetachedFailure],
   );
 
   /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
@@ -2406,10 +2463,12 @@ export function useSession() {
         }
         // 窗外 = 判为 launched：改用 WS 接流。游标取**本会话**真实 max seq，理由同
         // sendFollowUp（WS 快照会重放整段历史，旧终态会把 terminalSeen 提前置真）。
-        const conv = conversationRef.current;
-        const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+        // 这里是业务侧唯一「代际捕获与开流之间隔着 await」的点：判别窗内用户已
+        // 切走/另起一摊时 openLiveStream 会谢绝——游标槽位也得跟着成功才写
+        //（#1504 审查 P3：谢绝时改写 lastAppliedSeqRef 会污染新流的续传记账）。
+        const cursor = cursorOf(conversationRef.current, sessionId);
+        if (!openLiveStream({ sid: sessionId, afterSeq: cursor, gen, initialConv: conversationRef.current })) return;
         lastAppliedSeqRef.current = cursor;
-        attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), gen, conversationRef.current);
         // 悬挂的 promise 仍会落定：真是事件流就什么都不做，否则说明判错了。
         void pending
           .then((late) => {
@@ -2431,7 +2490,7 @@ export function useSession() {
         fail(`恢复失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, selectSession, markStreamFrame],
+    [attachLiveStream, openLiveStream, selectSession],
   );
 
   /** T7 #137：切换会话当前模型（POST /api/sessions/{id}/model）。
@@ -2550,15 +2609,15 @@ export function useSession() {
           if (res === null) {
             // launched：后端已直驱新 run，改用 WS 接流（交付层攒不住 WS 帧）。
             //
-            // 游标取**本会话**对话的真实 max seq，理由同 sendFollowUp：WS 快照会
-            // 重放整段历史，其中上一轮的终态事件会让 onEvent 把 terminalSeenRef
-            // 置真（那一步在 seenSeqs 去重门之前），于是新 run 还没跑完本地就认为
-            // 「已收口」——中途断流不再重连、停摆检查失效。
-            const conv = conversationRef.current;
-            const cursor = conv && conv.session_id === sessionId ? maxEventSeq(conv.events) : -1;
+            // 游标取**本会话**对话的真实 max seq，理由同 sendFollowUp（完整说明
+            // 见模块级 cursorOf）：WS 快照重放旧终态会把 terminalSeen 提前置真。
+            const cursor = cursorOf(conversationRef.current, sessionId);
+            if (!openLiveStream({ sid: sessionId, afterSeq: cursor, gen, initialConv: conversationRef.current })) return;
+            // 游标/模式与开流同拍、写在成功之后（同 resumePausedRun 的 P3 修复：
+            // 判别窗内被取代时，不得把 viewing 拽回一条没有流的 live，也不得
+            // 改写跨会话游标槽位）。
             lastAppliedSeqRef.current = cursor;
             setMode({ kind: 'live', sessionId });
-            attachLiveStream(wsStreamResponse(sessionId, cursor, markStreamFrame), gen, conversationRef.current);
             // 这条 promise 仍会悬挂到 run 结束。**窗外落定必须照样消费**：判别是
             // 推断（idle/404/409 都是极短 JSON，攒不住），推断错了不能静默——
             // 迟到的 idle 会白白接流到假「连接中断」，迟到的 409/404 会被吞成
@@ -2617,7 +2676,7 @@ export function useSession() {
         setError(`投递失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, markStreamFrame],
+    [attachLiveStream, openLiveStream],
   );
 
   /** ADR-0030 D11：取消一条尚未消费的排队/引导项。后端写 `queue/cancelled`
