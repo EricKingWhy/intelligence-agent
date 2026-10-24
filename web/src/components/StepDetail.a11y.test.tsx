@@ -192,6 +192,40 @@ describe('#1523 AC2 — Arrow 选中与 DOM 焦点一致', () => {
     expect(tabStops(list)).toHaveLength(1);
     expect(tabStops(list)[0]).toBe(list[0]);
   });
+
+  it('切到终端 tab 后 Arrow 同样落焦到可见实例的命令行（三个 ↑↓ 域同构）', () => {
+    render(<Host conv={keyboardConversation()} />);
+    const termTab = Array.from(container!.querySelectorAll<HTMLElement>('[role="tab"]'))
+      .find((t) => t.textContent?.includes('终端'));
+    expect(termTab).toBeTruthy();
+    click(termTab);
+    const list = Array.from(container!.querySelectorAll<HTMLElement>('button.step-head'));
+    // KEYBOARD_EVENTS 里有两条 bash 调用（ls / pwd）。
+    expect(list.length).toBe(2);
+    key('ArrowDown');
+    expect(list[0].getAttribute('aria-current')).toBe('true');
+    expect(document.activeElement).toBe(list[0]);
+    expect(tabStops(list)).toHaveLength(1);
+    expect(tabStops(list)[0]).toBe(list[0]);
+  });
+
+  it('点击把选中挪走后，↑/↓ 回到上次键盘到过的行仍要落焦（同 key 不能短路）', () => {
+    render(<Host conv={keyboardConversation()} />);
+    // 键盘先到第二行：keyboardNav 记下 row[1]。
+    key('ArrowDown');
+    key('ArrowDown');
+    expect(document.activeElement).toBe(rows()[1]);
+    // 点击第一行：选中与 DOM 焦点都到 row[0]，keyboardNav 仍记着 row[1]。
+    // （真实浏览器里点击会把焦点落在被点行上；jsdom 不模拟点击移焦，手动落焦。）
+    click(rows()[0]);
+    act(() => rows()[0].focus());
+    expect(rows()[0].getAttribute('aria-current')).toBe('true');
+    expect(document.activeElement).toBe(rows()[0]);
+    // ↑/↓ 回到 row[1]：目标 key 与上次相同，state 必须仍是"新移动"，焦点要跟上。
+    key('ArrowDown');
+    expect(rows()[1].getAttribute('aria-current')).toBe('true');
+    expect(document.activeElement).toBe(rows()[1]);
+  });
 });
 
 describe('#1523 AC1 — tooltip 键盘可达且与指针同一份派生', () => {

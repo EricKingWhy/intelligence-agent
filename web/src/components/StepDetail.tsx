@@ -245,15 +245,15 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
    * （App 的 onFocusEvent/onFocusTool），不是 HTMLElement.focus；真正的 DOM 落焦由
    * 下面的 effect 在渲染提交**之后**做——选中行可能刚被扩窗/切 tab 带进 DOM，
    * 同步 focus() 会静默打空（旧已知失败模式，见 moveSelection 注释）。 */
-  const [keyboardNavKey, setKeyboardNavKey] = useState<string | null>(null);
+  const [keyboardNav, setKeyboardNav] = useState<{ key: string; seq: number } | null>(null);
   useEffect(() => {
-    if (!keyboardNavKey) return;
+    if (!keyboardNav) return;
     /* preventScroll：滚动归 [selectedKey] 的 scrollIntoView({block:'nearest'})，
      * 这里不双滚。查询用 CSS.escape——rowKey 含 `:` 等字符。 */
     panelRef.current
-      ?.querySelector<HTMLElement>(`[data-list-key="${CSS.escape(keyboardNavKey)}"]`)
+      ?.querySelector<HTMLElement>(`[data-list-key="${CSS.escape(keyboardNav.key)}"]`)
       ?.focus({ preventScroll: true });
-  }, [keyboardNavKey]);
+  }, [keyboardNav]);
 
   /* ── F2（#272）：派生收敛 ────────────────────────────────────────────────
    *
@@ -464,7 +464,10 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
      * 只有渲染窗口内的行，跨窗口/切 tab 的移动在提交后必然命中可见实例（旧行为：
      * 窗口外的 focus() 静默打空，焦点留在旧行上，下一次 ↑/↓ 才追上）。 */
     listTargets[next].focus();
-    setKeyboardNavKey(listTargets[next].key);
+    /* 值必须带自增 seq：只存 key 的话，"点击把选中挪走、再 ↑/↓ 回到同一行"时
+     * setState 对相同字符串 Object.is 短路，effect 不重跑，DOM 焦点就漏跟一次
+     * （审查 F1）。每次移动都是新对象，effect 必然重跑。 */
+    setKeyboardNav((prev) => ({ key: listTargets[next].key, seq: (prev?.seq ?? 0) + 1 }));
     /* #1419：Timeline 的 ↑/↓ 是"选卡片"，不是"开预览"——App 的 onFocusEvent 会顺手
      * 打开 peek，这里立即关掉，保持与点击卡片同一套语义。 */
     if (tab === 'timeline') onPanelAction({ type: 'close-peek' });
@@ -2057,6 +2060,9 @@ export function TimelineTab({
         setTip(null);
         return;
       }
+      /* 行已展开：四段详情就是速览本身；这里开浮层只会作为"暗层"存着，
+       * 收卡的一瞬间突然弹出（审查 F2），直接不开。 */
+      if (activeExpanded.has(row.rowKey)) return;
       lastRowRef.current = btn;
       setTip(tipForRow(row, btn, 'keyboard'));
       return;
