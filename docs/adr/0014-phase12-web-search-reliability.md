@@ -24,12 +24,25 @@ Roadmap Phase 12 冻结交付 5 项：WebSearchProvider、独立 `web_search` To
 
 ### 统一检索接口
 
+> **决定级重开指针（2026-10-22，Issue #1490 / 裁决 20，card-37 D4-A RetrievalProvider facade）**：
+> 本节 **D7** 与下方 **D9** 被同批重开，承诺改为「**共享数据形状、各自返回类型**」，不再是「统一
+> 窄 Protocol」。（编号说明：本 ADR 的决策是 `## 决策` 下的 1–19 编号列表，没有 `### D7` 标题；
+> 「D7/D9」指**决策 7** 与**决策 9**。）**本票只登记指针、不改写正文**（0014 不在这十份重开清单内）：重开与 facade 退役
+> （删协议与未消费适配器）同批执行，落点 **#1507**。**明确保留**：`RetrievalHit` /
+> `to_retrieval_hit` 是生产活代码。**前置**：外部兼容核查；查到仓外消费者则裁决 20 的 A 作废，
+> 本指针随之失效。
+
 7. **窄 Protocol + 平行域**：`RetrievalProvider.search(query, *, k=5, gl=None, hl=None, freshness=None) -> list[RetrievalHit]`。KB（`KnowledgeVectorStore` 继承窄 Protocol + chunk 生命周期）和 Web（`WebSearchProvider` 只实现窄 Protocol）平行。`RetrievalHit` 统一 `{citation, content, score, metadata}`——KB 的 `source_id`/`chunk_index` 和 Web 的 `url`/`title` 走 metadata dict（spec §4 一致）。不泛化、不动 Phase 11 已冻结的 `KnowledgeVectorStore`（它继承窄 Protocol 即可，零改动）。
 8. **两个独立工具**（spec §8 硬约束：Web MUST 独立）：`retrieve_knowledge` + `web_search` 并存；背后各自 provider 策略类。**「同时选 KB+Web」= 模型一回合调用两个工具的 agentic 路径**，不是 Runtime 强制并行、不是合并成一个工具。
 
 ### WebSearchProvider
 
 9. **Protocol + 默认 Tavily（手写 httpx）**：`WebSearchProvider` 实现 `RetrievalProvider`；`WebHit = {title, url, snippet, score?, raw_content?}`（snippet=最佳可用摘要；raw_content 可选全文）。Tavily 默认实现：手写 httpx POST 到 `api.tavily.com/search`，**零新依赖**（同 `MilvusKnowledgeVectorStore` 「SDK 不绑死 Core」姿势）；错误分类 timeout/401/429/5xx → `WebSearchError(category)`。未配置 `TAVILY_API_KEY` → OPTIONAL_RUNTIME 降级缺席（同 `KNOWLEDGE_COLLECTION`）。
+
+   > **重开指针（2026-10-22，Issue #1490 / 裁决 20）**：本条中「`WebSearchProvider` 实现
+   > `RetrievalProvider`」这半句随决策 7 同批重开，改为共享数据形状、各自返回类型；落点 #1507。
+   > Tavily 默认实现、零新依赖、错误分类与 OPTIONAL_RUNTIME 降级**继续适用**。
+
 10. **Provider 可换 = 加策略类**（用户 Q4 核心诉求）：研究验证 Tavily/Serper/Brave/Google/Bocha 都能映射到同一 Protocol（auth 放 adapter 构造器、不进 Protocol 签名；HTTP verb 由 adapter 自有）。
 
 ### web_search 工具 schema（模型可见）

@@ -181,6 +181,7 @@ from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
 from agent_harness.web.board import BoardBroadcaster
 from agent_harness.web.context_usage import resolve_context_usage_payload
 from agent_harness.web.domain_errors import (
+    MEMORY_REASON_CODE_HEADER,
     http_error,
     model_http_error,
     sandbox_unavailable_http_error,
@@ -221,6 +222,8 @@ EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
     {
         "X-Local-Fuse-Source",
         "X-Local-Max-Agent-Turns",
+        # #1440 C 案：memory 内容拒绝的机读归因码（`memory_http_error` 下发）。
+        MEMORY_REASON_CODE_HEADER,
         "X-Permission-Mode",
         "X-Worktree-Path",
         "X-Worktree-Path-Encoded",
@@ -2324,7 +2327,7 @@ class AuthSeamMiddleware:
                         and isinstance(scopes, list)
                         and all(isinstance(item, str) for item in scopes)
                     )
-                except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+                except (jwt.InvalidTokenError, KeyError, RecursionError, TypeError, ValueError):
                     expected = ""
                     valid_identity = False
                     timestamp_is_fresh = False
@@ -2477,7 +2480,7 @@ class AuthSeamMiddleware:
                     or any(not isinstance(s, str) for s in scopes)):
                 raise ValueError("Invalid identity claims")
             return IdentityContext(tenant, user, scopes)
-        except (jwt.InvalidTokenError, ValueError) as invalid:
+        except (jwt.InvalidTokenError, RecursionError, ValueError) as invalid:
             raise _IdentityRejected("Invalid identity token") from invalid
 
 
@@ -3087,15 +3090,37 @@ def create_app(
         return session_rows(summaries)
 
     @app.get("/api/sessions/{session_id}/events")
-    async def get_session_events(session_id: str) -> list[dict]:
+    async def get_session_events(
+        session_id: str,
+        after_seq: int | None = Query(default=None, ge=-1),
+        limit: int | None = Query(default=None, ge=1, le=STREAM_REPLAY_MAX_EVENTS),
+    ) -> list[dict]:
         """读历史 SessionEvent——前端刷新后从此重建视图（不变量 #22）。
 
         session_id 先过安全校验（名字段，不是路径）；store 读是同步磁盘 I/O，
         走 to_thread 卸载（同 list_sessions）。
+
+        有界分页（#1526）：`?after_seq=N&limit=M`。`after_seq` 只返回 seq
+        **严格大于** N 的事件——ADR-0016 §2.3 重连游标（`stream?after_seq=`）
+        的同一语义挪到历史读取；Stripe `starting_after` 的「游标 = 对象身份」
+        同形，这里的对象身份就是 seq。`limit` 上限钉在
+        `STREAM_REPLAY_MAX_EVENTS`（**不新造窗口阈值**，与 WS/SSE backlog
+        截断同一常数）；只给 `limit` ⇒ 从头取首页；只给 `after_seq` ⇒ 默认
+        页大小 = `STREAM_REPLAY_MAX_EVENTS`。**两个参数都不给 ⇒ 既有全量
+        语义**（既有调用方零迁移）。响应仍是裸数组——续页判据 =「页长 ==
+        limit」（GitHub `per_page` 短页同款）：短页即完结，页长超 limit 只会
+        出现在不支持参数的旧后端（整包回退，客户端按完结处理）。seq 严格
+        递增且无重复由「过滤 > 游标 + 前缀切片」构造保证。窗口切空返回
+        `[]`（不是 404）：分页参数不改变会话存在性/损坏语义。
         """
         service = session_service(app.state.agent)
+        effective_limit = limit
+        if effective_limit is None and after_seq is not None:
+            effective_limit = STREAM_REPLAY_MAX_EVENTS
         try:
-            events = await service.get_events(session_id)
+            events = await service.get_events(
+                session_id, after_seq=after_seq, limit=effective_limit,
+            )
         except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as e:
             raise http_error(e) from e
         return [e.to_dict() for e in events]
