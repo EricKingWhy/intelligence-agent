@@ -112,8 +112,10 @@ from agent_harness.agent.budget import (
     BudgetRejection,
 )
 from agent_harness.memory.errors import MemoryNotFound
-from agent_harness.model.config import UnsupportedReasoningEffort
-from agent_harness.model.provider import ModelClientConstructionError
+from agent_harness.model.config import (
+    ModelClientConstructionError,
+    UnsupportedReasoningEffort,
+)
 from agent_harness.sandbox.capabilities import (
     SandboxUnavailableError,
     probe_all_capabilities,

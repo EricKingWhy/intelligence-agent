@@ -93,11 +93,11 @@ from agent_harness.instance_lock import InstanceLock
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import (
     ConfigError,
+    ModelClientConstructionError,
     ModelConfig,
     UnsupportedReasoningEffort,
     warn_unadopted_catalog_entries,
 )
-from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import (
