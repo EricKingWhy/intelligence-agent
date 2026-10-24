@@ -11,6 +11,17 @@
 - **Refines**: ADR-0018 D6，仅限 Memory V2 挂载的真实运行；非 V2 trace 行为不变
 - **Supersedes**: 无
 
+**当前适用关系（2026-10-22，Issue #1490 / ADR-0056）**：
+
+- **被取代**：§1 末句「SQLite 与派生索引仍是业务数据所有者」中的 **Memory 部分**。当前内容权威
+  是 Markdown（ADR-0056 §3.1），运行验收链改为 formation → Markdown receipt → 文件检索/注入 →
+  重启/故障恢复。依据裁决 1、2。
+- **继续适用**：D1 metadata-only trace 与 §2 的 allowlist 字段边界；D2 进程内哈希；D3 观测故障
+  不改写 Core 结果；D4–D9 的评测方法、许可证边界与"单样本 smoke ≠ 正式 baseline"；D10/D12/D13
+  的保留事实值、formation 负责分类、按存储事实与 raw hybrid Recall@6 度量。**旧测量不冒充新链
+  已验证**——新链的验收证据须由 #1494/#1495 产出。
+- **后继规格**：ADR-0056 §3.1/§3.6；施工落点 #1494、#1495。
+
 ---
 
 ## 1. Context
@@ -21,6 +32,12 @@ ADR-0018 的全局内容模式允许 `full` / `redacted`。Memory V2 的输入�
 
 本 ADR 为 V2 确定专用的内容边界、阻塞门禁、公共基准产物与许可证边界。Langfuse 仍是可选旁路，
 SQLite 与派生索引仍是业务数据所有者。
+
+> **更正（2026-10-22，Issue #1490 / ADR-0056）**：上一句的「SQLite 与派生索引仍是业务数据
+> 所有者」**仅对 Langfuse 旁路关系继续成立**（观测不得成为事实源）。Memory 的当前内容权威是
+> Markdown，SQLite/Milvus 在 Memory 侧只作只读迁移档案与可重建派生索引；RAG 侧不变。依据裁决
+> 1、2，见 ADR-0056 §3.1/§3.8。
+
 
 ## 2. Decision
 

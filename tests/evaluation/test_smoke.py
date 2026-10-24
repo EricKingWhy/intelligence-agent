@@ -141,6 +141,8 @@ def test_smoke_builds_runtime_with_fallback_config(tmp_path: Path, monkeypatch):
         # ModelConfig.from_settings 会读 settings.agent_models 解析 catalog
         # （#865 reasoning effort）；替身须与 Settings 默认值一致（SecretStr("")）。
         "agent_models": SecretStr(""),
+        # #1485 端点守卫例外（Settings.model_endpoint_allowlist，默认空串）同理由。
+        "model_endpoint_allowlist": "",
     })()
 
     def fake_create(config):

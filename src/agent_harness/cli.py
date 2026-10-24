@@ -3557,6 +3557,9 @@ async def _memory_command(
 
         counts = await migrate_active_records(
             Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME, settings.workspace_dir,
+            # #1441 §1：迁移与运行时用同一份容量预算（否则改配置后迁移与对话路径分叉）。
+            memory_char_limit=settings.memory_char_limit,
+            user_char_limit=settings.user_char_limit,
         )
         lines = [
             (
@@ -3564,6 +3567,10 @@ async def _memory_command(
                 f"去重={counts['deduplicated']}"
                 f"（MEMORY.md {counts['memory']} / USER.md {counts['user']}）"
             ),
+            # #1441 §2：kind 缺失（NULL/空串/未知值，含大小写与空白变体）且 tier≠profile
+            # 时一律默认 MEMORY.md——这半条是追认的简化，但用户必须能从报告里看见有多少
+            # 条走了兜底（此前静默混入）。判据与 `target_for` 同源，报告不会与落点对不上。
+            f"kind 缺失默认归入 MEMORY.md：{counts['kind_defaulted']} 条（tier≠profile）",
         ]
         failed = bool(counts["skipped"])
         if failed:

@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-23T01:34:37+00:00",
+  "sha": "902eea18371e8c57caa1dfedac89481d6a30c137",
+  "tree": "756a9476202121e949117ec7d4b4247ba69026cf",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 6,
+  "total": 7,
+  "failed": [
+    "coverage"
+  ],
+  "env_failures": [],
+  "wall_seconds": 84.63,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.53.0",
+    "python": "Python 3.13.11",
+    "ruff": "ruff 0.16.3",
+    "node": "v22.22.1",
+    "oxlint": "Version: 1.85.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [
+      "docs/gate/14f5217ae49bf96c0f7b9076a51e627784138734.json",
+      "docs/gate/1c174048bc41c90f402d5dbad8fa7dab34114e55.json",
+      "docs/gate/4e981d9f9ce54f355907bc802d877044d3619a88.json",
+      "docs/gate/5a23f44f2d09f7c775a45e32f1d0a280b7c542ae.json",
+      "docs/gate/8f485b57f2441bd0000fc541ef99c93b9283572b.json"
+    ],
+    "untracked_total": 5
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.02,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.03,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/ruff",
+        "check",
+        "."
+      ],
+      "command": "./.venv/bin/ruff check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.51,
+      "cwd": "web",
+      "argv": [
+        "~/node-v22.22.1-linux-x64/bin/node",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "~/node-v22.22.1-linux-x64/bin/node node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 17.86,
+      "cwd": "web",
+      "argv": [
+        "~/node-v22.22.1-linux-x64/bin/node",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "~/node-v22.22.1-linux-x64/bin/node node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "stylelint",
+      "desc": "stylelint（web/src 的 CSS：禁颜色字面量）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 1.22,
+      "cwd": "web",
+      "argv": [
+        "~/node-v22.22.1-linux-x64/bin/node",
+        "node_modules/stylelint/bin/stylelint.mjs",
+        "--config",
+        "stylelint.config.mjs",
+        "src/**/*.css"
+      ],
+      "command": "~/node-v22.22.1-linux-x64/bin/node node_modules/stylelint/bin/stylelint.mjs --config stylelint.config.mjs src/**/*.css"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 4.16,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/python",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/bin/python -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": ""
+      }
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 3.96,
+      "cwd": ".",
+      "argv": [
+        "./.venv/bin/python",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/bin/python scripts/check_review_coverage.py",
+      "output_tail": [
+        "✅ 零新增内容（树 b55894044205ac225835e44f570b08fa75d7a15f == 父 cd06025b210ef01dd03be0e5a7373579ef93c242 的树）: ff20b89db  Merge pull request #511 from EricKingWhy/fix/t509-t510-e2e-stability",
+        "✅ docs-only（按路径自动归属）: ffa5cf747  docs(gate): 落盘 32a9a59a 的 Gate-0 裸全量读数（6/6 PASS，墙钟 12.0s；先回后正第二轮合并树终态） — docs/gate/32a9a59ab76c82efb80b973f3d413feaf0293203.json",
+        "闸门失败。处置（不要改台账蒙过去）：",
+        "  · 这些 commit 动了代码 ⇒ **补一次审查**（两轴 /code-review，范围写进台账的新行）；",
+        "  · 若确认只是文档改动 ⇒ 归属**本该自动**（脚本按路径机械判定）；仍失败说明它的改动文件",
+        "    **核对不了**（合并提交的 `--cc` 空表）或含非文档文件。⚠ **别写 `[whitelist]`**：那一支",
+        "    自 2026-09-23 起已不再放行任何提交（写进去只会得到一个 ⚠ 未用到，见协议 §7 第 8 条）。",
+        "  协议原文与全部例外条款：docs/SDD_WORKFLOW_PROTOCOL.md §7 第 8 条。"
+      ]
+    }
+  ]
+}

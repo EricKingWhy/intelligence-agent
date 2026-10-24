@@ -181,6 +181,7 @@ from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
 from agent_harness.web.board import BoardBroadcaster
 from agent_harness.web.context_usage import resolve_context_usage_payload
 from agent_harness.web.domain_errors import (
+    MEMORY_REASON_CODE_HEADER,
     http_error,
     model_http_error,
     sandbox_unavailable_http_error,
@@ -221,6 +222,8 @@ EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
     {
         "X-Local-Fuse-Source",
         "X-Local-Max-Agent-Turns",
+        # #1440 C 案：memory 内容拒绝的机读归因码（`memory_http_error` 下发）。
+        MEMORY_REASON_CODE_HEADER,
         "X-Permission-Mode",
         "X-Worktree-Path",
         "X-Worktree-Path-Encoded",

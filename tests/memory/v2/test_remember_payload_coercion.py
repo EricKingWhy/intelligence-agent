@@ -132,18 +132,24 @@ class TestStringifiedPayloadCoercion:
             )
 
     def test_validator_chain_not_bypassed(self):
-        """coercion 不制造校验漏洞：content 覆盖 / kind-tier 组合校验对字符串入站同样生效。"""
-        # payload.fact 不是 content 的逐字摘录 → _payload_text_is_covered_by_content 照拒
-        smuggled = json.dumps(
+        """coercion 不制造校验漏洞：kind-tier 组合校验对字符串入站同样生效。
+
+        #1440 F-05 推翻披露：原用例的前半段断言 payload.fact 必须是 content 的逐字摘录
+        （`_payload_text_is_covered_by_content`）。#1353 §0 裁决 3 明定垫片放弃 verbatim
+        校验、折中为 add 软校验（执行期比对本轮 user message），所以该硬闸已移除；
+        参数面剩下的组合规则（kind ↔ payload 判别、profile ⇒ semantic）继续对字符串
+        入站生效——后半段原样保留，前半段改为断言"照收"，软校验另有用例覆盖。
+        """
+        # 转述式 payload 不再被参数面拒绝（逐字校验已按裁决 3 移除）
+        paraphrased = json.dumps(
             {"kind": "semantic", "subject": "我", "fact": "完全无关的内容",
              "category": "preference"},
             ensure_ascii=False,
         )
-        with pytest.raises(ValidationError) as exc_info:
-            _RememberV2Args.model_validate(
-                {"content": "我喜欢喝美式", "kind": "semantic", "payload": smuggled}
-            )
-        assert "must be derived from content" in str(exc_info.value)
+        args = _RememberV2Args.model_validate(
+            {"content": "我喜欢喝美式", "kind": "semantic", "payload": paraphrased}
+        )
+        assert args.payload.fact == "完全无关的内容"
 
         # kind=procedural 配 semantic payload → _kind_tier_payload_combination 照拒
         semantic_for_procedural = json.dumps(
@@ -165,6 +171,9 @@ class TestStringifiedPayloadCoercion:
         联合分支逐个解引用 `$defs` 内的定义，每个分支的顶层类型都必须是 object——
         任何分支声明 type=string（含 type 列表变体）即失败。分支内的叶子字段
         （subject/fact 等）合法声明 string，不在此判据内。
+
+        #1440 F-05：`payload` 现在可缺省（运行时由 content 合成），联合里因此多一个
+        `type: null` 分支——断言改为"对象形态恰好 3 个、其余只允许 null"，仍禁止 string。
         """
         schema = _RememberV2Args.model_json_schema()
         payload_node = schema["properties"]["payload"]
@@ -184,9 +193,9 @@ class TestStringifiedPayloadCoercion:
                 yield node
 
         branches = list(_iter_branches(payload_node))
-        assert len(branches) == 3  # semantic / episodic / procedural 三个对象形态
-        for branch in branches:
-            assert branch.get("type") == "object", branch
+        objects = [b for b in branches if b.get("type") == "object"]
+        assert len(objects) == 3  # semantic / episodic / procedural 三个对象形态
+        assert all(b.get("type") in ("object", "null") for b in branches), branches
 
 
 # ---------------------------------------------------------------------------

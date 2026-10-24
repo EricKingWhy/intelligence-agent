@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-24T00:14:15+08:00",
+  "sha": "bc0767d4ebd986d02ebd19cbff694f73dad2eef3",
+  "tree": "67d6f162e3117fb5e4c34c5903e92c499b3d593d",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 6,
+  "total": 7,
+  "failed": [
+    "guards"
+  ],
+  "env_failures": [],
+  "wall_seconds": 27.04,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "Python 3.13.5",
+    "ruff": "ruff 0.16.3",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.85.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.07,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.12,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/ruff.exe",
+        "check",
+        "."
+      ],
+      "command": "./.venv/Scripts/ruff.exe check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.43,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 13.75,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "stylelint",
+      "desc": "stylelint（web/src 的 CSS：禁颜色字面量）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 1.05,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/stylelint/bin/stylelint.mjs",
+        "--config",
+        "stylelint.config.mjs",
+        "src/**/*.css"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/stylelint/bin/stylelint.mjs --config stylelint.config.mjs src/**/*.css"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 6.47,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/Scripts/python.exe -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": ""
+      },
+      "output_tail": [
+        "E       AssertionError: 产物含 event.py 未注册的类型，或持久化/仅广播归属写错: ['memory/human_blocked']",
+        "E       assert not frozenset({'memory/human_blocked'})",
+        "tests\\test_event_vocabulary_generated.py:65: AssertionError",
+        "=========================== short test summary info ===========================",
+        "FAILED tests/test_event_types_generated.py::test_generated_event_types_artifact_is_current",
+        "FAILED tests/test_event_vocabulary_generated.py::test_generated_event_vocabulary_artifact_is_current",
+        "FAILED tests/test_event_vocabulary_generated.py::test_artifact_names_match_event_module_both_directions",
+        "3 failed, 37 passed in 4.25s"
+      ]
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 5.15,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/Scripts/python.exe scripts/check_review_coverage.py"
+    }
+  ]
+}

@@ -703,6 +703,24 @@ async def test_ac6_web_promote_is_audited(memory_app, caplog) -> None:
         "api", "promote_blocked", 1)
 
 
+@pytest.mark.asyncio
+async def test_web_promote_rejection_returns_403_and_reason_code(memory_app) -> None:
+    client, _vectors = memory_app
+    blocked = await _wiring_blocked(client)
+    secret = "my api key is sk-live-abcdefghijklmnopqrstuvwxyz012345"
+    blocked_id = await _insert_blocked_row(
+        blocked, trusted=TrustedMemoryIdentity("acme", "alice"), content=secret)
+
+    response = client.post(
+        f"/api/memory-blocked/{blocked_id}/promote", headers=_auth(_ALICE))
+
+    assert response.status_code == 403, response.text
+    assert isinstance(response.json()["detail"], str)
+    assert response.headers["X-Memory-Reason-Code"] == "secret_content"
+    assert (await blocked.get(blocked_id)).status == BLOCKED
+    assert _record_count(blocked.database_path) == 0
+
+
 # --------------------------------------------------------------------------------------
 # AC7①：真子进程 SIGKILL —— 提交前被杀 ⇒ 恢复恰好一行 blocked，不多不少
 # --------------------------------------------------------------------------------------

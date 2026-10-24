@@ -49,6 +49,8 @@ export const CARD_TINTS = {
   running: "#26282e", // = rgb(38, 40, 46)
   success: "#1e2821", // = rgb(30, 40, 33)
   error: "#2e1e21", // = rgb(46, 30, 33)
+  /** #1498 F7-2：被中断（stopped）不等于失败，底色取 warning 一侧的暗调。 */
+  stopped: "#2c281e", // = rgb(44, 40, 30)
 } as const;
 
 /** 主题函数集：组件需要 (text) => string 形态的颜色钩子。 */
