@@ -421,7 +421,14 @@ describe('#1195 键盘交互', () => {
   });
 
   it('唯一命中 /pl Enter 直接执行', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 's-1', mode: 'plan' }), { status: 200 }));
+    // #1526：`/plan` 的 mode 投影经 `getSessionEvents` 拉事件流，客户端现在
+    // 严格校验 /events 响应是裸数组（后端契约）。mock 必须按 URL 分流：
+    // 事件流给数组，/workflow-mode 的 POST 回执保留对象形状。
+    fetchMock.mockImplementation(async (url: unknown) =>
+      String(url).includes('/events')
+        ? new Response(JSON.stringify([]), { status: 200 })
+        : new Response(JSON.stringify({ id: 's-1', mode: 'plan' }), { status: 200 }),
+    );
     await typeText('/pl');
     expect(menuItems().length).toBe(1);
     press('Enter');

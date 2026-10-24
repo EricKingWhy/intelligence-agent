@@ -7,23 +7,33 @@
 - 所有者 loopback/LAN 的保存与连接测试照旧通过；例外只对登记的端点生效。
 - 错误明确说明"被误配置守卫拒绝"；不加任何二次审批。
 
-受控手段：`httpx2.MockTransport` 充当服务器（逐跳可计数、可回 302），
-`endpoint_guard` 的两个解析函数被替换成受控结果。真实 socket 一次都不开——
-"零请求"是传输层计数为 0，不是"没观察到"。
-**唯一例外**是 `test_owner_loopback_connection_test_still_works`：它起一个真
-`ThreadingHTTPServer` 绑 127.0.0.1，证明放行路径确实能连通（仍不碰任何元数据地址）。
+受控手段：`httpx2.MockTransport` 充当大多数用例的可计数服务器（逐跳可计数、可回 302），
+`endpoint_guard` 的解析函数由受控结果驱动。只有真实 socket 用例会在本机开监听器：
+所有者 loopback 连通性与 DNS pinning 用例只绑定 127.0.0.1；受控解析器可返回
+127.0.0.1 或 127.0.0.2，并记录实际连接目标。用例不访问外网或元数据地址。
 """
 
 from __future__ import annotations
 
+import asyncio
 import http.server
 import ipaddress
 import json
+import select
+import socket
+import socketserver
+import ssl
 import threading
 from collections import Counter
+from datetime import UTC, datetime, timedelta
 
+import anyio
 import httpx2
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from langchain_core.messages import HumanMessage
 from openai import APIConnectionError
 
@@ -67,10 +77,12 @@ class _Recorder:
     def __init__(self, redirect_to: str | None = None) -> None:
         self.redirect_to = redirect_to
         self.hosts: Counter[str] = Counter()
+        self.host_headers: list[str | None] = []
         self.auth_headers: list[str | None] = []
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.hosts[request.url.host] += 1
+        self.host_headers.append(request.headers.get("host"))
         self.auth_headers.append(request.headers.get("authorization"))
         if self.redirect_to is not None:
             location, self.redirect_to = self.redirect_to, None  # 只跳一次
@@ -89,10 +101,10 @@ def fake_resolver(monkeypatch):
     real_async = endpoint_guard._aresolved_addresses
 
     def _sync(host: str, port: int | None) -> list[str]:
-        return table.get(host) or real_sync(host, port)
+        return table[host] if host in table else real_sync(host, port)
 
     async def _async(host: str, port: int | None) -> list[str]:
-        return table.get(host) or await real_async(host, port)
+        return table[host] if host in table else await real_async(host, port)
 
     monkeypatch.setattr(endpoint_guard, "_resolved_addresses", _sync)
     monkeypatch.setattr(endpoint_guard, "_aresolved_addresses", _async)
@@ -117,7 +129,15 @@ def _install(model, recorder: _Recorder) -> None:
     for client in (model.root_client, model.root_async_client):
         inner = client._client
         inner._mounts = {}
-        inner._transport = httpx2.MockTransport(recorder)
+        inner._transport._inner = httpx2.MockTransport(recorder)
+        if isinstance(inner, httpx2.AsyncClient):
+            inner._transport._client_factory = lambda: httpx2.AsyncClient(
+                transport=httpx2.MockTransport(recorder),
+            )
+        else:
+            inner._transport._client_factory = lambda: httpx2.Client(
+                transport=httpx2.MockTransport(recorder),
+            )
 
 
 async def _invoke(model) -> None:
@@ -394,6 +414,20 @@ class TestRequestTimeGuard:
         assert recorder.hosts == Counter()
 
     @pytest.mark.asyncio
+    async def test_empty_dns_answers_fail_closed(self, fake_resolver):
+        fake_resolver["empty.test"] = []
+        recorder = _Recorder()
+        model = _model("http://empty.test/v1")
+        _install(model, recorder)
+
+        with pytest.raises(APIConnectionError) as excinfo:
+            await _invoke(model)
+
+        assert isinstance(excinfo.value.__cause__, socket.gaierror)
+        assert recorder.hosts == Counter()
+        assert recorder.auth_headers == []
+
+    @pytest.mark.asyncio
     async def test_redirect_into_link_local_is_blocked_per_hop(self, fake_resolver):
         """第一跳合法 → 302 到元数据目标：第二跳在发出前被拦，零请求零凭据。"""
         fake_resolver["metadata.test"] = [_METADATA_IP]
@@ -408,6 +442,21 @@ class TestRequestTimeGuard:
         assert recorder.hosts["127.0.0.1"] == 1
         assert recorder.hosts["metadata.test"] == 0
         assert len(recorder.auth_headers) == 1  # 只有第一跳，且确实带了凭据
+
+    @pytest.mark.asyncio
+    async def test_safe_redirect_rechecks_and_pins_each_hostname(self, fake_resolver):
+        fake_resolver["source.test"] = ["198.18.1.1"]
+        fake_resolver["redirect.test"] = ["198.18.1.2"]
+        recorder = _Recorder(redirect_to="http://redirect.test/v1/chat/completions")
+        model = _model("http://source.test/v1")
+        _install(model, recorder)
+
+        await _invoke(model)
+
+        assert recorder.hosts == Counter({"198.18.1.1": 1, "198.18.1.2": 1})
+        assert recorder.host_headers == ["source.test", "redirect.test"]
+        assert recorder.auth_headers[0].startswith("Bearer ")
+        assert recorder.auth_headers[1] is None
 
     @pytest.mark.asyncio
     async def test_allowlisted_endpoint_exception_applies_per_request(
@@ -487,7 +536,8 @@ class TestRequestTimeGuard:
         model = _model("http://0x7f.1:11434/v1")
         _install(model, recorder)
         await _invoke(model)
-        assert recorder.hosts["0x7f.1"] == 1
+        assert recorder.hosts["127.0.0.1"] == 1
+        assert recorder.host_headers == ["0x7f.1:11434"]
         assert recorder.auth_headers[0].startswith("Bearer ")
 
     def test_sync_invoke_path_is_also_guarded(self, fake_resolver):
@@ -649,3 +699,498 @@ async def test_owner_loopback_connection_test_still_works():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+class _ObservedChatHandler(_ChatHandler):
+    def do_POST(self) -> None:
+        self.server.request_observations.append(
+            (self.connection.getsockname()[0], self.headers.get("Host")),
+        )
+        super().do_POST()
+
+
+@pytest.fixture
+def rebind_http_server():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ObservedChatHandler)
+    server.request_observations = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _install_rebinding_resolver(monkeypatch, port: int) -> list[str]:
+    real_getaddrinfo = socket.getaddrinfo
+    answers: list[str] = []
+
+    def _getaddrinfo(host, requested_port, *args, **kwargs):
+        if host == "dns-rebinding.test" and requested_port == port:
+            address = "127.0.0.1" if not answers else "127.0.0.2"
+            answers.append(address)
+            return real_getaddrinfo(address, requested_port, *args, **kwargs)
+        return real_getaddrinfo(host, requested_port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo)
+    return answers
+
+
+def _install_async_rebinding_resolver(monkeypatch, port: int) -> list[str]:
+    import anyio._core._sockets as anyio_sockets
+
+    loop = asyncio.get_running_loop()
+    real_loop_getaddrinfo = loop.getaddrinfo
+    real_anyio_getaddrinfo = anyio_sockets.getaddrinfo
+    answers: list[str] = []
+
+    def _answer(host: str, requested_port: int) -> str | None:
+        if host != "dns-rebinding.test" or requested_port != port:
+            return None
+        address = "127.0.0.1" if not answers else "127.0.0.2"
+        answers.append(address)
+        return address
+
+    async def _loop_getaddrinfo(host, requested_port, *args, **kwargs):
+        address = _answer(host, requested_port)
+        return await real_loop_getaddrinfo(
+            address or host, requested_port, *args, **kwargs,
+        )
+
+    async def _anyio_getaddrinfo(host, requested_port, **kwargs):
+        address = _answer(host, requested_port)
+        if address is None:
+            return await real_anyio_getaddrinfo(host, requested_port, **kwargs)
+        return await real_loop_getaddrinfo(address, requested_port, **kwargs)
+
+    monkeypatch.setattr(loop, "getaddrinfo", _loop_getaddrinfo)
+    monkeypatch.setattr(anyio_sockets, "getaddrinfo", _anyio_getaddrinfo)
+    return answers
+
+
+def _local_guarded_clients(port: int):
+    clients = guarded_clients(base_url=f"http://dns-rebinding.test:{port}/v1/")
+    for client in clients:
+        client._mounts.clear()
+    return clients
+
+
+@pytest.fixture
+def fallback_http_server():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ObservedChatHandler)
+    server.request_observations = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("use_async_client", [False, True])
+@pytest.mark.asyncio
+async def test_transport_falls_back_to_next_checked_dns_address(
+    fake_resolver, fallback_http_server, use_async_client,
+):
+    """首个已检查地址不可达时，继续尝试同一 DNS 答案里的后续地址。"""
+    port = fallback_http_server.server_port
+    fake_resolver["dns-rebinding.test"] = ["127.0.0.2", "127.0.0.1"]
+    sync_client, async_client = _local_guarded_clients(port)
+    try:
+        if use_async_client:
+            response = await async_client.post("probe", json={})
+        else:
+            response = sync_client.post("probe", json={})
+        assert response.status_code == 200
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert fallback_http_server.request_observations == [
+        ("127.0.0.1", f"dns-rebinding.test:{port}"),
+    ]
+
+
+def test_sync_transport_connects_to_the_address_checked_by_guard(
+    monkeypatch, rebind_http_server,
+):
+    port = rebind_http_server.server_address[1]
+    answers = _install_rebinding_resolver(monkeypatch, port)
+    sync_client, async_client = _local_guarded_clients(port)
+    try:
+        response = sync_client.post("probe", json={})
+        assert response.status_code == 200
+    finally:
+        sync_client.close()
+        asyncio.run(async_client.aclose())
+
+    assert answers == ["127.0.0.1"]
+    assert rebind_http_server.request_observations == [
+        ("127.0.0.1", f"dns-rebinding.test:{port}"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_transport_connects_to_the_address_checked_by_guard(
+    monkeypatch, rebind_http_server,
+):
+    port = rebind_http_server.server_address[1]
+    answers = _install_async_rebinding_resolver(monkeypatch, port)
+    sync_client, async_client = _local_guarded_clients(port)
+    try:
+        response = await async_client.post("probe", json={})
+        assert response.status_code == 200
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert answers == ["127.0.0.1"]
+    assert rebind_http_server.request_observations == [
+        ("127.0.0.1", f"dns-rebinding.test:{port}"),
+    ]
+
+
+class _HostIdentityRedirectHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:
+        self.server.request_hosts.append(self.headers.get("Host"))
+        if self.path == "/redirect":
+            body = b""
+            self.send_response(302)
+            self.send_header(
+                "Location", f"https://b.test:{self.server.server_port}/final",
+            )
+        else:
+            body = b"ok"
+            self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args) -> None:
+        return
+
+
+@pytest.fixture
+def host_identity_redirect_server(tmp_path):
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "a.test"),
+    ])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("a.test")]),
+            critical=False,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+    cert_path = tmp_path / "server-cert.pem"
+    key_path = tmp_path / "server-key.pem"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ))
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _HostIdentityRedirectHandler,
+    )
+    server.request_hosts = []
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(cert_path, key_path)
+    server.socket = server_context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, cert_path
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class _FallbackConnectProxyHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        request_line = self.rfile.readline().decode("ascii").strip()
+        _method, target, _version = request_line.split(" ", 2)
+        while self.rfile.readline().strip():
+            pass
+        self.server.connect_targets.append(target)
+
+        if target.startswith("[2001:db8::1]:"):
+            status = self.server.rejection_status
+            reason = {
+                403: "Forbidden",
+                407: "Proxy Authentication Required",
+                502: "Bad Gateway",
+                504: "Gateway Timeout",
+            }[status]
+            self.wfile.write(
+                f"HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\n\r\n".encode(),
+            )
+            self.wfile.flush()
+            return
+
+        host, port = target.rsplit(":", 1)
+        upstream = socket.create_connection((host, int(port)), timeout=5)
+        try:
+            self.connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            self.connection.setblocking(False)
+            upstream.setblocking(False)
+            sockets = (self.connection, upstream)
+            while True:
+                readable, _writable, _exceptional = select.select(sockets, (), (), 5)
+                if not readable:
+                    return
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    destination = upstream if source is self.connection else self.connection
+                    destination.sendall(data)
+        finally:
+            upstream.close()
+
+
+class _ThreadingConnectProxy(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+@pytest.fixture
+def fallback_connect_proxy():
+    proxy = _ThreadingConnectProxy(("127.0.0.1", 0), _FallbackConnectProxyHandler)
+    proxy.connect_targets = []
+    proxy.rejection_status = 502
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield proxy
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("use_async_client", [False, True])
+@pytest.mark.asyncio
+async def test_cross_host_https_redirect_rechecks_tls_identity(
+    monkeypatch, fake_resolver, host_identity_redirect_server, use_async_client,
+):
+    """同 IP 的两个 HTTPS host 不得复用只验证了前一 host 的 TLS 连接。"""
+    import httpx2._transports.default as httpx2_default
+
+    server, cert_path = host_identity_redirect_server
+    port = server.server_port
+    fake_resolver.update({"a.test": ["127.0.0.1"], "b.test": ["127.0.0.1"]})
+    monkeypatch.setattr(
+        httpx2_default,
+        "create_ssl_context",
+        lambda verify=True, cert=None, trust_env=True: ssl.create_default_context(
+            cafile=str(cert_path),
+        ),
+    )
+    sync_client, async_client = guarded_clients(base_url=f"https://a.test:{port}/")
+    sync_client._mounts.clear()
+    async_client._mounts.clear()
+    try:
+        if use_async_client:
+            with pytest.raises(httpx2.ConnectError, match="certificate verify failed"):
+                await async_client.get("redirect")
+        else:
+            with pytest.raises(httpx2.ConnectError, match="certificate verify failed"):
+                sync_client.get("redirect")
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert server.request_hosts == [f"a.test:{port}"]
+
+
+@pytest.mark.parametrize("use_async_client", [False, True])
+@pytest.mark.parametrize(
+    ("rejection_status", "should_fallback"),
+    [(502, True), (504, True), (403, False), (407, False)],
+)
+@pytest.mark.asyncio
+async def test_https_proxy_brackets_ipv6_connect_and_falls_back_to_checked_address(
+    monkeypatch, fake_resolver, host_identity_redirect_server, fallback_connect_proxy,
+    rejection_status, should_fallback, use_async_client,
+):
+    import httpx2._transports.default as httpx2_default
+
+    server, cert_path = host_identity_redirect_server
+    port = server.server_port
+    fake_resolver["a.test"] = ["2001:db8::1", "127.0.0.1"]
+    fallback_connect_proxy.rejection_status = rejection_status
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.setenv(
+        "HTTPS_PROXY", f"http://127.0.0.1:{fallback_connect_proxy.server_address[1]}",
+    )
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setattr(
+        httpx2_default,
+        "create_ssl_context",
+        lambda verify=True, cert=None, trust_env=True: ssl.create_default_context(
+            cafile=str(cert_path),
+        ),
+    )
+    sync_client, async_client = guarded_clients(base_url=f"https://a.test:{port}/")
+    try:
+        if should_fallback:
+            if use_async_client:
+                response = await async_client.get("probe")
+            else:
+                response = sync_client.get("probe")
+            assert response.status_code == 200
+        else:
+            with pytest.raises(httpx2.ProxyError):
+                if use_async_client:
+                    await async_client.get("probe")
+                else:
+                    sync_client.get("probe")
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    expected_targets = [f"[2001:db8::1]:{port}"]
+    expected_hosts = []
+    if should_fallback:
+        expected_targets.append(f"127.0.0.1:{port}")
+        expected_hosts.append(f"a.test:{port}")
+    assert fallback_connect_proxy.connect_targets == expected_targets
+    assert server.request_hosts == expected_hosts
+
+
+@pytest.mark.parametrize("address", ["198.18.1.1", "2001:db8::1"])
+def test_sync_pin_preserves_host_and_sets_original_tls_sni(fake_resolver, address):
+    fake_resolver["model.test"] = [address]
+    observed = []
+    sync_client, async_client = guarded_clients(base_url="https://model.test/v1/")
+    sync_client._mounts.clear()
+    sync_client._transport._inner = httpx2.MockTransport(
+        lambda request: _observe_pinned_request(request, observed),
+    )
+    try:
+        response = sync_client.get("probe")
+    finally:
+        sync_client.close()
+        asyncio.run(async_client.aclose())
+
+    assert response.request.url.host == "model.test"
+    assert observed == [(address, "model.test", "model.test")]
+
+
+@pytest.mark.parametrize("address", ["198.18.1.1", "2001:db8::1"])
+@pytest.mark.asyncio
+async def test_async_pin_preserves_host_and_sets_original_tls_sni(fake_resolver, address):
+    fake_resolver["model.test"] = [address]
+    observed = []
+    sync_client, async_client = guarded_clients(base_url="https://model.test/v1/")
+    async_client._mounts.clear()
+    async_client._transport._inner = httpx2.MockTransport(
+        lambda request: _observe_pinned_request(request, observed),
+    )
+    try:
+        response = await async_client.get("probe")
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert response.request.url.host == "model.test"
+    assert observed == [(address, "model.test", "model.test")]
+
+
+def _observe_pinned_request(request: httpx2.Request, observed: list[tuple]) -> httpx2.Response:
+    observed.append((
+        request.url.host,
+        request.headers.get("host"),
+        request.extensions.get("sni_hostname"),
+    ))
+    return httpx2.Response(200, json=_chat_completion(), request=request)
+
+
+class _SlowAsyncCloseStream(httpx2.AsyncByteStream):
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aiter__(self):
+        yield b"chunk"
+
+    async def aclose(self) -> None:
+        await anyio.lowlevel.checkpoint()
+        self.closed = True
+
+
+class _SlowAsyncCloseTransport(httpx2.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, request=request)
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _SlowAsyncCloseClient:
+    def __init__(self) -> None:
+        self._transport = _SlowAsyncCloseTransport()
+        self.closed = False
+
+    async def aclose(self) -> None:
+        await anyio.lowlevel.checkpoint()
+        self.closed = True
+
+
+def test_temporary_async_stream_closes_under_cancellation():
+    stream = _SlowAsyncCloseStream()
+    client = _SlowAsyncCloseClient()
+    wrapper = endpoint_guard._ClosingAsyncByteStream(stream, client)
+
+    async def scenario() -> None:
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await wrapper.aclose()
+            await anyio.lowlevel.checkpoint()
+        assert stream.closed is True
+        assert client.closed is True
+
+    anyio.run(scenario)
+
+
+def test_temporary_async_request_closes_client_under_cancellation(monkeypatch):
+    client = _SlowAsyncCloseClient()
+    transport = endpoint_guard._PinnedAsyncTransport(
+        _SlowAsyncCloseTransport(), None,
+    )
+    transport._primary_origin = ("https", "primary.test", 443)
+    transport._client_factory = lambda: client
+
+    async def send_cancelled(*args, **kwargs):
+        await anyio.lowlevel.checkpoint()
+
+    monkeypatch.setattr(endpoint_guard, "_send_async", send_cancelled)
+
+    async def scenario() -> None:
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            with pytest.raises(anyio.get_cancelled_exc_class()):
+                await transport.handle_async_request(
+                    httpx2.Request("GET", "https://redirect.test/"),
+                )
+            assert client.closed is True
+
+    anyio.run(scenario)
