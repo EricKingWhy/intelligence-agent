@@ -66,7 +66,7 @@ class _ThreadConnection:
     `weakref.finalize` 的全局注册表里，直到创建它的线程退出）。
     """
 
-    __slots__ = ("conn", "__weakref__")
+    __slots__ = ("__weakref__", "conn")
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
