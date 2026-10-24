@@ -8733,6 +8733,18 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **增量复核 I-02 读数订正（append-only，不改上方各行）**：上方「复核修复轮」行写的 `git diff --numstat b259e06a^..b259e06a -- docs/adr` = `+34/−0` 是笔误，实测为 **`+35/−0`**（`35 0`；`9af0366a..b259e06a` 同为 35，增量复核 `review-1490-incr.md` §5.5 复算一致）。ADR-0056 该提交仍为纯新增、删除列 0，判定不变。
 - **增量复核收尾轮（append-only，不改上方各行）**：独立增量复核 `review-1490-incr.md` 判 **CLOSED**（P0 = 0 / P1 = 0），剩余 P3/P4 三条本轮清零：① **I-01（P3）** ADR-0056 §9「应保留的不变量」汇总段末补一行指针「逐条清单见 #1543 正文（该票已逐行照录八组保留项）」，只增补指针、汇总句与既有正文未改；② **I-02（P4）** 见上一行订正；③ **I-03（P4）** 在 `report-1490-fix1.md` 末尾追加「增量复核后订正」小节（§4.2 块实为 L245–L253、L254 为空行；并登记 I-01/I-02 处置与 CLOSED 结论）。仓内改动为 `4878f64d`（ADR-0056 +1/−0、tracker +1/−0，无删除行）。新 tip `4878f64d`（tree `56b38f04`）裸全量 Gate-0 **7/7 PASS**（墙钟 55.78s < 60s 预算目标），收据 `docs/gate/4878f64d861a489d7cbdc7587861593fe1a38fc9.json`（提交 `7b23a8db`）；`scripts/check_review_coverage.py` rc=0（覆盖区间 `09ca47a1..HEAD`，树 `7b23a8db` 读数 **6611 提交 / 已审查 6509 / 待判定 102**，增量全部来自本票自身 docs 提交、覆盖区间末端自指）。§8.1 判据① `git diff --name-status --no-renames 4878f64d HEAD` 仅该收据一个 `A`、判据② `git status --short` 仅长期未跟踪的 `session.log` ⇒ 读数可传递到最终 tip。
 
+## #1523 时间线键盘可达：↑/↓ 焦点随行 + `?` 速览 + 审批卡焦点落点（2026-10-24 · 夜间全权代理）
+
+- **分支/起点**：`zcode/1523-timeline-keyboard-focus`（worktree `D:\intelligence-agent-wt\z1523`），基线 `fe3d9bd8`。代码提交：`0aece830`（三 AC 主体）→ `416f47d4`（两轴审查 F1/F2 修复）；记账面：本节 + 台账行（后续提交）。
+- **AC2（焦点随行）**：`moveSelection` 里 `listTargets[i].focus()` 是业务选中回调（App 的 onFocusEvent/onFocusTool），不是 HTMLElement.focus；DOM 落焦改由 `keyboardNav{key,seq}` 的 effect 在渲染提交后做——跨渲染窗口/切 tab 的移动必中可见实例（旧失败模式：窗口外 focus() 静默打空，焦点滞留旧行）。seq 防「点击挪走选中、再 ↑/↓ 回到同 key」时 Object.is 短路（审查 F1；消融复现红证后修复）。roving tabindex 三面同构：timeline 行 / 概览工具行 / 终端命令行，停靠点 = 选中行（不在窗口时回落首行），其余行 -1。
+- **AC1（`?` 速览）**：两个自动打开方案先后证伪（聚焦即开、`:focus-visible` 门控）——都会在 y-inspector-peek AC2/AC5 已验收的 Esc 分层（收展开卡→关 peek→关面板）里插入时隐时现的一层，且 `:focus-visible` 在 jsdom 恒 false、Chromium 键盘模态启发式也区分不了点击聚焦。终案：显式 `?` 开关键（GitHub/Gmail 行内速览惯例），与指针 hover 共用 `tipForRow` 单一派生（不为同一内容造第二份数据真相）；`?`/Esc/blur 任一即关；来源行已展开时干脆不开（F2 修复，防收卡瞬间暗层弹出）。**hover tip 的生命周期与 Esc 认领保持票前行为零位移**（TipState.origin 区分：hover 不认领 Esc）——这是 4 个 e2e 回归（AC2/AC5 双视口）两轮修复后定下的关键设计。
+- **AC3（落点）**：AskUserCard 提交/整卡跳过、PlanApprovalCard 三键裁决 → 落焦 `#composer-input`（App 既有落点惯例，App.tsx:700/1718 同款）；失败（errorMessage 出现、卡仍在）回焦触发按钮，重试连续；`submittedRef` 防挂载即错时的焦点抢夺。不触及命令面板（#1480 独立票，双轴审查核过 diff 无 App.tsx/palette 文件）。
+- **测试**：新增 `StepDetail.a11y.test.tsx` 10 用例（AC2×6：单停靠点/随行/跨窗口/切概览/切终端/同 key 回访；AC1×4：? 开关+aria-describedby/Esc 分层不冒泡/指针键盘同源同容/blur 收起+展开行抑制）+ AskUserCard 3 + PlanApprovalCard 2。全量 vitest **2655P / 2F**（两红为 fe3d9bd8 既有：Conversation.metaHierarchy CSS 正则 + StepDetail.artifacts 时区 UTC+8）；tsc exit 0；oxlint 全仓 83 = 基线 83，触面文件 3→3 无新增；e2e：y-inspector-peek + t-a11y-1372 **36/36**（修复前 AC2/AC5 双视口共 4 红）、n-approval-card + plan-approval **38/38**。
+- **两轴审查**：子代理双轴（代码正确性 + 规格一致性/Scope Lock）双 **PASS-with-notes**；F1（P3 同 key 短路漏焦）与 F2（P4 展开行 ? 暗层）已修并补回归测试，F3（P4 终端面缺 Arrow 测试）已补；F4/F5（P4：resuming 期间回焦假设已注释载明 / `?` 关掉同行 hover tip 的 toggle 语义）登记不改。
+- **台账**：`docs/review_ledger.d/t1523-timeline-keyboard-focus-fe3d9bd8-416f47d4.tsv`（desc 445 字符，范围 fe3d9bd8..416f47d4）。
+- **环境纪律**：worktree 以 junction 复用 main 的 `.venv`/`web/node_modules`；jsdom 不模拟点击移焦，F1 回归测试用显式 focus() 模拟浏览器点击落焦。
+- **残余/承接**：PR 打 `等待merge` 由维护者合并（不追 main）；#1480 命令面板焦点为独立票未触及；vitest 两个既有红已在 #1526 证据链中对 fe3d9bd8 基线复现。
+- **Gate-0（append-only）**：记账树 `8722ac95` 裸全量 Gate-0 **7/7 PASS**（墙钟 145.8s > 60s 预算目标，仅告警），收据 `docs/gate/8722ac9538733f7ebbb3797f59cc663591e74a34.json`。`receipt-present` 报 2 笔代码提交缺收据（`0aece830`/`416f47d4`，一收据只覆盖冻结 tip 自身），首周 warn-only（窗口止 2026-10-25T09:21:24Z），guards 未转红——与 #1489/#1490/#1432 同形；**PR 须在窗口前 merge，否则该形状在 CI 转硬红**。
 
 ## #1480 — 命令面板打开的面板关闭后恢复焦点（2026-10-24）
 
