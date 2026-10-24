@@ -599,17 +599,21 @@ def transfer_diff_docs_only(repo_root, p: str, c: str) -> bool:
     return all(len(r) >= 2 and r[0] in ("A", "M") and _doc_pattern().match(r[1]) for r in rows)
 
 
-def tail_is_docs_or_receipts(repo_root, t: str, head: str = "HEAD") -> bool:
-    """形状④条件③：`t..head` 里**每一笔**提交要么纯 docs、要么纯收据落盘（fail-closed）。
+def tail_is_docs_or_receipts(repo_root, t: str) -> bool:
+    """形状④条件③：`t..HEAD` 里**每一笔**提交要么纯 docs、要么纯收据落盘（fail-closed）。
 
     逐笔判（不是对 `t..head` 整体取一次 diff）：整体 diff 会把「先加代码、后删代码」洗成
     空改动面；逐笔判则任一笔不满足 ⇒ ④ 对该 t 不成立。取不到提交列表 ⇒ False。
+    空提交（`changes == []`，`--allow-empty`）也不算纯 docs / 纯收据 ⇒ ④ 对该 t 不成立；
+    方向保守（多跑一次全量），与票面「每一笔提交都是纯 docs 或纯收据落盘」字面一致。
     """
-    rev = _git_at(repo_root, "rev-list", f"{t}..{head}")
+    rev = _git_at(repo_root, "rev-list", f"{t}..HEAD")
     if rev.returncode != 0:
         return False
     for c in (x for x in rev.stdout.split("\n") if x.strip()):
         changes = commit_file_changes(repo_root, c)
+        # 第二个析取项是第一个的严格子集（`docs/gate/<sha>.json` 也命中 docs 判据、`A` ⊂ `A/M`）；
+        # 照票面「复用既有两判据」的口径保留，不是互斥分支。
         if not (is_pure_docs_commit(changes) or is_pure_receipt_landing(changes)):
             return False
     return True
@@ -689,7 +693,9 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
                     break
         if not acceptable:
             # ④ 分支冻结 tip 覆盖（#1553）：t 在区间内、c 是 t 的祖先、且 t..HEAD 逐笔纯 docs /
-            # 纯收据落盘 ⇒ c 的代码已被 tip 那棵被测树包含。条件③不成立 ⇒ 不认（fail-closed）。
+            # 纯收据落盘 ⇒ c 的代码已被 tip 那棵被测树包含。条件不成立 ⇒ 不认（fail-closed）。
+            # 注意形状③与④**不可互推**：③ 只要求同一棵树、不看 tail，④ 只看 tail、不要求同树
+            # ⇒ 上面 ③ 的循环不能因为有了 ④ 就删。
             for t in receipts:
                 if t == c or t not in range_set or not receipts[t].get("valid", False):
                     continue
@@ -711,7 +717,7 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
     except ValueError:
         warn_only = False
 
-    detail = [f"receipt-present（#1338 改动 3）：base={base[:12]} bootstrap={bootstrap[:12]} "
+    detail = [f"receipt-present（#1338 改动 3 / #1553 形状④）：base={base[:12]} bootstrap={bootstrap[:12]} "
               f"范围 {len(commits)} 笔 / 被查 {len(scope)} 笔 / 违规 {len(violations)} 笔"
               + ("（首周 warn-only）" if warn_only else "")]
     for sha, subject in violations:

@@ -24,7 +24,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 GATE0_PATH = REPO / "scripts" / "gate0.py"
 
-#: 8 天前：保证 `bootstrap + 7 天 < now` ⇒ 转硬口径（宽限窗已过）。
+#: 固定在过去（> 7 天）：保证 `bootstrap + 7 天 < now` ⇒ 转硬口径（宽限窗已过）。
 _OLD_DATE = "2026-10-01T00:00:00+00:00"
 
 
@@ -39,8 +39,16 @@ gate0 = _load_gate0()
 
 
 def _env() -> dict:
-    """剥掉继承的 GIT_*：否则测试钩子/CI 的 GIT_DIR 会把 tmp 仓库操作劫持到外层仓库（#668）。"""
-    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    """剥掉继承的 `GIT_*` 并**屏蔽全局/系统 config**。
+
+    前者：#668（hook 注入的 GIT_DIR 会把 tmp 仓库操作劫持到外层仓库）。
+    后者：`core.hooksPath` / `autocrlf` / `commit.gpgsign` 等本机设置会让测试结果依赖跑测试
+    的那台机器（同仓先例：`tests/tooling/test_review_coverage_zero_content.py::_git`）。
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1"})
+    return env
 
 
 class Repo:
@@ -158,19 +166,29 @@ def test_shape4_requires_a_receipt_at_all(tmp_path):
 
 
 def test_shape4_tail_must_be_docs_or_receipts_only(tmp_path):
-    """条件③ fail-closed：t 之后删除 docs 文件（状态 D）也不算「纯 docs」。"""
+    """条件③ fail-closed：t 之后删除 docs 文件（状态 D）也不算「纯 docs」⇒ ④ 对该 t 不成立。
+
+    承重点：`code 1` 只可能靠 ④ 被覆盖（收据在它之后那笔上），tail 一旦被判不纯就必须进违规。
+    把 `tail_is_docs_or_receipts` 改成恒 True ⇒ 本断言转红。
+    """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
     repo.commit({"docs/old.md": "old\n"}, "docs 1")
-    tip = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    early = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    tip = repo.commit({"src/b.py": "b = 2\n"}, "code 2 (receipt carrier)")
     repo.commit(repo.receipt(tip), "docs(gate): receipt for tip")
-    repo.remove("docs/old.md", "docs: delete a file after receipt")
+    doomed = repo.remove("docs/old.md", "docs: delete a file after receipt")
 
     ok, detail, warn = _check(repo, base)
 
     assert warn is False, detail
     assert ok is False, detail
-    assert "违规 1 笔" in detail, detail
+    # tip 有自身收据（形状①）；early 只能靠 ④ 被覆盖 ⇒ tail 一旦判纯，early 就消失。
+    # 违规恰为 2 笔（early + doomed）：M1（tail 恒真）或 M6（接受 D 状态）下都只剩 1 笔 ⇒ 转红。
+    assert f"missing receipt for {early[:12]}" in detail, detail
+    assert f"missing receipt for {doomed[:12]}" in detail, detail
+    assert f"missing receipt for {tip[:12]}" not in detail, detail
+    assert "违规 2 笔" in detail, detail
 
 
 def test_shape4_tail_code_is_not_washed_out_by_a_later_delete(tmp_path):
@@ -207,27 +225,48 @@ def test_shape1_receipt_for_the_commit_itself(tmp_path):
 
 
 def test_shape2_readings_transfer_from_first_parent(tmp_path):
-    """形状②：t = 第一父，且 p..c 的差异是 docs-only。"""
+    """形状②：t = 第一父 p，且 p..c 的差异 docs-only。
+
+    构造要点：`is_pure_docs_commit` 要求 `bool(changes)`，所以**带 docs 改动的提交根本进不了
+    scope**——② 在 scope 里只对「第一父 diff 为空」的提交有事可做（空提交 / `-s ours` 合并）。
+    要让本用例**只**由 ② 放行：让第一父 base 落在检查区间之外（`range_set` 不含 base）⇒ ③/④
+    都拿不到 t = base；给 base 落一枚有效收据（收据提交是纯收据落盘、不进 scope）。
+    把 `and transfer_diff_docs_only(...)` 改成 `and False` ⇒ 本断言转红。
+    """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
-    p = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
-    repo.commit(repo.receipt(p), "docs(gate): receipt")
-    repo.commit({"docs/after.md": "after\n"}, "docs after receipt")
+    repo.git("checkout", "-q", "-b", "side")
+    repo.commit({"docs/side.md": "side\n"}, "docs on side")
+    repo.git("checkout", "-q", "main")
+    # -s ours：树与第一父相同 ⇒ `git diff base c` 为空 ⇒ 传递口径成立（docs-only 的空集）。
+    repo.git("merge", "-q", "--no-ff", "-s", "ours", "side", "-m", "merge side (ours)")
+    merged = repo.git("rev-parse", "HEAD")
+    repo.commit(repo.receipt(base), "docs(gate): receipt for base")
 
     ok, detail, _ = _check(repo, base)
 
+    assert merged != base
+    assert f"missing receipt for {merged[:12]}" not in detail, detail
     assert ok is True, detail
 
 
 def test_shape3_same_tree_descendant_receipt(tmp_path):
-    """形状③：t 为区间内后代且与 c **同一棵树**。"""
+    """形状③：t 为区间内后代且与 c **同一棵树**。
+
+    尾部再放一笔删除 docs 的提交（状态 D，不纯）⇒ ④ 对该 t 不成立，只有 ③ 能放行 c。
+    把 ③ 的 `c_tree == t_tree` 判据删掉 ⇒ 本断言转红。
+    """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
+    repo.commit({"docs/old.md": "old\n"}, "docs 1")
     c = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
     t = repo.empty_commit("same tree, later commit")
     repo.commit(repo.receipt(t), "docs(gate): receipt")
+    doomed = repo.remove("docs/old.md", "docs: delete after receipt")
 
     ok, detail, _ = _check(repo, base)
 
     assert c != t
-    assert ok is True, detail
+    assert f"missing receipt for {c[:12]}" not in detail, detail
+    assert f"missing receipt for {doomed[:12]}" in detail, detail
+    assert ok is False, detail  # 那笔 D 提交自身没有收据
