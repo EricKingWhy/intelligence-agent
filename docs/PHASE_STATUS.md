@@ -1,6 +1,6 @@
 # Phase Status — 实施进度追踪
 
-- 2026-10-24：#1571 Memory V2 Gold Gate 凭证拒绝探针已修复，代码 tip 2c00706e；两轴审查 PASS（P0–P4=0），聚焦 7/7 通过。冻结树全量与固定基线逐节点对比、Gate-0 预审及残余见 Tracker 和 docs/phase_status/2026-10.md#1571；最终 Gate-0、PR 待收尾。
+- 2026-10-24：#1571 Memory V2 Gold Gate 凭证拒绝探针已修复，代码 tip 2c00706e；两轴审查 PASS（P0–P4=0），聚焦 7/7 通过。最终 Gate-0 7/7 PASS，收据 docs/gate/a7541b277ea57ea24c827f73e948e285cc28af81.json；固定基线对比和残余见 Tracker 与 docs/phase_status/2026-10.md#1571，PR 待收尾。
 
 - 2026-10-23：#1485 模型端点元数据/link-local 轻量防误配（SEC-07 PARTIAL，裁决 25 B）实现 + 两轴审查 P0–P4 全修完成，**PR [#1545](https://github.com/EricKingWhy/intelligence-agent/pull/1545) 已开（base=main），未 merge**。分支 `claude/issue-1485-provider-url-guard`，基线 `origin/main=dec9aa69`，代码 tip `916d21f4`（tree `1a9215d4`）。新增 `model/endpoint_guard.py`：解析后地址（IPv4/IPv6 + 内嵌 v4，含 RFC 6052 拆位）与**每一跳重定向**拦截元数据/link-local 段，被拦目标零请求零凭据；`model_endpoint_allowlist` 为按端点所有者例外，回环/RFC1918 日常保存与测试不受影响；拒绝理由经 `misconfiguration_rejection` 与网络抖动区分。沙箱 `shell/ia-test` 全量 `-n 4` = 26 failed / 8877 passed / 258 skipped / 4 errors，基线 `dec9aa69` = 27 failed / 8816 passed / 258 skipped / 4 errors，**逐条对账零新增红**；聚焦三文件 78 passed。Gate-0 7/7 PASS（收据 `docs/gate/916d21f4fd8ae175c99003a05ef1cad4b4c3977e.json`），coverage exit 0。详见 Tracker 与月档。
 
