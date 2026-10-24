@@ -18,6 +18,17 @@
 - **Refines**: ADR-0008 子决策 1（"scope 只实现 USER + SESSION"）——V2 新开
   `user_global` / `project` 两档，不改 V1 的 `USER` / `SESSION` 存储与授权语义。
 
+**当前适用关系（2026-10-22，Issue #1490 / ADR-0056）**
+
+- **继续适用**：D1（类型化信封 + fail-closed）；D6 的语义三分（当前移除/失效 ≠ 历史查看 ≠
+  隐私删除）与墓碑防复活；D11 非目标；§3 的机制理由（除存储归属相关段落）。
+- **决定级重开**：D2、D3、D4、D5、D6（仅"墓碑仍有效"以外的删除语义归属）、D7、D7.1、D8、
+  D12 —— 逐条在对应决定下方标注被哪条裁决重开、新结论指向哪份后继规格。
+- **随 owner 变更核对**：D9 的七方法与旧 provider/seam 指针、D10 的旧决策登记清单
+  （见 D9/D10 下方标注），不得留下反向仍适用的指针。
+- **Phase 历史不改写**：§5 的实测读数与 §5.1–§5.4 的审查轨迹原样保留，只作历史证据。
+- **后继规格**：ADR-0056 §3（owner 表）、§7（处置索引）；施工落点 #1493、#1494、#1495、#1496。
+
 ---
 
 ## 1. Context
@@ -67,6 +78,13 @@ V2 写入**不接** run-end 自动写回（即 V2 目前只有显式调用者）
 
 ### D2 — 内容字段与生命周期字段分离：`MemoryDraftV2` vs `MemoryRecordV2`
 
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 7（身份/scope 路由整体退役）与所有者
+> 2026-10-19 转向决定。**被取代**：Store 从 trusted 上下文补 `tenant_id` / `user_id` 的**强制
+> 身份填充**，以及由此产生的三元身份字段语义。**保留**：`id` / `root_id` / `version` /
+> `operation` / `provenance` 等 Runtime 字段仍**禁止**由模型或调用方伪造；旧身份键只进只读
+> 迁移档案与映射。**新结论指向**：ADR-0056 §3.1（内容 owner）、§3.7（history/provenance）；
+> 施工落点 #1493（身份映射）、#1494（提交 seam）。
+
 调用方提交的是 `MemoryDraftV2`——**只有内容**，没有 `id` / `root_id` / `version` /
 `tenant_id` / `user_id` / 时间戳。这些字段由存储层从可信上下文补齐（PRD §6.2：
 "Runtime replaces all identity fields with trusted request/session identity"）。
@@ -76,6 +94,13 @@ V2 写入**不接** run-end 自动写回（即 V2 目前只有显式调用者）
 变成调用方的输入。两半共用 `_MemoryContentFields`（含 `_check_common_contract`）。
 
 ### D3 — tier 与 scope 是两件事，各有硬规则
+
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 7。**被取代**：`scope ∈ {user_global,
+> project}` 作为**归属路由**、`project_id` 作为授权维度，以及"profile 只允许 user_global"所依赖
+> 的可见性集合划分。**保留**：`tier` 是访问层级不是第二份真相；`source_type` 与 provenance 的
+> 对应关系（`user_edit` 是唯一允许空 provenance 的档位）继续适用。**新结论指向**：ADR-0056
+> §3.7（provenance 归只读档案）；施工落点 #1493（旧 scope/project 键逐项映射）、#1495（去路由）。
+
 
 - `tier ∈ {profile, collection}`（§4.2）：**访问层级，不是第二份真相**，两者共用同一批记录与生命周期。
 - `profile` **只允许 `user_global` 的 `semantic`**（§4.2）。理由：profile 是"每次可自动注入的
@@ -89,6 +114,14 @@ V2 写入**不接** run-end 自动写回（即 V2 目前只有显式调用者）
 
 ### D4 — 身份只来自可信上下文；读写两侧的失败语义刻意不同
 
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 7。**被取代**：
+> `TrustedMemoryIdentity(tenant_id, user_id, project_id)` 作为 Memory 读写路由三元组，以及
+> "项目作用域写入核对 `record.project_id == trusted.project_id`"这条归属校验。**保留**：身份只
+> 来自可信上下文、请求体身份一律不信；集合类"不可见 = 伪装成不存在"与写类"如实拒绝"的失败
+> 语义分野（在内容提交 seam 上按 #1494 的合同重述）。**明确禁止**：把三元组换名 `owner_id`
+> 复制成新路由。**新结论指向**：ADR-0056 §3.1/§3.7；施工落点 #1493、#1494、#1495。
+
+
 `TrustedMemoryIdentity(tenant_id, user_id, project_id)` 由可信入口解析（请求上下文 / 会话绑定），
 **请求体里的身份一律不信**（R1 末条）：
 
@@ -101,6 +134,13 @@ V2 写入**不接** run-end 自动写回（即 V2 目前只有显式调用者）
   `SqliteMemoryRecordStore.delete` 的既有口径同源。
 
 ### D5 — 版本生命周期的不变量在数据库层，不在调用方纪律
+
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 1、2 与 16。**被取代**："版本生命周期
+> 的不变量在 **SQLite** 层"这一实现落点（部分唯一索引 `memory_v2_one_active` 等）——内容权威
+> 改为 Markdown（ADR-0056 §3.1），版本不变量改由单一提交 seam 保证。**保留**：`root_id` 稳定、
+> `version` 单调、至多一条 active、版本号由存储层决定而非调用方给定、`update` 不允许改写归属。
+> **新结论指向**：ADR-0056 §3.1；施工落点 #1494（单次提交），SQLite 侧退役归 #1496。
+
 
 - 每条逻辑记忆有稳定 `root_id`，`version` 单调递增；
 - **至多一条 active**，由 SQLite **部分唯一索引**强制：
@@ -122,12 +162,29 @@ V2 写入**不接** run-end 自动写回（即 V2 目前只有显式调用者）
 
 ### D6 — `invalidate` 保留内容，不是删除
 
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 2（操作状态各自点名 owner）。**重开范围
+> 仅限"墓碑仍有效"以外的删除语义归属**：`invalidate` / tombstone 的**存储归属**从 V2 SQLite
+> 记录状态改为 ADR-0056 §3.5 的删除抑制事实（非可丢弃，带内容/来源哈希）。**保留**：语义三分
+> （当前移除/失效 ≠ 历史查看 ≠ 隐私删除）、`invalidate` 保留内容不移出历史、墓碑拒绝旧输入
+> 重放。**新结论指向**：ADR-0056 §3.5；施工落点 #1494。
+
+
 `invalidate` 把 active 置为 `invalidated`，**保留内容与历史**（§5.4.2）。它只是把记录移出
 active 检索面。V2 **没有硬删入口**——墓碑/删除 API 是 MEM-V2-7 的 Must Do，本票的 Must Not Do。
 
 `MemoryStatus.DELETED` 作为 §6.1 tombstone 契约的**占位**存在，本票不产生它。
 
 ### D7 — SQLite 权威，Milvus 派生；索引失败永不回滚已提交事实
+
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 1、2、16。**被取代**："**SQLite 权威**"
+> 这一标题句——当前内容权威是 Markdown（ADR-0056 §3.1）；`memory_v2_records` +
+> `memory_v2_outbox` 双表作为内容与意图的落点随之退出。**保留**：Milvus 是**派生**索引、
+> 索引失败永不回滚已提交事实；outbox "每个 id 一行 = 期望状态"、同 id 后写覆盖、自足路由列；
+> `revision` 作为乐观令牌并重置重试预算；ack 失败与索引失败分开归因、死信预算只计索引侧失败。
+> **裁决 16 的时序钉死**：`index.py` 与 outbox 合同存废由第 7 步单独裁，本票不动代码、不删文件。
+> **新结论指向**：ADR-0056 §3.6（receipt）/§3.8（派生索引无事实所有权）；施工落点 #1494、
+> #1496。
+
 
 - 所有写方法都是"**记录行 + outbox 意图**同一 `BEGIN IMMEDIATE` 事务"。outbox 写失败时
   记录行不许单独存在（否则既查不到、也无法修复索引）。
@@ -158,6 +215,13 @@ active 检索面。V2 **没有硬删入口**——墓碑/删除 API 是 MEM-V2-7
 
 ### D8 — 检索命中必须回 SQLite 复核（AC7）
 
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 1、7。**被取代**："回 **SQLite** 复核"
+> 与"归属必须落在调用方的可信身份（跨用户/跨项目/跨租户）"这一路由维度。**保留**：检索命中
+> 必须回**权威源**复核（当前为 Markdown 内容权威），三重过滤的**语义**不变——记录必须存在、
+> 状态必须可读（superseded/invalidated 不得命中）、归属必须落在可信上下文内。**新结论指向**：
+> ADR-0056 §3.1；施工落点 #1495（读侧切换）。
+
+
 `resolve_active_hits` 是检索路径上的**必经函数**，不是调用方的可选步骤。三重过滤缺一不可：
 
 1. 记录在 SQLite 里必须**存在**（挡伪造 / 过期命中）；
@@ -168,6 +232,11 @@ active 检索面。V2 **没有硬删入口**——墓碑/删除 API 是 MEM-V2-7
 "把别人的内容注入本轮对话"。
 
 ### D9 — provider 边界沿用 ADR-0024，只在 `builtin` 内部新增端口
+
+> **指针核对（2026-10-22，Issue #1490）**：D9 本身**不重开**。其"ADR-0024 D1 的 provider 边界
+> 不变"一句指向的 ADR-0024 D1 已在 ADR-0024 的"当前适用关系"中标为历史；本条的**实质主张**
+> （边界是 Protocol、Runtime 无 provider 专属分支、`search` 不顺手 flush）继续适用，只是边界的
+> 落点从五件套改为 ADR-0056 §3.1 的单一提交 seam。见 ADR-0056 §7。
 
 - 对外新增 `MemoryV2Capability` **Protocol**（7 方法：`create` / `update` / `invalidate` /
   `read` / `list_active` / `versions` / `search`）。这是 V2 的 provider-neutral 面：
@@ -180,6 +249,12 @@ active 检索面。V2 **没有硬删入口**——墓碑/删除 API 是 MEM-V2-7
   V2 是 `builtin` provider 内部的东西，`provider_name` 不因此改变。
 
 ### D10 — 将在 MEM-V2-7 被取代的旧决策（**AC8 的显式登记**）
+
+> **指针核对（2026-10-22，Issue #1490）**：D10 的**表本身**不重开——它是"旧决策在 cutover 时
+> 必须显式处置"的登记，仍然有效且正是本次重开的依据之一。**变化的是处置时点与责任票**：
+> 裁决 16 把 C3 删除钉死在记忆转向**第 7 步**，裁决 7 把去路由拆成第 3/5/6 步，因此表中各项的
+> 实际落点分别为 #1491（V1 退役）、#1493（身份映射）、#1495（读侧切换）、#1496（SQLite/索引
+> 退役），不再由单一 MEM-V2-7 一次收口。**本票不预占任何一步**，只登记指针。
 
 下表登记 V1 旧决策及其当前处理状态：未迁移的兼容路径在 MEM-V2-7 前继续适用；第 6 条的
 工具接线已由 #299/#300 局部切换，自动召回安全边界见 D11。MEM-V2-7 必须**在票面上**显式
@@ -213,6 +288,14 @@ active 检索面。V2 **没有硬删入口**——墓碑/删除 API 是 MEM-V2-7
   V2 切换由 #300 登记，剩余 V1 路径的最终退场归 MEM-V2-7。
 
 ### D12 — #300 增加 V2 治理生命周期，不提前 cutover
+
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 1、16。**被取代**："**SQLite 权威存储**"
+> 与"索引删除失败由 outbox 重试"所依附的 SQLite outbox 落点；治理删除（内容清除、tombstone、
+> 独立设置、显式命令）的**状态归属**改由 ADR-0056 §3.3/§3.4/§3.5 各自点名的 owner 承担。
+> **保留**：失败不得恢复已删除内容、旧索引命中不得重新可读；不提前 cutover。**时序**：裁决 16
+> 钉死 C3 删除与 ADR-0042 D7/D12/D7.1 重开同批在记忆转向第 7 步，本票只做决定级标注，不施工。
+> **新结论指向**：ADR-0056 §3.3–§3.6；施工落点 #1494、#1496。
+
 
 #300 在现有 V2 信封与 SQLite 权威存储上增加用户编辑、单条/批量删除、内容无关 tombstone、
 独立设置和显式命令入口。索引仍是派生数据，SQLite 提交后的索引删除失败由 outbox 重试；
@@ -496,6 +579,14 @@ LangMem / 其他项目的代码，**该票**必须补 license notice——本 AD
   否则后续票找不到它。
 
 ### D7.1 - explicit recovery after total derived-index loss (2026-09-30)
+
+> **决定级重开（2026-10-22，Issue #1490）**：依据裁决 16。**被取代**：本决定的前提
+> "SQLite remains the sole rebuild source" 与操作命令 `scripts/rebuild_memory_v2_index.py` 的
+> 存在——该脚本已不在仓库中（ADR-0056 §3.8 登记了该缺口），且重建源改为 Markdown 内容权威。
+> **保留**：派生索引全损后可显式恢复、恢复只重放 `active` 记录、经 outbox 收敛而不直写 Milvus、
+> 栅栏与锁的运维纪律。**施工归属**：裁决 16 钉死与 C3 删除同批在记忆转向**第 7 步**；本票不
+> 重建该脚本、不删文件。**新结论指向**：ADR-0056 §3.8；施工落点 #1496。
+
 
 SQLite remains the sole rebuild source. The operator command `scripts/rebuild_memory_v2_index.py`
 rebuilds only active V2 records from the existing `<workspace_dir>/memory-v2.db`; it does not
