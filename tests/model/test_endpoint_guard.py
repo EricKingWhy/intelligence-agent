@@ -376,16 +376,16 @@ class TestRequestTimeGuard:
         assert recorder.auth_headers == []
 
     @pytest.mark.asyncio
-    async def test_resolver_failure_is_not_a_bypass(self, fake_resolver, monkeypatch):
+    async def test_resolver_failure_is_not_a_bypass(self, monkeypatch):
         """解析器抛 OSError 时**不得**放行（fail-open 就是一条构造得出来的绕过）。
 
         请求连 transport 都不该到；异常类型不必是守卫拒绝（它按瞬时连接失败处理，
         可重试），但"零请求"是硬要求。
         """
-        def _boom(host: str, port: int | None) -> list[str]:
+        async def _boom(host: str, port: int | None) -> list[str]:
             raise OSError("resolver unavailable")
 
-        monkeypatch.setattr(endpoint_guard, "_resolved_addresses", _boom)
+        monkeypatch.setattr(endpoint_guard, "_aresolved_addresses", _boom)
         recorder = _Recorder()
         model = _model("http://metadata.test/v1")
         _install(model, recorder)
