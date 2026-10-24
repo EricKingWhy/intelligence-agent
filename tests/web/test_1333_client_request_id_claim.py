@@ -8,7 +8,8 @@
    （票面：普通列表响应不暴露该字段，也不写进 SessionEvent）；
 3. **fail-closed 的数据前提**：同一关联值对应多条会话时查询原样返回两条
    （「不任意挑选」由前端认领层执行，见 `web/src/lib/wsStream.test.ts`）；
-4. **零副作用拒绝**：非法形态（空串 / 超 128 字符）422，且不产生会话 / run 副作用。
+4. **零副作用拒绝**：非法形态（空串 / 超 128 字符 / 控制字符 / 空白）422，
+   且不产生会话 / run 副作用。
 
 `launch=false`（#204 只建会话）即可驱动全部四条——持久化发生在创建路径
 （`_finish_initial_creation`，先于 launch），不依赖 run 启动。
@@ -100,7 +101,7 @@ def test_duplicate_client_request_id_returns_both_rows(tmp_path) -> None:
     assert len(rows) == 2
 
 
-@pytest.mark.parametrize("bad_cid", ["", "x" * 129])
+@pytest.mark.parametrize("bad_cid", ["", "x" * 129, "\x01bad", "a b"])
 def test_invalid_client_request_id_rejected_before_side_effects(tmp_path, bad_cid) -> None:
     _, client = _web(tmp_path)
 
@@ -110,3 +111,48 @@ def test_invalid_client_request_id_rejected_before_side_effects(tmp_path, bad_ci
     assert client.get("/api/sessions").json() == []
     # 合法请求随后照常工作（排除"整个端点被打坏"的假绿）
     assert _create(client, {"client_request_id": _CID}).status_code == 200
+
+
+def test_create_with_cid_keeps_procedural_rule_semantics(tmp_path, monkeypatch) -> None:
+    """AC4 前半：带 `client_request_id` 的**带任务启动**创建不改变
+    `remember_as_procedural_rule` 语义——规则信号仍落在 task 的 user/message
+    事件上（service.py `user_input_metadata` 既有通路），cid 只进 SessionMeta。"""
+    import json as _json
+
+    from langchain_core.messages import AIMessage
+
+    from agent_harness.session.event import USER_MESSAGE
+    from tests.scripted_model import ScriptedModel
+
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kwargs: ScriptedModel([AIMessage(content="done")]),
+    )
+    app, client = _web(tmp_path)
+
+    res = client.post(
+        "/api/sessions",
+        json={
+            "task": "后续始终使用 pnpm",
+            "remember_as_procedural_rule": True,
+            "client_request_id": _CID,
+            "sandbox_backend": "local",
+            "budget": {"local": {"max_agent_turns": 1}},
+        },
+    )
+    assert res.status_code == 200, res.text
+    sid = next(
+        str(frame["session_id"])
+        for line in res.text.splitlines() if line.startswith("data:")
+        for frame in [_json.loads(line[len("data:"):].strip())]
+        if frame.get("session_id")
+    )
+
+    user_event = next(
+        event for event in app.state.agent.store.read_events(sid)
+        if event.type == USER_MESSAGE
+    )
+    assert user_event.data["remember_as_procedural_rule"] is True
+
+    rows = client.get("/api/sessions", params={"client_request_id": _CID}).json()
+    assert [r["session_id"] for r in rows] == [sid]

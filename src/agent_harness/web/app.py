@@ -683,8 +683,8 @@ class CreateSessionRequest(_AmendValueValidators):
     # 可选：旧客户端不带 = None（行为逐字不变）。显式给了就必须成形（空串 /
     # 超长 422，且发生在产生会话/run 副作用之前）——不承诺幂等/重放语义，
     # 命名刻意避开 Idempotency-Key（票面「方案依据」已裁：只做关联）。
-    # 长度封顶：值会持久化进 SQLite 索引，无界字符串不进信任边界。
-    client_request_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # 长度封顶 + 字符集（审查 P4 防御纵深）：值会持久化进 SQLite 索引，无界字符串不进信任边界；pattern 把 C0 控制字符/空白/DEL 挡在外面（值只经参数化 SQL 与索引，不进日志/事件）。
+    client_request_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x20\x7f]+$")
 
     @field_validator("autonomy")
     @classmethod
@@ -3180,7 +3180,7 @@ def create_app(
         include_archived: bool = False,
         limit: int | None = Query(default=None, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
-        client_request_id: str | None = Query(default=None, min_length=1, max_length=128),
+        client_request_id: str | None = Query(default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x20\x7f]+$"),
     ) -> list[SessionSummary]:
         """列历史 session。
 

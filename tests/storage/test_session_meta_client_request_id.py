@@ -83,6 +83,21 @@ async def test_upsert_conflict_preserves_client_request_id(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_upsert_conflict_with_different_cid_keeps_first_write(tmp_path: Path) -> None:
+    """write-once 的另一半：同 session_id 二次 upsert **带不同 cid** 也保持首个——
+    ON CONFLICT UPDATE SET 不含该列，不是「None 才保留」。"""
+    store = SqliteSessionMetaStore(tmp_path / "state.db")
+    await store.initialize()
+
+    await store.upsert(_meta("s-1", client_request_id="cid-first"))
+    await store.upsert(_meta("s-1", client_request_id="cid-second"))
+
+    row = await store.get("s-1")
+    assert row is not None
+    assert row.client_request_id == "cid-first"
+
+
+@pytest.mark.asyncio
 async def test_old_schema_migration_adds_column_and_index(tmp_path: Path) -> None:
     """存量库迁移：旧 schema（无 client_request_id 列）的库经 initialize 后
     补列（旧行 NULL）+ 建索引；查询照常工作。"""

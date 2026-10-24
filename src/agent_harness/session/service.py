@@ -1564,7 +1564,8 @@ class SessionService:
         - **`client_request_id` 给出时（#1333）**：只列 SessionMeta 索引里与该关联值
           **精确匹配**的会话行（创建路径主动落行，见 `create_and_launch`）。这是
           认领关联查询的读取面——20s 差分窗口内「别的客户端/上一轮迟到」的会话
-          结构上进不了候选。与 `workspace_id` 互斥（web 层 422，不静默取舍）；
+          结构上进不了候选。与 `workspace_id` 互斥由 HTTP 层强制（web 层 422）；
+          服务层自身若两者同传，cid 分支优先（当前唯一调用方是 web 层，已挡）；
           多条命中原样全量返回（「不任意挑选」的 fail-closed 裁决在调用方）；
           无命中返回 `[]`。归档/分页参数同一条共享管线（认领场景传
           `include_archived=True`，新建会话不可能已归档）。
