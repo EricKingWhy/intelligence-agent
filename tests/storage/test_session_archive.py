@@ -96,6 +96,20 @@ def _raw(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _posix_archive_fds(db_path: Path) -> int:
+    """本进程里指向该归档库（db / -wal / -shm）的 fd 数；POSIX 用 `/proc/self/fd`。"""
+    names = {db_path.name, f"{db_path.name}-wal", f"{db_path.name}-shm"}
+    count = 0
+    for entry in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{entry}")
+        except OSError:  # fd 已关闭（readdir 与 readlink 之间的竞态）
+            continue
+        if os.path.basename(target) in names and str(db_path.parent) in target:
+            count += 1
+    return count
+
+
 def _names(db_path: Path, kind: str) -> set[str]:
     with _raw(db_path) as conn:
         rows = conn.execute(
@@ -1065,6 +1079,175 @@ class TestStoreObserverWiring:
             released >= curve["workers"]
             for curve, released in zip(curves, releases, strict=True)
         ), f"close did not release worker-owned handles: {curves}"
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason="POSIX fd evidence uses /proc/self/fd",
+    )
+    def test_close_releases_real_worker_handle_curve_posix(self, tmp_path: Path) -> None:
+        """同一曲线的 POSIX 版：owner close 必须释放每个 worker 的连接。
+
+        Windows 版在上面的用例里（只跑在有 pytest 车道的 Windows 上），这条保证
+        ubuntu CI 车道真实执行同一断言。
+        """
+        curves: list[dict[str, int]] = []
+        for workers in (1, 2, 4, 8, 16):
+            db_path = tmp_path / f"curve-{workers}" / "state.db"
+            archive = SessionArchive(db_path, cjk_so_path=tmp_path / "missing.so")
+            archive.initialize()
+            baseline = _posix_archive_fds(db_path)
+            ready = [threading.Event() for _ in range(workers)]
+            release = threading.Event()
+            errors: list[BaseException] = []
+
+            def worker(
+                index: int, *, _archive=archive, _ready=ready,
+                _release=release, _errors=errors,
+            ) -> None:
+                try:
+                    _archive.ensure_session(
+                        f"worker-{index}", source="interactive", started_at=time.time(),
+                    )
+                    _ready[index].set()
+                    _release.wait(timeout=5)
+                except BaseException as exc:  # noqa: BLE001 - test must expose leaks
+                    _errors.append(exc)
+
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
+            for thread in threads:
+                thread.start()
+            assert all(event.wait(timeout=5) for event in ready)
+            after_workers = _posix_archive_fds(db_path)
+            archive.close()
+            after_close = _posix_archive_fds(db_path)
+            release.set()
+            for thread in threads:
+                thread.join(timeout=5)
+            assert all(not thread.is_alive() for thread in threads)
+            assert errors == []
+            curves.append({
+                "workers": workers,
+                "baseline": baseline,
+                "after_workers": after_workers,
+                "after_close": after_close,
+            })
+
+        assert all(
+            curve["after_workers"] - curve["after_close"] >= curve["workers"]
+            for curve in curves
+        ), f"close did not release worker-owned handles: {curves}"
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason="POSIX fd evidence uses /proc/self/fd",
+    )
+    def test_worker_thread_exit_releases_connection_without_close(self, tmp_path: Path) -> None:
+        """P1-1：线程退出就该回收它自己的连接——不调用 close() 也要回基线。
+
+        登记表若以 Thread 为键长期持有连接，已退出线程的连接会一直钉住到
+        `close()`；长驻进程里线程池换血 ⇒ fd 单调增长。
+        """
+        db_path = tmp_path / "sessions" / "state.db"
+        archive = SessionArchive(db_path, cjk_so_path=tmp_path / "missing.so")
+        archive.initialize()
+
+        def run_worker(index: int) -> None:
+            thread = threading.Thread(
+                target=archive.ensure_session,
+                args=(f"worker-{index}",),
+                kwargs={"source": "interactive", "started_at": time.time()},
+            )
+            thread.start()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+        # 先跑一个线程取基线：第二个连接会把库的 -wal fd 常驻下来（两棵树的
+        # 稳态都一样），那不是泄漏，量进去会把"回到基线"变成量这 1 个 fd。
+        run_worker(0)
+        baseline = _posix_archive_fds(db_path)
+        for index in range(1, 21):
+            run_worker(index)
+
+        assert _posix_archive_fds(db_path) == baseline, (
+            "worker thread exit must release its connection without close()"
+        )
+        assert archive.get_session("worker-20") is not None
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason="POSIX fd evidence uses /proc/self/fd",
+    )
+    def test_worker_churn_under_low_fd_limit_does_not_exhaust_handles(
+        self, tmp_path: Path,
+    ) -> None:
+        """P1-1：低 `RLIMIT_NOFILE` 下多波线程换血不得 EMFILE。
+
+        复现形状同生产（anyio 线程池换血后只有进程退出才 close）：每波 4 个
+        线程读写后退出，共 8 波。子进程内设 `RLIMIT_NOFILE=40`，父进程的 fd
+        上限不受影响。
+        """
+        db_path = tmp_path / "churn" / "state.db"
+        script = textwrap.dedent(
+            """
+            import os, resource, sys, threading, time
+            from pathlib import Path
+
+            from agent_harness.storage.session_archive import SessionArchive
+
+            resource.setrlimit(resource.RLIMIT_NOFILE, (40, 40))
+            db = Path(sys.argv[1])
+            archive = SessionArchive(db, cjk_so_path=Path(sys.argv[1] + ".missing"))
+            archive.initialize()
+
+            def held() -> int:
+                # 计数本身也要开 fd：在 40 上限下必须留余量，越小越安全。
+                return len(os.listdir("/proc/self/fd"))
+
+            counts = []
+            for wave in range(8):
+                errors = []
+
+                def work(index: int, *, _wave=wave) -> None:
+                    try:
+                        sid = f"wave-{_wave}-{index}"
+                        archive.ensure_session(
+                            sid, source="interactive", started_at=time.time(),
+                        )
+                        archive.append_message(sid, "user", "x", timestamp=time.time())
+                    except BaseException as exc:  # noqa: BLE001 - surface any leak
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=work, args=(i,)) for i in range(4)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=30)
+                if errors:
+                    raise SystemExit(f"wave {wave} failed: {errors[0]!r}")
+                counts.append(held())
+
+            print("wave_fds=" + ",".join(map(str, counts)))
+            print("registry=" + str(len(archive._connections)))
+            print("after_waves=" + str(held()))
+            archive.close()
+            print("after_close=" + str(held()))
+            """
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [sys.executable, "-c", script, str(db_path)],
+            capture_output=True, text=True, env=env, timeout=180, check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        readings = dict(
+            line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line
+        )
+        # 8 波 × 4 线程全部退出后只剩主线程那一条（`initialize()` 建的）。
+        assert int(readings["registry"]) <= 4, proc.stdout
+        wave_fds = [int(value) for value in readings["wave_fds"].split(",")]
+        assert wave_fds[-1] <= wave_fds[0] + 2, proc.stdout
+        assert int(readings["after_close"]) < int(readings["after_waves"]), proc.stdout
 
     def test_owned_observer_close_detaches_and_closes_archive(self, tmp_path: Path) -> None:
         from agent_harness.session.event import USER_MESSAGE

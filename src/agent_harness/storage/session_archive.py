@@ -38,6 +38,7 @@ import re
 import sqlite3
 import threading
 import time
+import weakref
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -46,6 +47,30 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _close_quietly(conn: sqlite3.Connection) -> None:
+    """finalizer 目标：线程 / 解释器收尾阶段关连接，失败不外溢。"""
+    try:
+        conn.close()
+    except (sqlite3.Error, ValueError):  # 解释器退出阶段 sqlite 模块可能已拆
+        pass
+
+
+class _ThreadConnection:
+    """一个线程的 owned 连接载荷；只由该线程的 `threading.local` 持有。
+
+    `sqlite3.Connection` 不支持弱引用，所以登记表存**这个载荷**而不是连接。
+    载荷在线程退出时被回收 ⇒ finalizer 关掉连接、`WeakSet` 自动摘除条目。
+    finalizer **不**引用 `SessionArchive`（否则会把归档对象钉在
+    `weakref.finalize` 的全局注册表里，直到创建它的线程退出）。
+    """
+
+    __slots__ = ("conn", "__weakref__")
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        weakref.finalize(self, _close_quietly, conn)
 
 
 def _archive_operation(method):
@@ -643,7 +668,10 @@ class SessionArchive:
         )
         self._local = threading.local()
         self._lifecycle = threading.Condition()
-        self._connections: dict[threading.Thread, sqlite3.Connection] = {}
+        # 只是"当前活着的 owned 连接"的弱登记表，**不能**以 Thread 为键：键会
+        # 长期持有已退出线程的连接（线程池换血时长驻进程 fd 单调增长）。载荷
+        # 只由线程局部持有，线程退出即被回收，见 `_ThreadConnection`。
+        self._connections: weakref.WeakSet[_ThreadConnection] = weakref.WeakSet()
         self._active_by_thread: dict[threading.Thread, int] = {}
         self._active_operations = 0
         self._closing = False
@@ -675,16 +703,16 @@ class SessionArchive:
 
     def _finish_close_locked(self) -> None:
         """Close every owned connection; caller holds ``_lifecycle``."""
-        connections = tuple(self._connections.values())
+        states = tuple(self._connections)
         self._connections.clear()
         self._closed = True
         self._closing = False
-        for conn in connections:
+        for state in states:
             try:
-                conn.close()
+                state.conn.close()
             except sqlite3.Error:
                 logger.debug("SessionArchive connection close failed", exc_info=True)
-        self._local.conn = None
+        self._local.state = None
 
     # -- connection --------------------------------------------------------
 
@@ -720,12 +748,12 @@ class SessionArchive:
         with self._lifecycle:
             if self._closed or (self._closing and owner not in self._active_by_thread):
                 raise RuntimeError("SessionArchive is closed")
-            conn = getattr(self._local, "conn", None)
-            if conn is None:
-                conn = self._connect()
-                self._local.conn = conn
-                self._connections[owner] = conn
-            return conn
+            state = getattr(self._local, "state", None)
+            if state is None:
+                state = _ThreadConnection(self._connect())
+                self._local.state = state
+                self._connections.add(state)
+            return state.conn
 
     @contextmanager
     def _cursor(self):
