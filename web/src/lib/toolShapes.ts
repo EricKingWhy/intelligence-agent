@@ -89,6 +89,62 @@ export interface ErrorShape {
   message: string;
 }
 
+export type ToolResultOutcome = 'success' | 'failure' | 'cancelled' | 'unknown';
+
+export interface ToolResultInterpretation {
+  /** Parsed ToolResult envelope, or null when this consumer's input contract rejects it. */
+  envelope: Record<string, unknown> | null;
+  /** Preserve the envelope's data value for projection fallbacks and diff extraction. */
+  data: unknown;
+  /** Error metadata only comes from the envelope; cancellation never becomes an error. */
+  error: ErrorShape | null;
+  outcome: ToolResultOutcome;
+}
+
+/** Interpret the backend ToolResult envelope once while keeping legacy input modes explicit.
+ * `serialized` is the production wire contract; Timeline also accepts already-parsed
+ * objects for its existing standalone/compatibility callers. Unknown envelopes stay unknown
+ * so each existing consumer can retain its established fallback. */
+export function interpretToolResult(
+  content: unknown,
+  inputMode: 'serialized' | 'serialized-or-object' = 'serialized',
+): ToolResultInterpretation {
+  let parsed: unknown = null;
+  if (typeof content === 'string') {
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      // Legacy plain text and malformed JSON do not express an outcome.
+    }
+  } else if (inputMode === 'serialized-or-object') {
+    parsed = content;
+  }
+
+  const envelope =
+    typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  const data = envelope?.data ?? null;
+  const dataRecord = typeof data === 'object' && data !== null && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : null;
+  const cancelled = dataRecord?.cancelled === true;
+  const outcome: ToolResultOutcome = cancelled
+    ? 'cancelled'
+    : envelope?.ok === true
+      ? 'success'
+      : envelope?.ok === false
+        ? 'failure'
+        : 'unknown';
+
+  return {
+    envelope,
+    data,
+    error: cancelled ? null : parseErrorShape(envelope),
+    outcome,
+  };
+}
+
 /** 从 tool.result（tryParseContent 后的对象）提取错误摘要。ok=true / 非对象 / 无
  *  error_code 都返回 null（成功与未知形状不是错误摘要）。 */
 export function parseErrorShape(result: unknown): ErrorShape | null {

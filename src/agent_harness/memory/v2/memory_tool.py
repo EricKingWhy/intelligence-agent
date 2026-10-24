@@ -267,7 +267,8 @@ class MemoryTool(Tool):
                 message=f"记忆写入失败（{type(error).__name__}）；存储可能未改变。",
                 error_code=ErrorCode.TRANSIENT_ERROR,
             )
-        return _result(response, target)
+        projection = await self._project(args, response)
+        return _result(response, target, projection)
 
     async def _gate(self, payload: dict[str, Any]) -> ToolResult | None:
         """M6：门开 → 钉住条目、整批入待审区并**返回 stage 结果**（``None`` = 直接写）。
@@ -323,18 +324,76 @@ class MemoryTool(Tool):
             error_code=ErrorCode.INVALID_ARGUMENT,
         )
 
+    async def _project(self, args: _MemoryArgs, response: dict[str, Any]) -> dict[str, Any] | None:
+        """把已落盘的写入投影到派生层（#1437 F-01 甲案）；``None`` = 本部署无投影面。
 
-def _result(response: dict[str, Any], target: str) -> ToolResult:
+        派生层失败**不得**让权威写入报错：markdown 已经提交，这里只留 pending 账本与一条
+        不含内容的 warning（与 `mirror_committed` 的"提交后失败只留痕"同口径）。
+
+        session 读取（`event_id` 的唯一来源）也包在同一个 try 里：它只增强 provenance，
+        读不到就该降级成"无事件"继续投影，而不是让整次投影消失（审查 Corr P3-1）。
+
+        无可信身份时返回 ``{"pending": True}`` 而不是 ``None``：``None`` 会让模型看到
+        一次"已完成"的投影，实际派生层里什么都没有。``pending`` 至少如实告诉模型
+        "权威已落盘、派生层待收敛"——与投影失败时的可见口径一致（审查 Std P4-4）。
+        """
+        if self._service is None:
+            return None
+        session_id = memory_session_var.get() or ""
+        try:
+            trusted = trusted_identity_for_session(session_id, self._workspace_index)
+        except PermissionError:
+            logger.warning("memory projection skipped (%s): no trusted identity", args.target)
+            return {
+                "created": 0, "deleted": 0, "skipped": [], "pending": True,
+                "desired": 0, "unreadable": [],
+            }
+        event_id = None
+        if self._sessions is not None and session_id:
+            try:
+                source = await current_user_message(self._sessions, session_id)
+            except Exception as error:  # noqa: BLE001 — provenance 读失败不该阻断投影
+                logger.warning(
+                    "memory projection without event id (%s): %s",
+                    args.target, type(error).__name__)
+            else:
+                event_id = source.event_id if source is not None else None
+        try:
+            return await self._service.project_tool_write(
+                args.target, response, trusted,
+                session_id=session_id or None, event_id=event_id,
+                operations=args.operations_payload() if args.operations is not None else None,
+                content=args.content_or_alias() if args.action != "remove" else None,
+            )
+        except Exception as error:  # noqa: BLE001 — 投影失败不能吞掉权威写入的成功
+            logger.warning("memory projection failed (%s): %s", args.target, type(error).__name__)
+            return {
+                "created": 0, "deleted": 0, "skipped": [], "pending": True,
+                "desired": 0, "unreadable": [],
+            }
+
+
+def _result(
+    response: dict[str, Any], target: str, projection: dict[str, Any] | None = None,
+) -> ToolResult:
     """把 store 的响应映射成 ToolResult（模型可见内容走 ``message`` + ``data``）。
 
     失败时把 ``current_entries`` 拼进 ``message``：AC1 要求 0 命中 / ≥2 命中时模型能
     就地自纠，而上游把整份 JSON 直接回给模型。这里两条通道都给（message 可读、
     ``data`` 结构化），语义与上游一致。
+
+    #1437：``projection`` 只进 ``data``（``projection`` / ``projection_skipped``），**不改**
+    message——记忆确实已存进权威面，成功语义不变。
     """
     if response.get("success"):
+        data: dict[str, Any] = {**response, "target": target}
+        if projection is not None:
+            data["projection"] = "pending" if projection.get("pending") else "done"
+            if skipped := projection.get("skipped"):
+                data["projection_skipped"] = skipped
         return ToolResult.success(
             message=str(response.get("message") or response.get("note") or "记忆已更新。"),
-            data={**response, "target": target},
+            data=data,
         )
     message = str(response.get("error") or "记忆写入被拒绝。")
     if entries := response.get("current_entries"):

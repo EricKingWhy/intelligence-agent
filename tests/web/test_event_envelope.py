@@ -39,7 +39,7 @@ def bare_client(tmp_path):
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
     )
-    return TestClient(create_app(settings))
+    return TestClient(create_app(settings, allow_testserver=True))
 
 
 # ── 纯单元：信封字段序列化 ──

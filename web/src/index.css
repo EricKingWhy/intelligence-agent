@@ -37,7 +37,6 @@
   --text-md: 15px;
   --text-lg: 17px;
   --text-xl: 20px;
-  --text-2xl: 28px;
 
   /* ── Spacing (PRD §18.1: 4/8/12/16/20/24/32/40) ── */
   --space-xs: 4px;
@@ -47,7 +46,6 @@
   --space-lg2: 20px;
   --space-xl: 24px;
   --space-2xl: 32px;
-  --space-3xl: 40px;
 
   /* ── Radii (semantic hierarchy; no giant rounding; PRD §18.2) ── */
   --radius-xs: 4px;   /* chips / tags */
@@ -58,11 +56,7 @@
   --radius-full: 9999px;
 
   /* ── Icon system (Tabler/PatternFly informed) ──
-   *  三档尺寸：sm 行内密集 / md 默认按钮 / lg logo 空态。
    *  Stroke 随尺寸降档——小图标细线更精致（lucide 默认 2px 在 14px 下偏粗）。 */
-  --icon-sm: 14px;
-  --icon-md: 16px;
-  --icon-lg: 20px;
   --icon-stroke-sm: 1.5px;
   --icon-stroke-md: 1.75px;
   --icon-stroke-lg: 2px;
@@ -79,9 +73,6 @@
   /* ── Shadows: 2 levels, floating surfaces only ── */
   --shadow-overlay: 0 2px 8px rgba(0, 0, 0, 0.25);
   --shadow-popover: 0 8px 28px rgba(0, 0, 0, 0.42);
-  /* 内嵌高光（0.5px 顶边）**不是**高度阴影，不计入上面 2 档；主题恒定，
-   * 亮色块刻意不覆盖（白 6% 在亮底本就不可见，翻转成黑线会改变既有效果）。 */
-  --inset-highlight: inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
 
   /* ── Motion (PRD §19 P0: inspector 220-280 / inline expand 160-220 /
    *    pulse 600-900 / palette 120-180) ── */
@@ -115,7 +106,6 @@
   --surface-workspace: #121217;   /* primary content area (brightest) */
   --surface-elevated:  #17171d;   /* inset cards, terminal blocks base */
   --surface-overlay:   #262b34;   /* popovers / floating controls */
-  --surface-glass:     rgba(38, 43, 52, 0.72); /* translucent overlays */
   --surface-selected:  rgba(83, 58, 253, 0.08); /* accent-tinted selection */
   --surface-hover:     rgba(255, 255, 255, 0.045);
   --surface-danger:    rgba(229, 114, 111, 0.10);
@@ -125,7 +115,6 @@
   --bg-app:       var(--surface-canvas);
   --bg-sidebar:   var(--surface-chrome);
   --bg-workspace: var(--surface-workspace);
-  --bg-inspector: var(--surface-chrome);
   --surface-1:    var(--surface-elevated);
   --surface-2:    #1f232b;
 
@@ -209,15 +198,12 @@
    * 与它不同（仓库 canvas 是中性黑，效果图是蓝黑）。这里按效果图**逐值**新增
    * 一组 `--fx-*`，只服务 Inspector；既有 token 不动（中心列/顶栏不受影响）。
    * 亮色块逐项覆盖（§15），值取既有亮色语义色的同族档位。 */
-  --fx-canvas: #0b0f16;
   --fx-canvas-soft: #080b11;
   --fx-panel: #0f141d;
   --fx-panel-2: #121926;
   --fx-surface-2: #161d29;
-  --fx-surface-3: #1b2331;
   --fx-card: #111823;
   --fx-card-hover: #151d2a;
-  --fx-card-open: #131b27;
   --fx-hairline: #1f2835;
   --fx-hairline-soft: #18202c;
   --fx-hairline-strong: #2b3747;
@@ -245,16 +231,12 @@
   --fx-danger-line: #6b2437;
   --fx-danger-bg: #241018;
   --fx-bar-fail: #e0526f;
-  --fx-violet: #9d8cff;
   --fx-violet-ink: #c9c0ff;
-  --fx-violet-line: #3b3470;
-  --fx-violet-bg: #17142e;
 
   /* brand：效果图 primary 与仓库 --accent 同为 #533afd；只补缺的档位。 */
   --fx-primary: var(--accent);
   --fx-primary-hover: #6652ff;
   --fx-primary-on: #ffffff;
-  --fx-primary-press: #3a2ab8;
   --fx-primary-ink: #b0a4ff;
   --fx-primary-soft: #1b1740;
   --fx-primary-softer: #141130;
@@ -265,16 +247,13 @@
   --fx-r-xs: 5px;
   --fx-r-sm: 7px;
   --fx-r-card: 10px;
-  --fx-r-lg: 14px;
   --fx-r-pill: 999px;
 
   --fx-edge-hi: inset 0 1px 0 rgba(255, 255, 255, 0.045);
-  --fx-edge-hi-strong: inset 0 1px 0 rgba(255, 255, 255, 0.075);
   --fx-shadow-lift: 0 14px 30px -18px rgba(0, 0, 0, 0.92), 0 2px 6px rgba(0, 0, 0, 0.35);
   --fx-shadow-sticky: 0 14px 18px -16px rgba(0, 0, 0, 0.95);
   --fx-shadow-pop: 0 18px 36px -20px rgba(0, 0, 0, 0.9), 0 2px 8px rgba(0, 0, 0, 0.5);
   --fx-track-line: rgba(255, 255, 255, 0.055);
-  --fx-track-line-strong: rgba(255, 255, 255, 0.09);
 
   --fx-ease: cubic-bezier(0.22, 0.8, 0.28, 1);
   --fx-ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
@@ -293,18 +272,14 @@
 /* ── Legacy aliases (app.css pre-Phase-2 references; do not use in new code) ── */
   --color-background: var(--bg-app);
   --color-surface-1: var(--surface-1);
-  --color-surface-2: var(--surface-2);
-  --color-surface-3: var(--surface-overlay);
   --color-foreground: var(--text-primary);
   --color-muted-foreground: var(--text-secondary);
   --color-subtle-foreground: var(--text-tertiary);
   --color-accent: var(--accent);
-  --color-accent-secondary: var(--success);
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-destructive: var(--danger);
   --color-border: var(--border-subtle);
-  --color-ring: var(--accent);
 
   /* JsonTree 语法着色（Inspector 结构化查看器） */
   --json-string: #7ec699;
@@ -326,7 +301,6 @@
   --surface-workspace: #fbfbfc;
   --surface-elevated:  #ffffff;
   --surface-overlay:   #ffffff;
-  --surface-glass:     rgba(255, 255, 255, 0.78);
   --surface-selected:  rgba(83, 58, 253, 0.07);
   --surface-hover:     rgba(20, 20, 28, 0.04);
   --surface-danger:    rgba(207, 74, 70, 0.08);
@@ -335,7 +309,6 @@
   --bg-app:       var(--surface-canvas);
   --bg-sidebar:   var(--surface-chrome);
   --bg-workspace: var(--surface-workspace);
-  --bg-inspector: var(--surface-chrome);
   --surface-1:    var(--surface-elevated);
   --surface-2:    #f1f1f3;
 
@@ -387,15 +360,12 @@
   --color-hover: var(--surface-hover);
 
   /* #1419 Inspector 融合版亮色档（暗色块逐项覆盖，见 :root）。 */
-  --fx-canvas: #f6f6f8;
   --fx-canvas-soft: #f8f9fb;
   --fx-panel: #ffffff;
   --fx-panel-2: #f3f4f7;
   --fx-surface-2: #eef0f4;
-  --fx-surface-3: #e7eaf0;
   --fx-card: #ffffff;
   --fx-card-hover: #f8f9fb;
-  --fx-card-open: #fbfbfc;
   --fx-hairline: rgba(18, 18, 24, 0.1);
   --fx-hairline-soft: rgba(18, 18, 24, 0.06);
   --fx-hairline-strong: rgba(18, 18, 24, 0.16);
@@ -423,15 +393,11 @@
   --fx-danger-line: #e8b4bf;
   --fx-danger-bg: #fdf0f2;
   --fx-bar-fail: #d4455f;
-  --fx-violet: #6b4fd8;
   --fx-violet-ink: #5a3fc4;
-  --fx-violet-line: #cfc3f0;
-  --fx-violet-bg: #f3efff;
 
   --fx-primary: var(--accent);
   --fx-primary-hover: #4434d4;
   --fx-primary-on: #ffffff;
-  --fx-primary-press: #3a2ab8;
   --fx-primary-ink: #533afd;
   --fx-primary-soft: rgba(83, 58, 253, 0.1);
   --fx-primary-softer: rgba(83, 58, 253, 0.05);
@@ -442,16 +408,13 @@
   --fx-r-xs: 5px;
   --fx-r-sm: 7px;
   --fx-r-card: 10px;
-  --fx-r-lg: 14px;
   --fx-r-pill: 999px;
 
   --fx-edge-hi: inset 0 1px 0 rgba(255, 255, 255, 0.7);
-  --fx-edge-hi-strong: inset 0 1px 0 rgba(255, 255, 255, 0.9);
   --fx-shadow-lift: 0 14px 30px -20px rgba(20, 20, 28, 0.28), 0 2px 6px rgba(20, 20, 28, 0.08);
   --fx-shadow-sticky: 0 14px 18px -16px rgba(20, 20, 28, 0.24);
   --fx-shadow-pop: 0 18px 36px -22px rgba(20, 20, 28, 0.3), 0 2px 8px rgba(20, 20, 28, 0.1);
   --fx-track-line: rgba(18, 18, 24, 0.06);
-  --fx-track-line-strong: rgba(18, 18, 24, 0.1);
 
   --json-string: #0a7d32;
   --json-number: #0550ae;

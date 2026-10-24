@@ -24,7 +24,7 @@ def bare_client(tmp_path):
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def wired_client(tmp_path):
         model_api_key="sk-test", enable_cors=False,
         capabilities='{"memory": {"provider": "builtin"}, "skills": {"provider": "builtin"}}',
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
 
     # Stub：跳过真实装配（需要外部依赖），直接注入真实 provider 实例。
     # 用 sentinel capability 对象构造 provider——endpoint 只读 .name，不调 .select。
