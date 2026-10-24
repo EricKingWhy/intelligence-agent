@@ -329,6 +329,35 @@ class TestExportModelDefinitions:
 
         assert parameters["title"] == "CustomHookArgs"
 
+    def test_export_preserves_custom_core_schema_hook_title(
+        self, registry: ToolRegistry
+    ):
+        class CustomCoreHookArgs(BaseModel):
+            value: str
+
+            @classmethod
+            def __get_pydantic_core_schema__(cls, source, handler):
+                schema = handler(source)
+                schema.setdefault("metadata", {})["pydantic_js_updates"] = {
+                    "title": cls.__name__
+                }
+                return schema
+
+        class CustomCoreHookTool(AddTool):
+            @property
+            def name(self) -> str:
+                return "custom_core_hook_title"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return CustomCoreHookArgs
+
+        registry.register(CustomCoreHookTool())
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters["title"] == "CustomCoreHookArgs"
+
     def test_export_preserves_mcp_schema_title(self, registry: ToolRegistry):
         class McpTool(AddTool):
             def __init__(self) -> None:

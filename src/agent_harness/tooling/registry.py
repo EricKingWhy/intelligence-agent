@@ -91,9 +91,12 @@ class ToolRegistry:
         schema_method = getattr(args_schema.model_json_schema, "__func__", None)
         schema_hook = getattr(args_schema, "__get_pydantic_json_schema__", None)
         schema_hook_method = getattr(schema_hook, "__func__", None)
+        core_schema_hook = getattr(args_schema, "__get_pydantic_core_schema__", None)
+        core_schema_hook_method = getattr(core_schema_hook, "__func__", None)
         if (
             schema_method is BaseModel.model_json_schema.__func__
             and schema_hook_method is BaseModel.__get_pydantic_json_schema__.__func__
+            and core_schema_hook_method is BaseModel.__get_pydantic_core_schema__.__func__
             and args_schema.model_config.get("title") is None
             and args_schema.model_config.get("model_title_generator") is None
             and args_schema.model_config.get("json_schema_extra") is None
