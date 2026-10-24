@@ -20,8 +20,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const appCss = readFileSync(join(here, '../styles/app.css'), 'utf8');
-const indexCss = readFileSync(join(here, '../index.css'), 'utf8');
+const appCss = readFileSync(join(here, '../styles/app.css'), 'utf8').replace(/\r\n?/g, '\n');
+const indexCss = readFileSync(join(here, '../index.css'), 'utf8').replace(/\r\n?/g, '\n');
 
 /** 取一条 CSS 规则的声明块；选择器必须整行开头，避免命中注释 / 状态变体里的同名文本。 */
 function ruleBlock(selector: string): string {
