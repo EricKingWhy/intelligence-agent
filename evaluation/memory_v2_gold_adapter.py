@@ -409,7 +409,7 @@ _SECRET_CANDIDATE: dict[str, Any] = {
 }
 
 _SECRET_SENTINEL = "NEVER-A-REAL-CREDENTIAL"
-_SECRET_POLICY_REJECTION = "memory content contains a credential or secret"
+_SECRET_POLICY_REJECTION = "该内容匹配凭证或密钥规则，不能写入长期记忆。"
 
 #: Automatic-pipeline secret probes and the probe path each one actually exercises.
 #: Keyed by case id only (never read from `case.expected`).
@@ -516,7 +516,7 @@ _EXPLICIT_SECRET_PROBE = "explicit_remember_secret_probe"
 #: `RememberMemoryV2Tool`'s refusal text when it matched the secret rule. Both the
 #: "no explicit instruction" and "secret" refusals use PERMISSION_DENIED, so the
 #: message is the only discriminator the tool's return exposes (tools.py:207-211).
-_EXPLICIT_SECRET_REFUSAL = "该内容匹配凭证或密钥规则，不能写入长期记忆。"
+_EXPLICIT_SECRET_REFUSAL = _SECRET_POLICY_REJECTION
 
 
 def _trusted_identity(case_id: str) -> TrustedMemoryIdentity:
