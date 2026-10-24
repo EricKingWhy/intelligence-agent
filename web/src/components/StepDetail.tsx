@@ -241,6 +241,19 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     bySession: ReadonlyMap<string, ReadonlySet<string>>;
   }>(() => ({ open, bySession: new Map() }));
   if (expandedStore.open !== open) setExpandedStore({ open, bySession: new Map() });
+  /* #1523 AC2：↑/↓ 的 DOM 落焦目标。`listTargets[i].focus()` 是**业务选中**回调
+   * （App 的 onFocusEvent/onFocusTool），不是 HTMLElement.focus；真正的 DOM 落焦由
+   * 下面的 effect 在渲染提交**之后**做——选中行可能刚被扩窗/切 tab 带进 DOM，
+   * 同步 focus() 会静默打空（旧已知失败模式，见 moveSelection 注释）。 */
+  const [keyboardNavKey, setKeyboardNavKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!keyboardNavKey) return;
+    /* preventScroll：滚动归 [selectedKey] 的 scrollIntoView({block:'nearest'})，
+     * 这里不双滚。查询用 CSS.escape——rowKey 含 `:` 等字符。 */
+    panelRef.current
+      ?.querySelector<HTMLElement>(`[data-list-key="${CSS.escape(keyboardNavKey)}"]`)
+      ?.focus({ preventScroll: true });
+  }, [keyboardNavKey]);
 
   /* ── F2（#272）：派生收敛 ────────────────────────────────────────────────
    *
@@ -446,11 +459,12 @@ export const StepDetail = memo(function StepDetail({ conversation, streaming, fo
     const next = nextSelectionIndex(selectedIndex, delta, listTargets.length);
     if (next < 0 || next === selectedIndex) return;
     /* 选中项与 DOM 焦点一起移动（读屏"当前项"与视觉一致，Enter 也要求焦点在行上）。
-       代价是一个已知的失败模式：`listTargets` 覆盖**筛选后**的全部事件，而 DOM 只有
-       渲染窗口内的行——选中项落到窗口外时 `focus()` 会静默打空，焦点留在旧行上。
-       这不是数据错误：`selectedKey` 已经变了，Timeline 的 `effectiveWindow` 会按它
-       扩窗、`scrollIntoView` 把行带进视野；下一次 ↑/↓ 时 `focus()` 才命中。 */
+     * #1523：`listTargets[i].focus()` 是业务选中回调，DOM 落焦改由 effect 在渲染
+     * 提交后按 `keyboardNavKey` 做——`listTargets` 覆盖**筛选后**的全部事件而 DOM
+     * 只有渲染窗口内的行，跨窗口/切 tab 的移动在提交后必然命中可见实例（旧行为：
+     * 窗口外的 focus() 静默打空，焦点留在旧行上，下一次 ↑/↓ 才追上）。 */
     listTargets[next].focus();
+    setKeyboardNavKey(listTargets[next].key);
     /* #1419：Timeline 的 ↑/↓ 是"选卡片"，不是"开预览"——App 的 onFocusEvent 会顺手
      * 打开 peek，这里立即关掉，保持与点击卡片同一套语义。 */
     if (tab === 'timeline') onPanelAction({ type: 'close-peek' });
@@ -1205,6 +1219,11 @@ export function ChatTab({
     selectedToolIndex >= 0 ? Math.max(toolWindow, tools.length - selectedToolIndex) : toolWindow;
   const hiddenTools = Math.max(0, tools.length - effectiveToolWindow);
   const visibleTools = hiddenTools > 0 ? tools.slice(hiddenTools) : tools;
+  /* #1523 AC2 roving tabindex：↑/↓ 域内只留一个 Tab 停靠点——选中行（不在窗口/
+   * 被隐藏时回落首行），其余行 -1，Tab 一次穿过列表（同 Timeline/Terminal 行）。 */
+  const toolRovingKey = selectedKey != null && visibleTools.some((v) => toolKey(v) === selectedKey)
+    ? selectedKey
+    : visibleTools[0] ? toolKey(visibleTools[0]) : null;
 
   return (
     <>
@@ -1452,6 +1471,7 @@ export function ChatTab({
               className={rowClass}
               data-list-key={toolKey(t)}
               aria-current={selected ? 'true' : undefined}
+              tabIndex={toolKey(t) === toolRovingKey ? 0 : -1}
               onClick={() => onFocusTool(t)}
             >
               <ChevronRight size={14} />
@@ -1796,6 +1816,15 @@ export function formatEventTooltip(e: AgentEvent): string[] {
 interface TipState {
   x: number;
   y: number;
+  /** #1523：tip 来源行的 `data-list-key`——指针与键盘两条触发路径共用同一份派生，
+   *  这个键让行按钮只在「tip 开在自己身上」时挂 `aria-describedby`（#tl-tip）。 */
+  sourceKey: string;
+  /** #1523：**开法**决定生命周期。`hover` = 指针路径，行为与 #1523 之前完全一致
+   *  （mouseover 换内容 / mouseleave·scroll 收起，**不认领 Esc**——否则点击后悬停
+   *  残留的 tip 会在收展开卡后重新可见，吃掉本该关 peek/退整页的第二下 Esc，
+   *  y-inspector-peek AC2/AC5 的分层契约就会位移）；`keyboard` = 行上按 `?` 召出
+   *  的命令层，`?`/Esc/焦点离开行即关，且来源行展开时隐藏（四段详情已摊开）。 */
+  origin: 'hover' | 'keyboard';
   /** 事件标题（人话模板）——T-11 富信息浮层的首行。 */
   title: string;
   /** `#seq · type · 时刻`（mono 副行）。 */
@@ -1941,25 +1970,12 @@ export function TimelineTab({
     };
   }, []);
 
-  const handleOver = (e: ReactMouseEvent<HTMLDivElement>) => {
-    /* P1-1：卡片行的身份属性是 `data-list-key`（旧行才有 `data-tl-i`）；
-     * 用错选择器会让 tip 永远为 null，hover 浮层整条功能不可达。 */
-    const btn = (e.target as HTMLElement).closest?.('[data-list-key]') as HTMLElement | null;
-    if (btn === lastRowRef.current) return;
-    lastRowRef.current = btn;
-    if (!btn) {
-      setTip(null);
-      return;
-    }
-    const row = btn.dataset.listKey ? visibleRef.current.get(btn.dataset.listKey) : undefined;
-    const ev = row?.event;
-    const lines = ev ? formatEventTooltip(ev) : [];
-    if (!ev || !row) {
-      setTip(null);
-      return;
-    }
-    /* T-11 富信息：标题 / `#seq · type · 时刻` / 摘要 + 既有时间戳与 step 行。
-     * 行数参与定位高度计算（TIP_LINE_H 每行）。 */
+  /** T-11 富信息 tip 的唯一派生（#1523 起指针与键盘**共用这一份**——两条触发路径
+   *  只差事件来源，内容不分叉，即票面「不为同一内容造第二份数据真相」）。
+   *  行数参与定位高度计算（TIP_LINE_H 每行）。 */
+  const tipForRow = (row: TimelineRow, btn: HTMLElement, origin: TipState['origin']): TipState => {
+    const ev = row.event;
+    const lines = formatEventTooltip(ev);
     const timing = row.timing;
     const meta = [
       ev.seq != null ? `#${ev.seq}` : null,
@@ -1974,16 +1990,82 @@ export function TimelineTab({
     const r = btn.getBoundingClientRect();
     const tipH = rows * TIP_LINE_H + TIP_PADDING;
     const above = r.top > tipH + TIP_TOP_MARGIN;
-    setTip({
+    return {
       x: Math.max(8, r.left + 6),
       y: above ? r.top - tipH - TIP_GAP : r.bottom + TIP_GAP,
+      sourceKey: row.rowKey,
+      origin,
       title: timelineTitle(ev),
       meta,
       summary,
       lines,
-    });
+    };
+  };
+  const handleOver = (e: ReactMouseEvent<HTMLDivElement>) => {
+    /* P1-1：卡片行的身份属性是 `data-list-key`（旧行才有 `data-tl-i`）；
+     * 用错选择器会让 tip 永远为 null，hover 浮层整条功能不可达。 */
+    const btn = (e.target as HTMLElement).closest?.('[data-list-key]') as HTMLElement | null;
+    if (btn === lastRowRef.current) return;
+    lastRowRef.current = btn;
+    if (!btn) {
+      setTip(null);
+      return;
+    }
+    const row = btn.dataset.listKey ? visibleRef.current.get(btn.dataset.listKey) : undefined;
+    if (!row) {
+      setTip(null);
+      return;
+    }
+    setTip(tipForRow(row, btn, 'hover'));
   };
   const handleLeave = () => {
+    lastRowRef.current = null;
+    /* 指针离开只收"指针开"的 tip；`?` 开的 tip 是命令层，与指针位置无关。 */
+    if (tip?.origin !== 'hover') return;
+    setTip(null);
+  };
+  /* #1523 AC1：tip 的键盘路径。**不做"聚焦即自动打开"**——那会在既有 Esc 分层
+   * （收展开卡 → 关 peek → 关面板，y-inspector-peek AC2/AC5 已验收）之前凭空插入
+   * 一层时隐时现的 tip，改变键位契约；`:focus-visible` 也区分不了"键盘惯例激活后的
+   * 点击聚焦"。改为显式开关键 **`?`**（GitHub/Gmail 的"行内速览"惯例）：行上按 `?`
+   * 打开同一份派生浮层，再按 `?` / Esc / 焦点离开行（blur）任一即关——显式命令式
+   * 浮层不受 WCAG 1.4.13 的 hover/focus 悬停约束，也不与任何既有键位重叠
+   * （↑↓ 选择 / ↵ 展开 / Space peek / Esc 分层）。 */
+  const handleRowBlur = () => {
+    /* `?` 开的 tip 只在"它那一行还持有焦点"时成立：焦点换行/移出列表都收——
+     *  旧内容浮在新焦点旁边就是误导（WCAG 1.4.13：focus 离开即关）。行间移动
+     *  不保留：用户要速览会在新行重按 `?`。hover 开的 tip 与焦点无关，归 mouseleave。 */
+    if (tip?.origin !== 'keyboard') return;
+    lastRowRef.current = null;
+    setTip(null);
+  };
+  /* #1523 AC1：`keyboard` tip 开在**已展开**的行上时不再显示——四段详情已经摊开，
+   *  浮层是重复真相。Enter 展开 ⇒ tip 随之隐藏 ⇒ Esc 的第一层回到"收展开卡"
+   *  （既有分层不位移）。渲染与 Esc 认领（下）都必须用这同一个 `visibleTip`，
+   *  否则会出现"看不见的层吃掉一次 Esc"。hover tip 不在此列（见 TipState.origin，
+   *  它不认领 Esc，视觉行为与 #1523 之前一致）。 */
+  const visibleTip =
+    tip && !(tip.origin === 'keyboard' && activeExpanded.has(tip.sourceKey)) ? tip : null;
+  const handleTipKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === '?') {
+      const btn = (e.target as HTMLElement).closest?.('[data-list-key]') as HTMLElement | null;
+      const row = btn?.dataset.listKey ? visibleRef.current.get(btn.dataset.listKey) : undefined;
+      if (!btn || !row) return;
+      e.preventDefault();
+      if (tip?.sourceKey === row.rowKey) {
+        lastRowRef.current = null;
+        setTip(null);
+        return;
+      }
+      lastRowRef.current = btn;
+      setTip(tipForRow(row, btn, 'keyboard'));
+      return;
+    }
+    if (e.key !== 'Escape' || !visibleTip || visibleTip.origin !== 'keyboard') return;
+    /* Esc 关 tip 是最内层——先于面板级 Esc（收展开卡 / 关 peek / 关面板）生效，
+     * "Esc 一下退一层"的层级直觉不变。 */
+    e.preventDefault();
+    e.stopPropagation();
     lastRowRef.current = null;
     setTip(null);
   };
@@ -2006,6 +2088,11 @@ export function TimelineTab({
   }
 
   const lanes = buildLanes(visible, runGroups);
+  /* #1523 AC2 roving tabindex：↑/↓ 移动域里只有"当前选中行"是 Tab 停靠点；无选中
+   * （或选中行被当前筛选隐藏、不在窗口里）时停靠点 = 首行。其余行 -1——Tab 一次
+   * 穿过整张列表，不再把每行都变成无谓停靠点（APG roving tabindex 模式）。 */
+  const selectedInWindow = selectedKey != null && visible.some((r) => r.rowKey === selectedKey);
+  const rovingKey = selectedInWindow ? selectedKey : visible[0]?.rowKey;
   const chips: { id: TimelineFilter; label: string; count: number; tone?: 'fail' }[] = [
     { id: 'all', label: '全部', count: counts.all },
     { id: 'tool', label: '工具', count: counts.tool },
@@ -2014,7 +2101,14 @@ export function TimelineTab({
   ];
 
   return (
-    <div className="detail-timeline" ref={listRef} onMouseOver={handleOver} onMouseLeave={handleLeave}>
+    <div
+      className="detail-timeline"
+      ref={listRef}
+      onMouseOver={handleOver}
+      onMouseLeave={handleLeave}
+      onBlur={handleRowBlur}
+      onKeyDown={handleTipKeyDown}
+    >
       <div className="tl-toolbar">
         <div className="tl-filters" role="group" aria-label="Timeline 筛选">
           {chips.map((chip) => (
@@ -2128,6 +2222,8 @@ export function TimelineTab({
                     timing={eventTiming}
                     axis={axis}
                     selected={selectedKey === key}
+                    tabStop={key === rovingKey}
+                    tipOpen={visibleTip?.sourceKey === key}
                     expanded={expanded}
                     flash={flashKey === key}
                     onSelect={selectEvent}
@@ -2144,12 +2240,12 @@ export function TimelineTab({
         );
       })}
 
-      {tip && (
-        <div className="tl-tooltip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
-          <div className="tl-tooltip-title">{tip.title}</div>
-          <div className="tl-tooltip-meta mono">{tip.meta}</div>
-          {tip.summary && <div className="tl-tooltip-summary">{tip.summary}</div>}
-          {tip.lines.map((l, i) => (
+      {visibleTip && (
+        <div id="tl-tip" className="tl-tooltip" role="tooltip" style={{ left: visibleTip.x, top: visibleTip.y }}>
+          <div className="tl-tooltip-title">{visibleTip.title}</div>
+          <div className="tl-tooltip-meta mono">{visibleTip.meta}</div>
+          {visibleTip.summary && <div className="tl-tooltip-summary">{visibleTip.summary}</div>}
+          {visibleTip.lines.map((l, i) => (
             <div key={i} className="tl-tooltip-line">
               {l}
             </div>
@@ -2169,6 +2265,10 @@ export function TimelineTab({
           <span className="tl-kbd">↑</span>
           <span className="tl-kbd">↓</span>
           选择
+        </span>
+        <span className="tl-foot-kbd">
+          <span className="tl-kbd">?</span>
+          速览
         </span>
         <span className="tl-foot-kbd">
           <span className="tl-kbd">↵</span>
@@ -2256,6 +2356,8 @@ const TimelineCard = memo(function TimelineCard({
   timing,
   axis,
   selected,
+  tabStop,
+  tipOpen,
   expanded,
   flash,
   onSelect,
@@ -2270,6 +2372,10 @@ const TimelineCard = memo(function TimelineCard({
   timing?: EventTiming;
   axis: TimelineAxis | null;
   selected: boolean;
+  /** #1523 AC2：本行是否是列表唯一的 Tab 停靠点（roving tabindex）。 */
+  tabStop: boolean;
+  /** #1523 AC1：tip 正开在本行上——`aria-describedby` 只在打开时挂（Radix 同款口径）。 */
+  tipOpen: boolean;
   expanded: boolean;
   flash: boolean;
   onSelect: (e: AgentEvent) => void;
@@ -2301,6 +2407,8 @@ const TimelineCard = memo(function TimelineCard({
         data-list-key={key}
         data-cat={category}
         aria-current={selected ? 'true' : undefined}
+        aria-describedby={tipOpen ? 'tl-tip' : undefined}
+        tabIndex={tabStop ? 0 : -1}
         aria-expanded={expanded}
         aria-controls={expandId}
         onClick={() => {
@@ -2618,10 +2726,12 @@ function LiveElapsed({ startedAt }: { startedAt?: string }) {
 }
 
 function TermCard({
-  tool, selected, onFocusTool,
+  tool, selected, tabStop, onFocusTool,
 }: {
   tool: ToolCall;
   selected: boolean;
+  /** #1523 AC2：本行是否是列表唯一的 Tab 停靠点（roving tabindex，同 Timeline/概览行）。 */
+  tabStop: boolean;
   onFocusTool: (t: ToolCall) => void;
 }) {
   const commandOutput = commandOutputs([tool])[0];
@@ -2661,6 +2771,7 @@ function TermCard({
         aria-expanded={open}
         data-list-key={toolKey(tool)}
         aria-current={selected ? 'true' : undefined}
+        tabIndex={tabStop ? 0 : -1}
         onClick={() => setOpen((v) => !v)}
       >
         <span className={`step-ico ${ico}`}>
@@ -2737,6 +2848,10 @@ export function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCa
   if (bashes.length === 0) {
     return <TabEmpty hint="本次会话未执行命令。" icon={TerminalSquare} />;
   }
+  /* #1523 AC2 roving tabindex（同 Timeline/概览行，↑/↓ 域内只留一个停靠点）。 */
+  const termRovingKey = selectedKey != null && bashes.some((t) => toolKey(t) === selectedKey)
+    ? selectedKey
+    : toolKey(bashes[0]);
   return (
     <>
       {/* #1419 M-1：段头（效果图 `.pane-head`）= 标签 + mono `N 条 · M 失败` + 右 bash 胶囊。 */}
@@ -2754,6 +2869,7 @@ export function TerminalTab({ tools, onFocusTool, selectedKey }: { tools: ToolCa
           key={t.tool_call_id}
           tool={t}
           selected={selectedKey != null && toolKey(t) === selectedKey}
+          tabStop={toolKey(t) === termRovingKey}
           onFocusTool={onFocusTool}
         />
       ))}
