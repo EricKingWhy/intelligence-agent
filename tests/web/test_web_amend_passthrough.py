@@ -49,7 +49,7 @@ def app_and_client(tmp_path):
         agent_models=_CATALOG_JSON,
         enable_cors=True,
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     wiring = CapabilityWiring()
     wiring.context_providers = [_FakeMemoryProvider()]
     from agent_harness.capability.base import CapabilityRegistry

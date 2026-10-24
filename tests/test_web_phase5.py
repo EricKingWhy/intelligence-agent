@@ -36,7 +36,9 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
     workspace = tmp_path / "state" / "workspaces" / "overflow-task"
     workspace.mkdir(parents=True)
     (workspace / "data.txt").write_text("content\n" * 1000, encoding="utf-8")
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings,
+    allow_testserver=True,
+    )) as client:
         response = client.post("/api/sessions", json={"task": "read", "workspace": "overflow-task"})
         assert response.status_code == 200
         live = [json.loads(line[5:]) for line in response.text.splitlines() if line.startswith("data:")]
@@ -66,7 +68,9 @@ def test_web_applies_context_budget_before_calling_model(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path),
                         model_api_key="sk-test-placeholder", max_context_tokens=100_000,
                         auto_compact_threshold=0.10, hard_guard_threshold=0.15)
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings,
+    allow_testserver=True,
+    )) as client:
         response = client.post("/api/sessions", json={"task": "large " * 16_000})
         live = [json.loads(line[5:]) for line in response.text.splitlines()
                 if line.startswith("data:")]

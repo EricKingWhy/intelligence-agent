@@ -24,7 +24,7 @@ def app_and_client(tmp_path):
         model_provider="openai",
         enable_cors=True,
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     client = TestClient(app)
     yield app, client
 
@@ -53,7 +53,9 @@ class TestSendMessageEndpoint:
             model_provider="deepseek",
             capabilities="{}",
             enable_cors=False,
-        ))
+        ),
+        allow_testserver=True,
+        )
 
         with TestClient(app) as client:
             created = client.post("/api/sessions?launch=false", json={})
@@ -99,7 +101,9 @@ class TestSendMessageEndpoint:
             model_provider="deepseek",
             capabilities="{}",
             enable_cors=False,
-        ))
+        ),
+        allow_testserver=True,
+        )
 
         with TestClient(app) as client:
             created = client.post("/api/sessions?launch=false", json={})
@@ -424,7 +428,9 @@ class TestCrashReconcileGuard:
             _env_file=None, workspace_dir=str(tmp_path),
             model_api_key="sk-test", model_provider="deepseek",
             model_name="deepseek-chat", enable_cors=False,
-        ))
+        ),
+        allow_testserver=True,
+        )
         client = TestClient(app)
         session_id = "crashed-unknown"
         self._seed_crashed_unknown(app, session_id)
@@ -492,7 +498,9 @@ class TestCrashReconcileGuard:
             _env_file=None, workspace_dir=str(tmp_path),
             model_api_key="sk-test", model_provider="deepseek",
             model_name="deepseek-chat", enable_cors=False,
-        ))
+        ),
+        allow_testserver=True,
+        )
         client = TestClient(app)
         state = app.state.agent
         session_id = "crashed-succeeded"

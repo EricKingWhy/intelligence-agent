@@ -109,11 +109,13 @@ def _terminate(proc: subprocess.Popen[bytes]) -> None:
 
 
 def _http_get(
-    url: str, *, token: str | None = None
+    url: str, *, token: str | None = None, headers: dict[str, str] | None = None
 ) -> tuple[int, object]:
     request = urllib.request.Request(url)
     if token is not None:
         request.add_header("Authorization", f"Bearer {token}")
+    for name, value in (headers or {}).items():
+        request.add_header(name, value)
     try:
         with _OPENER.open(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
@@ -170,6 +172,7 @@ def test_serve_publishes_attachable_endpoint(workspace: Path, tmp_path: Path) ->
         assert endpoint.pid > 0
         assert endpoint.auth_required is True
         assert endpoint.port > 0
+        assert endpoint.host == "127.0.0.1"
 
         result = _wait_attachable(workspace, tokfile)
         assert result.endpoint is not None and result.endpoint.port == endpoint.port
@@ -185,6 +188,14 @@ def test_serve_publishes_attachable_endpoint(workspace: Path, tmp_path: Path) ->
         assert payload["auth_required"] is True
         payload_text = json.dumps(payload).lower()
         assert "token" not in payload_text and "secret" not in payload_text
+
+        # Real socket regression: production never trusts Starlette's in-process
+        # ``testserver`` hostname (P4-1); the Host gate rejects it before health.
+        status, _ = _http_get(
+            f"http://127.0.0.1:{endpoint.port}/api/health",
+            headers={"Host": "testserver"},
+        )
+        assert status == 403
 
         # 已认证面：限权通道里的 token 可用；错 token 401；无 token 401。
         token = HostTokenStore(backend).get_token(workspace)
@@ -410,7 +421,7 @@ def test_serve_reuses_old_data_root_in_place(workspace: Path, tmp_path: Path) ->
 
     # 1) 服务未引入任何新面之前，用既有入口在该数据根上造「旧数据」：
     #    launch=false 会话（不跑 run、不碰模型）+ 自定义供应商 + artifact。
-    app = create_app(pre_settings, enable_cors=False)
+    app = create_app(pre_settings, enable_cors=False, allow_testserver=True)
     with TestClient(app) as client:
         old_token = pyjwt.encode(
             {
@@ -422,7 +433,7 @@ def test_serve_reuses_old_data_root_in_place(workspace: Path, tmp_path: Path) ->
         )
         created = client.post(
             "/api/sessions",
-            json={},
+            json={"sandbox_backend": "local"},
             params={"launch": "false"},
             headers={"Authorization": f"Bearer {old_token}"},
         )
