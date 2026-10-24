@@ -32,10 +32,10 @@ from agent_harness.agent.run_budget import (
     SessionBudgetSnapshot,
     SessionConsumed,
     SessionLimits,
-    _deadline_or_none,
-    _deadline_text,
-    _decimal_or_none,
-    _decimal_text,
+    deadline_or_none,
+    deadline_text,
+    decimal_or_none,
+    decimal_text,
     session_pause_trigger,
     session_resume_headroom_ok,
     utc_now,
@@ -220,8 +220,8 @@ def _row_session_limits(row: aiosqlite.Row | dict[str, Any]) -> SessionLimits:
         max_agent_turns_total=row["max_agent_turns_total"],
         max_model_requests=row["max_model_requests"],
         max_total_tokens=row["max_total_tokens"],
-        max_cost_usd=_decimal_or_none(row["max_cost_usd"]),
-        deadline_at=_deadline_or_none(row["deadline_at"]),
+        max_cost_usd=decimal_or_none(row["max_cost_usd"]),
+        deadline_at=deadline_or_none(row["deadline_at"]),
         tool_call_limits=_tool_map_from_json(row["tool_call_limits"]) or {},
         max_delegations=row["max_delegations"],
     )
@@ -233,7 +233,7 @@ def _row_session_consumed(row: aiosqlite.Row | dict[str, Any]) -> SessionConsume
         agent_turns=int(row["agent_turns"]),
         model_requests=int(row["model_requests"]),
         total_tokens=row["total_tokens"],
-        cost_usd=_decimal_or_none(row["cost_usd"]),
+        cost_usd=decimal_or_none(row["cost_usd"]),
         tool_calls_by_tool=_tool_map_from_json(row["tool_calls_by_tool"]),
         tool_attempts_by_tool=_tool_map_from_json(row["tool_attempts_by_tool"]),
         delegations=int(row["delegations"]),
@@ -602,8 +602,8 @@ class SqliteDelegationTreeLedger:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (budget_key, root_session_id, limits.max_agent_turns_total,
                      limits.max_model_requests, limits.max_total_tokens,
-                     _decimal_text(limits.max_cost_usd),
-                     _deadline_text(limits.deadline_at),
+                     decimal_text(limits.max_cost_usd),
+                     deadline_text(limits.deadline_at),
                      limits.max_delegations, _tool_map_json(limits.tool_call_limits)),
                 )
                 cursor = await connection.execute(
@@ -620,13 +620,13 @@ class SqliteDelegationTreeLedger:
                         ceiling if name not in current_tools
                         else min(int(current_tools[name]), int(ceiling))
                     )
-                current_deadline = _deadline_or_none(row["deadline_at"])
+                current_deadline = deadline_or_none(row["deadline_at"])
                 requested_deadline = limits.deadline_at
                 if current_deadline is not None and requested_deadline is not None:
                     tightened_deadline = min(current_deadline, requested_deadline)
                 else:
                     tightened_deadline = current_deadline or requested_deadline
-                current_cost = _decimal_or_none(row["max_cost_usd"])
+                current_cost = decimal_or_none(row["max_cost_usd"])
                 requested_cost = limits.max_cost_usd
                 if current_cost is not None and requested_cost is not None:
                     tightened_cost = min(current_cost, requested_cost)
@@ -639,8 +639,8 @@ class SqliteDelegationTreeLedger:
                         row["max_model_requests"], limits.max_model_requests),
                     "max_total_tokens": _tighten_ceiling(
                         row["max_total_tokens"], limits.max_total_tokens),
-                    "max_cost_usd": _decimal_text(tightened_cost),
-                    "deadline_at": _deadline_text(tightened_deadline),
+                    "max_cost_usd": decimal_text(tightened_cost),
+                    "deadline_at": deadline_text(tightened_deadline),
                     "max_delegations": _tighten_ceiling(
                         row["max_delegations"], limits.max_delegations),
                     "tool_call_limits": _tool_map_json(merged_tools),
@@ -1008,7 +1008,7 @@ class SqliteDelegationTreeLedger:
                                 detail.get("request_ids") == list(request_ids)
                                 and detail.get("count") == count
                                 and detail.get("usage") == usage
-                                and detail.get("cost_delta_usd") == _decimal_text(cost)
+                                and detail.get("cost_delta_usd") == decimal_text(cost)
                             )
                             if not same:
                                 raise ValueError("model request accounting replay differs from commit")
@@ -1035,7 +1035,7 @@ class SqliteDelegationTreeLedger:
                             total = int(tokens) + delta
                             # 合法值相加溢出 int64：存储无法表达 ⇒ 转未知（不 clamp）
                             tokens = total if total <= INT64_MAX else None
-                current_cost = _decimal_or_none(row["cost_usd"])
+                current_cost = decimal_or_none(row["cost_usd"])
                 if current_cost is None or cost is None:
                     new_cost = None
                 else:
@@ -1045,18 +1045,18 @@ class SqliteDelegationTreeLedger:
                        SET model_requests = model_requests + ?, total_tokens = ?,
                            cost_usd = ?
                        WHERE budget_key = ?""",
-                    (count, tokens, _decimal_text(new_cost), budget_key),
+                    (count, tokens, decimal_text(new_cost), budget_key),
                 )
                 await self._append_session_event(
                     connection, budget_key, "requests_recorded",
                     version=int(row["version"]),
                     detail={"count": count, "tokens": tokens,
-                            "cost_usd": _decimal_text(new_cost),
+                            "cost_usd": decimal_text(new_cost),
                             **({
                                 "accounting_id": accounting_id,
                                 "request_ids": list(request_ids),
                                 "usage": usage,
-                                "cost_delta_usd": _decimal_text(cost),
+                                "cost_delta_usd": decimal_text(cost),
                             } if accounting_id is not None else {})},
                 )
                 await connection.commit()
@@ -1224,15 +1224,15 @@ class SqliteDelegationTreeLedger:
                         if limits.max_total_tokens is not None
                         else row["max_total_tokens"]
                     ),
-                    "max_cost_usd": _decimal_text(
+                    "max_cost_usd": decimal_text(
                         limits.max_cost_usd
                         if limits.max_cost_usd is not None
-                        else _decimal_or_none(row["max_cost_usd"])
+                        else decimal_or_none(row["max_cost_usd"])
                     ),
-                    "deadline_at": _deadline_text(
+                    "deadline_at": deadline_text(
                         limits.deadline_at
                         if limits.deadline_at is not None
-                        else _deadline_or_none(row["deadline_at"])
+                        else deadline_or_none(row["deadline_at"])
                     ),
                     "max_delegations": (
                         limits.max_delegations
@@ -1260,7 +1260,7 @@ class SqliteDelegationTreeLedger:
                             f"{row['total_tokens']}（11 §6.1 ⇒ 409，未启动任何工作）"
                         )
                 if effective["max_cost_usd"] is not None:
-                    consumed_cost = _decimal_or_none(row["cost_usd"])
+                    consumed_cost = decimal_or_none(row["cost_usd"])
                     if consumed_cost is None:
                         raise BudgetConflict(
                             "cost 消耗基数未知而恢复点名了 max_cost_usd ⇒ 409，"
@@ -1292,8 +1292,8 @@ class SqliteDelegationTreeLedger:
                     max_agent_turns_total=effective["max_agent_turns_total"],
                     max_model_requests=effective["max_model_requests"],
                     max_total_tokens=effective["max_total_tokens"],
-                    max_cost_usd=_decimal_or_none(effective["max_cost_usd"]),
-                    deadline_at=_deadline_or_none(effective["deadline_at"]),
+                    max_cost_usd=decimal_or_none(effective["max_cost_usd"]),
+                    deadline_at=deadline_or_none(effective["deadline_at"]),
                     tool_call_limits=_tool_map_from_json(effective["tool_call_limits"]) or {},
                     max_delegations=effective["max_delegations"],
                 )
@@ -1301,7 +1301,7 @@ class SqliteDelegationTreeLedger:
                     agent_turns=int(row["agent_turns"]),
                     model_requests=int(row["model_requests"]),
                     total_tokens=row["total_tokens"],
-                    cost_usd=_decimal_or_none(row["cost_usd"]),
+                    cost_usd=decimal_or_none(row["cost_usd"]),
                     tool_calls_by_tool=_tool_map_from_json(row["tool_calls_by_tool"]),
                     tool_attempts_by_tool=_tool_map_from_json(row["tool_attempts_by_tool"]),
                     delegations=int(row["delegations"]),
@@ -1686,16 +1686,16 @@ class InMemoryDelegationTreeLedger:
                 state["max_model_requests"], limits.max_model_requests)
             state["max_total_tokens"] = _tighten_ceiling(
                 state["max_total_tokens"], limits.max_total_tokens)
-            current_cost = _decimal_or_none(state["max_cost_usd"])
+            current_cost = decimal_or_none(state["max_cost_usd"])
             if current_cost is not None and limits.max_cost_usd is not None:
-                state["max_cost_usd"] = _decimal_text(min(current_cost, limits.max_cost_usd))
+                state["max_cost_usd"] = decimal_text(min(current_cost, limits.max_cost_usd))
             elif limits.max_cost_usd is not None:
-                state["max_cost_usd"] = _decimal_text(limits.max_cost_usd)
-            current_deadline = _deadline_or_none(state["deadline_at"])
+                state["max_cost_usd"] = decimal_text(limits.max_cost_usd)
+            current_deadline = deadline_or_none(state["deadline_at"])
             if current_deadline is not None and limits.deadline_at is not None:
-                state["deadline_at"] = _deadline_text(min(current_deadline, limits.deadline_at))
+                state["deadline_at"] = deadline_text(min(current_deadline, limits.deadline_at))
             elif limits.deadline_at is not None:
-                state["deadline_at"] = _deadline_text(limits.deadline_at)
+                state["deadline_at"] = deadline_text(limits.deadline_at)
             state["max_delegations"] = _tighten_ceiling(
                 state["max_delegations"], limits.max_delegations)
             current_tools = _tool_map_from_json(state["tool_call_limits"]) or {}
@@ -1803,7 +1803,7 @@ class InMemoryDelegationTreeLedger:
                     "request_ids": list(request_ids),
                     "count": count,
                     "usage": usage,
-                    "cost_delta_usd": _decimal_text(cost),
+                    "cost_delta_usd": decimal_text(cost),
                 }
                 if accounting_key in self._resolved_model_request_accountings:
                     recorded_payload = self._settled_model_request_accountings.get(
@@ -1834,13 +1834,13 @@ class InMemoryDelegationTreeLedger:
                         total = int(tokens) + delta
                         tokens = total if total <= INT64_MAX else None
             state["total_tokens"] = tokens
-            current_cost = _decimal_or_none(state["cost_usd"])
+            current_cost = decimal_or_none(state["cost_usd"])
             if current_cost is None:
                 pass
             elif cost is None:
                 state["cost_usd"] = None
             else:
-                state["cost_usd"] = _decimal_text(current_cost + cost)
+                state["cost_usd"] = decimal_text(current_cost + cost)
             if accounting_id is not None:
                 self._recorded_model_request_ids[budget_key].update(request_ids)
                 accounting_key = (budget_key, accounting_id)
@@ -1933,15 +1933,15 @@ class InMemoryDelegationTreeLedger:
                     if limits.max_total_tokens is not None
                     else state["max_total_tokens"]
                 ),
-                "max_cost_usd": _decimal_text(
+                "max_cost_usd": decimal_text(
                     limits.max_cost_usd
                     if limits.max_cost_usd is not None
-                    else _decimal_or_none(state["max_cost_usd"])
+                    else decimal_or_none(state["max_cost_usd"])
                 ),
-                "deadline_at": _deadline_text(
+                "deadline_at": deadline_text(
                     limits.deadline_at
                     if limits.deadline_at is not None
-                    else _deadline_or_none(state["deadline_at"])
+                    else deadline_or_none(state["deadline_at"])
                 ),
                 "max_delegations": (
                     limits.max_delegations
@@ -1959,7 +1959,7 @@ class InMemoryDelegationTreeLedger:
                 if effective["max_total_tokens"] < int(state["total_tokens"]):
                     raise BudgetConflict("ceiling 低于已消耗（total_tokens）⇒ 409")
             if effective["max_cost_usd"] is not None:
-                consumed_cost = _decimal_or_none(state["cost_usd"])
+                consumed_cost = decimal_or_none(state["cost_usd"])
                 if consumed_cost is None:
                     raise BudgetConflict("cost 基数未知 ⇒ 409")
                 if Decimal(effective["max_cost_usd"]) < consumed_cost:
@@ -1978,8 +1978,8 @@ class InMemoryDelegationTreeLedger:
                 max_agent_turns_total=effective["max_agent_turns_total"],
                 max_model_requests=effective["max_model_requests"],
                 max_total_tokens=effective["max_total_tokens"],
-                max_cost_usd=_decimal_or_none(effective["max_cost_usd"]),
-                deadline_at=_deadline_or_none(effective["deadline_at"]),
+                max_cost_usd=decimal_or_none(effective["max_cost_usd"]),
+                deadline_at=deadline_or_none(effective["deadline_at"]),
                 tool_call_limits=_tool_map_from_json(effective["tool_call_limits"]) or {},
                 max_delegations=effective["max_delegations"],
             )
@@ -1987,7 +1987,7 @@ class InMemoryDelegationTreeLedger:
                 agent_turns=int(state["agent_turns"]),
                 model_requests=int(state["model_requests"]),
                 total_tokens=state["total_tokens"],
-                cost_usd=_decimal_or_none(state["cost_usd"]),
+                cost_usd=decimal_or_none(state["cost_usd"]),
                 tool_calls_by_tool=_tool_map_from_json(state["tool_calls_by_tool"]),
                 tool_attempts_by_tool=_tool_map_from_json(state["tool_attempts_by_tool"]),
                 delegations=int(state["delegations"]),

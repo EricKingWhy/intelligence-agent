@@ -849,9 +849,14 @@ def _raise_if_pending_user_input(
         )
 
 
-def _pending_user_input_pause(
+def pending_user_input_pause(
     events: list[SessionEvent], *, run_id: str,
 ) -> PausedRun | None:
+    """从事件流合成「pending user input」的 run/paused 事实（#1539 转正公开）。
+
+    合成口径只有这一份：恢复链（service 内部两处）与 Web 启动重建
+    （ask_user_timeout_driver 的回退段）共用；已有暂停/终态事实时返回 None。
+    """
     if latest_run_id(events) != run_id:
         return None
     state = derive_run_budget(events, run_id)
@@ -3058,7 +3063,7 @@ class SessionService:
         """
         paused = latest_paused_run(events)
         if paused is None and isinstance(run_id, str):
-            paused = _pending_user_input_pause(events, run_id=run_id)
+            paused = pending_user_input_pause(events, run_id=run_id)
         if paused is None:
             raise BudgetConflict(
                 "本会话最新逻辑 run 不在暂停态（可能已被恢复、已终结，或已被后续新 run "
@@ -3360,7 +3365,7 @@ class SessionService:
         if paused is None:
             run_id = latest_run_id(events)
             if run_id is not None:
-                paused = _pending_user_input_pause(events, run_id=run_id)
+                paused = pending_user_input_pause(events, run_id=run_id)
         if (
             paused is None
             or paused.reason != REASON_USER_INPUT
@@ -5031,28 +5036,24 @@ class SessionService:
         """dry_run 预览：是否存在可压缩的早期轮（与 compactor 闸门**一致**的判据）。
 
         前缀 / cut 规则与 `ContextCompactor.compact` **同源**：直接调
-        `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本。该
-        函数内含 `_is_compaction_summary` 守卫（前导摘要是 early 起点，不作前缀跳过）。
+        `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本；
+        「非摘要 HumanMessage」计数同样走 compactor 的
+        `non_summary_user_turn_count`（#1539——此前 import 私有的
+        `_is_compaction_summary` 在本函数自拼判据，属跨包私有穿透）。
 
         判据与 `compact` 的 `compacted_turn_count` 计算式**完全一致**：early 窗口内
         非摘要 `HumanMessage` 数 > 0 才算可压（P2-1 #1197 修回——旧实现只判窗口
         非空，early 恰好只含上一轮压缩摘要 HumanMessage 时会误判为可压，真实管线
         以 0 计数走 below-floor 200 分支，绕过 409 `NoCompactableEarlyTurn`）。
         """
-        from langchain_core.messages import HumanMessage
-
         from agent_harness.context.compactor import (
-            _is_compaction_summary,
             compactable_early_window,
+            non_summary_user_turn_count,
         )
 
         messages = session.derive_messages()
         prefix_end, cut = compactable_early_window(messages)
-        return any(
-            isinstance(message, HumanMessage)
-            and not _is_compaction_summary(message)
-            for message in messages[prefix_end:cut]
-        )
+        return non_summary_user_turn_count(messages[prefix_end:cut]) > 0
 
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
@@ -7628,6 +7629,7 @@ __all__ = [
     "current_model_selection",
     "current_reasoning_effort",
     "inherit_parent_model",
+    "pending_user_input_pause",
     "project_protected_fact_rows",
     "resolve_model_target",
     "validate_session_id",

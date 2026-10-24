@@ -732,7 +732,7 @@ def _deadline_dimension_lines(data: dict) -> list[str]:
     判据与 `_extra_dimension_lines` 同源：**键在不在**。键缺席（`#315` 之前的老事件）
     ⇒ 零行（不拿一片 unavailable 当信息）；`None` ⇒ `unlimited`（这一维没配，与同块
     `limit unlimited` 同一个词）；形状认不出（数 / 空串 / 带首尾空白）⇒ `unavailable`
-    ——`agent/run_budget._deadline_or_none` 对同一份事件读作"没配"（它不 strip），
+    ——`agent/run_budget.deadline_or_none` 对同一份事件读作"没配"（它不 strip），
     这里跟着它读：不印那个形状，也不编一个时刻。
     """
     limits = ((data.get("limits") or {}).get("run") or {})

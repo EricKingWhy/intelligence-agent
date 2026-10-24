@@ -484,7 +484,7 @@ def _crash_window_events(
 async def test_restore_arms_recent_request_in_crash_window_via_synthesized_pause():
     """#1337 B 段②：进程死在 `user/input-requested` 与 `run/paused` 两次 append
     之间——请求是新近的（30s < 2×60s），用户确实在等。启动重建复用在线路径
-    `resume_ask_user_timeout` 的同源回退（`_pending_user_input_pause`）合成暂停，
+    `resume_ask_user_timeout` 的同源回退（`pending_user_input_pause`）合成暂停，
     装表并保留 #1320 durable 语义；到点正常触发。"""
     clock = FakeClock()
     driver, fired = _driver(clock, timeout=60.0)

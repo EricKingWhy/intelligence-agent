@@ -332,7 +332,7 @@ class RunBudgetRequest(BaseModel):
     max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     #: 成本 ceiling：非负十进制（`11 §6.1`）。wire 上字符串最稳、数也收——
     #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
-    #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
+    #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `decimal_text`）。
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
     #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`；`#564`：两作用域口径统一）。
     #: 值用 `StrictInt`：pydantic 2.13 的 `Field(strict=True)` 只约束 dict 本身、
