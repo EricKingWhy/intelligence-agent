@@ -8,11 +8,25 @@ import { useCallback, useState } from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyEvent, initConversation } from '../lib/projection';
+import { applyEvent, initConversation, projectHistory } from '../lib/projection';
 import { EventType } from '../types';
 import type { AgentEvent, ConversationState } from '../types';
 import { StepDetail } from './StepDetail';
 import type { InspectorFocus, InspectorPanelAction } from './StepDetail';
+
+vi.mock('../lib/timelineView', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/timelineView')>();
+  return {
+    ...actual,
+    deriveTimelineModel: vi.fn(actual.deriveTimelineModel),
+    deriveTimelineView: vi.fn(actual.deriveTimelineView),
+  };
+});
+
+import { deriveTimelineModel, deriveTimelineView } from '../lib/timelineView';
+
+const deriveTimelineModelSpy = vi.mocked(deriveTimelineModel);
+const deriveTimelineViewSpy = vi.mocked(deriveTimelineView);
 
 const EVENTS: AgentEvent[] = [
   { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:00.000Z' },
@@ -22,7 +36,21 @@ const EVENTS: AgentEvent[] = [
   { type: EventType.RUN_COMPLETED, data: {}, seq: 5, run_id: 'r1', session_id: 'tl', time: '2026-10-20T10:00:05.000Z' },
 ];
 
+const KEYBOARD_EVENTS: AgentEvent[] = [
+  { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'r1', session_id: 'keyboard', time: '2026-10-20T10:00:00.000Z' },
+  { type: EventType.TOOL_CALL, data: { tool_call_id: 't1', tool_name: 'bash', args: { command: 'ls' } }, seq: 2, run_id: 'r1', step_id: 1, session_id: 'keyboard', time: '2026-10-20T10:00:01.000Z' },
+  { type: EventType.TOOL_RESULT, data: { tool_call_id: 't1', content: '{"ok":true}' }, seq: 3, run_id: 'r1', session_id: 'keyboard', time: '2026-10-20T10:00:02.000Z' },
+  { type: EventType.TOOL_CALL, data: { tool_call_id: 't2', tool_name: 'bash', args: { command: 'pwd' } }, seq: 4, run_id: 'r1', step_id: 2, session_id: 'keyboard', time: '2026-10-20T10:00:03.000Z' },
+  { type: EventType.TOOL_RESULT, data: { tool_call_id: 't2', content: '{"ok":true}' }, seq: 5, run_id: 'r1', session_id: 'keyboard', time: '2026-10-20T10:00:04.000Z' },
+  { type: EventType.MODEL_REQUEST, data: { outcome: 'completed' }, seq: 6, run_id: 'r1', session_id: 'keyboard', time: '2026-10-20T10:00:05.000Z' },
+  { type: EventType.MODEL_REQUEST, data: { outcome: 'completed' }, seq: 7, run_id: 'r1', session_id: 'keyboard', time: '2026-10-20T10:00:06.000Z' },
+  { type: EventType.MODEL_FAILED, data: { error: 'first failure' }, seq: 8, run_id: 'r1', session_id: 'keyboard', time: '2026-10-20T10:00:07.000Z' },
+  { type: EventType.MODEL_FAILED, data: { error: 'second failure' }, seq: 9, run_id: 'r1', session_id: 'keyboard', time: '2026-10-20T10:00:08.000Z' },
+  { type: EventType.RUN_COMPLETED, data: {}, seq: 10, run_id: 'r1', session_id: 'keyboard', time: '2026-10-20T10:00:09.000Z' },
+];
+
 const conversation = (): ConversationState => EVENTS.reduce(applyEvent, initConversation('tl'));
+const keyboardConversation = (): ConversationState => KEYBOARD_EVENTS.reduce(applyEvent, initConversation('keyboard'));
 
 function Host({ conv, onAction }: { conv: ConversationState; onAction?: (a: InspectorPanelAction) => void }) {
   const [focus, setFocus] = useState<InspectorFocus>({ kind: 'run' });
@@ -115,6 +143,8 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  deriveTimelineModelSpy.mockClear();
+  deriveTimelineViewSpy.mockClear();
 });
 
 afterEach(() => {
@@ -134,6 +164,60 @@ const key = (k: string) => act(() => {
 const click = (el: Element | null | undefined) => act(() => (el as HTMLElement).click());
 
 describe('#1419 Timeline 卡片流交互', () => {
+  it.each([
+    ['all', '全部'],
+    ['tool', '工具'],
+    ['model', '模型'],
+    ['fail', '失败'],
+  ] as const)('#1451 production keyboard navigation follows the $0 filtered rows', (_filter, label) => {
+    render(<Host conv={keyboardConversation()} />);
+    expect(deriveTimelineModelSpy).toHaveBeenCalledTimes(1);
+    expect(deriveTimelineViewSpy).toHaveBeenCalledTimes(1);
+
+    const chip = Array.from(container!.querySelectorAll<HTMLElement>('.tl-chip'))
+      .find((candidate) => candidate.textContent?.includes(label))!;
+    click(chip);
+
+    const filteredRows = rows();
+    expect(filteredRows.length).toBeGreaterThan(1);
+    expect(deriveTimelineModelSpy).toHaveBeenCalledTimes(1);
+    expect(deriveTimelineViewSpy).toHaveBeenCalledTimes(_filter === 'all' ? 1 : 2);
+
+    key('ArrowDown');
+    expect(filteredRows[0].getAttribute('aria-current')).toBe('true');
+    key('ArrowDown');
+    expect(filteredRows[1].getAttribute('aria-current')).toBe('true');
+    expect(filteredRows[0].getAttribute('aria-current')).toBeNull();
+    key('ArrowUp');
+    expect(filteredRows[0].getAttribute('aria-current')).toBe('true');
+    key('ArrowDown');
+    expect(filteredRows[1].getAttribute('aria-current')).toBe('true');
+
+    const selectedKey = filteredRows[1].getAttribute('data-list-key');
+    key('Enter');
+    expect(filteredRows[1].getAttribute('aria-expanded')).toBe('true');
+    expect(expandedCards()).toHaveLength(1);
+    expect(expandedCards()[0].querySelector('button.timeline-row')?.getAttribute('data-list-key')).toBe(selectedKey);
+  });
+
+  it('#1451 a new append-only event version refreshes the base model', () => {
+    const initial = conversation();
+    render(<Host conv={initial} />);
+    expect(deriveTimelineModelSpy).toHaveBeenCalledTimes(1);
+
+    const appended = applyEvent(initial, {
+      type: EventType.SESSION_RESUMED,
+      data: {},
+      seq: 6,
+      session_id: 'tl',
+      time: '2026-10-20T10:00:06.000Z',
+    });
+    render(<Host conv={appended} />);
+
+    expect(deriveTimelineModelSpy).toHaveBeenCalledTimes(2);
+    expect(rows()).toHaveLength(EVENTS.length + 1);
+  });
+
   it('点击卡片：就地展开，`.timeline-row` 数量不变（窗口不因展开扩大）', () => {
     render(<Host conv={conversation()} />);
     const before = rows().length;
@@ -254,6 +338,41 @@ describe('#1419 Timeline 卡片流交互', () => {
     expect(container!.querySelector('.tl-empty')).not.toBeNull();
     click(container!.querySelector('.tl-empty-reset'));
     expect(rows()).toHaveLength(EVENTS.length);
+  });
+
+  it('取消 ToolResult 的标题与失败筛选计数一致', () => {
+    const conv = projectHistory('tl-cancel', [
+      { type: EventType.RUN_STARTED, data: {}, seq: 1, run_id: 'cancel-run', session_id: 'tl-cancel', time: '2026-10-20T10:00:00.000Z' },
+      {
+        type: EventType.TOOL_CALL,
+        data: { tool_call_id: 'tc-cancel', tool_name: 'bash', args: { command: 'sleep 1' } },
+        seq: 2,
+        run_id: 'cancel-run',
+        step_id: 1,
+        session_id: 'tl-cancel',
+        time: '2026-10-20T10:00:01.000Z',
+      },
+      {
+        type: EventType.TOOL_RESULT,
+        data: {
+          tool_call_id: 'tc-cancel',
+          content: '{"ok":false,"message":"cancelled","data":{"cancelled":true}}',
+        },
+        seq: 3,
+        run_id: 'cancel-run',
+        step_id: 1,
+        session_id: 'tl-cancel',
+        time: '2026-10-20T10:00:02.000Z',
+      },
+    ] as AgentEvent[]);
+    render(<Host conv={conv} />);
+
+    const resultRow = rows().find((row) => row.textContent?.includes('tool/result'))!;
+    expect(resultRow.textContent).toContain('已中断');
+    const fail = container!.querySelector<HTMLElement>('.tl-chip-fail')!;
+    expect(fail.textContent).toContain('0');
+    click(fail);
+    expect(rows()).toHaveLength(0);
   });
 
   it('P1-1：hover 卡片出现 tooltip（完整时间 + step）', () => {

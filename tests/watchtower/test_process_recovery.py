@@ -95,7 +95,14 @@ async def test_process_kill_recovers_the_same_fire_once(
     )
     crash_output = (crashed.stdout + crashed.stderr).decode("utf-8", errors="replace")
     assert crashed.returncode == expected_exit_code, crash_output
-    assert (await store.get_execution(execution.fire_id)).state == "dispatching"
+    # Which of the two bookkeeping states the fire is left in depends on whether
+    # `_dispatch` reached `finish_fire(fired)` before the child died; both are
+    # legitimate crash windows and both must recover (#1546). The durable
+    # contract is asserted below: no `run/started` yet, and recovery launches
+    # that same fire exactly once.
+    assert (await store.get_execution(execution.fire_id)).state in {
+        "dispatching", "fired",
+    }
 
     session_store = JsonlSessionStore(root / "sessions")
     crashed_events = session_store.read_events(execution.session_id)

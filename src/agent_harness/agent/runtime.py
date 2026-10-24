@@ -1519,7 +1519,7 @@ class AgentRuntime:
                 value = getattr(steer, key, None)
                 if value is not None:
                     user_data[key] = value
-            user_event = session.append(
+            user_event = await session.append_async(
                 USER_MESSAGE,
                 user_data,
                 run_id=run_id, step_id=step_id,
@@ -1536,7 +1536,7 @@ class AgentRuntime:
                         self._context_builder.protected_fact_token_budget
                     ),
                 )
-            applied = session.append(
+            applied = await session.append_async(
                 STEER_APPLIED,
                 {"steer_id": steer.steer_id, "applied_seq": user_event.seq, "run_id": run_id},
                 run_id=run_id, step_id=step_id,
@@ -1757,7 +1757,7 @@ class AgentRuntime:
                 if existing_idempotent_messages:
                     user_event = existing_idempotent_messages[0]
                 else:
-                    user_event = session.append(USER_MESSAGE, message_data)
+                    user_event = await session.append_async(USER_MESSAGE, message_data)
                     yield to_agent_event(user_event)
                 # #1323：勾选「作为可复用规则」是用户的确定性手势——user/message
                 # 落盘后立即机械登记，不依赖模型当次是否调用 register_constraint。
@@ -2164,13 +2164,15 @@ class AgentRuntime:
                             collected.append(chunk)
                             reasoning_text = _extract_reasoning(chunk)
                             if reasoning_text:
-                                for streamed in streamer.offer_reasoning(
+                                # #1489：热路径走异步入口——durable 刷盘的等待不占
+                                # 事件循环（同 loop 的 SSE 心跳/其它会话照常推进）。
+                                for streamed in await streamer.offer_reasoning_async(
                                     reasoning_text, step=step_base + steps + 1,
                                 ):
                                     yield to_agent_event(streamed)
                             delta_text = _extract_text(chunk.content)
                             if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
-                                for streamed in streamer.offer_text(
+                                for streamed in await streamer.offer_text_async(
                                     delta_text, step=step_base + steps + 1,
                                 ):
                                     yield to_agent_event(streamed)
@@ -2202,7 +2204,9 @@ class AgentRuntime:
                         ai = AIMessage(content="")
                     arms.completed_model_response = ai
                     # 流结束：关思考块（completed）+ 落文本残余（合帧尾部）
-                    for streamed in streamer.end_step(step=step_base + steps + 1):
+                    for streamed in await streamer.end_step_async(
+                        step=step_base + steps + 1,
+                    ):
                         yield to_agent_event(streamed)
                 else:
                     invoke_task = asyncio.create_task(model_coord.ainvoke(
@@ -2392,7 +2396,7 @@ class AgentRuntime:
                 # 伪造）；run 级 usage_total 统一归集不分主备。
                 if fallback_transitions:
                     for transition in fallback_transitions:
-                        fallback_event = session.append(
+                        fallback_event = await session.append_async(
                             MODEL_FALLBACK,
                             {**transition.event_data(),
                              **({"usage": usage} if usage else {})},
@@ -2433,7 +2437,7 @@ class AgentRuntime:
                 defer_model_event = bool(tool_calls) and self.executor.tracks_operations
                 model_event: SessionEvent | None = None
                 if not defer_model_event:
-                    model_event = session.append(
+                    model_event = await session.append_async(
                         MODEL_COMPLETED,
                         model_data,
                         run_id=run_id,
@@ -2470,7 +2474,7 @@ class AgentRuntime:
                         ):
                             yield to_agent_event(refusal_event)
                     if defer_model_event:
-                        model_event = session.append(
+                        model_event = await session.append_async(
                             MODEL_COMPLETED,
                             model_data,
                             run_id=run_id,
@@ -2575,7 +2579,8 @@ class AgentRuntime:
                 # 要求 call 先于 running/output_delta，前端在工具在途期间就有
                 # 可关联的行；中断窗口也总是留下可配对修复的 call 事实。
                 for call in calls:
-                    call_event = self.executor.emit_call_event(
+                    # #1489：热路径走异步入口（每批 N 个 call 各一次 durable 写）。
+                    call_event = await self.executor.emit_call_event_async(
                         session, tool_call_id=call.id, tool_name=call.name,
                         args=call.args, run_id=run_id, step_id=step_base + steps,
                     )
@@ -2648,7 +2653,7 @@ class AgentRuntime:
                 if tool_error is not None:
                     raise tool_error
                 if defer_model_event:
-                    model_event = session.append(
+                    model_event = await session.append_async(
                         MODEL_COMPLETED,
                         model_data,
                         run_id=run_id,
@@ -2667,13 +2672,13 @@ class AgentRuntime:
                     # 持久化顺序（延迟事件 → TOOL_RESULT）的单一 owner 是
                     # ToolExecutor.emit_*（批次 C 候选 3 + ADR-0016 §4.1 拆分）：
                     # Runtime 只消费已持久化事件并镜像，不再自己 append。
-                    for persisted_event in self.executor.emit_pending_events(
+                    for persisted_event in await self.executor.emit_pending_events_async(
                         session,
                         pending_events=execution.pending_events,
                         run_id=run_id, step_id=step_base + steps,
                     ):
                         yield to_agent_event(persisted_event)
-                    result_event = self.executor.emit_result_event(
+                    result_event = await self.executor.emit_result_event_async(
                         session, tool_call_id=execution.tool_call_id,
                         content=content, run_id=run_id, step_id=step_base + steps,
                         # 预算增量由执行域算好（唯一计数点），这里只原样落盘：
@@ -3330,7 +3335,7 @@ class AgentRuntime:
         `trigger_dimension` 用**模式名**（ADR-0048 D5）：它不是配置字段路径，因为
         stuck 没有"该抬高哪一个 ceiling"可言——恢复要的是外部输入的变化。
         """
-        event = arms.session.append(
+        event = await arms.session.append_async(
             GUARD_STUCK, signal.as_event_data(),
             run_id=arms.run_id, step_id=arms.envelope_step(steps),
         )
@@ -3538,7 +3543,7 @@ class AgentRuntime:
             # `#318`：`session` 键在 `run/paused.data` 顶层（limits 里已有 session 的
             # **ceiling**，这里补的是**账行 identity + consumed**）。缺席 = 没接 session 账。
             pause_data["session"] = session_payload
-        paused = arms.session.append(
+        paused = await arms.session.append_async(
             RUN_PAUSED,
             pause_data,
             run_id=arms.run_id, step_id=envelope_step,
@@ -3623,7 +3628,7 @@ class AgentRuntime:
                 and event.data.get("tool_call_id") == operation.tool_call_id
                 for event in session.events
             ):
-                appended.append(session.append(
+                appended.append(await session.append_async(
                     OPERATION_RECONCILE_REQUIRED,
                     {
                         "tool_call_id": operation.tool_call_id,
@@ -3816,7 +3821,7 @@ class AgentRuntime:
             # （脱敏纪律——value 已在源事件里，事件不复制第二份）。
             # 本臂每次主循环 build 失败进一次；closeout 的二次 build 失败不进
             # 本臂（见 docstring），发射恰一次。
-            arms.session.append(
+            await arms.session.append_async(
                 CONTEXT_PROTECTED_FACTS_EXCEEDED,
                 {
                     "budget_tokens": error.budget_tokens,

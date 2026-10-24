@@ -89,9 +89,12 @@ class _FakeSessionService:
         return SimpleNamespace(run=self.run, subscriber=self.subscriber)
 
     async def stream_reconnect(self, *, session_id: str):
+        # 与真实 StreamReconnectHandle 同形：`events` 是重放窗口，watchtower 的
+        # 恢复路径要据此判断 `run/started` 是否已落盘（#1546）。
+        events = self.events.get(session_id, [])
         if self.active:
-            return SimpleNamespace(run=self.run, subscriber=self.subscriber)
-        return SimpleNamespace(run=None, subscriber=None)
+            return SimpleNamespace(run=self.run, subscriber=self.subscriber, events=events)
+        return SimpleNamespace(run=None, subscriber=None, events=events)
 
 
 def _settings():

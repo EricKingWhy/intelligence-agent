@@ -310,7 +310,12 @@ async def current_user_message(sessions: Any, session_id: str) -> SessionEvent |
 
 
 def explicit_remember_matches(user_text: str, content: str) -> bool:
-    """Require the proposed fact to be in the clause governed by the user's command."""
+    """Require the proposed fact to be in the clause governed by the user's command.
+
+    #1440 起无生产调用方（垫片改用 add 软校验）；保留是因为它的行为契约仍被
+    `tests/memory/v2/test_v2_governance.py` / `test_794_comma_clause.py` 当基线口径钉住，
+    而垫片的标点规范化（`tools._strip_edge_punctuation`）与这里逐字同源。
+    """
     if not content.strip() or _REMEMBER_NEGATION.search(user_text):
         return False
     clause, command_start, clause_end = _command_clause(user_text, _REMEMBER_INTENT)

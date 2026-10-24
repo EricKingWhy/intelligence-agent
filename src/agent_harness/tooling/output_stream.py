@@ -104,17 +104,22 @@ class ToolOutputStream:
                 else:
                     item = await self._aq.get()
             except TimeoutError:
-                events.extend(self._flush(pending))
+                events.extend(await self._flush(pending))
                 continue
             if item is None:
-                events.extend(self._flush(pending))
+                events.extend(await self._flush(pending))
                 return events
             pending.append(item)
             if sum(len(text) for _, text in pending) >= self._max_frame_chars:
-                events.extend(self._flush(pending))
+                events.extend(await self._flush(pending))
 
-    def _flush(self, pending: list[tuple[str, str]]) -> list[SessionEvent]:
-        """相邻同 channel 合并 → 按帧上限切分 → append durable 事件。"""
+    async def _flush(self, pending: list[tuple[str, str]]) -> list[SessionEvent]:
+        """相邻同 channel 合并 → 按帧上限切分 → append durable 事件。
+
+        #1489：这里是工具输出的逐帧热路径（长命令输出），走 `append_async` 把
+        durable 刷盘的等待移出事件循环——否则一次 bash 的输出洪水会让同 loop 的
+        SSE 心跳/其它会话停摆。
+        """
         if not pending:
             return []
         merged: list[list[str]] = []
@@ -127,7 +132,7 @@ class ToolOutputStream:
         events: list[SessionEvent] = []
         for channel, text in merged:
             for start in range(0, len(text), self._max_frame_chars):
-                events.append(self._session.append(
+                events.append(await self._session.append_async(
                     TOOL_OUTPUT_DELTA,
                     {
                         "tool_call_id": self._tool_call_id,

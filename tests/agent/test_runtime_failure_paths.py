@@ -390,8 +390,10 @@ class TestProviderContentModerationClassification:
             "id": TOOL_CALL_ID,
             "type": "tool_call",
         })
-        # 篡改：tool/call 写盘时抛含错误码的异常（模拟工具阶段异常抵达顶层兜底）
+        # 篡改：tool/call 写盘时抛含错误码的异常（模拟工具阶段异常抵达顶层兜底）。
+        # #1489 起工具阶段走异步入口，两套入口都要盖住——否则注入在热路径上静默失效。
         original_append = session.append
+        original_append_async = session.append_async
         marker_error = RuntimeError('data: {"error":{"code":"data_inspection_failed"}}')
 
         def sabotaged_append(event_type, data, **kwargs):
@@ -399,7 +401,13 @@ class TestProviderContentModerationClassification:
                 raise marker_error
             return original_append(event_type, data, **kwargs)
 
+        async def sabotaged_append_async(event_type, data, **kwargs):
+            if event_type == TOOL_CALL:
+                raise marker_error
+            return await original_append_async(event_type, data, **kwargs)
+
         session.append = sabotaged_append
+        session.append_async = sabotaged_append_async
         runtime = _runtime(model)
 
         result = await runtime.run(session, "计算 3 乘 4")
