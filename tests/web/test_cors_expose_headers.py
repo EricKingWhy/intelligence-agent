@@ -51,7 +51,7 @@ def cors_client(tmp_path: Path) -> TestClient:
         model_name="deepseek-chat",
         provider_store_path=str(tmp_path / "model-providers.json"),
     )
-    return TestClient(create_app(settings, enable_cors=True))
+    return TestClient(create_app(settings, enable_cors=True, allow_testserver=True))
 
 
 def test_cors_simple_response_exposes_all_custom_headers(cors_client: TestClient):

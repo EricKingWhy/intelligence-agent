@@ -14,6 +14,8 @@ Registry 的唯一职责：注册 / 查询 / 列出 / 导出模型定义。
 
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from agent_harness.tooling.contract import Tool, ToolExposure, exposure_of
 
 DYNAMIC_EXPOSURE_THRESHOLD = 30
@@ -84,10 +86,27 @@ class ToolRegistry:
 
     def model_definition(self, tool: Tool) -> dict:
         describe = getattr(tool, "description_for_registry", None)
+        args_schema = tool.args_schema
+        parameters = args_schema.model_json_schema()
+        schema_method = getattr(args_schema.model_json_schema, "__func__", None)
+        schema_hook = getattr(args_schema, "__get_pydantic_json_schema__", None)
+        schema_hook_method = getattr(schema_hook, "__func__", None)
+        core_schema_hook = getattr(args_schema, "__get_pydantic_core_schema__", None)
+        core_schema_hook_method = getattr(core_schema_hook, "__func__", None)
+        if (
+            schema_method is BaseModel.model_json_schema.__func__
+            and schema_hook_method is BaseModel.__get_pydantic_json_schema__.__func__
+            and core_schema_hook_method is BaseModel.__get_pydantic_core_schema__.__func__
+            and args_schema.model_config.get("title") is None
+            and args_schema.model_config.get("model_title_generator") is None
+            and args_schema.model_config.get("json_schema_extra") is None
+            and parameters.get("title") == args_schema.__name__
+        ):
+            parameters.pop("title")
         return {
             "name": tool.name,
             "description": describe(self) if callable(describe) else tool.description,
-            "parameters": tool.args_schema.model_json_schema(),
+            "parameters": parameters,
         }
 
     def export_model_definitions(self) -> list[dict]:

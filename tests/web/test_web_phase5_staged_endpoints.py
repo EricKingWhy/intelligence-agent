@@ -50,7 +50,7 @@ def bare_client(tmp_path):
         model_api_key="sk-test",
         enable_cors=False,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 # ── GET /api/reasoning-efforts ──

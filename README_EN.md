@@ -140,6 +140,16 @@ Settings are loaded via `pydantic-settings` from `.env` + environment variables 
 | `AUTO_COMPACT_THRESHOLD` | Auto-compaction trigger (default 0.70) |
 | `HARD_GUARD_THRESHOLD` | Hard context guard (default 0.85) |
 
+The control plane is loopback-only by default for both `Host` and browser origins.
+Non-loopback deployments must explicitly set `CONTROL_PLANE_ALLOWED_HOSTS` with
+comma-separated exact `host[:port]` values. `CONTROL_PLANE_ALLOWED_ORIGINS` adds
+comma-separated, complete browser Origins; `*` and `null` are rejected. For example:
+
+```dotenv
+CONTROL_PLANE_ALLOWED_HOSTS=control.example:8443
+CONTROL_PLANE_ALLOWED_ORIGINS=https://desktop.example
+```
+
 See `.env.example` for the full list, including `MILVUS_*` (memory), `ARTIFACT_STORE_*` (artifacts) and sandbox options.
 
 ## HTTP API
