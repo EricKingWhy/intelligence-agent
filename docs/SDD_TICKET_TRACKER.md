@@ -8683,3 +8683,16 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **复核修复轮读数订正（append-only，不改上方各行）**：上一行的 `6606 / 6509 / 97` 是树 `b259e06a`（ADR §9 修复提交）处 `check_review_coverage.py --list` 的读数；含收据提交 `3961ad7b` 与登记提交 `6bd52a42` 后，树 `6bd52a42` 实跑为 **rc=0、覆盖区间 `09ca47a1..HEAD`、6608 提交 / 已审查 6509 / 待判定 99**。本行入库后新增 docs 提交仍按 §8.1 判据①② 自指传递（覆盖区间末端自指，非缺口），不另订正。
 - **增量复核 I-02 读数订正（append-only，不改上方各行）**：上方「复核修复轮」行写的 `git diff --numstat b259e06a^..b259e06a -- docs/adr` = `+34/−0` 是笔误，实测为 **`+35/−0`**（`35 0`；`9af0366a..b259e06a` 同为 35，增量复核 `review-1490-incr.md` §5.5 复算一致）。ADR-0056 该提交仍为纯新增、删除列 0，判定不变。
 - **增量复核收尾轮（append-only，不改上方各行）**：独立增量复核 `review-1490-incr.md` 判 **CLOSED**（P0 = 0 / P1 = 0），剩余 P3/P4 三条本轮清零：① **I-01（P3）** ADR-0056 §9「应保留的不变量」汇总段末补一行指针「逐条清单见 #1543 正文（该票已逐行照录八组保留项）」，只增补指针、汇总句与既有正文未改；② **I-02（P4）** 见上一行订正；③ **I-03（P4）** 在 `report-1490-fix1.md` 末尾追加「增量复核后订正」小节（§4.2 块实为 L245–L253、L254 为空行；并登记 I-01/I-02 处置与 CLOSED 结论）。仓内改动为 `4878f64d`（ADR-0056 +1/−0、tracker +1/−0，无删除行）。新 tip `4878f64d`（tree `56b38f04`）裸全量 Gate-0 **7/7 PASS**（墙钟 55.78s < 60s 预算目标），收据 `docs/gate/4878f64d861a489d7cbdc7587861593fe1a38fc9.json`（提交 `7b23a8db`）；`scripts/check_review_coverage.py` rc=0（覆盖区间 `09ca47a1..HEAD`，树 `7b23a8db` 读数 **6611 提交 / 已审查 6509 / 待判定 102**，增量全部来自本票自身 docs 提交、覆盖区间末端自指）。§8.1 判据① `git diff --name-status --no-renames 4878f64d HEAD` 仅该收据一个 `A`、判据② `git status --short` 仅长期未跟踪的 `session.log` ⇒ 读数可传递到最终 tip。
+
+## #1501 a11y/对比度四类断言漂移——核实为已全覆盖，按票面停止施工（2026-10-24 · 夜间全权代理）
+
+- **票面条款执行**：票面明示「若四类已全部修复，停止施工并回报已覆盖」。在基线 fe3d9bd8 逐类核实：四类全部已由 #1465/#1476 修复，本票**零代码改动**，docs-only 交付证据（worktree `D:\intelligence-agent-wt\z1501`）。
+- **逐类已覆盖溯源**（`git log -S` 于 fe3d9bd8）：
+  - ① 死选择器 `.tl-seq`/`.tl-type`：`f44fba2f`（#1465）摘掉 `.tl-seq`，#1476 Phase 1 `8f02c458` 同步；现 t-contrast 只余历史注释（:6-7/:360/:476），等值断言的判别力原样保留（#1465 验收口径）。
+  - ② 旧 label/tooltip 断言（t-a11y-1372）：#1476 裁定二 `93c77f52`（决策点 4 项死条目改 menuitem 存在性）+ `51876875`（菜单关合后清残留指针再验）+ `357fd42f`（注释行号订正、断言零改动）。
+  - ③ t-contrast 菜单入口 role 漂移（恢复列表按 button 查）：`8f02c458`（#1476 Phase 1）改 `clickTopBarMenuItem` + menuitem 口径（现 :1166 注释块）。
+  - ④ `.model-fallback-val` 夹具漏展开：`dc645b9e`（#1175 三处夹具可达性，红基线误报为"元素不存在"）先修同类；`8f02c458` 落当前形状（切概览 tab + 展开 model 手风琴，:1421-1432）。
+- **实跑读数（本机 Windows）**：`pnpm exec playwright test e2e/t-contrast.spec.ts e2e/t-a11y-1372.spec.ts e2e/i-keyboard.spec.ts` → **176/176 绿**。分母核对：t-contrast 38 用例 × 2 主题 × 2 视口 = 152（单 project 76 ✓，与票面口径纠正一致）；t-a11y-1372 9 × 2 = 18；i-keyboard 3 × 2 = 6（未被误报基线红 ✓）。
+- **判别力负控（类④代表消融）**：把夹具的 model 手风琴展开段以 `if (false)` 旁路 → `[dark]`/`[light]` 双双红（元素在 DOM 但 `visibility: hidden`，`toBeVisible` 预检咬住）→ 已修断言仍有牙；`git checkout` 恢复后零残留。
+- **边界**：负载敏感 2 条超时（2 vCPU 必红、隔离绿）按票面归基线票（ticket-035-test-baseline-reproducibility）单独定性，本票不并入；不摘 spec、不改产品代码、不删断言——零改动即票面要求。
+- **残余/承接**：docs-only 交付（本节 + 月档 + PHASE_STATUS 索引）；PR `等待merge` 由维护者合并，不追 main。
