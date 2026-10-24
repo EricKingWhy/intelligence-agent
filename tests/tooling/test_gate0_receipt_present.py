@@ -173,6 +173,24 @@ def test_shape4_tail_must_be_docs_or_receipts_only(tmp_path):
     assert "违规 1 笔" in detail, detail
 
 
+def test_shape4_tail_code_is_not_washed_out_by_a_later_delete(tmp_path):
+    """逐笔判的必要性：t 之后「先加代码、后删代码」在 `t..HEAD` 整体 diff 里是空改动面，
+    只有逐笔判才看得见 ⇒ ④ 不成立（fail-closed）。"""
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    tip = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit(repo.receipt(tip), "docs(gate): receipt for tip")
+    repo.commit({"src/tmp.py": "x = 0\n"}, "code 3 (scratch)")
+    repo.remove("src/tmp.py", "code 3 reverted")
+
+    ok, detail, warn = _check(repo, base)
+
+    assert warn is False, detail
+    assert ok is False, detail
+    assert "违规 3 笔" in detail, detail
+
+
 # ── ①②③ 回归（此前无专用用例；本票只证明行为不变） ──
 
 
