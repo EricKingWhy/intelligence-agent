@@ -193,7 +193,7 @@ def test_deeply_nested_jwt_header_is_rejected_before_run_creation(tmp_path):
         _env_file=None,
         workspace_dir=str(workspace),
         jwt_secret=secret,
-    ))
+    ), allow_testserver=True)
     header_json = b'{"alg":"HS256","nested":' + b"[" * 10000 + b"0" + b"]" * 10000 + b"}"
     header = base64.urlsafe_b64encode(header_json).rstrip(b"=").decode("ascii")
     token = f"{header}.e30.invalid-signature"
