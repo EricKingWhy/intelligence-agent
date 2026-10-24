@@ -20,7 +20,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const appCss = readFileSync(join(here, '../styles/app.css'), 'utf8');
+/* Windows checkout 是 CRLF：ruleBlock 的正则以 \n 匹配多行选择器，读入时先归一。 */
+const appCss = readFileSync(join(here, '../styles/app.css'), 'utf8').replace(/\r\n/g, '\n');
 const indexCss = readFileSync(join(here, '../index.css'), 'utf8');
 
 /** 取一条 CSS 规则的声明块；选择器必须整行开头，避免命中注释 / 状态变体里的同名文本。 */

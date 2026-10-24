@@ -51,6 +51,7 @@ import {
   verification,
   T,
   type FrameSpec,
+  type MemoryFixture,
   type TaskReviewFixture,
 } from './fixtures';
 
@@ -83,6 +84,31 @@ const EVENTS = [
     seq: 5, session_id: ROW.session_id, run_id: 'r1', step_id: 1, time: T,
   },
 ];
+
+/** #1518：一条语义记忆夹具（形状同 memory-management.spec 的 semantic()），
+ *  让记忆面板里真实渲染出 `.memory-v2-row` 与 meta 徽标，供 token 基线测量。 */
+const MEMORY: MemoryFixture = {
+  id: 'm-contrast',
+  root_id: 'm-contrast',
+  version: 1,
+  content: '对比度回归夹具记忆',
+  scope: 'user_global',
+  tier: 'profile',
+  status: 'active',
+  kind: 'semantic',
+  project_id: null,
+  source_type: 'automatic',
+  source_session_id: 'source-session',
+  source_event_ids: ['source-event'],
+  payload: {
+    kind: 'semantic',
+    subject: '用户',
+    fact: '对比度回归夹具记忆',
+    category: 'preference',
+  },
+  metadata: {},
+  created_at: T,
+};
 
 async function openWorkspace(page: Page, theme: 'dark' | 'light'): Promise<void> {
   await routeApi(page, {
@@ -348,6 +374,56 @@ async function openTaskReview(
 }
 
 for (const theme of ['dark', 'light'] as const) {
+  /* #1518：记忆面板经 Radix `Dialog.Portal` 挂到 body——`.step-detail` 作用域里的
+   * `--border` 别名在这里**不可达**。修前 `border: 1px solid var(--border)` 整条
+   * invalid at computed-value time → 回落 initial（border-style: none，边框消失），
+   * `--bg-primary/--bg-secondary` 无定义 → 底色透明。这里用 computed style 把
+   * 「Portal 场景拿到合法 token」钉住，回归即红。 */
+  test(`[${theme}] #1518 记忆面板（Portal）token 基线：底色/边框非透明 + 12px 地板`, async ({ page }) => {
+    await routeApi(page, { memories: [MEMORY] });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await expect(page.locator('.app-frame')).toBeVisible({ timeout: 15_000 });
+    await clickTopBarMenuItem(page, '记忆管理');
+    const panel = page.locator('.memory-panel');
+    await expect(panel).toBeVisible();
+
+    const styleOf = (locator: ReturnType<Page['locator']>) =>
+      locator.evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return {
+          bg: cs.backgroundColor,
+          borderStyle: cs.borderTopStyle,
+          borderWidth: cs.borderTopWidth,
+          font: cs.fontSize,
+        };
+      });
+
+    /* #1519「小屏」档：桌面（1440）与窄屏（390，触发 memory-v2 的 600px 断点）
+     * 两个 viewport 都要拿到合法 computed style（#1518 症状在窄屏同样成立）。 */
+    for (const viewport of [
+      { width: 1440, height: 900, label: '桌面' },
+      { width: 390, height: 700, label: '小屏' },
+    ]) {
+      await page.setViewportSize(viewport);
+      await expect(panel).toBeVisible();
+
+      const input = await styleOf(panel.locator('.memory-v2-filters input').first());
+      expect(input.bg, `${viewport.label}：输入底色（--bg-secondary→--surface-2）不能是透明`).not.toBe('rgba(0, 0, 0, 0)');
+      expect(input.borderStyle, `${viewport.label}：输入边框（--border→--border-subtle）不能回落 none`).not.toBe('none');
+      expect(Number.parseFloat(input.font), `${viewport.label}：输入字号 ≥12px 地板`).toBeGreaterThanOrEqual(12);
+
+      const row = await styleOf(panel.locator('.memory-v2-row').first());
+      expect(row.bg, `${viewport.label}：记忆卡底色（--bg-primary→--surface-elevated）不能是透明`).not.toBe('rgba(0, 0, 0, 0)');
+      expect(row.borderStyle, `${viewport.label}：记忆卡边框不能回落 none`).not.toBe('none');
+
+      const chip = await styleOf(panel.locator('.memory-v2-meta span').first());
+      expect(Number.parseFloat(chip.font), `${viewport.label}：meta 徽标 12px 地板（修前 11px）`).toBeGreaterThanOrEqual(12);
+      expect(chip.bg, `${viewport.label}：meta 徽标底色（--bg-tertiary→--surface-2）不能是透明`).not.toBe('rgba(0, 0, 0, 0)');
+    }
+  });
+
   test(`[${theme}] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3）`, async ({ page }) => {
     await openWorkspace(page, theme);
     for (const selector of ['.session-item-meta', '.session-item-id']) {

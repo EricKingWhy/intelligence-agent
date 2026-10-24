@@ -831,7 +831,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: 4px;
   color: var(--text-secondary);
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -2070,7 +2070,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--text-primary);
 }
 .segmented-option.selected {
-  background: var(--surface-3);
+  background: var(--surface-overlay);
   color: var(--text-primary);
   font-weight: 600;
 }
@@ -5169,7 +5169,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .slash-menu-group {
   padding: 4px 10px 2px;
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 .slash-menu-item {
   display: flex;
@@ -5185,7 +5185,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .slash-menu-name {
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-family: var(--font-mono);
 }
 .slash-menu-desc {
@@ -5196,7 +5196,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* #1200：skill 行的参数提示（frontmatter `argument-hint`，如「主题…」）。 */
 .slash-menu-hint {
   color: var(--accent-text);
-  font-size: 11px;
+  font-size: var(--text-xs);
 }
 .slash-menu-empty {
   padding: 6px 10px;
@@ -5735,7 +5735,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 8.5px;
+  font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--fx-ghost);
@@ -5771,13 +5771,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: 5px;
   flex-wrap: wrap;
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   min-width: 0;
 }
 .ih-sub .mono {
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-mute);
   white-space: nowrap;
   overflow: hidden;
@@ -5798,7 +5798,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   height: 16px;
   padding: 0 5px;
   border-radius: 4px;
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   font-weight: 600;
   border: 1px solid var(--fx-hairline);
   background: var(--fx-surface-2);
@@ -5999,17 +5999,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* UI-03：视图 tab 条目计数（识别而非回忆）——效果图 `.tab .n` 胶囊。 */
 .detail-tab-count {
   padding: 0 3px;
-  min-width: 14px;
+  min-width: 16px;
   text-align: center;
   border-radius: 3px;
   border: 1px solid var(--fx-hairline-soft);
   background: var(--fx-surface-2);
   color: var(--fx-faint);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   font-weight: 400;
-  line-height: 12px;
-  height: 14px;
+  line-height: 16px;
+  height: 16px;
   box-sizing: border-box;
   font-variant-numeric: tabular-nums;
 }
@@ -6057,7 +6057,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: 0;
   background: transparent;
   color: var(--fx-faint);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 400;
   flex: 0 0 auto;
   white-space: nowrap;
@@ -6203,14 +6203,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: 1px solid var(--fx-hairline-strong);
   border-radius: var(--fx-r-sm);
   box-shadow: var(--fx-shadow-pop), var(--fx-edge-hi);
-  font-size: 9px;
+  font-size: var(--text-xs);
   line-height: 16px;
   color: var(--fx-faint);
   pointer-events: none;
   animation: tip-in 90ms var(--fx-ease);
 }
 .tl-tooltip-title {
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--fx-ink-2);
   white-space: nowrap;
@@ -6219,7 +6219,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .tl-tooltip-meta {
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-ghost);
   white-space: nowrap;
   overflow: hidden;
@@ -6234,7 +6234,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tl-tooltip-line {
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-ghost);
   font-variant-numeric: tabular-nums;
 }
@@ -6242,7 +6242,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   margin-top: 2px;
   padding-top: 3px;
   border-top: 1px solid var(--fx-hairline-soft);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-ghost);
 }
 @keyframes tip-in {
@@ -6304,7 +6304,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: var(--fx-r-pill);
   background: var(--fx-canvas-soft);
   color: var(--fx-mute);
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   cursor: pointer;
   transition:
     background var(--fx-dur-fast) var(--fx-ease),
@@ -6332,7 +6332,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .tl-chip-count {
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   font-variant-numeric: tabular-nums;
 }
@@ -6382,7 +6382,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: var(--fx-r-pill);
   background: transparent;
   color: var(--fx-primary-ink);
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   cursor: pointer;
   transition: background var(--fx-dur-fast) var(--fx-ease), color var(--fx-dur-fast) var(--fx-ease);
 }
@@ -6423,7 +6423,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   box-shadow: 0 1px 0 var(--fx-hairline-soft);
   color: var(--fx-ghost);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.09em;
   text-transform: uppercase;
   /* 标签密度按**轴自身**宽度收缩（见下方 `@container tl-axis` 的密度规则）。 */
@@ -6465,7 +6465,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   position: static;
   transform: translateX(-50%);
   white-space: nowrap;
-  font-size: 8px;
+  font-size: 10px;
   color: var(--fx-ghost);
   font-variant-numeric: tabular-nums;
 }
@@ -6484,7 +6484,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tl-axis-gutter::before {
   content: '事件 / 时间';
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.09em;
   color: var(--fx-ghost);
   white-space: nowrap;
@@ -6498,7 +6498,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tl-axis-dur::before {
   content: '耗时';
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.06em;
   color: var(--fx-ghost);
 }
@@ -6594,7 +6594,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   opacity: 0.55;
 }
 .tl-run-name {
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 650;
   color: var(--fx-ink-2);
   white-space: nowrap;
@@ -6608,19 +6608,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   height: 14px;
   padding: 0 4px;
   border-radius: 3px;
-  font-size: 7.5px;
+  font-size: var(--text-xs);
   flex: 0 0 auto;
 }
 .tl-run-count {
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 .tl-run-fail {
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--fx-danger-ink);
   white-space: nowrap;
@@ -6628,7 +6628,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tl-run-time {
   margin-left: auto;
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -6801,7 +6801,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 /* 效果图 `.fc-title`：11.5px / 550 / ink-2；hover 提亮到 ink；失败/运行态换语义色。 */
 .tl-title {
-  font-size: 11.5px;
+  font-size: var(--text-xs);
   font-weight: 550;
   letter-spacing: -0.005em;
   color: var(--fx-ink-2);
@@ -6826,7 +6826,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 /* P3-5：meta 主体必须可收缩（省略号），否则尾部「失败/运行中」tag 会被裁掉。 */
@@ -6835,7 +6835,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   text-overflow: ellipsis;
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-ghost);
 }
 .tl-tag {
@@ -6845,7 +6845,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 0 4px;
   border-radius: 3px;
   border: 1px solid transparent;
-  font-size: 7.5px;
+  font-size: var(--text-xs);
   font-weight: 650;
   letter-spacing: 0.02em;
   flex-shrink: 0;
@@ -6864,7 +6864,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tl-note {
   flex: 0 0 auto;
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   white-space: nowrap;
 }
@@ -6882,13 +6882,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 7px 11px;
   border-top: 1px solid var(--fx-hairline);
   background: var(--fx-panel);
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   min-width: 0;
 }
 .tl-foot-count {
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
 .tl-foot-grow {
@@ -6903,14 +6903,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .tl-kbd {
   display: inline-grid;
   place-items: center;
-  min-width: 14px;
-  height: 14px;
+  min-width: 18px;
+  height: 18px;
   padding: 0 3px;
   border: 1px solid var(--fx-hairline-strong);
   border-radius: 4px;
   background: var(--fx-surface-2);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .tl-foot-sync {
@@ -7016,7 +7016,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   width: auto;
   height: auto;
   background: none;
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-ghost);
 }
 .tl-track.is-empty::after {
@@ -7044,7 +7044,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   padding: 0 4px;
   font-family: var(--font-mono);
-  font-size: 7.5px;
+  font-size: var(--text-xs);
   font-weight: 700;
   line-height: 1;
   color: var(--fx-bar-ok-ink);
@@ -7061,7 +7061,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* 效果图 `.fc-dur`：mono 9px，右对齐；失败/运行态换语义色。 */
 .tl-dur {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-mute);
   text-align: right;
   white-space: nowrap;
@@ -7128,13 +7128,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: 5px;
   padding-bottom: 1px;
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .tl-drill-type {
   color: var(--fx-ink-2);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7144,7 +7144,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .tl-drill .mono {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-ghost);
   white-space: nowrap;
 }
@@ -7165,7 +7165,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: var(--fx-r-xs);
   background: var(--fx-card);
   color: var(--fx-ink-2);
-  font-size: 9px;
+  font-size: var(--text-xs);
   cursor: pointer;
   transition:
     background var(--fx-dur-fast) var(--fx-ease),
@@ -7195,7 +7195,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: 9px;
   background: var(--fx-warn-bg);
   color: var(--fx-warn-ink);
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   transition:
     background var(--fx-dur-fast) var(--fx-ease),
     border-color var(--fx-dur-fast) var(--fx-ease);
@@ -7447,7 +7447,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .step-detail .ov-metric-label {
   flex: 1;
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   white-space: nowrap;
   overflow: hidden;
@@ -7471,14 +7471,14 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 /* 效果图 `.metric .v .u`：单位是**小字**，不是数值的一部分。 */
 .step-detail .ov-metric-unit {
   margin-left: 2px;
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-weight: 500;
   letter-spacing: 0;
   color: var(--fx-mute);
 }
 .step-detail .ov-metric-sub {
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   line-height: 1.4;
   color: var(--fx-faint);
   overflow: hidden;
@@ -7582,7 +7582,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   color: var(--fx-warn-ink);
 }
 .step-detail .ov-acc-title {
-  font-size: 10.5px;
+  font-size: var(--text-xs);
   font-weight: 650;
   color: var(--fx-ink-2);
   white-space: nowrap;
@@ -7591,7 +7591,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .step-detail .ov-acc-kv {
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   white-space: nowrap;
   overflow: hidden;
@@ -7651,22 +7651,22 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 .step-detail .ov-acc .detail-row {
   gap: 8px;
   padding: 0;
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   line-height: 1.6;
 }
 .step-detail .ov-acc .detail-key {
   min-width: 0;
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .ov-acc .detail-val {
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-weight: 400;
   color: var(--fx-ink-2);
 }
 .step-detail .ov-acc .detail-val-mono,
 .step-detail .ov-acc .detail-val.code {
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-mute);
 }
 
@@ -7681,7 +7681,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: 1px solid var(--fx-hairline-soft);
   border-radius: 5px;
   background: var(--fx-canvas-soft);
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   color: var(--fx-ink-2);
   text-align: left;
 }
@@ -7693,13 +7693,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   white-space: nowrap;
 }
 .step-detail .ov-row .k {
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
   white-space: nowrap;
 }
 .step-detail .ov-row .v {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-ink-2);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -7744,7 +7744,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 6px 7px;
   border: 1px dashed var(--fx-hairline-strong);
   border-radius: 5px;
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   color: var(--fx-mute);
 }
 .step-detail .ov-empty svg {
@@ -7753,7 +7753,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .step-detail .ov-h {
   padding-top: 2px;
-  font-size: 8.5px;
+  font-size: 10px;
   font-weight: 650;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -7765,7 +7765,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 0 1px;
   border: 0;
   background: transparent;
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-primary-ink);
 }
 .step-detail .ov-toggle:hover {
@@ -7782,7 +7782,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: 1px solid var(--fx-hairline);
   border-radius: 4px;
   background: var(--fx-surface-2);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   font-weight: 600;
   white-space: nowrap;
   color: var(--fx-mute);
@@ -7792,7 +7792,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 2px 8px;
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 .step-detail .ov-kv dt {
   white-space: nowrap;
@@ -7808,7 +7808,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .step-detail .ov-kv dd.mono {
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
 }
 
 /* 效果图 `.decide*`：待审批卡（琥珀井）+ 已决行（绿/红）。 */
@@ -7825,7 +7825,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--fx-warn-ink);
 }
@@ -7835,12 +7835,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: 4px;
   background: var(--fx-canvas-soft);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-ink);
   word-break: break-all;
 }
 .step-detail .decide-why {
-  font-size: 9px;
+  font-size: var(--text-xs);
   line-height: 1.55;
   color: var(--fx-mute);
 }
@@ -7853,7 +7853,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: 6px;
   background: var(--fx-ok-bg);
   color: var(--fx-ok-ink);
-  font-size: 9.5px;
+  font-size: var(--text-xs);
 }
 .step-detail .decide-done.deny {
   border-color: var(--fx-danger-line);
@@ -7921,7 +7921,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--fx-ink-2);
 }
@@ -7932,7 +7932,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .art-meta .grow {
@@ -7948,7 +7948,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: 1px solid var(--fx-ok-line);
   border-radius: 4px;
   background: var(--fx-ok-bg);
-  font-size: 8px;
+  font-size: var(--text-xs);
   font-weight: 650;
   color: var(--fx-ok-ink);
 }
@@ -7968,7 +7968,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   color: var(--fx-ink-2);
 }
 .step-detail .art-preview .pv-head svg {
@@ -7986,12 +7986,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .step-detail .art-preview .pv-head .mono {
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .art-preview .pv-sub {
   gap: 4px;
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .art-preview .pv-foot {
@@ -7999,7 +7999,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .art-preview .pv-foot .grow {
@@ -8010,13 +8010,13 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   white-space: nowrap;
   text-overflow: ellipsis;
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
   color: var(--fx-mute);
 }
 /* 预览里的内容块（`ArtifactViewer` 的裸模式）收紧到面板内尺寸。 */
 .step-detail .art-preview .artifact-content-lines {
   max-height: 220px;
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 /* ── #1419 M：命令卡（效果图 `.term*`）——复用 `.step*` 卡头，只多输出井与卡尾 ──
@@ -8026,7 +8026,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
  *  这里只写输出井、行着色、卡尾与 live 点。 */
 .step-detail .term .step-title {
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--fx-ink-2);
 }
@@ -8050,7 +8050,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: 6px;
   background: var(--fx-canvas-soft);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   line-height: 1.65;
   color: var(--fx-ink-2);
   white-space: pre-wrap;
@@ -8081,7 +8081,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .term-foot .grow {
@@ -8089,7 +8089,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 .step-detail .term-foot .mono {
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
 }
 .step-detail .term-live-dot {
   width: 4px;
@@ -8108,12 +8108,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   padding: 0 1px 2px;
 }
 .step-detail .pane-head .lbl {
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .pane-head .n {
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-ghost);
 }
 .step-detail .pane-head .grow {
@@ -8185,11 +8185,11 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 10px;
+  font-size: var(--text-xs);
   color: var(--fx-ink-2);
 }
 .step-detail .step-title .mono {
-  font-size: 9px;
+  font-size: var(--text-xs);
   color: var(--fx-mute);
 }
 .step-detail .step-meta {
@@ -8198,12 +8198,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: 5px;
   overflow: hidden;
   white-space: nowrap;
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .step-meta .mono {
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--text-xs);
 }
 .step-detail .step-nums {
   display: flex;
@@ -8211,7 +8211,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   gap: 4px;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
 }
 .step-detail .step-nums .add {
   color: var(--fx-ok-ink);
@@ -8258,7 +8258,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border-radius: 6px;
   background: var(--fx-canvas-soft);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   line-height: 1.65;
 }
 .step-detail .dline {
@@ -8304,7 +8304,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   flex-wrap: wrap;
 }
 .step-detail .fc-note {
-  font-size: 9px;
+  font-size: var(--text-xs);
   line-height: 1.55;
   color: var(--fx-mute);
 }
@@ -8502,18 +8502,18 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 9.5px;
+  font-size: var(--text-xs);
 }
 .step-detail .ov-acc .detail-tool-row .k {
   flex: 0 0 auto;
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-faint);
 }
 .step-detail .ov-acc .detail-tool-row .v {
   margin-left: auto;
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--text-xs);
   color: var(--fx-mute);
 }
 
@@ -8650,12 +8650,12 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
 }
 /* Langfuse trace 跳转链接——继承 mono 字号，accent 色区分可点，hover 强化 */
 .detail-trace-link {
-  color: var(--color-accent, var(--info));
+  color: var(--accent-text);
   text-decoration: none;
-  border-bottom: 1px dashed color-mix(in srgb, var(--color-accent, var(--info)) 50%, transparent);
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent-text) 50%, transparent);
 }
 .detail-trace-link:hover {
-  color: var(--color-accent-strong, var(--color-accent, var(--info)));
+  color: var(--accent-text-strong);
   border-bottom-style: solid;
 }
 .detail-val-tag {
@@ -9282,7 +9282,7 @@ button.json-row {
   border-radius: 4px;
   background: transparent;
   color: var(--fx-faint);
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -12208,7 +12208,7 @@ button.json-row {
 }
 .provider-item-badge {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--text-xs);
   padding: 1px 6px;
   border-radius: var(--radius-full);
   background: var(--color-hover);
@@ -12246,7 +12246,7 @@ button.json-row {
   gap: 4px;
 }
 .provider-field-hint {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-tertiary);
 }
 .provider-key-row {
@@ -12343,7 +12343,7 @@ button.json-row {
 .provider-test-detail code {
   display: block;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   word-break: break-all;
   margin-top: 4px;
@@ -13097,7 +13097,7 @@ button.json-row {
   justify-content: center;
   overflow: hidden;
   padding: 2px;
-  font-size: 9px;
+  font-size: var(--text-xs);
   line-height: 1.1;
   text-align: center;
   color: var(--text-secondary);
