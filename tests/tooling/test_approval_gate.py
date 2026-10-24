@@ -454,6 +454,8 @@ class TestPermissionRuleEngineIntegration:
             # 表外文件承载选项的附着短旗值。
             "diff -X/etc/passwd a.txt b.txt",
             "file -m/etc/passwd README.md",
+            # 簇首 `-f<值>` 与空格形同语义，恢复 ASK（P2-8）。
+            "grep -fpatterns.txt src/app.py",
         ],
     )
     @pytest.mark.asyncio

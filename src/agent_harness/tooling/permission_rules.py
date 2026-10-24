@@ -232,6 +232,8 @@ _READONLY_FILE_OPTIONS = {
 #: 附着值是**匹配模式**而不是待读路径清单的短旗：`grep -ifile` 是 `-i -f ile`，
 #: `ile` 里只有模式，不会引出更多文件读取，因此它的附着值只做路径判定
 #: （`grep -f/etc/passwd` 仍是 ASK）。空格形保持保守 ASK，不放宽既有 ALLOW 面。
+#: 豁免只适用于**簇内前置了其它旗**的形态（`-ifile`）；簇首就是 `-f` 的
+#: `-fpatterns.txt` 与空格形同语义，仍 ASK（#1484 修复轮 3 P2-8）。
 _PATTERN_FILE_FLAGS = {"grep": frozenset({"f"})}
 #: 每个命令里自带取值的短旗：短旗簇扫到它即停，其后字符是它的值而不是新旗。
 #: 缺项按"该旗不带值"处理（继续扫）；漏判方向是多看一个候选路径，不是少看。
@@ -366,31 +368,39 @@ def _has_readonly_file_option(first: str, args: list[str]) -> bool:
         if option.startswith("--")
     }
     for arg in args:
-        if not arg.startswith("-") or arg == "-":
+        if not arg.startswith("-") or arg in ("-", "--"):
+            # `--` 是选项终止符，不是长选项（GNU getopt 之后全是操作数）。
             continue
         if arg.startswith("--"):
             if _matches_file_option(arg.split("=", 1)[0], long_options):
                 return True
             continue
         # 附着值同样是该选项的输入文件（`file -flist.txt` 的清单可再指向任意路径）。
-        # 只有模式来源的附着值（`grep -ifile`）例外，交给路径判定。
+        # 只有模式来源的附着值（`grep -ifile` = `-i -f ile`）例外，交给路径判定；
+        # 簇首即 `-f<值>`（`grep -fpatterns.txt`）与空格形同语义，不豁免。
         flag, attached = _scan_short_cluster(first, arg)
         if flag is None:
             continue
-        if attached is not None and flag in _PATTERN_FILE_FLAGS.get(first, frozenset()):
+        if (
+            attached is not None
+            and flag in _PATTERN_FILE_FLAGS.get(first, frozenset())
+            and arg[1] != flag
+        ):
             continue
         return True
     return False
 
 
 def _matches_file_option(name: str, options: set[str]) -> bool:
-    """长选项是否指向文件承载选项；含 GNU 双向无歧义前缀缩写。"""
+    """长选项是否指向文件承载选项；含 GNU 无歧义前缀缩写。
+
+    方向只有一个：**输入 token 是选项名前缀**（``--files0`` == ``--files0-from``）。
+    反向（token 比选项名更长，如 ``--files-with-matches`` vs ``--file``）在 GNU 下
+    是另一个选项，不是缩写（#1484 修复轮 3 P2-7）。
+    """
     if name in _EXACT_NON_FILE_OPTIONS:
         return False
-    return any(
-        name == option or option.startswith(name) or name.startswith(option)
-        for option in options
-    )
+    return any(name == option or option.startswith(name) for option in options)
 
 
 def _scan_short_cluster(first: str, arg: str) -> tuple[str | None, str | None]:

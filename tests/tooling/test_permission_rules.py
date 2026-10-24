@@ -195,6 +195,27 @@ class TestBashClassification:
     @pytest.mark.parametrize(
         "command",
         [
+            # GNU getopt_long 只把「输入 token 是选项名前缀」当缩写；反向（token 更长）
+            # 是另一个选项，不是缩写。`--` 是选项终止符，不是长选项本身。
+            "grep -rn --files-with-matches TODO src/",
+            "grep -- files",
+        ],
+    )
+    def test_reverse_long_prefix_and_terminator_are_allowed(self, command: str) -> None:
+        """反向长选项前缀与 `--` 终止符不得被文件承载选项表误伤（P2-7）。"""
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    def test_pattern_file_attached_value_inside_cluster_remains_allowed(self) -> None:
+        """集内：簇内前置了其它旗的 `-f` 附着值（`-ifile` = `-i -f ile`）仍 ALLOW。"""
+        assert classify_bash_command("grep -ifile README.md") is RuleVerdict.ALLOW
+
+    def test_pattern_file_attached_value_at_cluster_start_is_asked(self) -> None:
+        """集外：簇首 `-f<相对值>` 与空格形同语义，恢复 ASK（P2-8）。"""
+        assert classify_bash_command("grep -fpatterns.txt src/app.py") is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             # 短旗簇逐字符扫描：`-e`/`-i` 的取值不是文件承载选项；
             # `-if` 仍在簇内触达 `-f`，附着值走路径判定。
             "grep -efile README.md",
