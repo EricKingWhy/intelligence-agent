@@ -1428,8 +1428,9 @@ export function useSession() {
   const openLiveStream = useCallback(
     (spec: {
       sid: string;
-      /** 续传游标（-1 = 从头快照）。调用方负责先把它写进 lastAppliedSeqRef
-       *  （快照起点对齐），游标推导见模块级 cursorOf。 */
+          /** 续传游标（-1 = 从头快照），推导见模块级 cursorOf。首帧 seq 应为
+            *  afterSeq+1 起步（快照起点对齐）：lastAppliedSeqRef 与它的对齐由
+            *  调用方负责——写早或写进成功分支均可，同一同步块内首帧必晚于它。 */
       afterSeq: number;
       /** 调用方已推进并捕获的流代际。 */
       gen: number;
@@ -2462,9 +2463,12 @@ export function useSession() {
         }
         // 窗外 = 判为 launched：改用 WS 接流。游标取**本会话**真实 max seq，理由同
         // sendFollowUp（WS 快照会重放整段历史，旧终态会把 terminalSeen 提前置真）。
+        // 这里是业务侧唯一「代际捕获与开流之间隔着 await」的点：判别窗内用户已
+        // 切走/另起一摊时 openLiveStream 会谢绝——游标槽位也得跟着成功才写
+        //（#1504 审查 P3：谢绝时改写 lastAppliedSeqRef 会污染新流的续传记账）。
         const cursor = cursorOf(conversationRef.current, sessionId);
+        if (!openLiveStream({ sid: sessionId, afterSeq: cursor, gen, initialConv: conversationRef.current })) return;
         lastAppliedSeqRef.current = cursor;
-        openLiveStream({ sid: sessionId, afterSeq: cursor, gen, initialConv: conversationRef.current });
         // 悬挂的 promise 仍会落定：真是事件流就什么都不做，否则说明判错了。
         void pending
           .then((late) => {
@@ -2608,9 +2612,12 @@ export function useSession() {
             // 游标取**本会话**对话的真实 max seq，理由同 sendFollowUp（完整说明
             // 见模块级 cursorOf）：WS 快照重放旧终态会把 terminalSeen 提前置真。
             const cursor = cursorOf(conversationRef.current, sessionId);
+            if (!openLiveStream({ sid: sessionId, afterSeq: cursor, gen, initialConv: conversationRef.current })) return;
+            // 游标/模式与开流同拍、写在成功之后（同 resumePausedRun 的 P3 修复：
+            // 判别窗内被取代时，不得把 viewing 拽回一条没有流的 live，也不得
+            // 改写跨会话游标槽位）。
             lastAppliedSeqRef.current = cursor;
             setMode({ kind: 'live', sessionId });
-            openLiveStream({ sid: sessionId, afterSeq: cursor, gen, initialConv: conversationRef.current });
             // 这条 promise 仍会悬挂到 run 结束。**窗外落定必须照样消费**：判别是
             // 推断（idle/404/409 都是极短 JSON，攒不住），推断错了不能静默——
             // 迟到的 idle 会白白接流到假「连接中断」，迟到的 409/404 会被吞成
