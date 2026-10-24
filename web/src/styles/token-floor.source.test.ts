@@ -164,6 +164,9 @@ function collectFontSizes(): Finding[] {
         }
       }
     } else {
+      /* TSX 分母覆盖**字面量 px**；表达式型（如 Donut.tsx 的
+       * Math.max(11/12, Math.round(size*k))）不进分母——当前调用点无 <12 活违规，
+       * 新增表达式字号需人工核查（承诺范围如实收窄，审查 F3）。 */
       const noComments = text
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .replace(/^\s*\/\/.*$/gm, '');

@@ -424,6 +424,39 @@ for (const theme of ['dark', 'light'] as const) {
     }
   });
 
+  /* #1518：分段选中态（审查 F1 的回归钉）——`.segmented-option.selected` 修前用
+   * 裸名 `--surface-3`（真缺定义，`--color-surface-3` 是另一个别名），底色透明；
+   * 修后 `--surface-overlay`（两主题定义块齐备）。TaskCreationDialog 经 rail 项目
+   * 菜单打开，自主度分段默认选中 'ask'（在折叠的高级设置里，先展开）。 */
+  test(`[${theme}] #1518 分段选中态 token 基线（TaskCreationDialog）`, async ({ page }) => {
+    await routeApi(page, {
+      sessions: [sessionRow('s3', { id: 'p2', title: '项目 beta' })],
+      projects: [{ id: 'p1', path: 'D:/repos/alpha', title: '项目 alpha', session_ids: [] }],
+      permissionModes: PERMISSION_MODES,
+    });
+    await page.addInitScript((t) => localStorage.setItem('ahi.theme', t), theme);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    await expect(page.locator('.app-frame')).toBeVisible({ timeout: 15_000 });
+
+    const project = page.locator('.rail-project').filter({ hasText: '项目 alpha' });
+    await expect(project).toBeVisible({ timeout: 10_000 });
+    await project.locator('.rail-project-head .rail-menu-btn').click();
+    await page.getByRole('menuitem', { name: '新建任务…' }).click();
+    const dialog = page.locator('.project-dialog[aria-label="新建任务"]');
+    await expect(dialog).toBeVisible({ timeout: 10_000 });
+    await dialog.locator('.project-advanced-toggle').click();
+
+    const selected = dialog.locator('.segmented-option.selected').first();
+    await expect(selected).toBeVisible();
+    const style = await selected.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return { bg: cs.backgroundColor, font: cs.fontSize };
+    });
+    expect(style.bg, '分段选中底色（--surface-3→--surface-overlay）不能是透明').not.toBe('rgba(0, 0, 0, 0)');
+    expect(Number.parseFloat(style.font), '分段选中字号 ≥12px 地板').toBeGreaterThanOrEqual(12);
+  });
+
   test(`[${theme}] 元数据与时间线序号：12px 地板 + 对比度 ≥4.5（R2/R3）`, async ({ page }) => {
     await openWorkspace(page, theme);
     for (const selector of ['.session-item-meta', '.session-item-id']) {
