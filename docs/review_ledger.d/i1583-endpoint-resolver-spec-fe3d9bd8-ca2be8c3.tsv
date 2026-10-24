@@ -1,0 +1,1 @@
+2026-10-25	#1583 endpoint-guard async resolver test; Spec PASS; patches _aresolved_addresses, no real DNS, OSError maps to APIConnectionError with zero transport/credentials; no production scope; P0-P4=0; evidence docs/phase_status/2026-10.md#1583	fe3d9bd8c5015b941a75203041517d81eb90f2ee..ca2be8c3bc51d96fa6236d3c4225b66f68e3603c
