@@ -381,11 +381,23 @@ class TestRequestTimeGuard:
 
         请求连 transport 都不该到；异常类型不必是守卫拒绝（它按瞬时连接失败处理，
         可重试），但"零请求"是硬要求。
+
+        本用例是 async，**两个解析器都必须钉死必抛**：只 patch 同步的
+        `_resolved_addresses` 的话，`_async_hook → _aresolved_addresses` 仍走真实
+        解析——原实现就吃这个亏：`.test` 名义上不可解析，但环境一旦开了通配 DNS
+        （VPN / 沙箱），未登记主机名会被解析进 198.18/15，而该网段按裁决 B 是
+        **设计上放行**的，"解析失败"分支就静默变成"放行"，用例假红转假绿全看
+        机器网络状态（2026-10-24 实测）。钉死解析器后判定与 DNS 无关。
         """
+
         def _boom(host: str, port: int | None) -> list[str]:
             raise OSError("resolver unavailable")
 
+        async def _aboom(host: str, port: int | None) -> list[str]:
+            raise OSError("resolver unavailable")
+
         monkeypatch.setattr(endpoint_guard, "_resolved_addresses", _boom)
+        monkeypatch.setattr(endpoint_guard, "_aresolved_addresses", _aboom)
         recorder = _Recorder()
         model = _model("http://metadata.test/v1")
         _install(model, recorder)
