@@ -8695,3 +8695,4 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **台账**：`docs/review_ledger.d/t1523-timeline-keyboard-focus-fe3d9bd8-416f47d4.tsv`（desc 445 字符，范围 fe3d9bd8..416f47d4）。
 - **环境纪律**：worktree 以 junction 复用 main 的 `.venv`/`web/node_modules`；jsdom 不模拟点击移焦，F1 回归测试用显式 focus() 模拟浏览器点击落焦。
 - **残余/承接**：PR 打 `等待merge` 由维护者合并（不追 main）；#1480 命令面板焦点为独立票未触及；vitest 两个既有红已在 #1526 证据链中对 fe3d9bd8 基线复现。
+- **Gate-0（append-only）**：记账树 `8722ac95` 裸全量 Gate-0 **7/7 PASS**（墙钟 145.8s > 60s 预算目标，仅告警），收据 `docs/gate/8722ac9538733f7ebbb3797f59cc663591e74a34.json`。`receipt-present` 报 2 笔代码提交缺收据（`0aece830`/`416f47d4`，一收据只覆盖冻结 tip 自身），首周 warn-only（窗口止 2026-10-25T09:21:24Z），guards 未转红——与 #1489/#1490/#1432 同形；**PR 须在窗口前 merge，否则该形状在 CI 转硬红**。
