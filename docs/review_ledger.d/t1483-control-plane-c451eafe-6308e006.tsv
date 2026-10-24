@@ -1,0 +1,1 @@
+2026-10-23	#1483 Standards + Spec review：本机控制面 loopback 绑定、精确 Host/Origin、中央 HTTP/WS 边界与显式 CORS；fixed point c451eafe；P0/P1/P2/P3/P4=0/0/0/0/0	c451eafe3b35328cb37fcf9cb2101f7cd7c27a7b..6308e006

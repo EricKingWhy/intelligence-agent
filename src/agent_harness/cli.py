@@ -1502,11 +1502,11 @@ def main() -> None:
 def _main_serve(argv: list[str]) -> None:
     """W-11（#355）：单机服务冷启动闭环（附着 → 否则竞争启动 → 二次检查）。
 
-    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 127.0.0.1 /
-    localhost，个人桌面服务不暴露 LAN）；远程/LAN 部署保持既有显式配置入口
-    （`create_prod_app` + 显式 jwt_secret），不经本命令。
+    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 IPv4/IPv6
+    loopback，个人桌面服务不暴露 LAN）。控制面默认仅本机；非回环部署必须显式
+    配置 `CONTROL_PLANE_ALLOWED_HOSTS`，才能通过 Host 闸。
     """
-    from agent_harness.host_service import HostServiceError, serve_once
+    from agent_harness.host_service import HostServiceError, _loopback_url, serve_once
 
     parser = argparse.ArgumentParser(
         prog="agent-harness serve",
@@ -1515,8 +1515,8 @@ def _main_serve(argv: list[str]) -> None:
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        choices=["127.0.0.1", "localhost"],
-        help="绑定地址；只允许 loopback（W-11：个人服务不暴露 LAN，远程部署走显式配置入口）",
+        choices=["127.0.0.1", "localhost", "::1"],
+        help="绑定地址；本命令只允许 IPv4/IPv6 loopback；非回环部署须显式配置 CONTROL_PLANE_ALLOWED_HOSTS",
     )
     args = parser.parse_args(argv)
     settings = Settings()
@@ -1533,7 +1533,7 @@ def _main_serve(argv: list[str]) -> None:
         return
     if not outcome.served and outcome.endpoint is not None:
         print(
-            f"已有本机服务在运行：http://127.0.0.1:{outcome.endpoint.port}"
+            f"已有本机服务在运行：{_loopback_url(outcome.endpoint.host, outcome.endpoint.port, '')}"
             "（已附着，本进程退出）"
         )
 

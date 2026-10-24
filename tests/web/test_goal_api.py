@@ -66,7 +66,7 @@ def client(tmp_path, monkeypatch):
         model_api_key="sk-test",
         enable_cors=False,
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     return TestClient(app), app, settings
 
 
@@ -110,6 +110,7 @@ class TestGetGoal:
                     model_api_key="sk-test", enable_cors=False,
                 ),
                 enable_cors=False,
+                allow_testserver=True,
             )
         )
         second = fresh.get(f"/api/sessions/{session_id}/goal").json()

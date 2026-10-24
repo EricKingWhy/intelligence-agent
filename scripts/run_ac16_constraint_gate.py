@@ -1821,8 +1821,10 @@ class _RealRunner:
         # 事件循环——detached run task 与 `runner.drain()` 必须落在同一个 loop 上，否则
         # 抽取 pump 的任务属于另一个 loop，`drain()` 等不到。ASGITransport 在当前 loop
         # 内联跑 ASGI app，正是这个语义。
+        # ASGITransport still emits the base URL's Host header; use the real
+        # loopback Host so production create_app's central Host gate is exercised.
         self._client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=self._app), base_url="http://ac16.local",
+            transport=httpx.ASGITransport(app=self._app), base_url="http://127.0.0.1:8000",
         )
 
     async def _wire_memory_formation(self, settings: Any) -> None:  # pragma: no cover - 需凭证

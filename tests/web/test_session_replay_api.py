@@ -56,6 +56,7 @@ def _client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(
         Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=False,
+        allow_testserver=True,
     ))
 
 

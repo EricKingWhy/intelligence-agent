@@ -120,7 +120,9 @@ async def test_hard_kill_preserves_unmatched_start_without_resubmitting_provider
         workspace_dir=str(tmp_path),
         model_api_key="sk-test",
         enable_cors=False,
-    ))
+    ),
+    allow_testserver=True,
+    )
     async with restart_app.router.lifespan_context(restart_app):
         recovered = store.read_events(session_id)
 
