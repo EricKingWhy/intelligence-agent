@@ -50,7 +50,11 @@ from agent_harness.memory.v2 import (
     TrustedMemoryIdentity,
 )
 from agent_harness.memory.v2._sqlite import connect
-from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.capability import (
+    SECRET_CONTENT_REJECTION,
+    MemoryRejectionReason,
+    MemoryV2Service,
+)
 from agent_harness.memory.v2.eligibility import (
     MEMORY_OPT_OUT_FIELD,
     decide_run_end_eligibility,
@@ -88,6 +92,9 @@ from agent_harness.tooling import (
 )
 from agent_harness.tools.bash import BashTool
 from agent_harness.web.app import create_app
+from agent_harness.web.domain_errors import (
+    MEMORY_REASON_CODE_HEADER as _MEMORY_REASON_CODE_HEADER,
+)
 from evaluation.memory_v2_quality import (
     DEFAULT_GOLD_PATH,
     GoldCase,
@@ -409,7 +416,14 @@ _SECRET_CANDIDATE: dict[str, Any] = {
 }
 
 _SECRET_SENTINEL = "NEVER-A-REAL-CREDENTIAL"
-_SECRET_POLICY_REJECTION = "该内容匹配凭证或密钥规则，不能写入长期记忆。"
+
+#: The machine-readable rejection reasons that count as a blocked secret write
+#: (#1440 C case). Judged by code, never by message text; anything else — missing
+#: code, unknown code — is NOT blocked (fail-closed).
+_SECRET_BLOCK_REASONS = frozenset({
+    MemoryRejectionReason.SECRET_CONTENT.value,
+    MemoryRejectionReason.THREAT_PATTERN.value,
+})
 
 #: Automatic-pipeline secret probes and the probe path each one actually exercises.
 #: Keyed by case id only (never read from `case.expected`).
@@ -514,9 +528,11 @@ _INELIGIBLE_SCRIPTS: dict[str, dict[str, Any]] = {
 #: The explicit-command secret probe: the tool boundary must refuse to persist it.
 _EXPLICIT_SECRET_PROBE = "explicit_remember_secret_probe"
 #: `RememberMemoryV2Tool`'s refusal text when it matched the secret rule. Both the
-#: "no explicit instruction" and "secret" refusals use PERMISSION_DENIED, so the
-#: message is the only discriminator the tool's return exposes (tools.py:207-211).
-_EXPLICIT_SECRET_REFUSAL = _SECRET_POLICY_REJECTION
+#: "no explicit instruction" and "secret" refusals use PERMISSION_DENIED. The tool now
+#: also returns `metadata["reason_code"]` (#1440 C case), but this explicit-path verdict
+#: still reads the message: the C-case ticket scoped the code-based judgement to the
+#: create/update/HTTP probes, so switching this one is a separate decision.
+_EXPLICIT_SECRET_REFUSAL = SECRET_CONTENT_REJECTION
 
 
 def _trusted_identity(case_id: str) -> TrustedMemoryIdentity:
@@ -586,6 +602,17 @@ def _seed_draft(
     )
 
 
+def _reason_is_blocking(reason_code: Any) -> bool:
+    """Fail-closed: only a known content-rejection code counts as blocked.
+
+    `None`, a missing attribute, or an unrecognised code all mean NOT blocked — the
+    probe must never read "the guard fired" out of something it cannot attribute.
+    """
+    if reason_code is None:
+        return False
+    return str(getattr(reason_code, "value", reason_code)) in _SECRET_BLOCK_REASONS
+
+
 async def _run_secret_write_probe(
     path: str,
     *,
@@ -595,16 +622,18 @@ async def _run_secret_write_probe(
 ) -> bool:
     """Drive a real create/update/HTTP-edit boundary with a scanner-positive marker.
 
-    Returns whether every step behaved: the secret attempt was rejected with the exact
-    policy message (and, for api_edit, HTTP 403), while the interleaved safe edit
-    committed exactly one new version with no marker in any version.
+    Returns whether every step behaved: the secret attempt was rejected by the content
+    policy — judged by the exception's machine-readable `reason_code` (#1440 C case),
+    never by message text — and, for api_edit, carried that code across HTTP 403, while
+    the interleaved safe edit committed exactly one new version with no marker in any
+    version.
     """
     secret = f"api_key={_SECRET_SENTINEL}"
     if path == "direct":
         try:
             await service.create(_seed_draft(secret, trusted), trusted)
         except PermissionError as error:
-            create_blocked = str(error) == _SECRET_POLICY_REJECTION
+            create_blocked = _reason_is_blocking(getattr(error, "reason_code", None))
         else:
             create_blocked = False
         previous = await service.create(
@@ -619,7 +648,7 @@ async def _run_secret_write_probe(
         try:
             await service.update(safe_edit.id, _seed_draft(secret, trusted), trusted)
         except PermissionError as error:
-            update_blocked = str(error) == _SECRET_POLICY_REJECTION
+            update_blocked = _reason_is_blocking(getattr(error, "reason_code", None))
         else:
             update_blocked = False
         versions = await service.versions(safe_edit.root_id, trusted)
@@ -709,7 +738,7 @@ async def _run_secret_write_probe(
         secret_versions = await service.versions(secret_target.root_id, api_identity)
         return bool(
             response.status_code == 403
-            and response.json().get("detail") == _SECRET_POLICY_REJECTION
+            and _reason_is_blocking(response.headers.get(_MEMORY_REASON_CODE_HEADER))
             and _SECRET_SENTINEL not in response.text
             and len(safe_versions) == 2
             and any(item.content == safe_content for item in safe_versions)

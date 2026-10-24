@@ -56,6 +56,18 @@ git clone --depth 1 https://github.com/openai/codex.git D:\reference\codex
 
 （DeepSeek Harness 的核查链接已在 Reuse Matrix §3 / §7，此处不重复。）
 
+### 模型端点 DNS pinning 与 SSRF 传输（#1554）
+
+| 来源 | 是什么 | 看什么 |
+| --- | --- | --- |
+| LangChain Core `SSRFSafeTransport`（本机浅克隆 `D:/reference/langchain` @ `b15a385cb1aa4507b86a3ba1e6430748b0c4ae4b`，MIT） | 生产级 URL 请求的逐跳地址校验 | `libs/core/langchain_core/_security/_transport.py:31-115`：解析并校验每个 DNS 答案，使用首个已校验 IP 改写请求目标，同时保留原 Host 和 TLS SNI；每次重定向再次进入传输层校验。同步实现见 `:130-194`。本仓沿用其机制，不复制代码或全拦私网策略。 |
+| Pydantic `httpx2/httpcore2`（本机浅克隆 `D:/reference/httpx2` @ `d91c9f4236523eb5978ca800944fa0078f17409f`，BSD-3-Clause） | 本项目实际使用的 HTTP transport fork | `src/httpcore2/httpcore2/_async/http_proxy.py:258-302` 与 `src/httpcore2/CHANGELOG.md:7-11`：2.13.1 起，`sni_hostname` 用于代理隧道内目标 TLS，而不会覆盖代理自身 TLS；该能力覆盖 sync/async 连接实现。 |
+| [Python `socket.getaddrinfo` 文档](https://docs.python.org/3.13/library/socket.html#getaddrinfo) | 标准库解析契约 | 解析结果包含传给 socket 的 `sockaddr`；网络连接应使用同一结果，不能在校验后再次按名称解析。 |
+| [HTTPX Clients 官方文档](https://www.python-httpx.org/advanced/clients/) | 成熟客户端的连接池与性能依据 | `Client` 复用连接可减少同主机请求的延迟和握手开销。本仓继续复用主机的默认连接池；跨主机重定向走短生命周期隔离池，关闭时释放连接。 |
+| [urllib3 PoolManager 实现](https://github.com/urllib3/urllib3/blob/main/src/urllib3/poolmanager.py) 与[高级用法](https://github.com/urllib3/urllib3/blob/main/docs/advanced-usage.rst) | 成熟客户端的连接池隔离依据 | PoolManager 以 scheme、host、port 等请求上下文建立 pool key；HTTPS 文档也明确区分连接目标 IP 与证书主机名。本仓不复制上游代码，只保留原主机的 TLS 身份边界。 |
+
+引用纪律：代码机制以以上固定 clone commit 为准；实际端点策略仍以 ADR-0032 §7.4 和 #1554 为准。来源用于 PORT DESIGN，不把 LangChain 的全私网拦截默认值移植进本项目。
+
 ### 模型推理档位与 Provider 控制（#865 已核实来源，2026-10-08）
 
 | 来源 | 是什么 | 看什么 |
