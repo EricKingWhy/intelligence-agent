@@ -7,15 +7,15 @@
 - 所有者 loopback/LAN 的保存与连接测试照旧通过；例外只对登记的端点生效。
 - 错误明确说明"被误配置守卫拒绝"；不加任何二次审批。
 
-受控手段：`httpx2.MockTransport` 充当服务器（逐跳可计数、可回 302），
-`endpoint_guard` 的两个解析函数被替换成受控结果。真实 socket 一次都不开——
-"零请求"是传输层计数为 0，不是"没观察到"。
-**唯一例外**是 `test_owner_loopback_connection_test_still_works`：它起一个真
-`ThreadingHTTPServer` 绑 127.0.0.1，证明放行路径确实能连通（仍不碰任何元数据地址）。
+受控手段：`httpx2.MockTransport` 充当大多数用例的可计数服务器（逐跳可计数、可回 302），
+`endpoint_guard` 的解析函数由受控结果驱动。只有真实 socket 用例会在本机开监听器：
+所有者 loopback 连通性检查绑定 127.0.0.1；DNS rebinding 用例绑定 0.0.0.0 并记录
+目标地址，使用受控解析器在 127.0.0.1 与 127.0.0.2 间切换。用例不访问外网或元数据地址。
 """
 
 from __future__ import annotations
 
+import asyncio
 import http.server
 import ipaddress
 import json
@@ -68,10 +68,12 @@ class _Recorder:
     def __init__(self, redirect_to: str | None = None) -> None:
         self.redirect_to = redirect_to
         self.hosts: Counter[str] = Counter()
+        self.host_headers: list[str | None] = []
         self.auth_headers: list[str | None] = []
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.hosts[request.url.host] += 1
+        self.host_headers.append(request.headers.get("host"))
         self.auth_headers.append(request.headers.get("authorization"))
         if self.redirect_to is not None:
             location, self.redirect_to = self.redirect_to, None  # 只跳一次
@@ -90,10 +92,10 @@ def fake_resolver(monkeypatch):
     real_async = endpoint_guard._aresolved_addresses
 
     def _sync(host: str, port: int | None) -> list[str]:
-        return table.get(host) or real_sync(host, port)
+        return table[host] if host in table else real_sync(host, port)
 
     async def _async(host: str, port: int | None) -> list[str]:
-        return table.get(host) or await real_async(host, port)
+        return table[host] if host in table else await real_async(host, port)
 
     monkeypatch.setattr(endpoint_guard, "_resolved_addresses", _sync)
     monkeypatch.setattr(endpoint_guard, "_aresolved_addresses", _async)
@@ -118,7 +120,7 @@ def _install(model, recorder: _Recorder) -> None:
     for client in (model.root_client, model.root_async_client):
         inner = client._client
         inner._mounts = {}
-        inner._transport = httpx2.MockTransport(recorder)
+        inner._transport._inner = httpx2.MockTransport(recorder)
 
 
 async def _invoke(model) -> None:
@@ -220,16 +222,16 @@ class TestSaveTimeRejection:
         assert url_rejection(url) is None, url
 
     def test_legacy_parser_matches_inet_aton_on_sample(self):
-        """规范化层与 ``socket.inet_aton`` 同口径（补零 / 进制 / 段长边界）。
+        """常见 legacy forms 与本机 ``socket.inet_aton`` 对照。
 
-        自己实现而要的是跨平台确定性，判据就得跟系统的口径对齐——用差分法钉住，
-        否则补零写法会悄悄从"拦截"退回"当域名放行"（#1485 修复轮实测）。
+        算法固定采用 POSIX ``inet_aton`` 语义；部分平台接受集更窄，因此最大八进制
+        单段写法另用固定预期验证，不让 Windows 的差异改变跨平台结果。
         """
         samples = [
             "0xa9fea9fe", "0x00a9fea9fe", "0xA9FEA9FE", "2852039166",
             "0251.0376.0251.0376", "00000251.0376.0251.0376", "169.254.0xa9.0xfe",
             "0x7f.1", "0x007f.1", "2130706433", "0177.0.0.1", "127.1",
-            "037777777777", "0", "00", "0x0000", "0x00000000000000a9fea9fe",
+            "0", "00", "0x0000", "0x00000000000000a9fea9fe",
             "0x", "09", "0009", "256.1.1.1", "1.2.3.4.5", "0xa9fea9fe.com",
             "4294967296", "1.16777216",
             # 剥前导零不能"补出"合法写法：``00X4`` 不是任何进制（inet_aton 也拒）。
@@ -244,6 +246,9 @@ class TestSaveTimeRejection:
             except OSError:
                 expected = None
             assert endpoint_guard._legacy_ipv4(host) == expected, host
+        assert endpoint_guard._legacy_ipv4("037777777777") == ipaddress.IPv4Address(
+            "255.255.255.255",
+        )
 
     def test_store_create_rejects_metadata_target_with_guard_message(self, tmp_path):
         store = ProviderStore(tmp_path / "p.json", MemoryCredentialStore())
@@ -375,6 +380,20 @@ class TestRequestTimeGuard:
         assert recorder.hosts == Counter()
 
     @pytest.mark.asyncio
+    async def test_empty_dns_answers_fail_closed(self, fake_resolver):
+        fake_resolver["empty.test"] = []
+        recorder = _Recorder()
+        model = _model("http://empty.test/v1")
+        _install(model, recorder)
+
+        with pytest.raises(APIConnectionError) as excinfo:
+            await _invoke(model)
+
+        assert isinstance(excinfo.value.__cause__, socket.gaierror)
+        assert recorder.hosts == Counter()
+        assert recorder.auth_headers == []
+
+    @pytest.mark.asyncio
     async def test_redirect_into_link_local_is_blocked_per_hop(self, fake_resolver):
         """第一跳合法 → 302 到元数据目标：第二跳在发出前被拦，零请求零凭据。"""
         fake_resolver["metadata.test"] = [_METADATA_IP]
@@ -389,6 +408,21 @@ class TestRequestTimeGuard:
         assert recorder.hosts["127.0.0.1"] == 1
         assert recorder.hosts["metadata.test"] == 0
         assert len(recorder.auth_headers) == 1  # 只有第一跳，且确实带了凭据
+
+    @pytest.mark.asyncio
+    async def test_safe_redirect_rechecks_and_pins_each_hostname(self, fake_resolver):
+        fake_resolver["source.test"] = ["198.18.1.1"]
+        fake_resolver["redirect.test"] = ["198.18.1.2"]
+        recorder = _Recorder(redirect_to="http://redirect.test/v1/chat/completions")
+        model = _model("http://source.test/v1")
+        _install(model, recorder)
+
+        await _invoke(model)
+
+        assert recorder.hosts == Counter({"198.18.1.1": 1, "198.18.1.2": 1})
+        assert recorder.host_headers == ["source.test", "redirect.test"]
+        assert recorder.auth_headers[0].startswith("Bearer ")
+        assert recorder.auth_headers[1] is None
 
     @pytest.mark.asyncio
     async def test_allowlisted_endpoint_exception_applies_per_request(
@@ -467,7 +501,8 @@ class TestRequestTimeGuard:
         model = _model("http://0x7f.1:11434/v1")
         _install(model, recorder)
         await _invoke(model)
-        assert recorder.hosts["0x7f.1"] == 1
+        assert recorder.hosts["127.0.0.1"] == 1
+        assert recorder.host_headers == ["0x7f.1:11434"]
         assert recorder.auth_headers[0].startswith("Bearer ")
 
     def test_sync_invoke_path_is_also_guarded(self, fake_resolver):
@@ -629,3 +664,166 @@ async def test_owner_loopback_connection_test_still_works():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+class _ObservedChatHandler(_ChatHandler):
+    def do_POST(self) -> None:
+        self.server.request_observations.append(
+            (self.connection.getsockname()[0], self.headers.get("Host")),
+        )
+        super().do_POST()
+
+
+@pytest.fixture
+def rebind_http_server():
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), _ObservedChatHandler)
+    server.request_observations = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _install_rebinding_resolver(monkeypatch, port: int) -> list[str]:
+    real_getaddrinfo = socket.getaddrinfo
+    answers: list[str] = []
+
+    def _getaddrinfo(host, requested_port, *args, **kwargs):
+        if host == "dns-rebinding.test" and requested_port == port:
+            address = "127.0.0.1" if not answers else "127.0.0.2"
+            answers.append(address)
+            return real_getaddrinfo(address, requested_port, *args, **kwargs)
+        return real_getaddrinfo(host, requested_port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo)
+    return answers
+
+
+def _install_async_rebinding_resolver(monkeypatch, port: int) -> list[str]:
+    import anyio._core._sockets as anyio_sockets
+
+    loop = asyncio.get_running_loop()
+    real_loop_getaddrinfo = loop.getaddrinfo
+    real_anyio_getaddrinfo = anyio_sockets.getaddrinfo
+    answers: list[str] = []
+
+    def _answer(host: str, requested_port: int) -> str | None:
+        if host != "dns-rebinding.test" or requested_port != port:
+            return None
+        address = "127.0.0.1" if not answers else "127.0.0.2"
+        answers.append(address)
+        return address
+
+    async def _loop_getaddrinfo(host, requested_port, *args, **kwargs):
+        address = _answer(host, requested_port)
+        return await real_loop_getaddrinfo(
+            address or host, requested_port, *args, **kwargs,
+        )
+
+    async def _anyio_getaddrinfo(host, requested_port, **kwargs):
+        address = _answer(host, requested_port)
+        if address is None:
+            return await real_anyio_getaddrinfo(host, requested_port, **kwargs)
+        return await real_loop_getaddrinfo(address, requested_port, **kwargs)
+
+    monkeypatch.setattr(loop, "getaddrinfo", _loop_getaddrinfo)
+    monkeypatch.setattr(anyio_sockets, "getaddrinfo", _anyio_getaddrinfo)
+    return answers
+
+
+def _local_guarded_clients(port: int):
+    clients = guarded_clients(base_url=f"http://dns-rebinding.test:{port}/v1/")
+    for client in clients:
+        client._mounts.clear()
+    return clients
+
+
+def test_sync_transport_connects_to_the_address_checked_by_guard(
+    monkeypatch, rebind_http_server,
+):
+    port = rebind_http_server.server_address[1]
+    answers = _install_rebinding_resolver(monkeypatch, port)
+    sync_client, async_client = _local_guarded_clients(port)
+    try:
+        response = sync_client.post("probe", json={})
+        assert response.status_code == 200
+    finally:
+        sync_client.close()
+        asyncio.run(async_client.aclose())
+
+    assert answers == ["127.0.0.1"]
+    assert rebind_http_server.request_observations == [
+        ("127.0.0.1", f"dns-rebinding.test:{port}"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_transport_connects_to_the_address_checked_by_guard(
+    monkeypatch, rebind_http_server,
+):
+    port = rebind_http_server.server_address[1]
+    answers = _install_async_rebinding_resolver(monkeypatch, port)
+    sync_client, async_client = _local_guarded_clients(port)
+    try:
+        response = await async_client.post("probe", json={})
+        assert response.status_code == 200
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert answers == ["127.0.0.1"]
+    assert rebind_http_server.request_observations == [
+        ("127.0.0.1", f"dns-rebinding.test:{port}"),
+    ]
+
+
+@pytest.mark.parametrize("address", ["198.18.1.1", "2001:db8::1"])
+def test_sync_pin_preserves_host_and_sets_original_tls_sni(fake_resolver, address):
+    fake_resolver["model.test"] = [address]
+    observed = []
+    sync_client, async_client = guarded_clients(base_url="https://model.test/v1/")
+    sync_client._mounts.clear()
+    sync_client._transport._inner = httpx2.MockTransport(
+        lambda request: _observe_pinned_request(request, observed),
+    )
+    try:
+        response = sync_client.get("probe")
+    finally:
+        sync_client.close()
+        asyncio.run(async_client.aclose())
+
+    assert response.request.url.host == "model.test"
+    assert observed == [(address, "model.test", b"model.test")]
+
+
+@pytest.mark.parametrize("address", ["198.18.1.1", "2001:db8::1"])
+@pytest.mark.asyncio
+async def test_async_pin_preserves_host_and_sets_original_tls_sni(fake_resolver, address):
+    fake_resolver["model.test"] = [address]
+    observed = []
+    sync_client, async_client = guarded_clients(base_url="https://model.test/v1/")
+    async_client._mounts.clear()
+    async_client._transport._inner = httpx2.MockTransport(
+        lambda request: _observe_pinned_request(request, observed),
+    )
+    try:
+        response = await async_client.get("probe")
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert response.request.url.host == "model.test"
+    assert observed == [(address, "model.test", b"model.test")]
+
+
+def _observe_pinned_request(request: httpx2.Request, observed: list[tuple]) -> httpx2.Response:
+    observed.append((
+        request.url.host,
+        request.headers.get("host"),
+        request.extensions.get("sni_hostname"),
+    ))
+    return httpx2.Response(200, json=_chat_completion(), request=request)

@@ -9,6 +9,7 @@ requires-python = ">=3.11"
 dependencies = [
     "aiosqlite>=0.21.0",
     "fastapi>=0.141.1",
+    "httpx2>=2.13.1,<3",
     # #530 IMP-17：delegate output_schema 用原生 JSON Schema dict 做应用侧校验
     # （Draft 2020-12，MIT）；pydantic 只能对 Python 类型校验，做不到这件事。
     "jsonschema>=4.23.0",
