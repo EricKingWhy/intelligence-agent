@@ -605,8 +605,21 @@ def tail_is_docs_or_receipts(repo_root, t: str) -> bool:
     逐笔判（不是对 `t..head` 整体取一次 diff）：整体 diff 会把「先加代码、后删代码」洗成
     空改动面；逐笔判则任一笔不满足 ⇒ ④ 对该 t 不成立。取不到提交列表 ⇒ False。
     空提交（`changes == []`，`--allow-empty`）也不算纯 docs / 纯收据 ⇒ ④ 对该 t 不成立；
-    方向保守（多跑一次全量），与票面「每一笔提交都是纯 docs 或纯收据落盘」字面一致。
+    后果是**该 t 的 ④ 整体失效**（不是"多跑一次全量"），与票面「每一笔提交都是纯 docs 或
+    纯收据落盘」字面一致。
+
+    按 `(repo_root, t, HEAD)` 记忆化（r3 P3）：④ 对每笔 c 都遍历候选 t，同一 t 会被重算
+    一遍 `rev-list` + 逐笔 `diff-tree`；#1553 的副本实测 tail 被调 3125 次。HEAD 进 key 是
+    **正确性**要求而非性能：只按 (repo_root, t) 缓存时，同一进程里 HEAD 前进后再问会命中
+    旧答案 ⇒ fail-open（tail 里新进的代码提交看不见）。
     """
+    head = _git_at(repo_root, "rev-parse", "HEAD").stdout.strip()
+    return _tail_is_docs_or_receipts_cached(repo_root, t, head)
+
+
+@functools.cache
+def _tail_is_docs_or_receipts_cached(repo_root, t: str, head: str) -> bool:
+    """`tail_is_docs_or_receipts` 的记忆化体；`head` 只用于让缓存随 HEAD 失效。"""
     rev = _git_at(repo_root, "rev-list", f"{t}..HEAD")
     if rev.returncode != 0:
         return False
@@ -623,7 +636,8 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
     """收据在场检查（#1338 改动 3 / #1553 形状④）⇒ (ok, detail, warn_only)。
 
     对 `merge-base(origin/main, HEAD)..HEAD` 里每笔**非纯 docs、非纯收据落盘**、且晚于 bootstrap
-    B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受四种形状：
+    B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受四种形状
+    （①②③ 见下，④ 另起一段）：
     ① t = c 自身；②（§8.1 传递）t = 第一父 p 且 p..c 的差异是 docs-only；③ t != c、t 在本区间内、
     c 是 t 的祖先、**且 c 与 t 同一冻结树**（`c^{tree} == t^{tree}`）——即批次冻结在树 F 后整批
     只跑一次全量，每笔 c 的 t 都是后代 F。
@@ -634,10 +648,16 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
     的树真被测过就有后代读数，没测过的新树照旧红（SDD §8.1 的 fail-closed 语义）。找不到 = 违规。
 
     ④（#1553，用户 2026-10-23 亲裁 A 案）补的正是上面这条的**多提交分支**形态：③ 要求 c 与 t
-    是同一棵树，而多笔代码提交逐笔改树 ⇒ ③ 覆盖不到，字面执行等于每笔各跑一次全量。④ 的依据是
-    **被测的是最终合入的那棵树**：tip 树实跑过全量、其后无代码改动 ⇒ 中间提交的代码已被包含在
-    被测树内——与 PR #1336（7 笔代码提交、1 枚冻结 tip 读数）、此后各波集成实践及 SDD §8.1
-    读数传递规则同源。条件③（`t..HEAD` 逐笔纯 docs / 纯收据落盘）不成立 ⇒ ④ 对该 t 不成立。
+    是同一棵树，而多笔代码提交逐笔改树 ⇒ ③ 覆盖不到。t 在区间内、c 是 t 的祖先、且 t..HEAD 逐笔
+    纯 docs / 纯收据落盘 ⇒ c 由 t 的收据覆盖（条件③）。它的**后果**是"不必为每笔中间提交各跑一次
+    全量"，与 PR #1336（7 笔代码提交、1 枚冻结 tip 读数）、此后各波集成实践及 SDD §8.1 读数传递
+    规则同源。
+    ⚠ ④ 认的是**提交图关系**（c 是 t 的祖先 + tail 安静），**不**验"c 的改动仍留在 t 的树里"：
+    c 的改动若在 tail 之前被回滚掉，其净效果不在被测树内 —— 这属可接受的语义（回滚掉的代码本就不
+    进最终树），但别把 ④ 读成内容包含证明。
+    ⚠ 条件②（c 是 t 的祖先）由 ①+③ 蕴含，删掉不改判定（短路优化）：满足 ① 而不满足 ② 的 t，
+    必有 c ∈ `t..HEAD`，而 c ∈ scope 非纯 docs ⇒ ③ 已经 False。用例
+    `test_shape4_condition2_is_implied_by_conditions_1_and_3` 把这条链子钉住。
     """
     repo_root = repo_root or REPO_ROOT
     mb = _git_at(repo_root, "merge-base", "origin/main", "HEAD")

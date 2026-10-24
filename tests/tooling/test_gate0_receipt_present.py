@@ -10,16 +10,19 @@
 包含在被测树内（与 PR #1336「7 笔代码提交、1 枚冻结 tip 读数」及 SDD §8.1 读数传递同源）。
 
 本文件用真 git 仓库（tmp_path）构造检查区间，直接调 `receipt_present_check()`；不跑门禁车道。
-bootstrap 一律显式传 base、且把 base 的提交时间推到 8 天前 ⇒ `warn_only=False`（转硬口径）。
+bootstrap 一律显式传 base、且把 base 的提交时间固定在 2026-10-01（远早于今天，> 7 天）
+⇒ `warn_only=False`（转硬口径）。
 """
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
 import subprocess
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 GATE0_PATH = REPO / "scripts" / "gate0.py"
@@ -97,6 +100,14 @@ class Repo:
                 "result": "PASS", "passed": 7, "total": 7}
         return {f"docs/gate/{tested_sha}.json": json.dumps(body)}
 
+    def is_ancestor(self, a: str, b: str) -> bool:
+        env = _env()
+        proc = subprocess.run(["git", "merge-base", "--is-ancestor", a, b],
+                              cwd=self.root, env=env, capture_output=True, text=True,
+                              check=False)
+        assert proc.returncode in (0, 1), f"git merge-base rc={proc.returncode}: {proc.stderr}"
+        return proc.returncode == 0
+
 
 def _base_with_origin(repo: Repo) -> str:
     base = repo.commit({"README.md": "base\n"}, "base")
@@ -105,7 +116,23 @@ def _base_with_origin(repo: Repo) -> str:
 
 
 def _check(repo: Repo, base: str) -> tuple[bool, str, bool]:
-    return gate0.receipt_present_check(repo_root=str(repo.root), bootstrap_sha=base)
+    """在**干净 env** 里调被测逻辑。
+
+    `_env()` 只喂 fixture 自己起的 git 子进程；被测逻辑走 `gate0.git()`（`scripts/gate0.py:162`），
+    它不传 env ⇒ 继承 `os.environ`，而 `GIT_DIR` 的优先级**高于** `-C <tmp>` ⇒ 检查会跑去查外层
+    仓库（r3 实测：`GIT_DIR=$PWD/.git` 下 5 failed / 3 passed，`test_shape1/2` 是**假绿**——detail
+    显示 `被查 0 笔`，什么都没检）。这里把整段调用期间的 `os.environ` 换成 `_env()` 的结果，
+    退出即逐字恢复。不改生产 `git()`：它继承环境在真实门禁里是对的，缺的是测试侧的隔离。
+    """
+    with _clean_env():
+        return gate0.receipt_present_check(repo_root=str(repo.root), bootstrap_sha=base)
+
+
+@contextlib.contextmanager
+def _clean_env():
+    """被测逻辑调 `gate0.*` 时用的干净 env（见 `_check` 的 docstring）。"""
+    with mock.patch.dict(os.environ, _env(), clear=True):
+        yield
 
 
 # ── 判别力四项 ──
@@ -209,8 +236,117 @@ def test_shape4_tail_code_is_not_washed_out_by_a_later_delete(tmp_path):
     assert "违规 3 笔" in detail, detail
 
 
-# ── ①②③ 回归（此前无专用用例；本票只证明行为不变） ──
+def test_shape4_condition1_t_must_be_inside_the_range(tmp_path):
+    """④ 条件①（`t in range_set`）的判别力：区间外的收据**不得**覆盖区间内的 c。
 
+    构造（r3 P2 指条件①零判别力，此例即其反例）：t 存在一条**未合入**的 side 分支上，
+    c 是 t 的祖先，且 `t..HEAD` 逐笔纯 docs ⇒ ②③ 都成立，只有 ① 不成立。
+    删掉 `t not in range_set` ⇒ ④ 认下这枚区间外收据、c 被放行 ⇒ 本用例转红。
+
+    注意 m 笔（`-s ours` 合并）的树与第一父相同 ⇒ ③ 也不会认它（③ 要求 c 与 t 同树，
+    而 c 的树 ≠ base 的树），c 只可能靠 ④ 被覆盖。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c = repo.commit({"src/a.py": "a = 1\n"}, "code c")
+    repo.git("checkout", "-q", "-b", "side")
+    out_of_range = repo.commit({"src/side.py": "s = 1\n"}, "side code t")
+    repo.git("checkout", "-q", "main")
+    repo.commit({"docs/notes.md": "notes\n"}, "docs tail")
+    repo.commit(repo.receipt(out_of_range), "docs(gate): receipt for the out-of-range tip")
+
+    ok, detail, warn = _check(repo, base)
+
+    assert warn is False, detail
+    # 前提自证：t 确实在区间外、且 c 确是 t 的祖先（否则本用例没有命中条件①）。
+    assert out_of_range not in repo.git("rev-list", f"{base}..HEAD").split(), \
+        "构造失败：t 落进了检查区间"
+    assert repo.is_ancestor(c, out_of_range), "构造失败：c 不是 t 的祖先"
+    assert ok is False, detail
+    assert f"missing receipt for {c[:12]}" in detail, detail
+    assert "违规 1 笔" in detail, detail
+
+
+# ── ④ 条件②（`c` 是 `t` 的祖先）: 不补用例，理由如下（r3 P2 的第二半） ──
+
+
+def test_shape4_condition2_is_implied_by_conditions_1_and_3(tmp_path):
+    """条件② 无判别力用例，因为它**由 ①+③ 蕴含**，删掉不改变任何判定结果。
+
+    论证（本用例用一组真实提交把前提打实，不是纯口述）：设 c ∈ scope（⇒ c 在区间内且非纯
+    docs），t 满足 ①（t 在区间内）但**不**满足 ②（c 不是 t 的祖先）。则 c 可从 HEAD 到达、
+    从 t 不可到达 ⇒ **c ∈ `t..HEAD`**；而 c 非纯 docs ⇒ `tail_is_docs_or_receipts(t)` 必为
+    False ⇒ ④ 对该 t 不成立。即「②不成立」的那些 t 全部被 ③ 挡掉，② 只是短路优化。
+    这里断言的是这条链子的三个环节，而不是「跑一遍 8 passed」。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c = repo.commit({"src/a.py": "a = 1\n"}, "code c")
+    repo.git("checkout", "-q", "-b", "side", base)
+    t = repo.commit({"src/s.py": "s = 1\n"}, "side code t")
+    repo.git("checkout", "-q", "main")
+    repo.commit({"docs/notes.md": "notes\n"}, "docs tail")
+    repo.git("merge", "-q", "--no-ff", "side", "-m", "merge side")
+
+    # ① t 在区间内。
+    assert t in repo.git("rev-list", f"{base}..HEAD").split()
+    # ② 前提：c 不是 t 的祖先（这正是要论证的情形）。
+    assert not repo.is_ancestor(c, t)
+    # 关键环节：c 落在 t..HEAD ⇒ ③ 必然判 False（c 非纯 docs）。
+    assert c in repo.git("rev-list", f"{t}..HEAD").split()
+    with _clean_env():
+        assert gate0.is_pure_docs_commit(gate0.commit_file_changes(str(repo.root), c)) is False
+        assert gate0.tail_is_docs_or_receipts(str(repo.root), t) is False
+
+
+def test_tail_memo_does_not_serve_a_stale_answer_after_head_moves(tmp_path):
+    """记忆化的正确性：HEAD 前进后再问同一个 `t`，必须重算而不是给旧答案。
+
+    `tail_is_docs_or_receipts` 按 `(repo_root, t, HEAD)` 记忆化 —— 少了 HEAD 这一项就会
+    fail-open：先问一次拿到 True（当时 `t..HEAD` 全纯 docs），之后**在 t 之后落一笔代码提交**，
+    再问同一个 t 仍命中旧缓存 True ⇒ 新提交被静默放行。本用例先直接调一次把缓存填上，
+    再进代码提交，然后要求同一调用返回 False。
+    """
+    repo = Repo(tmp_path / "r")
+    _base_with_origin(repo)
+    tip = repo.commit({"src/b.py": "b = 2\n"}, "code at tip")
+
+    # 第一次：t = tip 自己 ⇒ tail 为空 ⇒ True（缓存被填）。
+    with _clean_env():
+        assert gate0.tail_is_docs_or_receipts(str(repo.root), tip) is True
+        # HEAD 前进一笔代码提交。
+        late = repo.commit({"src/c.py": "c = 3\n"}, "code after tip")
+        assert late != tip
+        # 同一 (repo_root, t) 再问 ⇒ 必须看见新提交（False），不能吃缓存。
+        assert gate0.tail_is_docs_or_receipts(str(repo.root), tip) is False
+
+
+def test_tail_rejects_an_empty_commit(tmp_path):
+    """空提交（`--allow-empty`）不算「纯 docs / 纯收据落盘」⇒ ④ 对该 t 不成立（fail-closed）。
+
+    票面字面是「每一笔提交都是纯 docs 或纯收据落盘」；空提交的改动面是空集，既不满足
+    `is_pure_docs_commit`（要求 `bool(changes)`）也不满足 `is_pure_receipt_landing`。
+    把那个 `bool(changes) and` 放宽掉 ⇒ 本用例转红。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    tip = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit(repo.receipt(tip), "docs(gate): receipt for tip")
+    empty = repo.empty_commit("empty commit after the receipt")
+
+    ok, detail, warn = _check(repo, base)
+
+    assert warn is False, detail
+    with _clean_env():
+        assert gate0.is_pure_docs_commit(gate0.commit_file_changes(str(repo.root), empty)) is False
+    assert ok is False, detail
+    # tip 有自身收据；code 1 与那笔空提交都没有 ⇒ 违规 2 笔。
+    assert "违规 2 笔" in detail, detail
+    assert f"missing receipt for {empty[:12]}" in detail, detail
+
+
+# ── ①②③ 回归（此前无专用用例；本票只证明行为不变） ──
 
 def test_shape1_receipt_for_the_commit_itself(tmp_path):
     """形状①：t = c 自身。"""
