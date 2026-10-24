@@ -581,6 +581,7 @@ def root_registry_reconcile_info(
 
 def create_chat_model(
     config: ModelConfig, *, reasoning_effort: str | None = None,
+    request_timeout: float = 300.0,
 ) -> Any:
     """构造 ChatModel 的装配层注入点：真实 provider SDK 在**调用时**才导入（#1527）。
 
@@ -589,10 +590,16 @@ def create_chat_model(
     CLI 导入墙钟一半以上）。现在导入收进本包装内部，轻入口不再支付这份成本；
     三个调用点（主模型 / summary / fallback）与测试的 patch 注入点
     （``patch("agent_harness.assembly.create_chat_model", …)``）语义都不变。
+
+    签名与 ``model.provider.create_chat_model`` **逐字同形**（含
+    ``request_timeout``）：同名注入点签名收窄会让未来调用点的 TypeError 被
+    mock 全绿掩盖（审查 P3；web 的测试专用超时直连 provider，不经此处）。
     """
     from agent_harness.model.provider import create_chat_model as _create
 
-    return _create(config, reasoning_effort=reasoning_effort)
+    return _create(
+        config, reasoning_effort=reasoning_effort, request_timeout=request_timeout,
+    )
 
 
 async def build_runtime(
