@@ -112,8 +112,8 @@ from agent_harness.context.builder import (
     ProtectedFactBudgetExceededError,
 )
 from agent_harness.context.compactor import (
-    _TRANSIENT_ERROR_CLASSES,
     CompactionPostWriteError,
+    is_transient_error_class,
 )
 from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
@@ -949,7 +949,8 @@ def _is_retriable_compaction_failure(error: ContextWindowExceededError) -> bool:
     "再压一次"只在**摘要尝试被模型侧抖动打掉**时有意义（超时 / 传输 / 输出不成
     摘要 / 校验闸门拒绝）。其余每一条都是**结构性**的，再压必然同结果：
 
-    · 结构性词条（`_TRANSIENT_ERROR_CLASSES` 的补集，见 compactor 侧二分）；
+    · 结构性词条（compactor `is_transient_error_class` 的假集——二分归
+      compactor 所有）；
     · `ProtectedFactBudgetExceededError`（保护事实超独立预算，与摘要无关）；
     · `CompactionPostWriteError`（bracket **已落盘**，历史已变，重试会写出第二对）；
     · `failures` 为空（异常不是从压缩链出来的，无从判断）。
@@ -970,7 +971,7 @@ def _is_retriable_compaction_failure(error: ContextWindowExceededError) -> bool:
         return False
     failures = [f for f in (error.failures or ()) if f.attempt >= 1]
     return bool(failures) and all(
-        failure.error_class in _TRANSIENT_ERROR_CLASSES for failure in failures
+        is_transient_error_class(failure.error_class) for failure in failures
     )
 
 

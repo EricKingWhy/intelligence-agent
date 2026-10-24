@@ -80,7 +80,7 @@ def has_unproven_side_effect(operation: Operation) -> bool:
     """这次调用的副作用是否**仍**"无法证明已完成或未开始"（`07 §7` / ADR-0044 D4）。
 
     宽容读法：`reconcile_meta` 缺失 / 非 JSON / 形状不对 / 已被裁决覆盖 ⇒ `False`
-    （与 `_int_map` / `_deadline_or_none` 同一条纪律：腐烂的历史数据只让**这一项**
+    （与 `_int_map` / `deadline_or_none` 同一条纪律：腐烂的历史数据只让**这一项**
     失去标记，不让整个判定抛错）。缺标记 ⇒ 未证不成立——标记的**写入**才是
     "Executor 承认自己证不出结论"那一刻，本函数不替它猜。
     """

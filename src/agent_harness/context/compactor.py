@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -24,10 +25,10 @@ from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.derive import (
-    _USER_GOAL_VALUE_MAX_CHARS,
     COMPACTION_SUMMARY_MESSAGE_NAME,
+    USER_GOAL_VALUE_MAX_CHARS,
     ProtectedFact,
-    _bounded_goal_value,
+    bounded_goal_value,
     serialize_protected_facts,
 )
 from agent_harness.session.event import CONTEXT_COMPACTED, SessionEvent
@@ -478,6 +479,34 @@ def _render_transcript(messages: list[AnyMessage]) -> str:
     return json.dumps(
         [message.model_dump(mode="json") for message in messages],
         ensure_ascii=False,
+    )
+
+
+def is_transient_error_class(error_class: str) -> bool:
+    """#1539：摘要失败 ``error_class`` 瞬态/结构性二分的唯一公开判据。
+
+    Runtime 的「这次超限值不值得在循环内再压一次」（``agent/runtime.py`` 的
+    ``_is_retriable_compaction_failure``）消费本谓词；词表本体
+    （``_TRANSIENT_ERROR_CLASSES``，与 ``_SUMMARY_ERROR_CLASSES`` 同 owner
+    同步二分）保持模块私有——调用方只问行为，不再持有常量知识。
+    """
+    return error_class in _TRANSIENT_ERROR_CLASSES
+
+
+def non_summary_user_turn_count(messages: Sequence[AnyMessage]) -> int:
+    """「非摘要 HumanMessage」条数——可压轮数判据的唯一实现。
+
+    消费方：``ContextCompactor.compact`` 的 ``compacted_turn_count``（传实际
+    参与压缩的 early 段——缩小/分块路径下是实际生效段）、
+    ``_programmatic_summary_sections``（经 ``_assemble_summary`` 调用）的归档
+    计数（传全量 messages），与 dry-run 预览
+    （``session/service.py::_has_compactable_early_turn``，传完整 early 窗口）。
+    #1539：session 侧不再 import ``_is_compaction_summary`` 识别细节。
+    """
+    return sum(
+        isinstance(message, HumanMessage)
+        and not _is_compaction_summary(message)
+        for message in messages
     )
 
 
@@ -1144,11 +1173,7 @@ class ContextCompactor:
             )
         return CompactionResult(
             compacted,
-            sum(
-                isinstance(message, HumanMessage)
-                and not _is_compaction_summary(message)
-                for message in early
-            ),
+            non_summary_user_turn_count(early),
             count,
             False,
             source_seq_start=source_seq_start,
@@ -1460,7 +1485,7 @@ def _carrier_instruction_line(
     触发压缩的当前轮仍在 recent 逐字保留，不会进入本窗口。
 
     口径对齐 `_current_goal_body`：JSON 字符串编码（ensure_ascii=False）、
-    复用 `_USER_GOAL_VALUE_MAX_CHARS`（2000）截断上限 + 超长截断标记（含
+    复用 `USER_GOAL_VALUE_MAX_CHARS`（2000）截断上限 + 超长截断标记（含
     来源 seq 回读指针）。选中消息时用同下标的 range 写指针（用户消息的
     range 是 (seq, seq)，取 [0]）；range 为 None（来源区间不可用的直连调用
     面）时不写指针行、只写 JSON。无候选用户消息（early 全是模型消息等退化
@@ -1486,13 +1511,13 @@ def _carrier_instruction_line(
     raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
     source_range = source_ranges[carrier_index] if source_ranges is not None else None
     content = raw_text
-    if len(raw_text) > _USER_GOAL_VALUE_MAX_CHARS:
+    if len(raw_text) > USER_GOAL_VALUE_MAX_CHARS:
         pointer = (
             f"，见来源事件 seq={source_range[0]}" if source_range is not None else ""
         )
         content = (
-            raw_text[:_USER_GOAL_VALUE_MAX_CHARS]
-            + f"…［已截断：显示前{_USER_GOAL_VALUE_MAX_CHARS}字符，"
+            raw_text[:USER_GOAL_VALUE_MAX_CHARS]
+            + f"…［已截断：显示前{USER_GOAL_VALUE_MAX_CHARS}字符，"
             + f"全文共{len(raw_text)}字符{pointer}］"
         )
     body = json.dumps(content, ensure_ascii=False)
@@ -1524,7 +1549,7 @@ def _current_goal_body(
     state = effective_goal(events or [])
     if state.defined and state.objective:
         raw = state.objective
-        value = _bounded_goal_value(raw, state.source_event_id or "")
+        value = bounded_goal_value(raw, state.source_event_id or "")
     elif state.authoritative:
         # `clear` 墓碑 = 没有目标。不回落旧 user_goal 事实（换源后旧事实已
         # superseded，这里按"无目标"投影，与 /goal 一致）。
@@ -1731,14 +1756,7 @@ def _programmatic_summary_sections(
         f"{_current_goal_body(events, protected_facts)}\n"
         f"{_carrier_instruction_line(messages, source_ranges)}"
     )
-    archived_turns = (
-        sum(
-            1
-            for message in messages
-            if isinstance(message, HumanMessage) and not _is_compaction_summary(message)
-        )
-        - 1
-    )
+    archived_turns = non_summary_user_turn_count(messages) - 1
     if archived_turns > 0:
         section0 += (
             f"\n（更早 {archived_turns} 条用户指令已归档："
