@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import http.server
+import ipaddress
 import json
+import socket
 import threading
 from collections import Counter
 
@@ -176,6 +178,72 @@ class TestSaveTimeRejection:
     )
     def test_owner_and_private_endpoints_are_allowed(self, url):
         assert url_rejection(url) is None, url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://0xa9fea9fe/v1",  # 单整数十六进制 = 169.254.169.254（POSIX inet_aton）
+            "http://0XA9FEA9FE/v1",  # 十六进制大小写不敏感
+            "http://0x00a9fea9fe/v1",  # 前导零不改变地址（inet_aton 认，长度上限不能判成域名）
+            "http://2852039166/v1",  # 单整数十进制
+            "http://0251.0376.0251.0376/v1",  # 八进制分段
+            "http://00000251.0376.0251.0376/v1",  # 同上，补零写法
+            "http://169.254.0xa9.0xfe/v1",  # 十进制 + 十六进制混写
+            "http://169.254.0xa9.0xfe:99999/v1",  # 端口坏也不能跳过判定
+        ],
+    )
+    def test_legacy_numeric_metadata_forms_are_rejected(self, url):
+        """非规范数字 IPv4 与规范写法是同一个地址，保存期不能只认规范写法。"""
+        assert url_rejection(url) is not None, url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://0x7f.1:11434/v1",  # loopback 传统写法：裁决 25 B 照旧放行
+            "http://0x007f.1:11434/v1",  # 同上，补零写法
+            "http://2130706433/v1",
+            "http://0177.0.0.1/v1",
+            "http://127.1/v1",
+            "http://0x01020304/v1",  # 1.2.3.4：公网，不在拦截面
+            "http://0xa9fea9fe.com/v1",  # 长得像数字但不是数字地址 ⇒ 仍按域名
+            "http://169.254.169.254.example.com/v1",
+        ],
+    )
+    def test_legacy_numeric_forms_keep_owner_endpoints_allowed(self, url):
+        assert url_rejection(url) is None, url
+
+    @pytest.mark.parametrize(
+        "url", ["http://" + "9" * 40 + "/v1", "http://0x" + "f" * 20 + "/v1"],
+    )
+    def test_oversized_numeric_host_is_not_an_exception(self, url):
+        """超长数字串不是地址；守卫只能判"放行"，不能把保存打成 500。"""
+        assert url_rejection(url) is None, url
+
+    def test_legacy_parser_matches_inet_aton_on_sample(self):
+        """规范化层与 ``socket.inet_aton`` 同口径（补零 / 进制 / 段长边界）。
+
+        自己实现而要的是跨平台确定性，判据就得跟系统的口径对齐——用差分法钉住，
+        否则补零写法会悄悄从"拦截"退回"当域名放行"（#1485 修复轮实测）。
+        """
+        samples = [
+            "0xa9fea9fe", "0x00a9fea9fe", "0xA9FEA9FE", "2852039166",
+            "0251.0376.0251.0376", "00000251.0376.0251.0376", "169.254.0xa9.0xfe",
+            "0x7f.1", "0x007f.1", "2130706433", "0177.0.0.1", "127.1",
+            "037777777777", "0", "00", "0x0000", "0x00000000000000a9fea9fe",
+            "0x", "09", "0009", "256.1.1.1", "1.2.3.4.5", "0xa9fea9fe.com",
+            "4294967296", "1.16777216",
+            # 剥前导零不能"补出"合法写法：``00X4`` 不是任何进制（inet_aton 也拒）。
+            "00X4", "00XB0", "000x7f.1",
+            # 全零十六进制段也走剥零：``0x`` + ≥9 个 0 的段 aton 认（= 0 字节），
+            # 剥完不能回退原串（那样长度超限 ⇒ 判成域名 ⇒ link-local 保存期放行）。
+            "0x" + "0" * 9, "169.254.0x000000000.1",
+        ]
+        for host in samples:
+            try:
+                expected = ipaddress.IPv4Address(socket.inet_aton(host))
+            except OSError:
+                expected = None
+            assert endpoint_guard._legacy_ipv4(host) == expected, host
 
     def test_store_create_rejects_metadata_target_with_guard_message(self, tmp_path):
         store = ProviderStore(tmp_path / "p.json", MemoryCredentialStore())
@@ -359,6 +427,49 @@ class TestRequestTimeGuard:
         assert "误配置守卫" in str(rejection)
         assert _METADATA_IP in str(rejection)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "http://0xa9fea9fe/v1",
+            "http://2852039166/v1",
+            "http://169.254.0xa9.0xfe/v1",
+        ],
+    )
+    async def test_legacy_numeric_metadata_literal_blocks_at_request_time(self, base_url):
+        """保存期的新写法判定与请求期是同一份 `_host_rejection`：字面量同样零请求。"""
+        recorder = _Recorder()
+        model = _model(base_url)
+        _install(model, recorder)
+        with pytest.raises(Exception) as excinfo:
+            await _invoke(model)
+        assert misconfiguration_rejection(excinfo.value) is not None
+        assert recorder.hosts == Counter()
+        assert recorder.auth_headers == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("literal", ["0xa9fea9fe", "2852039166"])
+    async def test_legacy_numeric_resolved_address_blocks(self, fake_resolver, literal):
+        """解析器给出传统写法（例如系统 resolver 直接回字符串）时同样拦。"""
+        fake_resolver["metadata.test"] = [literal]
+        recorder = _Recorder()
+        model = _model("http://metadata.test/v1")
+        _install(model, recorder)
+        with pytest.raises(Exception) as excinfo:
+            await _invoke(model)
+        assert misconfiguration_rejection(excinfo.value) is not None
+        assert recorder.hosts == Counter()
+
+    @pytest.mark.asyncio
+    async def test_legacy_numeric_loopback_still_reaches_the_endpoint(self, fake_resolver):
+        """`0x7f.1` 之类是 loopback：裁决 25 B 放行，请求照常到达（不被新规则误伤）。"""
+        recorder = _Recorder()
+        model = _model("http://0x7f.1:11434/v1")
+        _install(model, recorder)
+        await _invoke(model)
+        assert recorder.hosts["0x7f.1"] == 1
+        assert recorder.auth_headers[0].startswith("Bearer ")
+
     def test_sync_invoke_path_is_also_guarded(self, fake_resolver):
         """同步 hook 与异步 hook 是两份代码：`model.invoke` 必须同样零请求。
 
@@ -381,7 +492,28 @@ class TestRequestTimeGuard:
 
         请求连 transport 都不该到；异常类型不必是守卫拒绝（它按瞬时连接失败处理，
         可重试），但"零请求"是硬要求。
+
+        `ainvoke` 走的是 `_aresolved_addresses`——patch 同步版只会让真实 DNS 接手，
+        测试会因"本机恰好也解析失败"而假绿（#1485 复核 F-02）。
         """
+        async def _boom(host: str, port: int | None) -> list[str]:
+            raise OSError("resolver unavailable")
+
+        monkeypatch.setattr(endpoint_guard, "_aresolved_addresses", _boom)
+        recorder = _Recorder()
+        model = _model("http://metadata.test/v1")
+        _install(model, recorder)
+        with pytest.raises(APIConnectionError) as excinfo:
+            await _invoke(model)
+        # 仍是瞬时连接失败（可重试），不是守卫拒绝——别把 DNS 抖动说成配置错。
+        assert misconfiguration_rejection(excinfo.value) is None
+        assert isinstance(excinfo.value.__cause__, OSError)
+        assert recorder.hosts == Counter()
+        assert recorder.auth_headers == []
+
+    def test_sync_resolver_failure_is_not_a_bypass(self, fake_resolver, monkeypatch):
+        """同步 hook 的同一性质：`_resolved_addresses` 抛 OSError 时同样零请求。"""
+
         def _boom(host: str, port: int | None) -> list[str]:
             raise OSError("resolver unavailable")
 
@@ -390,9 +522,9 @@ class TestRequestTimeGuard:
         model = _model("http://metadata.test/v1")
         _install(model, recorder)
         with pytest.raises(APIConnectionError) as excinfo:
-            await _invoke(model)
-        # 仍是瞬时连接失败（可重试），不是守卫拒绝——别把 DNS 抖动说成配置错。
+            _invoke_sync(model)
         assert misconfiguration_rejection(excinfo.value) is None
+        assert isinstance(excinfo.value.__cause__, OSError)
         assert recorder.hosts == Counter()
         assert recorder.auth_headers == []
 
