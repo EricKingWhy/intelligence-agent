@@ -302,6 +302,33 @@ class TestExportModelDefinitions:
 
         assert parameters["title"] == "GeneratedTitleArgs"
 
+    def test_export_preserves_custom_json_schema_hook_title(
+        self, registry: ToolRegistry
+    ):
+        class CustomHookArgs(BaseModel):
+            value: str
+
+            @classmethod
+            def __get_pydantic_json_schema__(cls, core_schema, handler):
+                schema = handler(core_schema)
+                schema["title"] = cls.__name__
+                return schema
+
+        class CustomHookTool(AddTool):
+            @property
+            def name(self) -> str:
+                return "custom_hook_title"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return CustomHookArgs
+
+        registry.register(CustomHookTool())
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters["title"] == "CustomHookArgs"
+
     def test_export_preserves_mcp_schema_title(self, registry: ToolRegistry):
         class McpTool(AddTool):
             def __init__(self) -> None:
