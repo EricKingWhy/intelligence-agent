@@ -1421,8 +1421,10 @@ export function useSession() {
    *  挂流复位全部内聚于此；调用方只描述「这条流是什么」（目标会话 + 续传游标
    *  + 初始投影 + 语义选项），不再各自拼装 wsStreamResponse 三参与代际次序
    *  （#440 事故的接口摩擦根源）。返回 false = 代际已换代，调用方静默退场即可。
-   *  唯一例外：resumePausedRun 的早响应 SSE（POST 直接回的 Response）不经
-   *  WS 开流，仍直呼 attachLiveStream——那不是这条传输路径。 */
+   *  例外（不属于 WS 开流）：窗内直收的 SSE Response——submitTask /
+   *  sendFollowUp / resumePausedRun / flushQueue 各自 POST 直接回来的
+   *  `text/event-stream` 响应——仍直呼 attachLiveStream，那是 POST 自己的
+   *  传输，不是这里开的流。 */
   const openLiveStream = useCallback(
     (spec: {
       sid: string;
