@@ -849,9 +849,14 @@ def _raise_if_pending_user_input(
         )
 
 
-def _pending_user_input_pause(
+def pending_user_input_pause(
     events: list[SessionEvent], *, run_id: str,
 ) -> PausedRun | None:
+    """从事件流合成「pending user input」的 run/paused 事实（#1539 转正公开）。
+
+    合成口径只有这一份：恢复链（service 内部两处）与 Web 启动重建
+    （ask_user_timeout_driver 的回退段）共用；已有暂停/终态事实时返回 None。
+    """
     if latest_run_id(events) != run_id:
         return None
     state = derive_run_budget(events, run_id)
@@ -1702,7 +1707,11 @@ class SessionService:
         metas = await self._session_meta_store.list_all()
         return {meta.session_id for meta in metas if meta.archived}
 
-    async def get_events(self, session_id: str) -> list:
+    async def get_events(
+        self, session_id: str, *,
+        after_seq: int | None = None,
+        limit: int | None = None,
+    ) -> list:
         """读取 session 的完整事件历史（只读，不 mutate）。
 
         用于前端刷新后重建视图（不变量 #22）；replay 等零副作用场景也用它。
@@ -1711,6 +1720,13 @@ class SessionService:
         #752：零可解析事件时区分"真不存在"与"全坏"——前者 404，后者 409
         （`EventLogCorruptError`，与 `recover` 的诊断对齐）。404 会把"数据损坏，
         需要恢复"掩蔽成"没这个东西"，用户到不了恢复入口。
+
+        有界窗口（#1526）：`after_seq` 只保留 seq **严格大于**它的事件
+        （ADR-0016 §2.3 重连游标同一语义），`limit` 截取窗口前缀；两者皆 None
+        ⇒ 既有全量语义（既有调用方零迁移）。窗口参数**不参与**存在性/损坏
+        判定——404/409 永远判在全量读上，「切完为空」返回 `[]` 而不是 404
+        （分页到头的正常页）。磁盘序 = seq 序（写锁内追加），前缀切片即
+        按序页。
         """
         self._validate_session_id(session_id)
         events, integrity = await anyio.to_thread.run_sync(
@@ -1720,6 +1736,10 @@ class SessionService:
             raise SessionNotFound(f"session '{session_id}' not found")
         # 全坏日志（零可解析事件 + 有损坏行）：抛 409 而非误导性 404。
         self._raise_if_event_log_corrupt(session_id, integrity)
+        if after_seq is not None:
+            events = [event for event in events if event.seq > after_seq]
+        if limit is not None:
+            events = events[:limit]
         return events
 
     async def budget_projection(self, session_id: str) -> dict[str, Any]:
@@ -3043,7 +3063,7 @@ class SessionService:
         """
         paused = latest_paused_run(events)
         if paused is None and isinstance(run_id, str):
-            paused = _pending_user_input_pause(events, run_id=run_id)
+            paused = pending_user_input_pause(events, run_id=run_id)
         if paused is None:
             raise BudgetConflict(
                 "本会话最新逻辑 run 不在暂停态（可能已被恢复、已终结，或已被后续新 run "
@@ -3345,7 +3365,7 @@ class SessionService:
         if paused is None:
             run_id = latest_run_id(events)
             if run_id is not None:
-                paused = _pending_user_input_pause(events, run_id=run_id)
+                paused = pending_user_input_pause(events, run_id=run_id)
         if (
             paused is None
             or paused.reason != REASON_USER_INPUT
@@ -5016,28 +5036,24 @@ class SessionService:
         """dry_run 预览：是否存在可压缩的早期轮（与 compactor 闸门**一致**的判据）。
 
         前缀 / cut 规则与 `ContextCompactor.compact` **同源**：直接调
-        `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本。该
-        函数内含 `_is_compaction_summary` 守卫（前导摘要是 early 起点，不作前缀跳过）。
+        `compactable_early_window`（G3 #635 抽取，判据只有一份），不再手抄副本；
+        「非摘要 HumanMessage」计数同样走 compactor 的
+        `non_summary_user_turn_count`（#1539——此前 import 私有的
+        `_is_compaction_summary` 在本函数自拼判据，属跨包私有穿透）。
 
         判据与 `compact` 的 `compacted_turn_count` 计算式**完全一致**：early 窗口内
         非摘要 `HumanMessage` 数 > 0 才算可压（P2-1 #1197 修回——旧实现只判窗口
         非空，early 恰好只含上一轮压缩摘要 HumanMessage 时会误判为可压，真实管线
         以 0 计数走 below-floor 200 分支，绕过 409 `NoCompactableEarlyTurn`）。
         """
-        from langchain_core.messages import HumanMessage
-
         from agent_harness.context.compactor import (
-            _is_compaction_summary,
             compactable_early_window,
+            non_summary_user_turn_count,
         )
 
         messages = session.derive_messages()
         prefix_end, cut = compactable_early_window(messages)
-        return any(
-            isinstance(message, HumanMessage)
-            and not _is_compaction_summary(message)
-            for message in messages[prefix_end:cut]
-        )
+        return non_summary_user_turn_count(messages[prefix_end:cut]) > 0
 
     # ── 硬删（#172 / ADR-0029）────────────────────────────────────────
 
@@ -7613,6 +7629,7 @@ __all__ = [
     "current_model_selection",
     "current_reasoning_effort",
     "inherit_parent_model",
+    "pending_user_input_pause",
     "project_protected_fact_rows",
     "resolve_model_target",
     "validate_session_id",

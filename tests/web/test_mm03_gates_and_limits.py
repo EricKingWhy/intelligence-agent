@@ -66,7 +66,7 @@ def _client(tmp_path: Path, **overrides: Any) -> TestClient:
         provider_store_path=str(tmp_path / "model-providers.json"),
         **overrides,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _session_id_from_sse(resp: Any) -> str:

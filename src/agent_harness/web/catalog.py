@@ -22,9 +22,9 @@ from agent_harness.config import Settings
 from agent_harness.model.config import (
     PROVIDER_PRESETS,
     ModelConfig,
-    _pick_capabilities,
     find_catalog_entry,
     parse_model_catalog,
+    pick_capabilities,
 )
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.session.service import resolve_model_target
@@ -163,7 +163,7 @@ async def list_models(
         default_entry.declared_capabilities() if default_entry is not None else {}
     )
     default_caps = {
-        **_pick_capabilities(PROVIDER_PRESETS.get(default_provider, {})),
+        **pick_capabilities(PROVIDER_PRESETS.get(default_provider, {})),
         **default_declared,
     }
     models: list[dict[str, Any]] = [_render_model_option(
@@ -179,7 +179,7 @@ async def list_models(
         if shadowed is not None and shadowed.model_id is None:
             continue
         declared = entry.declared_capabilities()
-        preset_caps = _pick_capabilities(PROVIDER_PRESETS.get(entry.provider, {}))
+        preset_caps = pick_capabilities(PROVIDER_PRESETS.get(entry.provider, {}))
         models.append(_render_model_option(
             id=entry.name,
             provider=entry.provider,

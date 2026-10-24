@@ -128,9 +128,18 @@ Agent 世界中已经提交的事实。
 索引、引用、版本、映射、配置状态。
 
 ### Vector Store
-语义检索索引；默认 Milvus Provider。
+语义检索索引；默认 Milvus Provider。它服务于 Knowledge/RAG，不是长期记忆内容的 owner。
 
-它们 MAY 使用同一数据库基础设施，但逻辑职责 MUST 分离。
+上述五个事实源 MAY 使用同一数据库基础设施，但逻辑职责 MUST 分离。
+
+### Memory 文件事实（当前）
+长期记忆的**内容与 revision** 属于 Markdown 文件（`MEMORY.md` / `USER.md`），由统一提交 seam
+作为唯一可变入口；它不是上述任何存储的从属数据，也不把上述存储变成"多主"。
+job/lease、approval/pin、本机设置、tombstone、receipt、只读历史档案各自是 Memory 域内的
+**操作状态事实**，各有明确 owner（ADR-0056 §3）；派生索引与 outbox 只可重建、不拥有当前事实。
+旧 tenant/user/project 只作为只读迁移来源标签，不构成路由。
+⚠ 本条只描述 Memory 事实归属，**不授权** Memory 的操作状态沿用 SQLite / 任何存储层作为例外
+（裁决 1：无例外；ADR-0056 §5）。
 
 ## 6. 统一执行原则
 

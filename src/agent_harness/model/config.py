@@ -117,8 +117,12 @@ REASONING_EFFORT_WIRE_VALUES = frozenset(
 )
 
 
-def _pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
-    """从 source dict 抽取已知能力位（仅声明的键）。省略 = 不猜测。"""
+def pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
+    """从 source dict 抽取已知能力位（仅声明的键）。省略 = 不猜测。
+
+    #1539 转正公开：preset/自定义模型配置的能力视图抽取只有这一份，
+    Web catalog 与配置解析共用（此前 catalog import 私有名）。
+    """
     return {k: source[k] for k in _CAPABILITY_FIELDS if k in source}
 
 

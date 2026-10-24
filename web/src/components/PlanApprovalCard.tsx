@@ -15,7 +15,7 @@
  *  「切回 normal 档」与「续跑 run」当同一个原子动作（AC6），前端不需要也不该
  *  自己发切档请求。
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FileText } from 'lucide-react';
 import type {
   PendingPlanApprovalRequest,
@@ -41,16 +41,29 @@ export function PlanApprovalCard({
 }: PlanApprovalCardProps) {
   const [feedback, setFeedback] = useState('');
 
+  /* #1523 AC3：裁决提交后的焦点落点——同 `AskUserCard`。`resuming` 禁用三个按钮的
+   * 瞬间浏览器把焦点丢给 body；成功则卡片卸载。提交即落 composer（App 的既有落点
+   * 惯例 `#composer-input`）；失败（卡仍在、错误出现）拉回触发裁决的那个按钮。 */
+  const submittedRef = useRef(false);
+  const lastActionBtnRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!submittedRef.current || !errorMessage) return;
+    lastActionBtnRef.current?.focus();
+  }, [errorMessage]);
+
   /** 三个按钮**各点一次即提交**（AC9 的判据就是这一条）。反馈框常驻、可选：
    *  只在 revise / reject 时随裁决发出——后端对「approve + feedback」直接 422，
    *  所以批准时即使框里有字也不带（标签已写明适用范围，不是静默吞掉）。 */
-  const submit = (decision: PlanApprovalDecision) => {
+  const submit = (decision: PlanApprovalDecision, btn: HTMLButtonElement | null) => {
     const trimmed = feedback.trim();
     onSubmit({
       request_id: request.request_id,
       decision,
       ...(decision !== 'approve' && trimmed ? { feedback: trimmed } : {}),
     });
+    submittedRef.current = true;
+    if (btn) lastActionBtnRef.current = btn;
+    document.getElementById('composer-input')?.focus();
   };
 
   return (
@@ -90,7 +103,7 @@ export function PlanApprovalCard({
           <button
             type="button"
             className="plan-approval-btn primary plan-approval-approve"
-            onClick={() => submit('approve')}
+            onClick={(e) => submit('approve', e.currentTarget)}
             disabled={resuming}
           >
             批准并开始执行
@@ -98,7 +111,7 @@ export function PlanApprovalCard({
           <button
             type="button"
             className="plan-approval-btn plan-approval-revise"
-            onClick={() => submit('revise')}
+            onClick={(e) => submit('revise', e.currentTarget)}
             disabled={resuming}
           >
             要求修改
@@ -106,7 +119,7 @@ export function PlanApprovalCard({
           <button
             type="button"
             className="plan-approval-btn plan-approval-reject"
-            onClick={() => submit('reject')}
+            onClick={(e) => submit('reject', e.currentTarget)}
             disabled={resuming}
           >
             拒绝

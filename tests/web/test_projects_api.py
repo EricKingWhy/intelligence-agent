@@ -42,7 +42,7 @@ def _app(tmp_path: Path, **overrides):
         model_api_key="sk-test",
         **overrides,
     )
-    return create_app(settings, enable_cors=False)
+    return create_app(settings, enable_cors=False, allow_testserver=True)
 
 
 def _create_session(client: TestClient, *, workspace: str | None = None) -> str:

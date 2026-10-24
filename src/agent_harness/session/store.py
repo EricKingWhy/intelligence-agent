@@ -26,6 +26,7 @@ import logging
 import os
 import shutil
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -341,6 +342,12 @@ class _GroupFlush:
             os.close(fd)
 
 
+#: 全量事件读缓存的会话数上限（#1526）：全量事件是 MB 级，无界 dict 会把
+#: 「读过的每个会话的整段历史」都钉在内存里——LRU 4 覆盖并发分页重建的
+#: 常见形状（>4 个并发重建时退化为部分命中，正确性不受影响）。
+_EVENTS_CACHE_MAX_SESSIONS = 4
+
+
 class JsonlSessionStore:
     """JSONL append-only 事件存储。
 
@@ -378,6 +385,20 @@ class JsonlSessionStore:
         self._summary_cache: dict[
             str, tuple[tuple[int, int], SessionSummaryStats]
         ] = {}
+        # 全量事件读缓存（#1526）：{session_id: ((size, mtime_ns), (events,
+        # integrity))}。长会话每页都全量解析纯属浪费（#516 摘要缓存的同型
+        # 问题）。与 `_summary_cache` 同款双戳纪律：扫描前后戳一致才入；戳变化
+        # （追加必变 size）→ 以磁盘为准重扫。与摘要缓存的**两点不同**：
+        # ① 全量事件是 MB 级，用 OrderedDict LRU 且上限 4 个会话（摘要行 KB
+        # 级才敢用无界 dict）；② 归还时**拷贝列表**——`Session.__init__` 直接
+        # 持有传入列表并在其上追加，共享同一列表会把 Session 的内存投影写穿
+        # 进缓存。元素级共享是**有意**的：`SessionEvent` frozen+slots 冻结属性
+        # 写，多读者共享同一对象安全；`data`/`source_event_ids` 字段可变，纪律
+        # 是**任何读者不得就地改写元素字段**（仓内现存用法全是读）。
+        self._events_cache: OrderedDict[
+            str,
+            tuple[tuple[int, int], tuple[list[SessionEvent], EventLogIntegrity]],
+        ] = OrderedDict()
         self._state_guard = threading.Lock()
         # #1489：每会话一个刷盘协调器（懒创建，表结构由 `_state_guard` 保护）。
         # 与 `_seq_locks` 分表：写锁管「读戳→判定→写」的原子性，协调器管「谁的
@@ -854,10 +875,29 @@ class JsonlSessionStore:
         差别只在多返回一份**脱敏完整性报告**：完整坏行（定位记录）+ 解析后序列的
         seq 断层 / 重复。恢复入口据此拒绝——对有洞的投影做恢复裁决，等于把丢失的
         permission/tool 事实当不存在（不变量 #14 的反面就是这类沉默）。
+
+        结果缓存（#1526）：文件戳 `(size, mtime_ns)` 未变 → 复用上次扫描结果
+        （归还**列表拷贝**，调用方——如 `Session.__init__`——可安全持有/追加；
+        纪律与 `read_session_summary` 的 #516 摘要缓存同款，见 `_events_cache`）。
         """
         path = self._events_path(session_id)
         if not path.exists():
             return [], EventLogIntegrity()
+
+        cached = self._events_cache.get(session_id)
+        if cached is not None and self._summary_stamp(path) == cached[0]:
+            with self._state_guard:
+                # 读侧不加锁的固有竞态（#516 同款取舍）：本线程 `get` 命中后、
+                # `move_to_end` 前，另一线程插入第 5 个会话触发 LRU 逐出，逐出的
+                # 恰是本条（`.get` 不改序，命中的老条目可停在队首）。逐出 = 本地
+                # miss 而非错误——数据已验证过戳，这里吞掉 KeyError 只跳过提序。
+                try:
+                    self._events_cache.move_to_end(session_id)
+                except KeyError:
+                    pass
+            cached_events, integrity = cached[1]
+            return list(cached_events), integrity
+        stamp_before = self._summary_stamp(path)
 
         events: list[SessionEvent] = []
         corrupt: list[CorruptLine] = []
@@ -889,11 +929,19 @@ class JsonlSessionStore:
                 gaps.append((prev + 1, event.seq - 1))
             seen.add(event.seq)
             prev = event.seq
-        return events, EventLogIntegrity(
+        report = EventLogIntegrity(
             corrupt_lines=tuple(corrupt),
             seq_gaps=tuple(gaps),
             seq_duplicates=tuple(duplicates),
         )
+        # 扫描期间无外部追加（双戳一致）才入缓存；LRU 上限防多会话重建撑爆内存。
+        if stamp_before == self._summary_stamp(path):
+            with self._state_guard:
+                self._events_cache[session_id] = (stamp_before, (events, report))
+                self._events_cache.move_to_end(session_id)
+                while len(self._events_cache) > _EVENTS_CACHE_MAX_SESSIONS:
+                    self._events_cache.popitem(last=False)
+        return list(events), report
 
     def read_events(self, session_id: str) -> list[SessionEvent]:
         """读取 Session 的全部有效事件，跳过无法解析的损坏行。

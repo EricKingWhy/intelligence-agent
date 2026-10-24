@@ -17,11 +17,11 @@ from agent_harness.model.config import (
     PROVIDER_PRESETS,
     ConfigError,
     ModelConfig,
-    _pick_capabilities,
     _unadopted_catalog_entries,
     find_catalog_entry,
     model_supports_vision,
     parse_model_catalog,
+    pick_capabilities,
     unadopted_catalog_entries,
     warn_unadopted_catalog_entries,
 )
@@ -153,7 +153,7 @@ class TestPromptCacheCapabilityDeclaration:
             assert "prompt_cache" not in preset, name
 
     def test_pick_capabilities_passes_the_field_through(self):
-        picked = _pick_capabilities({"prompt_cache": "automatic", "unknown": "x"})
+        picked = pick_capabilities({"prompt_cache": "automatic", "unknown": "x"})
         assert picked == {"prompt_cache": "automatic"}
 
     def test_catalog_entry_may_declare(self):

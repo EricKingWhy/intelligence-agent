@@ -15,12 +15,16 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, ClassVar
 from uuid import uuid4
 
 SCHEMA_VERSION = "1.0"
 SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
+# Keep one active 10 MiB log and five rotated backups per workspace.
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
 
 EVENT_TYPES = frozenset(
     {
@@ -287,7 +291,6 @@ def setup_logging(
     """配置 root logger，并返回 append-only JSONL 文件路径。"""
 
     log_dir = Path(workspace_dir).parent / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "agent.jsonl"
 
     root = logging.getLogger()
@@ -302,7 +305,22 @@ def setup_logging(
     )
     root.addHandler(console)
 
-    jsonl = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        jsonl = RotatingFileHandler(
+            log_path,
+            mode="a",
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+    except OSError as error:
+        root.warning(
+            "JSONL diagnostic logging unavailable; continuing with console logging (%s)",
+            type(error).__name__,
+        )
+        return log_path
+
     jsonl.setFormatter(JsonlFormatter())
     root.addHandler(jsonl)
     return log_path

@@ -43,7 +43,7 @@ def bare_client(tmp_path):
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def wired_client(tmp_path):
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     wiring = CapabilityWiring()
     # ADR-0020b mechanism: providers with `name` class attribute
     wiring.context_providers = [_FakeMemoryProvider(), _FakeSkillsProvider()]
