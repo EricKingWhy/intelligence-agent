@@ -98,7 +98,7 @@ Recall combines a small trusted profile from `USER.md` with hybrid retrieval ove
 1. Reuse/adapt LangMem only behind the replaceable provider seam; project runtime code owns identity, policy, retries, persistence, and observability.
 2. Keep Markdown files authoritative for memory content and every index rebuildable. No retrieval hit is trusted until the current approved file content (and its revision) confirms it.
 3. Treat Formation and Adjudication as distinct model stages with strict runtime-validated contracts and explicit abstention/no-op outcomes.
-4. Use an expand-then-contract delivery: establish V2 while legacy behavior still runs, integrate all V2 consumers, then cut over to the Markdown-only runtime path. No destructive deletion is performed under this delivery (see §3.4).
+4. Use an expand-then-contract delivery: establish V2 while legacy behavior still runs, integrate all V2 consumers, then cut over to the Markdown-only runtime path. No destructive deletion is performed under this delivery (see §3 item 4).
 5. Keep Profile and Collection as access tiers, not separate truths. Both use the same V2 records and lifecycle.
 6. Keep public benchmark results separate from blocking project gates so benchmark optimization cannot weaken product-specific precision or security.
 
