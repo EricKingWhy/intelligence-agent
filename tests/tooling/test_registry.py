@@ -14,12 +14,14 @@ Hands-on 落点（见下方 TODO 注释）：
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, Literal
 
 import pytest
 from langchain_core.messages import AIMessage
-from pydantic import BaseModel, Field
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
+from agent_harness.mcp.adapter import _attach_schema_passthrough
 from agent_harness.tooling import (
     ErrorCode,
     Tool,
@@ -213,6 +215,176 @@ class TestExportModelDefinitions:
         # required 字段也来自 AddArgs 的必填项
         assert set(d["parameters"]["required"]) == {"first_number", "second_number"}
 
+    def test_export_omits_only_generated_root_title(
+        self, registry: ToolRegistry, add_tool: AddTool
+    ):
+        registry.register(add_tool)
+        expected = AddArgs.model_json_schema()
+        expected.pop("title")
+
+        definition = registry.export_model_definitions()[0]
+
+        assert definition["parameters"] == expected
+        assert AddArgs.model_json_schema()["title"] == "AddArgs"
+
+    def test_export_preserves_other_schema_metadata(self, registry: ToolRegistry):
+        class NestedArgs(BaseModel):
+            state: Literal["ready", "waiting"] = Field(
+                default="ready", description="Current state"
+            )
+
+        class RichArgs(BaseModel):
+            required_name: str = Field(description="Required display name")
+            nested: NestedArgs
+
+        class RichTool(AddTool):
+            @property
+            def name(self) -> str:
+                return "rich_schema"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return RichArgs
+
+        registry.register(RichTool())
+        expected = RichArgs.model_json_schema()
+        expected.pop("title")
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters == expected
+        assert parameters["required"] == ["required_name", "nested"]
+        assert parameters["properties"]["nested"]["$ref"] == "#/$defs/NestedArgs"
+        nested_state = parameters["$defs"]["NestedArgs"]["properties"]["state"]
+        assert nested_state["default"] == "ready"
+        assert nested_state["enum"] == ["ready", "waiting"]
+
+    def test_export_preserves_explicit_root_title(self, registry: ToolRegistry):
+        class ExplicitTitleArgs(BaseModel):
+            model_config = ConfigDict(title="Public tool input")
+            value: str
+
+        class ExplicitTitleTool(AddTool):
+            @property
+            def name(self) -> str:
+                return "explicit_title"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return ExplicitTitleArgs
+
+        registry.register(ExplicitTitleTool())
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters["title"] == "Public tool input"
+
+    def test_export_preserves_model_title_generator(self, registry: ToolRegistry):
+        def title_generator(model: type[BaseModel]) -> str:
+            return model.__name__
+
+        class GeneratedTitleArgs(BaseModel):
+            model_config = ConfigDict(model_title_generator=title_generator)
+            value: str
+
+        class GeneratedTitleTool(AddTool):
+            @property
+            def name(self) -> str:
+                return "generated_title"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return GeneratedTitleArgs
+
+        registry.register(GeneratedTitleTool())
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters["title"] == "GeneratedTitleArgs"
+
+    def test_export_preserves_custom_json_schema_hook_title(
+        self, registry: ToolRegistry
+    ):
+        class CustomHookArgs(BaseModel):
+            value: str
+
+            @classmethod
+            def __get_pydantic_json_schema__(cls, core_schema, handler):
+                schema = handler(core_schema)
+                schema["title"] = cls.__name__
+                return schema
+
+        class CustomHookTool(AddTool):
+            @property
+            def name(self) -> str:
+                return "custom_hook_title"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return CustomHookArgs
+
+        registry.register(CustomHookTool())
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters["title"] == "CustomHookArgs"
+
+    def test_export_preserves_custom_core_schema_hook_title(
+        self, registry: ToolRegistry
+    ):
+        class CustomCoreHookArgs(BaseModel):
+            value: str
+
+            @classmethod
+            def __get_pydantic_core_schema__(cls, source, handler):
+                schema = handler(source)
+                schema.setdefault("metadata", {})["pydantic_js_updates"] = {
+                    "title": cls.__name__
+                }
+                return schema
+
+        class CustomCoreHookTool(AddTool):
+            @property
+            def name(self) -> str:
+                return "custom_core_hook_title"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return CustomCoreHookArgs
+
+        registry.register(CustomCoreHookTool())
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters["title"] == "CustomCoreHookArgs"
+
+    def test_export_preserves_mcp_schema_title(self, registry: ToolRegistry):
+        class McpTool(AddTool):
+            def __init__(self) -> None:
+                self._args_schema = create_model("RemoteArgs")
+                _attach_schema_passthrough(
+                    self._args_schema,
+                    {"type": "object", "properties": {"remote": {"type": "string"}}},
+                )
+
+            @property
+            def name(self) -> str:
+                return "remote"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return self._args_schema
+
+        registry.register(McpTool())
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters == {
+            "type": "object",
+            "properties": {"remote": {"type": "string"}},
+            "title": "RemoteArgs",
+        }
+
     def test_can_feed_to_scripted_model_bind_tools(
         self, registry: ToolRegistry, add_tool: AddTool
     ):
@@ -227,6 +399,17 @@ class TestExportModelDefinitions:
         # （ScriptedModel 的 bind_tools 会记住 tools，ainvoke 会记快照）
         assert bound is model  # ScriptedModel.bind_tools 返回 self
         assert model.bound_tools == defs
+
+    def test_can_bind_exported_schema_with_openai_adapter(self, registry: ToolRegistry):
+        registry.register(AddTool())
+        model = ChatOpenAI(model="gpt-4o-2024-08-06", api_key="sk-test")
+
+        bound = model.bind_tools(registry.export_model_definitions(), strict=True)
+
+        parameters = bound.kwargs["tools"][0]["function"]["parameters"]
+        assert "title" not in parameters
+        assert parameters["required"] == ["first_number", "second_number"]
+        assert set(parameters["properties"]) == {"first_number", "second_number"}
 
 
 # ============================================================================
