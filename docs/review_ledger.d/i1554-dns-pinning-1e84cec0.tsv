@@ -1,0 +1,1 @@
+2026-10-24	#1554 DNS pinning 与祖先范围 #1485 代码两轴复审（Correctness/Spec + Security/Standards）；固定范围 91de0539..1e84cec0。先前 P2/P3 与本轮 loopback 绑定、httpx2 精确锁注释、测试文件头说明均复核闭合；无残余 P0–P4。	91de0539237d898da01e3cdc371e842fb2b57be2..1e84cec03b9c859fc2def17ca95d6f57a7788804
