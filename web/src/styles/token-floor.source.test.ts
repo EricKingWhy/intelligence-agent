@@ -23,12 +23,16 @@ function walk(dir: string): string[] {
   return out;
 }
 
+/* Windows checkout 是 CRLF：正则与行号都按 \n 折算，读入时先归一（审查 P4）。 */
 const SOURCES = walk(SRC).map((p) => ({
   rel: relative(SRC, p).replaceAll('\\', '/'),
-  text: readFileSync(p, 'utf8'),
+  text: readFileSync(p, 'utf8').replace(/\r\n/g, '\n'),
 }));
 
-const stripCssComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '');
+/* 注释换成等宽空格但保留换行：既中和注释里的 `{`/`}`/正文，又让行号与
+ * 原文件逐行对齐（审查 P4：剥成空串会让报告行号向上偏）。 */
+const stripCssComments = (s: string) =>
+  s.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
 
 /* ── ① #1519：可读文本字号地板 12px（UI-02 PRD D3；10px 仅限全大写 micro-label）──
  * 分母 = src 下全部 css/tsx 的 font-size 声明（含 font 简写与 TSX 内联 fontSize）。
@@ -102,43 +106,43 @@ const FLOOR_EXCEPTIONS: Exception[] = [
 const isException = (file: string, selector: string) =>
   FLOOR_EXCEPTIONS.some((e) => e.file === file && e.selector === selector);
 
-/** 深度扫描提取叶子规则块：返回 { selector, body, line }（line = 块首行，
- *  声明行 = line + body 内换行数，由调用方折算）。
- *  @media/@supports 外层块的 body 含 '{'，不产出声明，其子块正常产出。 */
-function cssRules(css: string): { selector: string; body: string; line: number }[] {
-  const rules: { selector: string; body: string; line: number }[] = [];
-  let depth = 0;
+type CssRule = { selector: string; body: string; line: number };
+
+/** 栈式扫描提取叶子规则块（审查 P2 修正：@media/@supports/@container 内的规则
+ *  同样收集）。prelude 取「上一个 { 或 } 之后到本 { 之前」；body 无嵌套 `{`
+ *  即叶子规则；line = prelude 首行，声明行由调用方按 body 内换行折算。 */
+function cssRules(css: string): CssRule[] {
+  const rules: CssRule[] = [];
+  const stack: { preludeStart: number; bodyStart: number }[] = [];
   let preludeStart = 0;
-  let bodyStart = -1;
   for (let i = 0; i < css.length; i++) {
     const ch = css[i];
     if (ch === '{') {
-      if (depth === 0) {
-        bodyStart = i + 1;
+      stack.push({ preludeStart, bodyStart: i + 1 });
+      preludeStart = i + 1;
+    } else if (ch === '}' && stack.length > 0) {
+      const frame = stack.pop()!;
+      const body = css.slice(frame.bodyStart, i);
+      if (!body.includes('{')) {
+        rules.push({
+          selector: css.slice(frame.preludeStart, frame.bodyStart - 1).trim(),
+          body,
+          line: css.slice(0, frame.preludeStart).split('\n').length,
+        });
       }
-      depth++;
-    } else if (ch === '}') {
-      depth--;
-      if (depth === 0 && bodyStart >= 0) {
-        const body = css.slice(bodyStart, i);
-        if (!body.includes('{')) {
-          const selector = css.slice(preludeStart, bodyStart - 1).trim();
-          const line = css.slice(0, preludeStart).split('\n').length;
-          rules.push({ selector, body, line });
-        }
-        bodyStart = -1;
-        preludeStart = i + 1;
-      }
+      preludeStart = i + 1;
     }
   }
   return rules;
 }
 
-const lineOf = (rule: { line: number; body: string }, declIndex: number) =>
-  rule.line + rule.body.slice(0, declIndex).split('\n').length - 1;
+const lineOf = (rule: CssRule, offsetInBody: number) =>
+  rule.line + rule.body.slice(0, offsetInBody).split('\n').length - 1;
 
-function collectFontSizes(): { file: string; selector: string; value: string; line: number }[] {
-  const found: { file: string; selector: string; value: string; line: number }[] = [];
+type Finding = { file: string; selector: string; value: string; px: number | null; line: number };
+
+function collectFontSizes(): Finding[] {
+  const found: Finding[] = [];
   for (const { rel, text } of SOURCES) {
     if (rel.endsWith('.css')) {
       for (const rule of cssRules(stripCssComments(text))) {
@@ -148,13 +152,14 @@ function collectFontSizes(): { file: string; selector: string; value: string; li
           offset += decl.length + 1;
           const m = decl.match(/^\s*(font-size|font)\s*:\s*([^;]+)$/);
           if (!m) continue;
-          if (m[1] === 'font-size' || /\b1[01]px\b/.test(m[2])) {
-            found.push({
-              file: rel,
-              selector: rule.selector,
-              value: m[2].trim(),
-              line: lineOf(rule, start),
-            });
+          const raw = m[2].trim();
+          if (m[1] === 'font-size') {
+            const px = raw.match(/^(\d+(?:\.\d+)?)px$/);
+            found.push({ file: rel, selector: rule.selector, value: raw, px: px ? Number.parseFloat(px[1]) : null, line: lineOf(rule, start) });
+          } else {
+            // font 简写：取值里第一个 px 分量（审查 P2：只认 10/11px 字面量会漏 9.5px 之类）
+            const px = raw.match(/(\d+(?:\.\d+)?)px/);
+            found.push({ file: rel, selector: rule.selector, value: raw, px: px ? Number.parseFloat(px[1]) : null, line: lineOf(rule, start) });
           }
         }
       }
@@ -163,7 +168,7 @@ function collectFontSizes(): { file: string; selector: string; value: string; li
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .replace(/^\s*\/\/.*$/gm, '');
       for (const m of noComments.matchAll(/fontSize:\s*['"`]?(\d+(?:\.\d+)?)px/g)) {
-        found.push({ file: rel, selector: '(tsx inline)', value: `${m[1]}px`, line: 0 });
+        found.push({ file: rel, selector: '(tsx inline)', value: `${m[1]}px`, px: Number.parseFloat(m[1]), line: 0 });
       }
     }
   }
@@ -173,12 +178,11 @@ function collectFontSizes(): { file: string; selector: string; value: string; li
 describe('#1519 可读文本字号地板（12px，UI-02 PRD D3）', () => {
   it('src 下所有 font-size ≥12px，例外仅限白名单（逐条有规格依据）', () => {
     const violations: string[] = [];
-    for (const { file, selector, value, line } of collectFontSizes()) {
-      const px = value.match(/^(\d+(?:\.\d+)?)px$/);
-      if (!px) continue; // var()/rem/inherit 等交给 token 检查与本断言的 px 字面量域
-      if (Number.parseFloat(px[1]) >= 12) continue;
+    for (const { file, selector, value, px, line } of collectFontSizes()) {
+      if (px === null) continue; // var()/rem/inherit 等交给 token 检查与本断言的 px 字面量域
+      if (px >= 12) continue;
       if (isException(file, selector)) continue;
-      violations.push(`${file}:${line} ${selector || '(裸)'} → font-size: ${value}`);
+      violations.push(`${file}:${line} ${selector || '(裸)'} → ${value}`);
     }
     expect(
       violations,
@@ -206,7 +210,8 @@ describe('#1519 可读文本字号地板（12px，UI-02 PRD D3）', () => {
 
 const VAR_WHITELIST_PREFIXES = [/^--radix-/];
 
-const collectVarNames = (regex: RegExp, pick: (m: RegExpMatchArray) => string) => {  const names = new Set<string>();
+const collectVarNames = (regex: RegExp, pick: (m: RegExpMatchArray) => string) => {
+  const names = new Set<string>();
   for (const { text } of SOURCES) {
     const noComments = text
       .replace(/\/\*[\s\S]*?\*\//g, '')

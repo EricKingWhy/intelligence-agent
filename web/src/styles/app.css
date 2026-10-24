@@ -8494,7 +8494,7 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   border: 1px solid var(--fx-hairline-soft);
   border-radius: 5px;
   background: var(--fx-canvas-soft);
-  font: 400 9.5px var(--font-ui);
+  font: 400 var(--text-xs) var(--font-ui);
   color: var(--fx-ink-2);
 }
 .step-detail .ov-acc .detail-tool-row .detail-tool-name {
