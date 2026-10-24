@@ -11,6 +11,10 @@
 ``64:ff9b:1::/48``、IPv4-compatible ``::/96``——它们在 ``ipaddress`` 里**都不**命中
 IPv4 网段（实测），不拆就是白名单。
 
+传统数字 IPv4 写法（``0xa9fea9fe`` / ``2852039166`` / ``0251.0376.0251.0376``）在
+``ipaddress`` 里**不合法**，但在 ``inet_aton`` / 系统解析器眼里就是同一个地址 ⇒
+判定前先按 :func:`_legacy_ipv4` 规范化，否则保存期放行、连接期照样连上去。
+
 RFC1918 / loopback / ``198.18.0.0/15`` 一律放行。``198.18/15`` 尤其不能拦：沙箱的
 通配 DNS 会把**任意**主机名解析进该段（实测 ``api.example.com`` → 198.18.222.105），
 照搬 ``langchain_core`` 默认策略（= 裁决 C 的全私网拦截）会让本机所有模型调用假红。
@@ -19,10 +23,13 @@ RFC1918 / loopback / ``198.18.0.0/15`` 一律放行。``198.18/15`` 尤其不能
 
 - **保存期**（``ProviderStore``）：只判 IP 字面量与元数据主机名，**不做 DNS**——
   保存期解析只会拿到 ``198.18.x.x`` 之类，既判不出真伪又拖慢保存。
-- **请求期**（``create_chat_model`` 注入的 httpx2 客户端 request hook）：httpx2
-  ``_send_handling_redirects`` 的循环体**首行**就是 request hook，因此**每一跳**
-  重定向发出前都会过一遍——先解析主机名，再逐个解析结果判；拒绝时请求根本没到
-  transport，**零请求、零凭据**（Authorization 头不会离开进程）。
+- **请求期**（``create_chat_model`` 注入的 httpx2 客户端 request hook + transport）：
+  request hook 在 ``_send_handling_redirects`` 每一跳发出前解析并检查所有答案，再把
+  已检查地址列表附到请求；transport 保留原 URL 选择代理，并将连接目标改为已检查 IP。
+  直连时按解析顺序尝试地址，连接失败后继续尝试后续已检查地址。Host 与 TLS SNI 始终
+  使用原始主机名；跨主机请求使用临时隔离池，响应流关闭后释放，防止共享解析 IP 的
+  HTTPS 主机复用按另一主机名验证的 TLS 通道。拒绝时请求根本没到 transport，**零请求、
+  零凭据**（Authorization 头不会离开进程）。
 
 所有者例外只来自 ``Settings.model_endpoint_allowlist``（env / .env）。Web 请求体是
 ``ConfigDict(extra="forbid")``，外部输入无法设置或改写它，也就不能自行把某个地址
@@ -34,10 +41,9 @@ RFC1918 / loopback / ``198.18.0.0/15`` 一律放行。``198.18/15`` 尤其不能
 ``block_localhost=True`` 正是本票裁决**明确否决**的 C 方案，且 ``SSRFSafeTransport``
 是 httpx 实现，与本仓 openai 3.0.0 使用的 httpx2 客户端不兼容。
 
-残余风险（诚实登记）：本守卫判"解析器给出的地址"，不是"实际连上的地址"——httpx2
-连接时会再解析一次，理论上存在 DNS rebinding 的 TOCTOU 窗口。彻底封堵需要自建
-pin-IP transport（复制一份 ``SSRFSafeTransport`` 到 httpx2），超出"轻量防误配"的
-本票范围；见完工报告"残余风险"。
+HTTPS 代理隧道里的目标 SNI 从 httpx2/httpcore2 2.13.1 起支持；本项目固定
+``httpx2==2.16.0``，以匹配使用的私有 transport API。升级时要运行 transport 兼容性测试，
+确保 direct transport 与代理 transport 都以原始主机名校验目标证书。
 
 解析失败（``OSError``）在 hook 里**不吞**：吞掉再放行就是"解析器一抖就绕过"，
 而真实连接用的是同一个解析器——放过它换不来可用性，只换来一条绕过路径。异常
@@ -54,10 +60,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
-from collections.abc import Iterable
+import threading
+from collections.abc import Callable, Iterable
 from urllib.parse import urlsplit
 
+import anyio
 import httpx2
 from openai import DefaultAsyncHttpxClient, DefaultHttpxClient
 
@@ -83,6 +92,30 @@ _EMBEDDED_V4_PREFIXES = (
 _METADATA_HOSTNAMES = frozenset(
     {"metadata.google.internal", "metadata.amazonaws.com", "metadata", "instance-data"}
 )
+
+#: 传统 IPv4 单段写法：十六进制 ``0x…`` / 八进制 ``0…`` / 十进制。**不含**符号与空白。
+#: 每段长度封顶到 32 位能表示的范围（``int()`` 对超长数字串会抛 ``ValueError``，
+#: 而这里的输入来自用户 URL——守卫不能自己变成 500）。
+_LEGACY_V4_PART_RE = re.compile(r"0[xX][0-9a-fA-F]{1,8}|0[0-7]{0,11}|[1-9][0-9]{0,9}")
+
+
+def _strip_leading_zeros(part: str) -> str:
+    """去掉多余前导零，但保留进制标记（``0x`` / 八进制的 ``0``）。
+
+    ``inet_aton`` 认任意多个前导零（``0x00a9fea9fe`` / ``00000251.0376....``），
+    而下面的长度上限按**有效位数**定 ⇒ 不先剥零，补零写法会因长度超限被判成
+    "不是地址"而放行。剥完仍交给同一份正则判合法（``0x`` 剥不出数字 ⇒ 仍是非法）。
+    """
+    if part[:2].lower() == "0x":
+        digits = part[2:].lstrip("0")
+        # 全零段收敛成 ``0x0``：回退原串会让 ≥9 个 0 撞长度上限 ⇒ link-local 保存期放行。
+        return part if len(part) == 2 else "0x" + (digits or "0")
+    if part.startswith("0"):
+        digits = part[1:].lstrip("0")
+        if digits[:1] in ("x", "X"):
+            return part  # ``00X4`` 不是任何合法写法，别把剥零变成"补出合法十六进制"
+        return "0" + digits
+    return part
 
 
 class EndpointBlockedError(RuntimeError):
@@ -113,6 +146,368 @@ class _GuardedAsyncClient(DefaultAsyncHttpxClient):  # type: ignore[misc]
                 asyncio.get_running_loop().create_task(self.aclose())
         except Exception:  # noqa: BLE001, S110
             pass
+
+
+_PINNED_ADDRESS_EXTENSION = "agent_harness.endpoint_guard.pinned_address"
+_SNI_HOSTNAME_EXTENSION = "sni_hostname"
+
+
+def _request_with_pinned_address(
+    request: httpx2.Request,
+    address: str | None,
+) -> httpx2.Request:
+    """复制请求并锁定一个已校验 IP；原请求仍供代理选择和重定向使用。"""
+    pin = request.extensions.get(_PINNED_ADDRESS_EXTENSION)
+    if pin is None:
+        return request
+
+    host, port, addresses = pin
+    if request.url.host != host or request.url.port != port:
+        raise RuntimeError("DNS pin no longer matches the request origin")
+    if address not in addresses:
+        raise RuntimeError("transport address was not returned by the checked DNS lookup")
+
+    extensions = dict(request.extensions)
+    extensions.pop(_PINNED_ADDRESS_EXTENSION, None)
+    if request.url.scheme == "https":
+        extensions[_SNI_HOSTNAME_EXTENSION] = host
+    pinned_url = request.url.copy_with(host=address)
+    return httpx2.Request(
+        method=request.method,
+        url=pinned_url,
+        headers=request.headers,
+        stream=request.stream,
+        extensions=extensions,
+    )
+
+
+def _request_addresses(request: httpx2.Request) -> tuple[str | None, ...]:
+    pin = request.extensions.get(_PINNED_ADDRESS_EXTENSION)
+    return pin[2] if pin is not None else (None,)
+
+
+def _can_retry_address(error: BaseException, *, proxy_route: bool) -> bool:
+    if not proxy_route:
+        return isinstance(error, (httpx2.ConnectError, httpx2.ConnectTimeout))
+    return isinstance(error, httpx2.ProxyError) and re.match(r"^(?:502|504)\b", str(error)) is not None
+
+
+def _http_proxy_pool(transport: object, *, async_transport: bool) -> object | None:
+    import httpcore2
+
+    proxy_type = httpcore2.AsyncHTTPProxy if async_transport else httpcore2.HTTPProxy
+    pool = getattr(transport, "_pool", None)
+    return pool if isinstance(pool, proxy_type) else None
+
+
+def _httpcore_ipv6_proxy_request(request: httpx2.Request):
+    import httpcore2
+
+    return httpcore2.Request(
+        method=request.method,
+        url=httpcore2.URL(
+            scheme=request.url.raw_scheme,
+            host=b"[" + request.url.raw_host + b"]",
+            port=request.url.port,
+            target=request.url.raw_path,
+        ),
+        headers=request.headers.raw,
+        content=request.stream,
+        extensions=request.extensions,
+    )
+
+
+def _uses_ipv6_http_proxy(
+    transport: object, request: httpx2.Request, *, async_transport: bool,
+) -> bool:
+    return ":" in request.url.host and _http_proxy_pool(
+        transport, async_transport=async_transport,
+    ) is not None
+
+
+def _send_ipv6_proxy_sync(
+    transport: httpx2.BaseTransport,
+    request: httpx2.Request,
+) -> httpx2.Response:
+    from httpx2._transports.default import ResponseStream, map_httpcore_exceptions
+
+    pool = transport._pool  # type: ignore[attr-defined]
+    with map_httpcore_exceptions():
+        core_response = pool.handle_request(_httpcore_ipv6_proxy_request(request))
+    return httpx2.Response(
+        status_code=core_response.status,
+        headers=core_response.headers,
+        stream=ResponseStream(core_response.stream),
+        extensions=core_response.extensions,
+    )
+
+
+async def _send_ipv6_proxy_async(
+    transport: httpx2.AsyncBaseTransport,
+    request: httpx2.Request,
+) -> httpx2.Response:
+    from httpx2._transports.default import AsyncResponseStream, map_httpcore_exceptions
+
+    pool = transport._pool  # type: ignore[attr-defined]
+    with map_httpcore_exceptions():
+        core_response = await pool.handle_async_request(_httpcore_ipv6_proxy_request(request))
+    return httpx2.Response(
+        status_code=core_response.status,
+        headers=core_response.headers,
+        stream=AsyncResponseStream(core_response.stream),
+        extensions=core_response.extensions,
+    )
+
+
+def _send_sync(
+    transport: httpx2.BaseTransport,
+    request: httpx2.Request,
+    *,
+    proxy_route: bool,
+) -> httpx2.Response:
+    addresses = _request_addresses(request)
+    for index, address in enumerate(addresses):
+        try:
+            pinned_request = _request_with_pinned_address(request, address)
+            if proxy_route and _uses_ipv6_http_proxy(
+                transport, pinned_request, async_transport=False,
+            ):
+                return _send_ipv6_proxy_sync(transport, pinned_request)
+            return transport.handle_request(pinned_request)
+        except (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.ProxyError) as error:
+            if index + 1 == len(addresses) or not _can_retry_address(
+                error, proxy_route=proxy_route,
+            ):
+                raise
+    raise RuntimeError("DNS lookup produced no usable addresses")
+
+
+async def _send_async(
+    transport: httpx2.AsyncBaseTransport,
+    request: httpx2.Request,
+    *,
+    proxy_route: bool,
+) -> httpx2.Response:
+    addresses = _request_addresses(request)
+    for index, address in enumerate(addresses):
+        try:
+            pinned_request = _request_with_pinned_address(request, address)
+            if proxy_route and _uses_ipv6_http_proxy(
+                transport, pinned_request, async_transport=True,
+            ):
+                return await _send_ipv6_proxy_async(transport, pinned_request)
+            return await transport.handle_async_request(pinned_request)
+        except (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.ProxyError) as error:
+            if index + 1 == len(addresses) or not _can_retry_address(
+                error, proxy_route=proxy_route,
+            ):
+                raise
+    raise RuntimeError("DNS lookup produced no usable addresses")
+
+
+class _ClosingSyncByteStream(httpx2.SyncByteStream):
+    """一次性传输完成后关闭其临时客户端。"""
+
+    def __init__(self, stream: httpx2.SyncByteStream, client: httpx2.Client) -> None:
+        self._stream = stream
+        self._client = client
+        self._closed = False
+
+    def __iter__(self):
+        try:
+            yield from self._stream
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._stream.close()
+        finally:
+            self._client.close()
+
+
+class _ClosingAsyncByteStream(httpx2.AsyncByteStream):
+    """异步版一次性传输清理。"""
+
+    def __init__(
+        self, stream: httpx2.AsyncByteStream, client: httpx2.AsyncClient,
+    ) -> None:
+        self._stream = stream
+        self._client = client
+        self._closed = False
+
+    async def __aiter__(self):
+        try:
+            async for chunk in self._stream:
+                yield chunk
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        with anyio.CancelScope(shield=True):
+            self._closed = True
+            try:
+                await self._stream.aclose()
+            finally:
+                await self._client.aclose()
+
+
+def _transport_for_mount(
+    client: httpx2.Client | httpx2.AsyncClient,
+    mount: object | None,
+) -> httpx2.BaseTransport | httpx2.AsyncBaseTransport:
+    """在新 client 里选取与原请求相同的 mount route。"""
+    if mount is None:
+        return client._transport
+    pattern = getattr(mount, "pattern", None)
+    for candidate, transport in client._mounts.items():
+        if candidate is mount or candidate == mount or (
+            pattern is not None and getattr(candidate, "pattern", None) == pattern
+        ):
+            return transport or client._transport
+    raise RuntimeError("guarded HTTP transport mount changed after client creation")
+
+
+class _PinnedSyncTransport(httpx2.BaseTransport):
+    """pin 到已检查 IP，并隔离不同原始主机名的连接池。"""
+
+    def __init__(
+        self,
+        inner: httpx2.BaseTransport | None,
+        mount: object | None,
+    ) -> None:
+        self._inner = inner
+        self._mount = mount
+        self._client_factory: Callable[[], httpx2.Client] = _GuardedSyncClient
+        self._primary_origin: tuple[str, str, int | None] | None = None
+        self._origin_lock = threading.Lock()
+
+    def _use_primary_transport(self, request: httpx2.Request) -> bool:
+        if self._inner is None:
+            return False
+        origin = (request.url.scheme, request.url.host, request.url.port)
+        with self._origin_lock:
+            if self._primary_origin is None:
+                self._primary_origin = origin
+            return self._primary_origin == origin
+
+    def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        if self._use_primary_transport(request):
+            assert self._inner is not None
+            return _send_sync(
+                self._inner, request, proxy_route=self._mount is not None,
+            )
+
+        client = self._client_factory()
+        try:
+            transport = _transport_for_mount(client, self._mount)
+            assert isinstance(transport, httpx2.BaseTransport)
+            response = _send_sync(
+                transport, request, proxy_route=self._mount is not None,
+            )
+        except BaseException:
+            client.close()
+            raise
+        response.stream = _ClosingSyncByteStream(response.stream, client)
+        return response
+
+    def close(self) -> None:
+        if self._inner is not None:
+            self._inner.close()
+
+
+class _PinnedAsyncTransport(httpx2.AsyncBaseTransport):
+    """异步版 pin-IP 与连接池隔离。"""
+
+    def __init__(
+        self,
+        inner: httpx2.AsyncBaseTransport | None,
+        mount: object | None,
+    ) -> None:
+        self._inner = inner
+        self._mount = mount
+        self._client_factory: Callable[[], httpx2.AsyncClient] = _GuardedAsyncClient
+        self._primary_origin: tuple[str, str, int | None] | None = None
+        self._origin_lock = threading.Lock()
+
+    def _use_primary_transport(self, request: httpx2.Request) -> bool:
+        if self._inner is None:
+            return False
+        origin = (request.url.scheme, request.url.host, request.url.port)
+        with self._origin_lock:
+            if self._primary_origin is None:
+                self._primary_origin = origin
+            return self._primary_origin == origin
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        if self._use_primary_transport(request):
+            assert self._inner is not None
+            return await _send_async(
+                self._inner, request, proxy_route=self._mount is not None,
+            )
+
+        client = self._client_factory()
+        try:
+            transport = _transport_for_mount(client, self._mount)
+            assert isinstance(transport, httpx2.AsyncBaseTransport)
+            response = await _send_async(
+                transport, request, proxy_route=self._mount is not None,
+            )
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await client.aclose()
+            raise
+        response.stream = _ClosingAsyncByteStream(response.stream, client)
+        return response
+
+    async def aclose(self) -> None:
+        if self._inner is not None:
+            await self._inner.aclose()
+
+
+def _pin_sync_transports(client: httpx2.Client) -> None:
+    owners: set[int] = set()
+
+    def _wrap(
+        transport: httpx2.BaseTransport | None,
+        mount: object | None,
+    ) -> _PinnedSyncTransport | None:
+        if transport is None:
+            return None
+        key = id(transport)
+        inner = transport if key not in owners else None
+        owners.add(key)
+        return _PinnedSyncTransport(inner, mount)
+
+    client._transport = _wrap(client._transport, None)
+    client._mounts = {
+        matcher: _wrap(transport, matcher) for matcher, transport in client._mounts.items()
+    }
+
+
+def _pin_async_transports(client: httpx2.AsyncClient) -> None:
+    owners: set[int] = set()
+
+    def _wrap(
+        transport: httpx2.AsyncBaseTransport | None,
+        mount: object | None,
+    ) -> _PinnedAsyncTransport | None:
+        if transport is None:
+            return None
+        key = id(transport)
+        inner = transport if key not in owners else None
+        owners.add(key)
+        return _PinnedAsyncTransport(inner, mount)
+
+    client._transport = _wrap(client._transport, None)
+    client._mounts = {
+        matcher: _wrap(transport, matcher) for matcher, transport in client._mounts.items()
+    }
 
 
 def parse_allowlist(raw: str) -> frozenset[str]:
@@ -229,6 +624,43 @@ def _address_rejection(
     return None
 
 
+def _legacy_ipv4(name: str) -> ipaddress.IPv4Address | None:
+    """传统数字 IPv4 写法 → 地址（不是这类写法则 None）。
+
+    系统解析器与 ``socket.inet_aton`` 都接受 ``0xa9fea9fe`` / ``2852039166`` /
+    ``0251.0376.0251.0376`` / ``127.1`` 这类写法（同一个地址的不同拼法），而
+    ``ipaddress.ip_address`` 只认规范四段十进制。只补这一层，判定仍统一走
+    :func:`_address_rejection`——否则保存期放行、连接期按传统写法解析，一条绕过路径。
+
+    规则按 ``inet_aton``：1–4 段，每段十进制、``0`` 开头八进制或 ``0x`` 十六进制；
+    前几段各占一个字节，末段占剩余字节。自己实现而不直接调 ``socket.inet_aton``：
+    后者是平台相关的（本仓施工机与 CI 不同 OS），而这里要的是**确定**的判定。
+    非数字形态（``0xa9fea9fe.com``、``1.2.3.4.5``）一律返回 None，仍按域名处理。
+    """
+    parts = name.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+    numbers: list[int] = []
+    for part in parts:
+        part = _strip_leading_zeros(part)
+        if not _LEGACY_V4_PART_RE.fullmatch(part):
+            return None
+        if part[:2].lower() == "0x":
+            numbers.append(int(part, 16))
+        elif part.startswith("0"):
+            numbers.append(int(part, 8))
+        else:
+            numbers.append(int(part))
+    head, last = numbers[:-1], numbers[-1]
+    room = 4 - len(head)
+    if any(number > 0xFF for number in head) or last >= 256**room:
+        return None
+    value = last
+    for index, number in enumerate(head):
+        value |= number << (8 * (3 - index))
+    return ipaddress.IPv4Address(value)
+
+
 def _host_rejection(host: str) -> str | None:
     """主机名/IP 字面量的**本地**判据（不解析 DNS）。"""
     name = host.strip().strip("[]").rstrip(".").lower()
@@ -239,7 +671,9 @@ def _host_rejection(host: str) -> str | None:
     try:
         address = ipaddress.ip_address(name)
     except ValueError:
-        return None
+        address = _legacy_ipv4(name)
+        if address is None:
+            return None
     return _address_rejection(address)
 
 
@@ -296,6 +730,36 @@ def _rejection_for(addresses: list[str]) -> str | None:
     return None
 
 
+def _pinned_address(address: str) -> str:
+    """只允许传输层接收标准 IP 字面量，避免再次触发名称解析。"""
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError as error:
+        raise socket.gaierror(f"DNS returned a non-IP address: {address!r}") from error
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.scope_id is not None:
+        raise socket.gaierror(f"DNS returned a scoped IPv6 address: {address!r}")
+    return parsed.compressed
+
+
+def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return _legacy_ipv4(host)
+
+
+def _attach_address_pin(
+    request: httpx2.Request,
+    host: str,
+    port: int | None,
+    addresses: Iterable[str],
+) -> None:
+    checked = tuple(dict.fromkeys(_pinned_address(address) for address in addresses))
+    if not checked:
+        raise socket.gaierror(f"DNS resolution returned no results for {host}")
+    request.extensions[_PINNED_ADDRESS_EXTENSION] = (host, port, checked)
+
+
 def _check_request(request: httpx2.Request, allow: frozenset[str]) -> str | None:
     """单跳请求的判据；返回拒绝原因（None = 放行）。
 
@@ -305,6 +769,7 @@ def _check_request(request: httpx2.Request, allow: frozenset[str]) -> str | None
     ``APIConnectionError``（cause 保留），仍按**瞬时**连接失败处理——DNS 抖动
     不会因此变成不可重试的配置错。
     """
+    request.extensions.pop(_PINNED_ADDRESS_EXTENSION, None)
     host = request.url.host
     port = request.url.port
     if not host or _is_allowed(host, port, allow, request.url.scheme):
@@ -312,10 +777,22 @@ def _check_request(request: httpx2.Request, allow: frozenset[str]) -> str | None
     literal = _host_rejection(host)
     if literal is not None:
         return literal
-    return _rejection_for(_resolved_addresses(host, port))
+    numeric_address = _numeric_address(host)
+    if numeric_address is not None:
+        _attach_address_pin(request, host, port, (numeric_address.compressed,))
+        return None
+    addresses = _resolved_addresses(host, port)
+    reason = _rejection_for(addresses)
+    if reason is not None:
+        return reason
+    if not addresses:
+        raise socket.gaierror(f"DNS resolution returned no results for {host}")
+    _attach_address_pin(request, host, port, addresses)
+    return None
 
 
 async def _acheck_request(request: httpx2.Request, allow: frozenset[str]) -> str | None:
+    request.extensions.pop(_PINNED_ADDRESS_EXTENSION, None)
     host = request.url.host
     port = request.url.port
     if not host or _is_allowed(host, port, allow, request.url.scheme):
@@ -323,7 +800,18 @@ async def _acheck_request(request: httpx2.Request, allow: frozenset[str]) -> str
     literal = _host_rejection(host)
     if literal is not None:
         return literal
-    return _rejection_for(await _aresolved_addresses(host, port))
+    numeric_address = _numeric_address(host)
+    if numeric_address is not None:
+        _attach_address_pin(request, host, port, (numeric_address.compressed,))
+        return None
+    addresses = await _aresolved_addresses(host, port)
+    reason = _rejection_for(addresses)
+    if reason is not None:
+        return reason
+    if not addresses:
+        raise socket.gaierror(f"DNS resolution returned no results for {host}")
+    _attach_address_pin(request, host, port, addresses)
+    return None
 
 
 def guarded_clients(
@@ -355,6 +843,8 @@ def guarded_clients(
     async_client = _GuardedAsyncClient(
         base_url=base_url, event_hooks={"request": [_async_hook]},
     )
+    _pin_sync_transports(sync_client)
+    _pin_async_transports(async_client)
     return sync_client, async_client
 
 
