@@ -226,17 +226,26 @@ export async function getHealth(): Promise<{ status: string }> {
  *  于是可见性过滤落在**投影层**（`buildRailModel` 的 `includeArchived`）：一份载荷 +
  *  一个开关 = 一处真相（不变量 #22）。 */
 export async function listSessions(
-  options: { includeArchived?: boolean } = {},
+  options: { includeArchived?: boolean; clientRequestId?: string } = {},
 ): Promise<SessionSummary[]> {
   return (await listSessionsRaw(options)).json();
 }
 
 /** 会话列表的裸响应：给需要读响应头（`Date` → 服务端时钟锚点，#1333）的
- *  调用方。语义与 `listSessions` 逐字一致，只是把 `Response` 本体交出来。 */
+ *  调用方。语义与 `listSessions` 逐字一致，只是把 `Response` 本体交出来。
+ *
+ *  `clientRequestId`（#1333）：认领关联查询——服务端只返回**精确匹配**该
+ *  关联值的会话。不支持该参数的旧后端会忽略它并返回全量 ⇒ 认领层的候选
+ *  谓词（基线 + 创建时间过滤）仍然兜底，行为退化为既有差分认领。 */
 export async function listSessionsRaw(
-  options: { includeArchived?: boolean } = {},
+  options: { includeArchived?: boolean; clientRequestId?: string } = {},
 ): Promise<Response> {
-  const query = options.includeArchived ? '?include_archived=true' : '';
+  const parts: string[] = [];
+  if (options.includeArchived) parts.push('include_archived=true');
+  if (options.clientRequestId) {
+    parts.push(`client_request_id=${encodeURIComponent(options.clientRequestId)}`);
+  }
+  const query = parts.length > 0 ? `?${parts.join('&')}` : '';
   const res = await apiFetch(`/api/sessions${query}`);
   if (!res.ok) throw new Error(`list sessions ${res.status}`);
   return res;
@@ -1002,12 +1011,22 @@ const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
  *  401 throws UnauthorizedError (after broadcasting) — fail fast, no empty stream.
  *
  *  「有值才带键」的**单一执行点**（与 sendMessage 同一契约，见 lib/amend.ts）：
- *  空值 / 空数组不发键 = 后端默认；调用方只做字段名映射，不判空。 */
-export async function startSession(payload: StartSessionPayload): Promise<Response> {
+ *  空值 / 空数组不发键 = 后端默认；调用方只做字段名映射，不判空。
+ *
+ *  `opts.clientRequestId`（#1333）：**不属于** `StartSessionPayload`——payload
+ *  会被重试通道原样复用（`SendFailure.onRetry` 重发同一对象），而关联值必须
+ *  每次 POST 重新生成（票面：请求值只用于关联，不提供幂等/重放）。由
+ *  `useSession.submitTask` 在提交点生成 UUID v4 后从这里带入。 */
+export async function startSession(
+  payload: StartSessionPayload,
+  opts: { clientRequestId?: string } = {},
+): Promise<Response> {
+  const body = buildBody(payload, START_SESSION_FIELDS);
+  if (opts.clientRequestId) body['client_request_id'] = opts.clientRequestId;
   return apiFetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildBody(payload, START_SESSION_FIELDS)),
+    body: JSON.stringify(body),
   });
 }
 

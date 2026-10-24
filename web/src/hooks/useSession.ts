@@ -1505,7 +1505,12 @@ export function useSession() {
         // WebSocket 接流（同一交付链路上实测逐帧到达，见 lib/wsStream.ts）。
         const baselineDetailed = await sessionIdBaselineDetailed();
         const clientBaselineAtMs = Date.now();
-        const started = startSession(payload);
+        // #1333（2026-10-20 已批准方案）：每次 POST 生成新的关联 UUID——
+        // 在**提交点**生成（不放进 payload：重试通道复用同一 payload 对象，
+        // 关联值必须逐次独立）；随创建请求落 SessionMeta 索引，认领改走
+        // 精确关联查询，20s 差分窗口内的「别的客户端/迟到会话」不再可被误认。
+        const clientRequestId = crypto.randomUUID();
+        const started = startSession(payload, { clientRequestId });
         // #1333：锚点必须钉在「本次 POST 发起时刻（服务端时钟）」，在这里
         // 一次算好、下面认领时复用。⚠ 若挪到 `raceEarlyResponse`（1200ms 早
         // 窗）之后才算（= 认领开始时刻），锚点会落到自己会话的创建时间之后，
@@ -1570,9 +1575,12 @@ export function useSession() {
         });
         let sid: string;
         try {
-          // #1333：把上面在 POST 发起时刻钉死的锚点交给认领，启用
-          // first_event_time 过滤 + 多候选 fail-closed。
-          sid = await discoverNewSessionId(baseline, { submittedAtServerMs });
+          // #1333：锚点（POST 发起时刻，服务端时钟）与关联 UUID 一并交给认领
+          // ——时间过滤 + 多候选 fail-closed 之外，候选集先由关联查询收窄。
+          sid = await discoverNewSessionId(baseline, {
+            submittedAtServerMs,
+            clientRequestId,
+          });
         } catch (e) {
           // POST 的迟到失败原因优先于「认领超时」/「认领歧义」：迟到失败
           // （如 401 / 5xx / 断网）是比认领结论更硬的事实（#1148 既有设计，
