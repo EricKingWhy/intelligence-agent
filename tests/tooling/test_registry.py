@@ -279,6 +279,29 @@ class TestExportModelDefinitions:
 
         assert parameters["title"] == "Public tool input"
 
+    def test_export_preserves_model_title_generator(self, registry: ToolRegistry):
+        def title_generator(model: type[BaseModel]) -> str:
+            return model.__name__
+
+        class GeneratedTitleArgs(BaseModel):
+            model_config = ConfigDict(model_title_generator=title_generator)
+            value: str
+
+        class GeneratedTitleTool(AddTool):
+            @property
+            def name(self) -> str:
+                return "generated_title"
+
+            @property
+            def args_schema(self) -> type[BaseModel]:
+                return GeneratedTitleArgs
+
+        registry.register(GeneratedTitleTool())
+
+        parameters = registry.export_model_definitions()[0]["parameters"]
+
+        assert parameters["title"] == "GeneratedTitleArgs"
+
     def test_export_preserves_mcp_schema_title(self, registry: ToolRegistry):
         class McpTool(AddTool):
             def __init__(self) -> None:
