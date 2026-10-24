@@ -1,6 +1,6 @@
 # SDD Ticket Tracker
 
-**进行中（2026-10-24，#1554）**：issue `bug` / `in-progress` / `in-progress-CodeX`，已分配 EricKingWhy；短分支 `codex/issue-1554-dns-pinning` 基于父修复 PR #1563 head `3594e741b80b560f390b5daa4ac0ed653bfccfbc`，不追 main。用户授权 push 与开 PR，明确不 merge。
+**等待 merge（2026-10-24，#1554；PR [#1570](https://github.com/EricKingWhy/intelligence-agent/pull/1570) OPEN）**：Issue #1554 CLOSED，标签 `bug` / `等待merge`；短分支 `codex/issue-1554-dns-pinning` 基于父修复 PR #1563 head `3594e741b80b560f390b5daa4ac0ed653bfccfbc`，不追 main。PR head `a30c12e9dd843937aee4ad0f96349f573de560d0`，未 merge；集成负责人 EricKingWhy。
 
 - **目标 / Scope**：闭合 #1485 F-03 的 DNS 校验—socket 连接 TOCTOU。每个未被所有者 allowlist 豁免的请求逐跳校验 DNS 结果，传输必须使用已校验地址；保持原 Host/TLS SNI、现有拒绝面、allowlist 和 loopback/LAN 行为。
 - **方案依据**：① LangChain Core `D:/reference/langchain/libs/core/langchain_core/_security/_transport.py:31-115` @ `b15a385cb1aa4507b86a3ba1e6430748b0c4ae4b`（MIT）：逐跳 DNS 校验后 pin 已校验 IP，并保留 Host/SNI；② Pydantic httpcore2 `D:/reference/httpx2/src/httpcore2/httpcore2/_async/http_proxy.py:258-302` @ `d91c9f4236523eb5978ca800944fa0078f17409f`（BSD-3-Clause）：2.13.1 起支持 HTTP 代理隧道目标 SNI。判定 `PORT DESIGN`：用现有 httpx2 transport 能力，不复制上游代码；将 httpx2 最低版本提升到含代理 SNI 修复的版本，避免 HTTPS 代理下的 Host/SNI 回归。
