@@ -242,11 +242,54 @@ export async function listSessionsRaw(
   return res;
 }
 
+/** REST /events 的单页上限（#1526）：镜像后端 `STREAM_REPLAY_MAX_EVENTS`
+ *  （1000，WS/SSE backlog 截断同一常数）。有界传输：一次完整重建 = 多次
+ *  ≤1000 帧的请求，单响应不再 MB 级整包（历史夹具读数 19800 事件/8.36MB，
+ *  部署交付层会整包攒到流结束才下发）。 */
+const EVENTS_PAGE_LIMIT = 1000;
+
 export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]> {
-  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
-  if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
-  if (!res.ok) throw new Error(`get events ${res.status}`);
-  return res.json();
+  // #1526：循环取页直到短页。签名不变——所有重建点（首屏 / stream/truncated
+  // 重连 / 子会话）自动获得有界传输；对未知分页参数的旧后端返回整包（页长 >
+  // limit）时按完结处理，不发下一页。任何一页失败即抛：**不把不完整内容当
+  // 完整历史**（已累积的页随异常一起丢弃）。
+  const events: AgentEvent[] = [];
+  let afterSeq = -1;
+  for (;;) {
+    const res = await apiFetch(
+      `/api/sessions/${encodeURIComponent(sessionId)}/events` +
+        `?after_seq=${afterSeq}&limit=${EVENTS_PAGE_LIMIT}`,
+    );
+    if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
+    if (!res.ok) throw new Error(`get events ${res.status}`);
+    const page: unknown = await res.json();
+    if (!Array.isArray(page)) throw new Error('get events: 响应不是数组');
+    // 跨页界同样校验：首页后每页首帧必须 > 上一页游标（页内校验只保证页内
+    // 严格递增，接缝处的重叠/回退要单独拦——后端把 after_seq 误读成 >= 之类
+    // 的窗口错切会在这里露出，而不是把重复帧静默拼进"完整历史"）。
+    if (page.length > 0 && afterSeq !== -1) {
+      const head = (page[0] as AgentEvent | null)?.seq;
+      if (typeof head !== 'number' || head <= afterSeq) {
+        throw new Error(`get events: 页接缝 seq 未越过游标（${head} ≤ ${afterSeq}）`);
+      }
+    }
+    let lastSeq: number | null = null;
+    for (const frame of page) {
+      const seq = (frame as AgentEvent | null)?.seq;
+      if (typeof seq !== 'number') {
+        throw new Error('get events: 页内帧缺 seq（拒绝把不完整内容当完整历史）');
+      }
+      if (lastSeq !== null && seq <= lastSeq) {
+        throw new Error(`get events: 页内 seq 非严格递增（${lastSeq} → ${seq}）`);
+      }
+      lastSeq = seq;
+    }
+    events.push(...(page as AgentEvent[]));
+    if (page.length !== EVENTS_PAGE_LIMIT) return events;
+    const next = lastSeq as number; // 满 page ⇒ lastSeq 必有值
+    if (next <= afterSeq) throw new Error('get events: 游标未前进（拒绝死循环）');
+    afterSeq = next;
+  }
 }
 
 /** #1256：某父会话的子智能体 roster 行（= 后端 `GET /delegations` 的响应元素）。
