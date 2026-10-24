@@ -1,7 +1,11 @@
 # SDD Ticket Tracker
 
+**等待 merge（2026-10-24，#1513；Issue CLOSED；PR [#1559](https://github.com/EricKingWhy/intelligence-agent/pull/1559) OPEN）**：Issue [#1513](https://github.com/EricKingWhy/intelligence-agent/issues/1513)「JWT 深层解析结构化拒绝与诊断日志有限保留」。分支 codex/issue-1513-jwt-log，验证记录提交 b22b71cd5851dd24983f9ba1756d42cab1a2e514，base main=fe3d9bd8；未合并。Issue 标签为 bug / P2 / 等待merge，集成负责人 EricKingWhy。票内双轴 review findings 清零，聚焦测试 17 passed，Gate-0 7/7，coverage exit 0。全量结果与固定基线逐节点对账均见月档：分支独有失败 0；Docker 环境不可用，全量未通过。
+
 **等待 merge（2026-10-24，#1432；Issue CLOSED；PR [#1558](https://github.com/EricKingWhy/intelligence-agent/pull/1558) OPEN）**：CopyButton 仅在剪贴板写入成功时显示成功态，并在重试前清除旧成功态。分支 `codex/issue-1432-copybutton`，基线 `origin/main=13a96482`，最终 tip `60a106ab`。票内组件测试 1/1、Playwright 双视口 2/2；全量 Vitest 有 2 个范围外失败；Gate-0 6/7，事件生成物守卫失败。详见十月归档。
+
 **已完成、未集成（2026-10-23，#1552）**：Issue CLOSED，保留 `bug`/`P2`/`memory`，移除 `in-progress`；本地分支 `codex/issue-1552-memory-promote`，代码提交 `b524d547`；PR [#1557](https://github.com/EricKingWhy/intelligence-agent/pull/1557) OPEN（base `main` / `bd97fbfd`，创建时 head `817e5e6a`），未 merge。Gate-0 7/7 PASS，收据 `docs/gate/2dc04b755d5647f63c310ca6a4034e8cc3000255.json`。Web promote 重放现对 `MemoryContentRejected` 复用 `memory_http_error`，返回 403 + `X-Memory-Reason-Code`；聚焦测试 71 passed，Ruff 与 diff-check 通过；Standards / Spec 两轴独立审查 PASS，P0–P4=0。集成负责人 EricKingWhy。详见月档 `docs/phase_status/2026-10.md` #1552。
+
 **等待 merge（2026-10-23，#1485；PR [#1545](https://github.com/EricKingWhy/intelligence-agent/pull/1545) OPEN）**：Issue [#1485](https://github.com/EricKingWhy/intelligence-agent/issues/1485) `bug`/`P4`/`SEC-07 PARTIAL`——模型地址加元数据与 link-local 轻量防误配（**裁决 25 B**：所有者回环/内网直连照常，只拦已知元数据/link-local 目标，可对具体端点开例外；不采用 C 的默认全拦）。worktree `~/workspace/batch1-cc/issue-1485`，分支 `claude/issue-1485-provider-url-guard`，基线 = `origin/main` `dec9aa69`（任务书所写 `c451eafe` 已被 main 推进超越，现场以 `git merge-base` 为准），**代码 tip `916d21f4`（tree `1a9215d4`）**，其后只追加 Gate-0 收据笔（docs-only）。8 笔提交：实现 `e81711a9`、收尾审计两修 `b8e10485`、先回后正合并 `c69708a9`、冒烟替身 allowlist `4e981d9f`、两轴 findings 处置 `24bf4905`+`91de0539`、台账行 `916d21f4`、收据落盘 `06fb04d5`。
 - **实现面**：新增 `src/agent_harness/model/endpoint_guard.py`（370 行）——解析后地址按 IPv4/IPv6 判元数据段（169.254.0.0/16、`fe80::/10`、`fd00:ec2::254` 等）与内嵌 v4 变体（含 RFC 6052 `64:ff9b:1::/48` 按位拆分）；重定向每一跳复检（httpx hook），被拦目标在发出请求前终止；`validate_base_url` 与保存/测试连接两条真实出站路径共用同一守卫；`model_endpoint_allowlist` 为**按端点**的所有者例外，不扩大信任来源、不借用已存 key；拒绝理由经 `misconfiguration_rejection` 沿异常链上抛（openai SDK 会把连接层错误包成 `APIConnectionError`），调用方据此区分「守卫拒绝」与「网络抖动」，后者才重试。
 - **两轴独立审查（各一独立只读子代理，范围 `e81711a9`+`b8e10485` 树）**：Standards 轴 1×P2（守卫拒绝与网络抖动同形）+ Correctness 轴 3×P2（解析器 `OSError` 被吞=fail-open / 同步 invoke 路径零覆盖 / `64:ff9b:1::/48` 未拆位）；**P0–P4 全修**，红证先行（`test_sync_invoke_path_is_also_guarded` 等）。台账行 `docs/review_ledger.d/t1485-provider-url-guard-9f2a1c.tsv`；合并 `c69708a9` 的机械归属同在该行（`git show --cc` 空表、树与两父均不同 ⇒ 闸门 fail-closed）。
@@ -8698,3 +8702,15 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **环境纪律**：worktree 经主 clone `.venv` junction 跑一切 pytest 必须显式 `PYTHONUTF8=1 PYTHONPATH=<worktree>/src`（主 venv `.pth` 绝对路径指主仓 `src`，裸跑静默测错树，实测复现并已全程规避）。Gate-0 七车道不含 pytest-full；guards 车道清空 PYTHONPATH 但其守卫对象（EVENT_VOCABULARY 等）与本票改动面无交集，且主仓 checkout == `fe3d9bd8` src 零漂移，判读等同。
 - **残余/承接**：① S2 混版本边缘（旧后端 × 恰 N×1000 事件）：客户端游标守卫 fail-loud，部署瞬态可接受，按设计；② S4 `stream?after_seq=` 无 422 校验：REST 侧更严，一致性备注不本票扩面；③ S5 `delete_session` 不清 `_events_cache`：`path.exists` 短路 + LRU≤4，与 `_summary_cache` 同款既有取舍；④ api.ts 游标前进守卫在接缝守卫之后逻辑不可达，属纵深防御勿删。
 - **Gate-0 收据（append-only）**：裸全量 Gate-0 在 docs 提交 `05cfd5af` 7/7 PASS（墙钟 170.7s > 60s 预算目标，仅告警），收据 `docs/gate/05cfd5af796d1a0a1cc0245127b3233c5d8117e0.json`；`receipt-present` 对代码提交 `3bc37e19`/`2ac89089` 的无收据告警为 #1338 首周 warn-only，读数树已含两提交全部内容。首次在未提交台账的工作树实跑 7/7 PASS 但被 §8.7 第 3 条正确拒落盘（未跟踪车道输入），提交后重跑取得本收据；§8.1 判据① `git diff --name-status --no-renames 05cfd5af HEAD` 仅收据 `A`、判据②工作树 clean ⇒ 读数可传递到最终 tip。
+## #1501 a11y/对比度四类断言漂移——核实为已全覆盖，按票面停止施工（2026-10-24 · 夜间全权代理）
+
+- **票面条款执行**：票面明示「若四类已全部修复，停止施工并回报已覆盖」。在基线 fe3d9bd8 逐类核实：四类全部已由 #1465/#1476 修复，本票**零代码改动**，docs-only 交付证据（worktree `D:\intelligence-agent-wt\z1501`）。
+- **逐类已覆盖溯源**（`git log -S` 于 fe3d9bd8）：
+  - ① 死选择器 `.tl-seq`/`.tl-type`：`f44fba2f`（#1465）摘掉 `.tl-seq`，#1476 Phase 1 `8f02c458` 同步；现 t-contrast 只余历史注释（:6-7/:360/:476），等值断言的判别力原样保留（#1465 验收口径）。
+  - ② 旧 label/tooltip 断言（t-a11y-1372）：#1476 裁定二 `93c77f52`（决策点 4 项死条目改 menuitem 存在性）+ `51876875`（菜单关合后清残留指针再验）+ `357fd42f`（注释行号订正、断言零改动）。
+  - ③ t-contrast 菜单入口 role 漂移（恢复列表按 button 查）：`8f02c458`（#1476 Phase 1）改 `clickTopBarMenuItem` + menuitem 口径（现 :1166 注释块）。
+  - ④ `.model-fallback-val` 夹具漏展开：`dc645b9e`（#1175 三处夹具可达性，红基线误报为"元素不存在"）先修同类；`8f02c458` 落当前形状（切概览 tab + 展开 model 手风琴，:1421-1432）。
+- **实跑读数（本机 Windows）**：`pnpm exec playwright test e2e/t-contrast.spec.ts e2e/t-a11y-1372.spec.ts e2e/i-keyboard.spec.ts` → **176/176 绿**。分母核对：t-contrast 38 用例 × 2 主题 × 2 视口 = 152（单 project 76 ✓，与票面口径纠正一致）；t-a11y-1372 9 × 2 = 18；i-keyboard 3 × 2 = 6（未被误报基线红 ✓）。
+- **判别力负控（类④代表消融）**：把夹具的 model 手风琴展开段以 `if (false)` 旁路 → `[dark]`/`[light]` 双双红（元素在 DOM 但 `visibility: hidden`，`toBeVisible` 预检咬住）→ 已修断言仍有牙；`git checkout` 恢复后零残留。
+- **边界**：负载敏感 2 条超时（2 vCPU 必红、隔离绿）按票面归基线票（ticket-035-test-baseline-reproducibility）单独定性，本票不并入；不摘 spec、不改产品代码、不删断言——零改动即票面要求。
+- **残余/承接**：docs-only 交付（本节 + 月档 + PHASE_STATUS 索引）；PR `等待merge` 由维护者合并，不追 main。

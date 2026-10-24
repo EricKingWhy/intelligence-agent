@@ -2327,7 +2327,7 @@ class AuthSeamMiddleware:
                         and isinstance(scopes, list)
                         and all(isinstance(item, str) for item in scopes)
                     )
-                except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+                except (jwt.InvalidTokenError, KeyError, RecursionError, TypeError, ValueError):
                     expected = ""
                     valid_identity = False
                     timestamp_is_fresh = False
@@ -2480,7 +2480,7 @@ class AuthSeamMiddleware:
                     or any(not isinstance(s, str) for s in scopes)):
                 raise ValueError("Invalid identity claims")
             return IdentityContext(tenant, user, scopes)
-        except (jwt.InvalidTokenError, ValueError) as invalid:
+        except (jwt.InvalidTokenError, RecursionError, ValueError) as invalid:
             raise _IdentityRejected("Invalid identity token") from invalid
 
 
