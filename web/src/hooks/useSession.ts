@@ -1428,9 +1428,9 @@ export function useSession() {
   const openLiveStream = useCallback(
     (spec: {
       sid: string;
-          /** 续传游标（-1 = 从头快照），推导见模块级 cursorOf。首帧 seq 应为
-            *  afterSeq+1 起步（快照起点对齐）：lastAppliedSeqRef 与它的对齐由
-            *  调用方负责——写早或写进成功分支均可，同一同步块内首帧必晚于它。 */
+      /** 续传游标（-1 = 从头快照），推导见模块级 cursorOf。首帧 seq 应为
+       *  afterSeq+1 起步（快照起点对齐）：lastAppliedSeqRef 与它的对齐由
+       *  调用方负责——写早或写进成功分支均可，同一同步块内首帧必晚于它。 */
       afterSeq: number;
       /** 调用方已推进并捕获的流代际。 */
       gen: number;
