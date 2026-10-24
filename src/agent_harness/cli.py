@@ -1506,7 +1506,7 @@ def _main_serve(argv: list[str]) -> None:
     loopback，个人桌面服务不暴露 LAN）。控制面默认仅本机；非回环部署必须显式
     配置 `CONTROL_PLANE_ALLOWED_HOSTS`，才能通过 Host 闸。
     """
-    from agent_harness.host_service import HostServiceError, _loopback_url, serve_once
+    from agent_harness.host_service import HostServiceError, loopback_url, serve_once
 
     parser = argparse.ArgumentParser(
         prog="agent-harness serve",
@@ -1533,7 +1533,7 @@ def _main_serve(argv: list[str]) -> None:
         return
     if not outcome.served and outcome.endpoint is not None:
         print(
-            f"已有本机服务在运行：{_loopback_url(outcome.endpoint.host, outcome.endpoint.port, '')}"
+            f"已有本机服务在运行：{loopback_url(outcome.endpoint.host, outcome.endpoint.port, '')}"
             "（已附着，本进程退出）"
         )
 

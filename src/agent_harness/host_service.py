@@ -85,6 +85,7 @@ __all__ = [
     "host_skills_request_proof",
     "host_skills_response_proof",
     "host_token_username",
+    "loopback_url",
     "publish_endpoint",
     "query_attached_mcp_packages",
     "query_attached_skill_catalog",
@@ -526,7 +527,7 @@ def _http_get_json(url: str, *, token: str | None, timeout: float) -> tuple[int,
         return response.status, json.loads(_read_bounded_body(response).decode("utf-8"))
 
 
-def _loopback_url(host: str, port: int, path: str) -> str:
+def loopback_url(host: str, port: int, path: str) -> str:
     authority = f"[{host}]" if ":" in host else host
     return f"http://{authority}:{port}{path}"
 
@@ -689,7 +690,7 @@ def attach_probe(
     # 第二步：健康面必须是我们协议形状的服务（而非恰好占用同端口的别的程序）。
     try:
         status, payload = _http_get_json(
-            _loopback_url(probe_host, endpoint.port, "/api/health"),
+            loopback_url(probe_host, endpoint.port, "/api/health"),
             token=None,
             timeout=connect_timeout,
         )
@@ -719,7 +720,7 @@ def attach_probe(
         )
     try:
         status, _ = _http_get_json(
-            _loopback_url(probe_host, endpoint.port, AUTH_PROBE_PATH),
+            loopback_url(probe_host, endpoint.port, AUTH_PROBE_PATH),
             token=token,
             timeout=connect_timeout,
         )
@@ -804,7 +805,7 @@ def serve_once(
             time.sleep(_ATTACH_POLL_INTERVAL)
         if last is not None and last.status is AttachStatus.AUTH_FAILED and last.endpoint:
             raise HostServiceError(
-                f"本机服务已在 {_loopback_url(last.endpoint.host, last.endpoint.port, '')} 运行，但当前用户没有可用的"
+                f"本机服务已在 {loopback_url(last.endpoint.host, last.endpoint.port, '')} 运行，但当前用户没有可用的"
                 f" host token（凭据通道可能属于另一 OS 用户）：{last.detail}。"
                 "已拒绝另起第二个写者。"
             ) from error
@@ -880,7 +881,7 @@ def serve_once(
             if time.monotonic() > verify_deadline:
                 raise RuntimeError(f"启动自验失败：{probe.detail}")
             time.sleep(0.1)
-        print(f"HOST_SERVICE_READY {_loopback_url(normalized_host, port, '')}", flush=True)
+        print(f"HOST_SERVICE_READY {loopback_url(normalized_host, port, '')}", flush=True)
         while (
             not server.should_exit
             and thread.is_alive()
@@ -940,7 +941,7 @@ def describe_lock_error_with_attach(root: str | os.PathLike[str], error: Instanc
     if result.status is AttachStatus.ATTACHABLE and result.endpoint is not None:
         return (
             f"{error}\n"
-            f"  已有本机服务在运行：{_loopback_url(result.endpoint.host, result.endpoint.port, '')}"
+            f"  已有本机服务在运行：{loopback_url(result.endpoint.host, result.endpoint.port, '')}"
             "—— 请附着该服务（同一数据根不允许第二个写者）。"
         )
     return str(error)
