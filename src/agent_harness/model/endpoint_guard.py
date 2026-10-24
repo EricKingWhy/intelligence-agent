@@ -96,6 +96,9 @@ class EndpointBlockedError(RuntimeError):
 #: ``from openai import …`` 因此成了 ``cli/agent.runtime → model.failure → 本模块``
 #: 这条导入链的必经站——CLI 轻入口被拖去加载整个 provider SDK。导入期本模块
 #: 只付 stdlib 成本；openai（及其 httpx2）推迟到真正构造客户端那一刻。
+#: 多线程同时首调的竞态是**良性**的（最坏两对类对象、一份胜出，功能等价；
+#: openai 首导本身被 import 锁串行化，类对象无任何外部身份消费者——审查
+#: Correctness 轴 P4 已核），不为它加锁。
 _GUARDED_CLIENT_CLASSES: tuple[type, type] | None = None
 
 

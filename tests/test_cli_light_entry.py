@@ -108,6 +108,25 @@ def test_no_model_subcommand_runs_without_provider_sdk(tmp_path: Path) -> None:
     assert leaked == "", f"无模型子命令执行期加载了 provider SDK：{leaked}"
 
 
+def test_cli_help_entry_runs_and_exits_zero() -> None:
+    """AC① 的字面用例：真实 `--help` 入口在新进程里跑通（exit 0 + 用法输出）。"""
+    result = subprocess.run(
+        [sys.executable, "-m", "agent_harness.cli", "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=_ROOT,
+        env={**os.environ, "PYTHONUTF8": "1", "PYTHONPATH": _SRC},
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "usage" in result.stdout.lower(), (
+        f"--help 未输出用法（前 200 字符）：{result.stdout[:200]!r}"
+    )
+
+
 def test_provider_import_still_loads_sdk_as_counter_evidence() -> None:
     result = _run(
         "import sys; import agent_harness.model.provider; print('openai' in sys.modules)"
