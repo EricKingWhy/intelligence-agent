@@ -41,7 +41,8 @@ RFC1918 / loopback / ``198.18.0.0/15`` 一律放行。``198.18/15`` 尤其不能
 ``block_localhost=True`` 正是本票裁决**明确否决**的 C 方案，且 ``SSRFSafeTransport``
 是 httpx 实现，与本仓 openai 3.0.0 使用的 httpx2 客户端不兼容。
 
-HTTPS 代理隧道里的目标 SNI 需要 httpx2/httpcore2 2.13.1+；项目显式声明该最低版本，
+HTTPS 代理隧道里的目标 SNI 从 httpx2/httpcore2 2.13.1 起支持；本项目固定
+``httpx2==2.16.0``，以匹配使用的私有 transport API。升级时要运行 transport 兼容性测试，
 确保 direct transport 与代理 transport 都以原始主机名校验目标证书。
 
 解析失败（``OSError``）在 hook 里**不吞**：吞掉再放行就是"解析器一抖就绕过"，

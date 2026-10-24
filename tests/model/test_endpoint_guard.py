@@ -9,8 +9,8 @@
 
 受控手段：`httpx2.MockTransport` 充当大多数用例的可计数服务器（逐跳可计数、可回 302），
 `endpoint_guard` 的解析函数由受控结果驱动。只有真实 socket 用例会在本机开监听器：
-所有者 loopback 连通性检查绑定 127.0.0.1；DNS rebinding 用例绑定 0.0.0.0 并记录
-目标地址，使用受控解析器在 127.0.0.1 与 127.0.0.2 间切换。用例不访问外网或元数据地址。
+所有者 loopback 连通性与 DNS pinning 用例只绑定 127.0.0.1；受控解析器可返回
+127.0.0.1 或 127.0.0.2，并记录实际连接目标。用例不访问外网或元数据地址。
 """
 
 from __future__ import annotations
@@ -693,7 +693,7 @@ class _ObservedChatHandler(_ChatHandler):
 
 @pytest.fixture
 def rebind_http_server():
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), _ObservedChatHandler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ObservedChatHandler)
     server.request_observations = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
