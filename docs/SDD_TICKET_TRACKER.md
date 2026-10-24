@@ -8647,3 +8647,13 @@ desktop **160/161**（唯一红 = `assertStagedProductMatchesSource` staging 陈
 - **门禁 / §8.1**：代码面 tip `542a12bc`（tree `2aa22184`）裸全量 Gate-0 读数与逐车道结果**见收据** `docs/gate/542a12bc286c6266e36ba1d027259e8d69bfddf0.json`（如实落盘；沙箱为跑 guards/coverage 车道补建了 `.venv`，该目录已 gitignore、`tracked_matches_head=true`）；两段式 ① `--since` 段读数见战役报告。`scripts/check_review_coverage.py` 在 docs 顶 rc=0；`receipt_present_check()` 结果与宽限窗口径见战役报告（首周 warn-only，结构性形状如实记录、未伪造收据）。
 - **审查（两轴独立）**：**本阶段未执行**——工单口径为 push 后由收口步安排双轴审查；本段据此不写两轴结论，行进 P 计数不适用。
 - **残余 / 承接**：① memory-management AC9 ×2（焦点不归入口）→ **#1477**（根因 `MemoryPanel.tsx:186-196` 拍下的是菜单项、Radix 菜单卸载后 `isConnected===false` ⇒ 不归焦；同根因另有 `RecoveryListPanel.tsx:103-111`）；② 7 支 spec 之外的文件头/注释陈旧项按 `b-build-report.md` §7 的余项处置；③ 收据宽限窗 **2026-10-25T09:21:24Z**——PR 须在窗口内合并/或补新窗口收据，否则该形状在 CI 转硬失败。
+
+
+## #1575 [bug][P3] endpoint guard 数值 IPv4 测试跨平台确定性（2026-10-24）
+
+- **状态**：实现、focused verification 与双轴审查完成；等待本地 Gate-0 最终收据及 PR 收口。Issue 保持 OPEN，施工标签为 `in-progress` + `in-progress-CodeX`。
+- **验收与实现**：固定传统 IPv4 数值形式的预期值，移除测试对平台 `socket.inet_aton` 的依赖；为 `0x7f.1` 提供明确的 fake resolver 结果。只改 `tests/model/test_endpoint_guard.py`，runtime policy 不变。TDD 红证为原 Windows 两例失败；修后该模块 **80 passed**。
+- **代码范围**：分支 `codex/issue-1575-endpoint-guard-tests`，基线 `3594e741b80b560f390b5daa4ac0ed653bfccfbc`，代码 tip `0fb0a46ff393f94485a8263220e23a4e23ca2c12` / tree `e37e06d935e26230e463aea1e7a5f337d7885814`。双轴审查范围等于基线..代码 tip，两轴 PASS、无 findings、P0–P4=0。
+- **全量 pytest**：冻结树读数 `8608 passed, 408 failed, 4 errors, 186 skipped, 43 deselected`（1627.14s，Windows Python 3.13.5）。目标模块 80/80 通过。4 个 error 在 `tests/sandbox/test_docker_hardlink_isolation.py`，setup 连接 `//./pipe/docker_engine` 失败；代表 Web 用例 `tests/web/test_session_delete_api.py::test_second_delete_after_success_is_404` 因 Windows 部署默认 Docker backend 不可用而返回 409。启动本机 Docker Desktop 后，Backend 日志报 Inference manager 初始化失败，Engine API 仍未就绪。该全量读数为环境受阻，未记作全绿；无全量产品回归已被证实。
+- **Gate-0 前置读数**：代码 tip 裸全量 6/7，唯一失败为审查覆盖台账尚未登记；其余机械车道通过。此行为审查完成前的读数，最终结果以补录双轴台账后的 Gate-0 收据为准。
+- **后续交付**：提交 PR 后补入 PR/CI 状态；不合并。细节及复现证据见 `docs/phase_status/2026-10.md` 的 #1575 条目。
