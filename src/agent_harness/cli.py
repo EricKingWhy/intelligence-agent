@@ -732,7 +732,7 @@ def _deadline_dimension_lines(data: dict) -> list[str]:
     判据与 `_extra_dimension_lines` 同源：**键在不在**。键缺席（`#315` 之前的老事件）
     ⇒ 零行（不拿一片 unavailable 当信息）；`None` ⇒ `unlimited`（这一维没配，与同块
     `limit unlimited` 同一个词）；形状认不出（数 / 空串 / 带首尾空白）⇒ `unavailable`
-    ——`agent/run_budget._deadline_or_none` 对同一份事件读作"没配"（它不 strip），
+    ——`agent/run_budget.deadline_or_none` 对同一份事件读作"没配"（它不 strip），
     这里跟着它读：不印那个形状，也不编一个时刻。
     """
     limits = ((data.get("limits") or {}).get("run") or {})
@@ -1285,7 +1285,9 @@ async def run(
         store = JsonlSessionStore(root=workspace_root / "sessions")
         # #1389：会话全文存档（派生检索索引）。CLI `run` 不经 RunManager，
         # store 级观察者是本路径唯一覆盖点。
-        install_session_archive(store, workspace_root / "sessions" / "state.db")
+        archive_observer = install_session_archive(
+            store, workspace_root / "sessions" / "state.db",
+        )
         _, wiring = await assemble_wiring(settings, sessions=store)
         # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
         # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
@@ -1405,6 +1407,7 @@ async def run(
                     pause_data = event.data
         finally:
             memory_session_var.reset(session_token)
+            archive_observer.close()
         if pause_data is not None:
             # 恢复指令要给出**本会话 id**——暂停摘要是事件的纯函数（不含会话上下文），
             # 而 CLI 的一次性命令此前从不打印 session_id。提示读的是 durable 事件的
@@ -1502,11 +1505,11 @@ def main() -> None:
 def _main_serve(argv: list[str]) -> None:
     """W-11（#355）：单机服务冷启动闭环（附着 → 否则竞争启动 → 二次检查）。
 
-    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 127.0.0.1 /
-    localhost，个人桌面服务不暴露 LAN）；远程/LAN 部署保持既有显式配置入口
-    （`create_prod_app` + 显式 jwt_secret），不经本命令。
+    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 IPv4/IPv6
+    loopback，个人桌面服务不暴露 LAN）。控制面默认仅本机；非回环部署必须显式
+    配置 `CONTROL_PLANE_ALLOWED_HOSTS`，才能通过 Host 闸。
     """
-    from agent_harness.host_service import HostServiceError, serve_once
+    from agent_harness.host_service import HostServiceError, loopback_url, serve_once
 
     parser = argparse.ArgumentParser(
         prog="agent-harness serve",
@@ -1515,8 +1518,8 @@ def _main_serve(argv: list[str]) -> None:
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        choices=["127.0.0.1", "localhost"],
-        help="绑定地址；只允许 loopback（W-11：个人服务不暴露 LAN，远程部署走显式配置入口）",
+        choices=["127.0.0.1", "localhost", "::1"],
+        help="绑定地址；本命令只允许 IPv4/IPv6 loopback；非回环部署须显式配置 CONTROL_PLANE_ALLOWED_HOSTS",
     )
     args = parser.parse_args(argv)
     settings = Settings()
@@ -1533,7 +1536,7 @@ def _main_serve(argv: list[str]) -> None:
         return
     if not outcome.served and outcome.endpoint is not None:
         print(
-            f"已有本机服务在运行：http://127.0.0.1:{outcome.endpoint.port}"
+            f"已有本机服务在运行：{loopback_url(outcome.endpoint.host, outcome.endpoint.port, '')}"
             "（已附着，本进程退出）"
         )
 

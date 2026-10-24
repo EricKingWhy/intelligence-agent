@@ -1,0 +1,1 @@
+2026-10-25	#1531 repair review: Standards PASS; Correctness P3—custom CoreSchema metadata pydantic_js_updates.title can synthesize the class-name title; fixed with hook guard and regression in 2648b351.	79c3d0d8603d660f205a171134da57165b908bb6..3eedaecbf0d9d653a7e3dd05306cbddf4ecf9817

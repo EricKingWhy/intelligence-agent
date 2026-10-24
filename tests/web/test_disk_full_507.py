@@ -21,7 +21,7 @@ def _app(tmp_path: Path) -> object:
         data_dir=str(tmp_path / "data"),
         model_api_key="test-key",
     )
-    return create_app(settings, enable_cors=False)
+    return create_app(settings, enable_cors=False, allow_testserver=True)
 
 
 def _client(tmp_path: Path) -> TestClient:

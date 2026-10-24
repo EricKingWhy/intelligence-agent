@@ -67,8 +67,14 @@ def test_store_scanners_share_one_line_iterator(
 
     monkeypatch.setattr(store, "_iter_event_lines", recording_iterator)
 
+    # #1526：read_events 有了文件戳缓存（`_events_cache`），`_summary_fallback`
+    # 内部那次 read_events 若命中缓存就不再扫盘——那正是缓存要消灭的重复扫描，
+    # 不是「绕开共享迭代器」。这里逐个扫描器前清缓存，钉住的仍是**原契约**：
+    # 凡真扫描，必走这唯一一份行迭代器（不存在平行的第二套迭代实现）。
     assert len(store.read_events(session_id)) == 3
+    store._events_cache.clear()
     assert store.read_session_summary(session_id).event_count == 3
+    store._events_cache.clear()
     assert store._summary_fallback(session_id).event_count == 3
     assert store.read_started_header(session_id).cwd == "D:/workspace"
 

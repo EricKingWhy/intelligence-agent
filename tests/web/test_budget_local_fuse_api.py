@@ -55,7 +55,7 @@ def _web(
     if ceiling is not None:
         overrides["local_max_agent_turns"] = ceiling
     overrides.update(settings_overrides)
-    app = create_app(Settings(**overrides), enable_cors=False)
+    app = create_app(Settings(**overrides), enable_cors=False, allow_testserver=True)
     return app, TestClient(app)
 
 
@@ -622,7 +622,7 @@ def test_session_tool_call_limits_accepts_delegate_when_multiagent_enabled(tmp_p
             {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
         ),
     }
-    app = create_app(Settings(**overrides), enable_cors=False)
+    app = create_app(Settings(**overrides), enable_cors=False, allow_testserver=True)
     client = TestClient(app)
     probe = _ModelProbe()
     with probe:
@@ -650,7 +650,7 @@ def test_session_declaration_judged_against_root_registry(tmp_path):
             {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
         ),
     }
-    client = TestClient(create_app(Settings(**overrides), enable_cors=False))
+    client = TestClient(create_app(Settings(**overrides), enable_cors=False, allow_testserver=True))
     probe = _ModelProbe()
     with probe:
         resp = client.post(
@@ -679,7 +679,7 @@ def test_run_declaration_still_judged_against_narrowed_registry(tmp_path):
             {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
         ),
     }
-    client = TestClient(create_app(Settings(**overrides), enable_cors=False))
+    client = TestClient(create_app(Settings(**overrides), enable_cors=False, allow_testserver=True))
     probe = _ModelProbe()
     with probe:
         resp = client.post(

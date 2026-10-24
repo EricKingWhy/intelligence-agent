@@ -793,7 +793,7 @@ def test_pause_block_renders_the_deadline_line():
 def test_pause_block_deadline_line_never_invents_an_instant():
     """没配 ⇒ `unlimited`；形状认不出 ⇒ `unavailable`——**不**印那个形状、也不编时刻。
 
-    带首尾空白的文本是这一格的边缘：后端事件回读（`_deadline_or_none`）不 strip ⇒
+    带首尾空白的文本是这一格的边缘：后端事件回读（`deadline_or_none`）不 strip ⇒
     同一份事件在那边读作"没配"，CLI 也就不能就地把它当成一个时刻印出来。
     """
     base = {
