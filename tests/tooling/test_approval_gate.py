@@ -273,6 +273,41 @@ class _CustomDangerTool(Tool):
         return ToolResult.success(message="done", data={"ok": True})
 
 
+class _SpyBashArgs(BaseModel):
+    command: str
+
+
+class _SpyBashTool(Tool):
+    """无副作用的 bash 替身：只用于验证 Executor 审批前不进入 execute。"""
+
+    def __init__(self) -> None:
+        self.execute_calls = 0
+
+    @property
+    def name(self) -> str:
+        return "bash"
+
+    @property
+    def description(self) -> str:
+        return "测试用无副作用 bash 替身。"
+
+    @property
+    def args_schema(self) -> type[BaseModel]:
+        return _SpyBashArgs
+
+    @property
+    def permission(self) -> ToolPermission:
+        return ToolPermission.DANGER
+
+    @property
+    def side_effect(self) -> ToolSideEffect:
+        return ToolSideEffect.MUTATING
+
+    async def execute(self, args: BaseModel) -> ToolResult:
+        self.execute_calls += 1
+        return ToolResult.success(message="spy executed", data={"command": args.command})
+
+
 class TestPermissionRuleEngineIntegration:
     """executor 接入规则引擎的四条路径：DENY / ALLOW / ASK / NO_MATCH。"""
 
@@ -326,6 +361,128 @@ class TestPermissionRuleEngineIntegration:
         assert result.result.ok is True
         assert "hi" in result.result.data["stdout"]
         assert calls == [], "ALLOW 规则应免审批"
+
+    @pytest.mark.asyncio
+    async def test_find_delete_requires_approval_and_rejection_prevents_execute(
+        self, sandbox: LocalSubprocessSandbox
+    ):
+        spy = _SpyBashTool()
+        registry = ToolRegistry()
+        registry.register(spy)
+        calls: list[ApprovalRequest] = []
+
+        async def rejecting(req: ApprovalRequest) -> ApprovalResponse:
+            calls.append(req)
+            return ApprovalResponse(approved=False, reason="reject readonly bypass")
+
+        result = await ToolExecutor(
+            registry,
+            approval_callback=rejecting,
+            permission_rules=default_rule_set(),
+            workspace_root=sandbox.workspace_root,
+        ).execute(_tc("bash", {"command": "find . -delete"}))
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+        assert result.tool_call_id == "c1"
+        assert len(calls) == 1
+        assert spy.execute_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_find_delete_without_approval_channel_prevents_execute(
+        self, sandbox: LocalSubprocessSandbox
+    ):
+        spy = _SpyBashTool()
+        registry = ToolRegistry()
+        registry.register(spy)
+
+        result = await ToolExecutor(
+            registry,
+            approval_callback=None,
+            permission_rules=default_rule_set(),
+            workspace_root=sandbox.workspace_root,
+        ).execute(_tc("bash", {"command": "find . -delete"}))
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+        assert result.tool_call_id == "c1"
+        assert spy.execute_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_find_delete_approval_allows_exactly_one_execution(
+        self, sandbox: LocalSubprocessSandbox
+    ):
+        spy = _SpyBashTool()
+        registry = ToolRegistry()
+        registry.register(spy)
+        calls: list[ApprovalRequest] = []
+
+        async def approving(req: ApprovalRequest) -> ApprovalResponse:
+            calls.append(req)
+            return ApprovalResponse(approved=True)
+
+        result = await ToolExecutor(
+            registry,
+            approval_callback=approving,
+            permission_rules=default_rule_set(),
+            workspace_root=sandbox.workspace_root,
+        ).execute(_tc("bash", {"command": "find . -delete"}))
+
+        assert result.result.ok is True
+        assert result.tool_call_id == "c1"
+        assert result.result.message == "spy executed"
+        assert len(calls) == 1
+        assert calls[0].reason == "Bash 命令需逐次审批。"
+        assert spy.execute_calls == 1
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "wc -c --files0-from=/tmp/rev1484-out/list.txt",
+            "grep -f/etc/passwd .",
+            "grep --file=/etc/passwd .",
+            "grep --exclude-from=/etc/passwd .",
+            "file -f/etc/passwd",
+            "file --files-from=/etc/passwd",
+            "head --files0-from=x",
+            "diff --from-file=/etc/passwd",
+            "date -f/etc/passwd",
+            # GNU 长选项无歧义前缀缩写。
+            "wc -c --files0=list.txt",
+            "wc -c --files0-fro=list.txt",
+            "wc -c --files0-fro list.txt",
+            # 表外文件承载选项的附着短旗值。
+            "diff -X/etc/passwd a.txt b.txt",
+            "file -m/etc/passwd README.md",
+            # 簇首 `-f<值>` 与空格形同语义，恢复 ASK（P2-8）。
+            "grep -fpatterns.txt src/app.py",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_file_consuming_readonly_option_is_approved_before_execution(
+        self, sandbox: LocalSubprocessSandbox, command: str,
+    ):
+        """每个文件承载选项都必须先进入既有审批闸，拒绝时零执行。"""
+        spy = _SpyBashTool()
+        registry = ToolRegistry()
+        registry.register(spy)
+        calls: list[ApprovalRequest] = []
+
+        async def rejecting(req: ApprovalRequest) -> ApprovalResponse:
+            calls.append(req)
+            return ApprovalResponse(approved=False, reason="reject file option")
+
+        result = await ToolExecutor(
+            registry,
+            approval_callback=rejecting,
+            permission_rules=default_rule_set(),
+            workspace_root=sandbox.workspace_root,
+        ).execute(_tc("bash", {"command": command}))
+
+        assert result.result.ok is False
+        assert result.result.error_code == ErrorCode.PERMISSION_DENIED
+        assert len(calls) == 1
+        assert spy.execute_calls == 0
 
     @pytest.mark.asyncio
     async def test_ask_bash_uses_rule_reason(

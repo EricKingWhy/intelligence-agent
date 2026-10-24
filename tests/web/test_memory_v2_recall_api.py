@@ -51,7 +51,7 @@ def test_session_recall_api_returns_authorized_redacted_explanations(tmp_path) -
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=_SECRET, capabilities="{}",
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
 
     with TestClient(app) as client:
         state = client.app.state.agent

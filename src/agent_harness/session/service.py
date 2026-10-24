@@ -1707,7 +1707,11 @@ class SessionService:
         metas = await self._session_meta_store.list_all()
         return {meta.session_id for meta in metas if meta.archived}
 
-    async def get_events(self, session_id: str) -> list:
+    async def get_events(
+        self, session_id: str, *,
+        after_seq: int | None = None,
+        limit: int | None = None,
+    ) -> list:
         """读取 session 的完整事件历史（只读，不 mutate）。
 
         用于前端刷新后重建视图（不变量 #22）；replay 等零副作用场景也用它。
@@ -1716,6 +1720,13 @@ class SessionService:
         #752：零可解析事件时区分"真不存在"与"全坏"——前者 404，后者 409
         （`EventLogCorruptError`，与 `recover` 的诊断对齐）。404 会把"数据损坏，
         需要恢复"掩蔽成"没这个东西"，用户到不了恢复入口。
+
+        有界窗口（#1526）：`after_seq` 只保留 seq **严格大于**它的事件
+        （ADR-0016 §2.3 重连游标同一语义），`limit` 截取窗口前缀；两者皆 None
+        ⇒ 既有全量语义（既有调用方零迁移）。窗口参数**不参与**存在性/损坏
+        判定——404/409 永远判在全量读上，「切完为空」返回 `[]` 而不是 404
+        （分页到头的正常页）。磁盘序 = seq 序（写锁内追加），前缀切片即
+        按序页。
         """
         self._validate_session_id(session_id)
         events, integrity = await anyio.to_thread.run_sync(
@@ -1725,6 +1736,10 @@ class SessionService:
             raise SessionNotFound(f"session '{session_id}' not found")
         # 全坏日志（零可解析事件 + 有损坏行）：抛 409 而非误导性 404。
         self._raise_if_event_log_corrupt(session_id, integrity)
+        if after_seq is not None:
+            events = [event for event in events if event.seq > after_seq]
+        if limit is not None:
+            events = events[:limit]
         return events
 
     async def budget_projection(self, session_id: str) -> dict[str, Any]:

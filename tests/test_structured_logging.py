@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
 
+import agent_harness.logging as structured_logging
 from agent_harness import cli
 from agent_harness.config import Settings
 from agent_harness.logging import LogContext, log_context, log_event, setup_logging
@@ -221,3 +223,53 @@ def test_formatter_warns_on_unknown_event_type(caplog):
     warnings = [r for r in caplog.records if r.levelno == std_logging.WARNING
                 and "llm_cal" in r.getMessage()]
     assert warnings, "未知 event_type 必须产生告警"
+
+
+def test_setup_logging_rotates_and_retains_a_finite_number_of_stack_traces(
+    monkeypatch, tmp_path: Path,
+):
+    assert structured_logging.LOG_MAX_BYTES == 10 * 1024 * 1024
+    assert structured_logging.LOG_BACKUP_COUNT == 5
+    monkeypatch.setattr(structured_logging, "LOG_MAX_BYTES", 1024)
+    monkeypatch.setattr(structured_logging, "LOG_BACKUP_COUNT", 2)
+
+    log_path = setup_logging(workspace_dir=str(tmp_path / "workspace"))
+    handler = next(
+        handler for handler in logging.getLogger().handlers
+        if isinstance(handler, RotatingFileHandler)
+    )
+    assert handler.maxBytes == 1024
+    assert handler.backupCount == 2
+
+    logger = logging.getLogger("agent_harness.retention_test")
+    for _ in range(20):
+        try:
+            raise RuntimeError("repeated failure")
+        except RuntimeError:
+            log_event(logger, "error", "repeated failure", level="error", exc_info=True)
+    handler.flush()
+
+    log_files = list(log_path.parent.glob("agent.jsonl*"))
+    assert len(log_files) == 3
+    assert all(path.stat().st_size <= 1024 for path in log_files)
+    entries = [entry for path in log_files for entry in read_jsonl(path)]
+    assert 0 < len(entries) < 20
+    assert all(
+        any(key.startswith("stack_trace") and entry[key] for key in entry)
+        for entry in entries
+    )
+
+
+def test_jsonl_file_setup_failure_keeps_core_logging_available(monkeypatch, tmp_path: Path):
+    def unavailable_file_handler(*_args, **_kwargs):
+        raise OSError("diagnostic disk unavailable")
+
+    monkeypatch.setattr(structured_logging, "RotatingFileHandler", unavailable_file_handler)
+    log_path = setup_logging(workspace_dir=str(tmp_path / "workspace"))
+
+    log_event(logging.getLogger("agent_harness.core"), "system_log", "core continues")
+
+    assert not log_path.exists()
+    handlers = logging.getLogger().handlers
+    assert len(handlers) == 1
+    assert isinstance(handlers[0], logging.StreamHandler)

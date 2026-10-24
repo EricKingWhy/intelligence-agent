@@ -344,7 +344,10 @@ class MemoryTool(Tool):
             trusted = trusted_identity_for_session(session_id, self._workspace_index)
         except PermissionError:
             logger.warning("memory projection skipped (%s): no trusted identity", args.target)
-            return {"created": 0, "deleted": 0, "skipped": [], "pending": True, "desired": 0}
+            return {
+                "created": 0, "deleted": 0, "skipped": [], "pending": True,
+                "desired": 0, "unreadable": [],
+            }
         event_id = None
         if self._sessions is not None and session_id:
             try:
@@ -364,7 +367,10 @@ class MemoryTool(Tool):
             )
         except Exception as error:  # noqa: BLE001 — 投影失败不能吞掉权威写入的成功
             logger.warning("memory projection failed (%s): %s", args.target, type(error).__name__)
-            return {"created": 0, "deleted": 0, "skipped": [], "pending": True, "desired": 0}
+            return {
+                "created": 0, "deleted": 0, "skipped": [], "pending": True,
+                "desired": 0, "unreadable": [],
+            }
 
 
 def _result(

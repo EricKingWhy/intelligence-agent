@@ -1852,6 +1852,11 @@ class AgentRuntime:
             if not resuming:
                 # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
                 # 续跑执行没有新的 run/started（逻辑 run 是同一个），跳过镜像。
+                # #1547（审查 F3）：run/started 是同步 append，同实例有更低 seq 的
+                # 在途写者时会被闸门暂存到 `begin_run` 返回之后；`next()` 无默认
+                # 值，快照里缺它就 StopIteration→RuntimeError（PEP 479）杀死整个
+                # run。先等闸门清空再扫。
+                await session.wait_gate_settled()
                 run_started = next(
                     e for e in session.since(arms.memory_event_start) if e.type == RUN_STARTED
                 )
@@ -2644,6 +2649,11 @@ class AgentRuntime:
                     current_constraint_tool_context_var.reset(tool_context_token)
                 # 执行期间追加的事件（tool/output_delta 等）镜像给流式消费者；
                 # web 订阅者经 session listener 实时收到（seq 幂等合并不重复）。
+                # #1547：exec 子调用在 worker 线程同步落 `tool/result`，其投递可能
+                # 被更低 seq 的在途写者推迟到 `execute_batch` 返回之后——一次性
+                # `since()` 快照（无 listener 通道补偿，尤其下方预算记账）先等
+                # 闸门清空再取，否则 `budget_delta` 会从账上永久消失。
+                await session.wait_gate_settled()
                 for event in session.since(tool_event_start):
                     yield to_agent_event(event)
                 # session 树账的工具计数点（`#318`）：从本批 `tool/result` 的

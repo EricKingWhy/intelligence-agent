@@ -42,7 +42,7 @@ def client(tmp_path: Path):
         workspace_dir=str(tmp_path / "ws"),
         model_api_key="sk-test",
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     with TestClient(app) as c:
         yield c
 

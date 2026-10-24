@@ -1,0 +1,1 @@
+2026-10-24	#1575 endpoint-guard Windows tests; Correctness PASS + Standards PASS, no findings, P0-P4=0; focused module 80 passed. Full pytest environment-blocked by unavailable Docker Engine (8608 pass/408 fail/4 errors); see 2026-10 archive.	3594e741b80b560f390b5daa4ac0ed653bfccfbc..0fb0a46ff393f94485a8263220e23a4e23ca2c12
