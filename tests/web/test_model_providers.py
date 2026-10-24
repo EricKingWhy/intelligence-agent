@@ -25,7 +25,7 @@ def provider_app(tmp_path):
         model_provider="deepseek", model_name="deepseek-chat",
         provider_store_path=str(tmp_path / "model-providers.json"),
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     # 测试注入内存凭据后端：SystemCredentialStore 在 Windows 上就是真实凭据
     # 管理器——测试 key 会写进系统级存储并在用例间泄漏（实测 my-proxy 残留）。
     # keyring 注入（memory backend）是 ADR-0032 §10 T3 的既有口径。
@@ -110,7 +110,7 @@ class TestCrudEndpoints:
             model_provider="deepseek", model_name="deepseek-chat",
             provider_store_path=str(tmp_path / "model-providers.json"),
         )
-        app = create_app(settings, enable_cors=False)
+        app = create_app(settings, enable_cors=False, allow_testserver=True)
         assert type(app.state.agent.provider_store.credentials).__name__ == "SystemCredentialStore"
         client = TestClient(app)
 

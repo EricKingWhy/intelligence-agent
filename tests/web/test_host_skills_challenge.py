@@ -79,6 +79,7 @@ def test_host_service_challenge_authenticates_and_signs_live_skills_response(
         Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
         enable_cors=False,
         host_service_token=token,
+        allow_testserver=True,
     )
     app.state.agent = _FakeAgent(_SkillCapability(tmp_path / "skills" / "sample-skill" / "SKILL.md"))
     nonce = secrets.token_hex(32)
@@ -120,6 +121,7 @@ def test_host_service_challenge_authenticates_and_signs_live_mcp_package_respons
         Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
         enable_cors=False,
         host_service_token=token,
+        allow_testserver=True,
     )
     app.state.agent = _FakeAgent(
         _SkillCapability(tmp_path / "skills" / "sample-skill" / "SKILL.md"), packages
@@ -169,6 +171,7 @@ def test_bearer_authenticates_skills_when_host_challenge_is_invalid(
         Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
         enable_cors=False,
         host_service_token=host_token,
+        allow_testserver=True,
     )
     app.state.agent = _FakeAgent(_SkillCapability(tmp_path / "skills" / "sample-skill" / "SKILL.md"))
     nonce = secrets.token_hex(32)
@@ -196,6 +199,7 @@ def test_expired_host_token_cannot_use_skills_challenge(tmp_path: Path) -> None:
         Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
         enable_cors=False,
         host_service_token=token,
+        allow_testserver=True,
     )
     nonce = secrets.token_hex(32)
     timestamp = str(int(datetime.now(UTC).timestamp()))
@@ -221,6 +225,7 @@ def test_host_skills_proof_is_bound_to_service_uuid(tmp_path: Path) -> None:
         Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
         enable_cors=False,
         host_service_token=token,
+        allow_testserver=True,
     )
     nonce = secrets.token_hex(32)
     timestamp = str(int(datetime.now(UTC).timestamp()))

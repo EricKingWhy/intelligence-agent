@@ -1526,6 +1526,9 @@ export default function App() {
 
   // ── Command Palette（PRD §15，ADR-0014）：Ctrl/Cmd+K 开关 + 命令集组装 ──
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteOpenerRef = useRef<HTMLElement | null>(null);
+  const memoryPanelFocusReturnTargetRef = useRef<HTMLElement | null>(null);
+  const approvePolicyFocusReturnTargetRef = useRef<HTMLElement | null>(null);
   /** 面板**关闭后**要执行的一次性动作（见命令 `focus-composer` 与 CommandPalette 的
    *  `onAfterClose` 注释：命令执行时浮层还开着，直接 focus 会被关闭时的焦点恢复打断）。 */
   const paletteAfterClose = useRef<(() => void) | null>(null);
@@ -1585,6 +1588,17 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isPaletteShortcut(e)) {
         e.preventDefault();
+        const active = document.activeElement;
+        const composer = document.querySelector<HTMLTextAreaElement>('#composer-input');
+        const composerCanReceiveFocus = composer !== null
+          && !composer.disabled
+          && composer.getClientRects().length > 0
+          && getComputedStyle(composer).visibility !== 'hidden';
+        paletteOpenerRef.current = active instanceof HTMLElement && active !== document.body
+          ? active
+          : composerCanReceiveFocus
+            ? composer
+            : document.querySelector<HTMLElement>('.appbar-more-trigger');
         setPaletteOpen((v) => !v);
       }
     };
@@ -1724,7 +1738,12 @@ export default function App() {
         keywords: 'memory memories forget delete 记忆 遗忘 删除 忘记',
         meta: '记忆库',
         group: 'actions',
-        run: () => setMemoriesOpen(true),
+        run: () => {
+          if (!memoriesOpen) {
+            memoryPanelFocusReturnTargetRef.current = paletteOpenerRef.current;
+            setMemoriesOpen(true);
+          }
+        },
       },
       {
         id: 'manage-approve-policy',
@@ -1732,7 +1751,12 @@ export default function App() {
         keywords: 'approval approve policy always allow persistent 审批 授权 持久 规则 撤销',
         meta: '持久授权',
         group: 'actions',
-        run: () => setApprovePolicyOpen(true),
+        run: () => {
+          if (!approvePolicyOpen) {
+            approvePolicyFocusReturnTargetRef.current = paletteOpenerRef.current;
+            setApprovePolicyOpen(true);
+          }
+        },
       },
     ];
     // trace_id 缺则 Copy Trace ID 不出现；trace_url 缺则 Open Trace 不出现
@@ -1785,7 +1809,22 @@ export default function App() {
       });
     }
     return items;
-  }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction, handleNew]);
+  }, [
+    paletteOpen,
+    conversation,
+    density,
+    theme,
+    toggleTheme,
+    copyText,
+    jumpToStream,
+    focusEvent,
+    inspectorOpen,
+    panel.expanded,
+    onPanelAction,
+    handleNew,
+    memoriesOpen,
+    approvePolicyOpen,
+  ]);
 
   // UI-01 / APR-01：待决审批 > 0 → composer 锁定；失效审批不算（与 Composer 同一
   // projection 状态，无第二真相源）。`lockReasonOf` 与 Composer 共用同一优先级，
@@ -2359,7 +2398,11 @@ export default function App() {
           return true;
         }}
       />
-      <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      <MemoryPanel
+        open={memoriesOpen}
+        onOpenChange={setMemoriesOpen}
+        focusReturnTargetRef={memoryPanelFocusReturnTargetRef}
+      />
       {/* #1200：插件管理窗口（侧栏「插件」入口；左列表 + 右详情）。 */}
       <PluginPanel open={pluginsOpen} onOpenChange={setPluginsOpen} />
       {/* #357 W-13：恢复列表浮层（顶栏 历史 入口）。只读列表；「继续」= 打开该会话，
@@ -2376,6 +2419,7 @@ export default function App() {
       <ApprovePolicyPanel
         open={approvePolicyOpen}
         onOpenChange={setApprovePolicyOpen}
+        focusReturnTargetRef={approvePolicyFocusReturnTargetRef}
       />
       {/* #1304：Agent 看板（TopBar Columns 入口）。数据源走 WS 板级快照（T3 / #1305）；
           #1306 起点卡写 ack 并打开会话（ack 写序在 KanbanPanel 内，先 ack 再导航）。 */}

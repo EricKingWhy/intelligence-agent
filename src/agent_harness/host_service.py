@@ -124,6 +124,10 @@ HOST_TOKEN_TTL_SECONDS = 7 * 24 * 3600
 #: 锁竞争输家二次检查的轮询间隔（秒）。
 _ATTACH_POLL_INTERVAL = 0.25
 
+# 本机控制面只允许显式 loopback 绑定；远程/LAN 部署不经 `serve` 这条个人服务入口。
+_LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_LOOPBACK_PROBE_HOSTS = ("127.0.0.1", "::1")
+
 # Bound local JSON reads so a stale or unexpected loopback service cannot force
 # an unbounded allocation during attach probing.
 _MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -261,6 +265,7 @@ class HostEndpointInfo:
 
     pid: int
     port: int
+    host: str = "127.0.0.1"
     protocol_version: int = HOST_PROTOCOL_VERSION
     auth_required: bool = True
     owner: str = ""
@@ -329,9 +334,11 @@ def read_endpoint(root: str | os.PathLike[str]) -> HostEndpointInfo | None:
     if not isinstance(payload, dict):
         return None
     try:
+        raw_host = payload.get("host")
         info = HostEndpointInfo(
             pid=int(payload["pid"]),
             port=int(payload["port"]),
+            host=raw_host if isinstance(raw_host, str) and raw_host else "127.0.0.1",
             protocol_version=int(payload.get("protocol_version", 0)),
             auth_required=bool(payload.get("auth_required", True)),
             owner=str(payload.get("owner", "")),
@@ -405,6 +412,7 @@ def _read_bounded_body(response: Any) -> bytes:
 
 
 async def _loopback_get_bytes_with_deadline(
+    host: str,
     port: int,
     path: str,
     *,
@@ -413,10 +421,10 @@ async def _loopback_get_bytes_with_deadline(
 ) -> tuple[int, dict[str, str], bytes]:
     """GET one fixed loopback route with an absolute deadline and bounded body."""
     async with asyncio.timeout(timeout):
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection(host, port)
         try:
             request_headers = {
-                "Host": "127.0.0.1",
+                "Host": f"[{host}]" if ":" in host else host,
                 "Accept": "application/json",
                 "Connection": "close",
                 **headers,
@@ -466,12 +474,61 @@ async def _loopback_get_bytes_with_deadline(
             writer.close()
 
 
+async def _loopback_get_from_any_host(
+    port: int,
+    path: str,
+    *,
+    headers: dict[str, str],
+    timeout: float,
+) -> tuple[str, int, dict[str, str], bytes]:
+    """GET a loopback route, racing the fixed IPv4/IPv6 candidates."""
+    tasks = {
+        asyncio.create_task(
+            _loopback_get_bytes_with_deadline(
+                host,
+                port,
+                path,
+                headers=headers,
+                timeout=timeout,
+            )
+        ): host
+        for host in _LOOPBACK_PROBE_HOSTS
+    }
+    last_error: Exception | None = None
+    try:
+        while tasks:
+            done, _ = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                host = tasks.pop(task)
+                try:
+                    status, response_headers, body = task.result()
+                    return host, status, response_headers, body
+                except (OSError, ValueError, TimeoutError, EOFError) as error:
+                    last_error = error
+    finally:
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError("loopback request deadline expired")
+
+
 def _http_get_json(url: str, *, token: str | None, timeout: float) -> tuple[int, object]:
     request = urllib.request.Request(url)
     if token is not None:
         request.add_header("Authorization", f"Bearer {token}")
     with _LOOPBACK_OPENER.open(request, timeout=timeout) as response:
         return response.status, json.loads(_read_bounded_body(response).decode("utf-8"))
+
+
+def _loopback_url(host: str, port: int, path: str) -> str:
+    authority = f"[{host}]" if ":" in host else host
+    return f"http://{authority}:{port}{path}"
 
 
 def query_attached_skill_catalog(
@@ -530,15 +587,18 @@ def _query_attached_runtime_payload(
         pass
     else:
         return None
-    deadline = time.monotonic() + connect_timeout
     # Reuse the existing iterative guard so json.loads never has to parse an
     # unexpectedly deep response from the loopback service.
     from agent_harness.web.wire_safety import BODY_MAX_DEPTH, json_container_depth
 
+    deadline = time.monotonic() + connect_timeout
     try:
-        health_status, _, health_body = asyncio.run(
-            _loopback_get_bytes_with_deadline(
-                endpoint.port, "/api/health", headers={}, timeout=max(0.001, deadline - time.monotonic())
+        health_host, health_status, _, health_body = asyncio.run(
+            _loopback_get_from_any_host(
+                endpoint.port,
+                "/api/health",
+                headers={},
+                timeout=max(0.001, deadline - time.monotonic()),
             )
         )
         if json_container_depth(health_body) > BODY_MAX_DEPTH:
@@ -572,7 +632,11 @@ def _query_attached_runtime_payload(
             return None
         status, response_headers, body = asyncio.run(
             _loopback_get_bytes_with_deadline(
-                endpoint.port, path, headers=proof_headers, timeout=timeout
+                health_host,
+                endpoint.port,
+                path,
+                headers=proof_headers,
+                timeout=timeout,
             )
         )
         response_proof = response_headers.get(HOST_SKILLS_RESPONSE_PROOF_HEADER.lower(), "")
@@ -606,18 +670,28 @@ def attach_probe(
         return AttachResult(AttachStatus.ABSENT, None, "端点状态文件不存在或不可读")
 
     # 第一步：loopback TCP 能连上才谈得上「活服务」。端口拒绝/超时 = 残留物。
-    try:
-        with socket.create_connection(("127.0.0.1", endpoint.port), timeout=connect_timeout):
-            pass
-    except OSError as error:
+    probe_host: str | None = None
+    connection_errors: list[str] = []
+    for host in _LOOPBACK_PROBE_HOSTS:
+        try:
+            with socket.create_connection((host, endpoint.port), timeout=connect_timeout):
+                probe_host = host
+                break
+        except OSError as error:
+            connection_errors.append(f"{host} ({error.__class__.__name__})")
+    if probe_host is None:
         return AttachResult(
-            AttachStatus.STALE, endpoint, f"127.0.0.1:{endpoint.port} 连接失败（{error.__class__.__name__}）"
+            AttachStatus.STALE,
+            endpoint,
+            f"loopback:{endpoint.port} 连接失败（{', '.join(connection_errors)}）",
         )
 
     # 第二步：健康面必须是我们协议形状的服务（而非恰好占用同端口的别的程序）。
     try:
         status, payload = _http_get_json(
-            f"http://127.0.0.1:{endpoint.port}/api/health", token=None, timeout=connect_timeout
+            _loopback_url(probe_host, endpoint.port, "/api/health"),
+            token=None,
+            timeout=connect_timeout,
         )
     except (OSError, ValueError) as error:
         return AttachResult(
@@ -645,7 +719,9 @@ def attach_probe(
         )
     try:
         status, _ = _http_get_json(
-            f"http://127.0.0.1:{endpoint.port}{AUTH_PROBE_PATH}", token=token, timeout=connect_timeout
+            _loopback_url(probe_host, endpoint.port, AUTH_PROBE_PATH),
+            token=token,
+            timeout=connect_timeout,
         )
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):
@@ -698,7 +774,7 @@ def serve_once(
     探针 AUTH_FAILED ⇒ 服务活着但本凭据不可用，响亮拒绝；始终 ABSENT/STALE ⇒
     锁在非服务写者（如在途 CLI 命令）手里，原样抛 `InstanceLockError`。
 
-    拿到锁后：绑定 `127.0.0.1` 随机端口（`port=0` 受管）→ 生成/沿用 jwt 密钥 →
+    拿到锁后：绑定指定的 loopback 随机端口（`port=0` 受管）→ 生成/沿用 jwt 密钥 →
     签发限权身份 token 进凭据通道 → 发布端点文件 → 用与附着方**同一条探针**做
     启动自验 → 就绪行打到 stdout（只含端口，无 token）。**拿到锁之后的每一段
     都在 try/finally 里**：任何启动/运行异常都会清端点 + 清 token + 放锁
@@ -708,6 +784,11 @@ def serve_once(
     本机个人服务不开宽松 CORS（`enable_cors=False`）：本地 UI 同源/桌面壳加载，
     Vite dev 直连属显式开发配置，走 `create_app` 直调路径。
     """
+    normalized_host = host.strip().lower()
+    if normalized_host not in _LOOPBACK_BIND_HOSTS:
+        raise HostServiceError(
+            "agent-harness serve 只允许绑定 IPv4/IPv6 loopback（127.0.0.1、localhost、::1）"
+        )
     root = settings.workspace_dir
     creds = credentials if credentials is not None else default_credentials()
     token_store = HostTokenStore(creds)
@@ -723,7 +804,7 @@ def serve_once(
             time.sleep(_ATTACH_POLL_INTERVAL)
         if last is not None and last.status is AttachStatus.AUTH_FAILED and last.endpoint:
             raise HostServiceError(
-                f"本机服务已在 127.0.0.1:{last.endpoint.port} 运行，但当前用户没有可用的"
+                f"本机服务已在 {_loopback_url(last.endpoint.host, last.endpoint.port, '')} 运行，但当前用户没有可用的"
                 f" host token（凭据通道可能属于另一 OS 用户）：{last.detail}。"
                 "已拒绝另起第二个写者。"
             ) from error
@@ -763,7 +844,7 @@ def serve_once(
     server = uvicorn.Server(
         uvicorn.Config(
             app,
-            host=host,
+            host=normalized_host,
             port=0,
             log_level="warning",
             access_log=False,
@@ -782,7 +863,12 @@ def serve_once(
         else:
             raise RuntimeError("服务 60s 未完成启动")
         port = int(server.servers[0].sockets[0].getsockname()[1])
-        endpoint = HostEndpointInfo(pid=os.getpid(), port=port, service_uuid=service_uuid)
+        endpoint = HostEndpointInfo(
+            pid=os.getpid(),
+            port=port,
+            host=normalized_host,
+            service_uuid=service_uuid,
+        )
         token_store.set_token(root, token)
         publish_endpoint(root, endpoint)
         # 启动自验：与附着方完全同一条探针（健康面形状 + 限权 token 鉴权）。
@@ -794,7 +880,7 @@ def serve_once(
             if time.monotonic() > verify_deadline:
                 raise RuntimeError(f"启动自验失败：{probe.detail}")
             time.sleep(0.1)
-        print(f"HOST_SERVICE_READY http://127.0.0.1:{port}", flush=True)
+        print(f"HOST_SERVICE_READY {_loopback_url(normalized_host, port, '')}", flush=True)
         while (
             not server.should_exit
             and thread.is_alive()
@@ -854,7 +940,7 @@ def describe_lock_error_with_attach(root: str | os.PathLike[str], error: Instanc
     if result.status is AttachStatus.ATTACHABLE and result.endpoint is not None:
         return (
             f"{error}\n"
-            f"  已有本机服务在运行：http://127.0.0.1:{result.endpoint.port}"
+            f"  已有本机服务在运行：{_loopback_url(result.endpoint.host, result.endpoint.port, '')}"
             "—— 请附着该服务（同一数据根不允许第二个写者）。"
         )
     return str(error)
