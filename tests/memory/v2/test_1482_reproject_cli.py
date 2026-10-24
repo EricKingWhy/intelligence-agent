@@ -356,6 +356,111 @@ def test_markdown_readable_with_the_other_file_unreadable_does_not_blame_the_wro
     assert _pending_count(db_path) == 1
 
 
+
+# --------------------------------------------------------------------- #1573
+
+
+def _probe_disk_reads(
+    monkeypatch, memories: Path, *, user_unreadable_reads: int,
+) -> dict[str, int]:
+    """按文件统计本轮读盘次数，并让 USER.md 前 N 次读返回「存在但读不出来」。#1573
+
+    间隔探针：判 `unknown` 的读与归因读若是两次独立读盘，文件在这两次之间恢复可读就能
+    造出 `pending=True ∧ unreadable=[]`。计数点取 `read_raw_checked`（`disk_entries`
+    的唯一读盘出口），因此每个计数都是真实磁盘读，不是函数调用次数。
+    """
+    real = MarkdownMemoryStore.read_raw_checked
+    counts = {"MEMORY.md": 0, "USER.md": 0}
+
+    def counted(path):
+        name = Path(path).name
+        counts[name] = counts.get(name, 0) + 1
+        if name == "USER.md" and counts[name] <= user_unreadable_reads:
+            return "", False
+        return real(path)
+
+    monkeypatch.setattr(MarkdownMemoryStore, "read_raw_checked", staticmethod(counted))
+    return counts
+
+
+def _unreadable_window_summary(summary: dict) -> None:
+    """#1573 AC1 三条断言：不一致组合、归因文件名、方向安全。"""
+    assert not (summary["pending"] and summary["unreadable"] == []), summary
+    assert summary["pending"] is True, summary
+    assert summary["unreadable"] == ["user"], summary
+    assert summary["deleted"] == 0, summary  # 读不出来时绝不判删
+
+
+def test_apply_write_path_reads_the_disk_once_per_file_and_names_the_unreadable_file(
+    tmp_path, monkeypatch,
+) -> None:
+    """#1573 AC1 路径一（`retract_entry` / `apply_write`）：只读一次盘，归因不二次读。
+
+    当前实现：`_retract` 判 `unknown` 读一次两文件，`count_retraction` 的
+    `_unreadable_files` 再读一次——USER.md 在两次之间恢复可读 ⇒ `pending=True`、
+    `unreadable=[]`（CLI 不报是哪个文件读不出来），且两文件各读 2 次。
+    """
+    settings = _settings(tmp_path)
+    db_path = Path(settings.workspace_dir) / "memory-v2.db"
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "MEMORY.md").write_text("别的句子", encoding="utf-8")
+    (memories / "USER.md").write_text("", encoding="utf-8")
+
+    async def _seed() -> SqliteMemoryV2Store:
+        store = SqliteMemoryV2Store(db_path)
+        await store.initialize()
+        await store.create(
+            reprojection.draft_for("memory", "被删掉的句子"), TRUSTED,
+            projection_source="tool", projection_target="memory")
+        return store
+
+    store = asyncio.run(_seed())
+    counts = _probe_disk_reads(monkeypatch, memories, user_unreadable_reads=1)
+
+    summary = asyncio.run(reprojection.apply_write(
+        store, MarkdownMemoryStore(memories), "memory",
+        {"success": True, "removed_entry": "被删掉的句子"}, TRUSTED))
+
+    _unreadable_window_summary(summary)
+    # 基线常数：一次判定读各文件一次；归因与账本记账都不再读盘。
+    assert counts == {"MEMORY.md": 1, "USER.md": 1}, counts
+
+
+def test_reproject_target_path_reads_the_disk_once_per_file_and_names_the_unreadable_file(
+    tmp_path, monkeypatch,
+) -> None:
+    """#1573 AC1 路径二（`reproject_target`，CLI 对账最直接的症候）。
+
+    当前实现：目标文件读一次、`_known_entries` 再读一次、`files is None` 又让 `_retract`
+    读一次、`count_retraction` 归因再读一次——USER.md 若在中间恢复可读，这一轮既可能
+    假删共享行，也会把归因名单抹成空。
+    """
+    settings = _settings(tmp_path)
+    db_path = Path(settings.workspace_dir) / "memory-v2.db"
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "MEMORY.md").write_text("可读的一句", encoding="utf-8")
+    (memories / "USER.md").write_text("", encoding="utf-8")
+
+    async def _seed() -> SqliteMemoryV2Store:
+        store = SqliteMemoryV2Store(db_path)
+        await store.initialize()
+        await store.create(
+            reprojection.draft_for("memory", "被删掉的句子"), TRUSTED,
+            projection_source="tool", projection_target="memory")
+        return store
+
+    store = asyncio.run(_seed())
+    counts = _probe_disk_reads(monkeypatch, memories, user_unreadable_reads=1)
+
+    summary = asyncio.run(
+        reprojection.reproject_target(store, MarkdownMemoryStore(memories), TRUSTED, "memory"))
+
+    _unreadable_window_summary(summary)
+    # 基线常数：全轮每个文件各读一次（目标条目与并集同出一次遍历，`_retract` 不读）。
+    assert counts == {"MEMORY.md": 1, "USER.md": 1}, counts
+
 def test_entry_exits_non_zero_when_markdown_is_not_assembled(
     tmp_path, monkeypatch, capsys,
 ) -> None:
