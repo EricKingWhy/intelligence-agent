@@ -1,5 +1,12 @@
 # SDD Ticket Tracker
 
+**等待 merge（2026-10-24，#1571；PR [#1574](https://github.com/EricKingWhy/intelligence-agent/pull/1574) OPEN）**：Issue [#1571](https://github.com/EricKingWhy/intelligence-agent/issues/1571) 已 CLOSED，标签 bug/P3/memory/等待merge；施工期间曾标 in-progress + in-progress-CodeX。分支 codex/issue-1571-memory-gold-gate，固定基线 3594e741（#1563 head），代码 tip 2c00706e；未追随滚动中的 main。
+- **修复**：evaluation/memory_v2_gold_adapter.py 将 _SECRET_POLICY_REJECTION 对齐 MemoryV2Service._reject_secret 当前文案，并由 _EXPLICIT_SECRET_REFUSAL 复用该常量；没有改变拒绝策略、金标语料、门槛或分母。
+- **聚焦证据**：修复前 4 failed / 3 passed，修复后 tests/evaluation/test_memory_v2_gold_gate.py 为 7 passed；Ruff 与 git diff --check 通过。
+- **两轴审查**：Standards PASS；Correctness/Spec PASS；P0–P4=0，范围 3594e741..2c00706e。台账 docs/review_ledger.d/t1571-memory-gold-gate.tsv。
+- **全量验证**：冻结代码提交 2c00706e 执行 scripts/run_tests_clean.sh，结果 406 failed, 8610 passed, 186 skipped, 43 deselected, 4 errors（1968.13s）。对照固定基线 3594e741 的 411 个失败/错误节点，4 个目标金集节点已转绿；差异中另外 3 个节点为本轮尚未登记 review 的 coverage 测试，以及两个未改动的 endpoint guard 跨平台测试。4 个 Docker 集成用例因本机 Docker Engine 管道不存在而报错。日志在执行机临时文件 %TEMP%\issue1571-full-clean.log。
+- **Gate-0**：代码提交预审收据 docs/gate/2c00706ee48faa7002be6622a8f876932aeceb07.json 为 6/7（唯一失败是当时缺本票 review ledger）；补台账后最终 Gate-0 收据 docs/gate/a7541b277ea57ea24c827f73e948e285cc28af81.json 为 7/7 PASS（152.34s，tree 4db21c66，tracked_matches_head=true，untracked_total=0）。receipt-present 首周 warn-only，不计失败。
+- **PR 与关单**：PR #1574 base 为 claude/issue-1485-provider-url-guard-reland（#1563 固定 head）；OPEN、未合并。GitHub gitleaks 检查 PASS，OpenSSF Scorecard skipped；本地 Gate-0 7/7 PASS。集成负责人 EricKingWhy；维护者负责合并。另有两个 endpoint guard Windows 测试可移植性问题待在后续独立票修复。
 **等待 merge（2026-10-24，#1554；PR [#1570](https://github.com/EricKingWhy/intelligence-agent/pull/1570) OPEN）**：Issue #1554 CLOSED，标签 `bug` / `等待merge`；短分支 `codex/issue-1554-dns-pinning` 基于父修复 PR #1563 head `3594e741b80b560f390b5daa4ac0ed653bfccfbc`，不追 main。PR head `a30c12e9dd843937aee4ad0f96349f573de560d0`，未 merge；集成负责人 EricKingWhy。
 
 - **目标 / Scope**：闭合 #1485 F-03 的 DNS 校验—socket 连接 TOCTOU。每个未被所有者 allowlist 豁免的请求逐跳校验 DNS 结果，传输必须使用已校验地址；保持原 Host/TLS SNI、现有拒绝面、allowlist 和 loopback/LAN 行为。
