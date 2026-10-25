@@ -5,6 +5,8 @@
 #   ./dev.sh              起 Web（后端 :8000 + 前端 :5173），Ctrl+C 一起停
 #   ./dev.sh web          同上（显式）
 #   ./dev.sh cli          起交互式 CLI REPL（demo/live_agent.py）
+#   ./dev.sh tui          起终端界面（tui/，ia-tui --session new；自动装依赖/构建）
+#   ./dev.sh tui <id>     附着到已有会话（ia-tui --session <id>）
 #   ./dev.sh backend      只起后端
 #   ./dev.sh frontend     只起前端
 #   ./dev.sh help         显示用法
@@ -63,6 +65,32 @@ start_cli() {
   exec uv run python demo/live_agent.py
 }
 
+# ── TUI：终端交互界面（tui/，ia-tui；自动冷启动/附着本机服务） ──
+# node 版本闸：tui/package.json engines 要求 >= 22.1，major 与 minor 都要比较
+#（只比 major 会放行 22.0.x，随后在 install/运行期才失败）。回归测试：
+# tests/tooling/test_dev_sh_tui_node_gate.py（提取本函数真实文本执行）。
+tui_node_ok() {
+  local major minor
+  major="$(node -p 'process.versions.node.split(".")[0]')"
+  minor="$(node -p 'process.versions.node.split(".")[1]')"
+  (( major > 22 || (major == 22 && minor >= 1) ))
+}
+start_tui() {
+  local session="${1:-new}"
+  command -v node >/dev/null 2>&1 || { err "未找到 node（需要 >= 22.1）。安装：https://nodejs.org/"; exit 1; }
+  tui_node_ok || { err "node 版本过低：$(node --version)，TUI 需要 >= 22.1"; exit 1; }
+  if [[ ! -d tui/node_modules ]]; then
+    warn "TUI 依赖未装——先跑 npm install"
+    (cd tui && npm install)
+  fi
+  if [[ ! -f tui/dist/src/index.js ]]; then
+    warn "TUI 未构建——先跑 npm run build"
+    (cd tui && npm run build)
+  fi
+  log "启动 TUI（--session $session）..."
+  exec node tui/dist/src/index.js --session "$session"
+}
+
 # ── Web：后端 + 前端并行，Ctrl+C 一起停 ──
 start_web() {
   header "启动 Web（后端 + 前端）"
@@ -112,6 +140,8 @@ dev.sh — intelligence-agent 开发启动脚本
   ./dev.sh              起 Web（后端 :8000 + 前端 :5173），Ctrl+C 一起停
   ./dev.sh web          同上（显式）
   ./dev.sh cli          起交互式 CLI REPL（demo/live_agent.py，输一行一个任务）
+  ./dev.sh tui          起终端界面（ia-tui --session new，自动装依赖/构建）
+  ./dev.sh tui <id>     附着到已有会话
   ./dev.sh backend      只起后端 FastAPI (:8000)
   ./dev.sh frontend     只起前端 Vite (:5173)
   ./dev.sh help         显示本帮助
@@ -137,6 +167,7 @@ check_prereqs
 case "${1:-web}" in
   web)        start_web ;;
   cli)        start_cli ;;
+  tui)        start_tui "${2:-new}" ;;
   backend)    start_backend ;;
   frontend)   start_frontend ;;
   help|-h|--help) show_help ;;

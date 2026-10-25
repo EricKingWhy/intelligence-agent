@@ -9,6 +9,9 @@
 .agent/
 logs/
 
+# harness 本地运行时状态（.agent-harness/approve-policy.json 等由 CLI/TUI 运行生成）
+.agent-harness/
+
 # 测试运行产物（playwright 上次运行状态 / real-model smoke 会话 JSONL）
 test-results/
 evaluation/smoke_sessions/
@@ -38,6 +41,9 @@ __pycache__/
 # Codex CLI 本地配置（MCP servers 等——属工具链，非项目代码）
 .codex/
 .workbuddy/
+
+# Playwright MCP 会话产物（console/page 快照——调试运行产物，非项目代码）
+.playwright-mcp/
 
 # 根目录不应有 JS 依赖（前端依赖在 web/node_modules）
 node_modules/
