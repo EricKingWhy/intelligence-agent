@@ -88,6 +88,7 @@ import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
 import { effectiveModelEntry, modelChangeTarget, normalizeSelectedModel } from './lib/modelSelection';
 import { projectActiveFallbackModel } from './lib/modelReasoningEffortProjection';
 import { toAmendFields, toCreateBudget, toCreateControls, type ComposerControls } from './lib/amend';
+import { resolveDismissFocusTarget } from './lib/errorBannerFocus';
 import { composerPermissionMode } from './lib/permission';
 import {
   EventType,
@@ -154,6 +155,13 @@ export default function App() {
     streaming,
     reconnecting,
     error,
+    /* #1509：三个新增的旁路通道给测试替身**显式缺省**（同 #1521 的
+       historyLoad* 策略）——与下面 sendFailure 的"不设缺省"相反：sendFailure
+       是既有唯一内联通道，缺键必须崩出来；这三个是旁路，替身缺键不应让全部
+       App 用例崩掉，真实 hook 漏键的回归由本票新增用例兜住。 */
+    errorSeq = 0,
+    answerFailure = null,
+    queueCancelError = null,
     // #1367（审查 S-P2-2）：不设缺省。`useSession` 漏返回键时宁可在这里崩掉
     // （显式报警），也不让整条内联错误通道静默消失。测试替身由各 `App.*.test.tsx`
     // 的 mock 显式补全这两个键。
@@ -1081,6 +1089,49 @@ export default function App() {
   const bannerHiddenByInlineFailure =
     submitFailure !== null && sendFailure !== null && error === sendFailure.message;
 
+  /* ── #1520：通用错误横幅的可关闭/身份化关闭 ────────────────────────────── */
+
+  /** 按错误**实例**（`errorSeq` 即身份）记关闭：只影响当前实例，同类错误再次
+   *  发生 = 新实例，横幅必须重新出现——关闭不是把这类错误永久静音，更不代表
+   *  服务端已成功；待处理错误不自动超时消失。 */
+  const [dismissedErrorSeq, setDismissedErrorSeq] = useState<number | null>(null);
+  /** 常驻槽位：横幅关闭即卸载，焦点链的最后一级落回这里（tabindex=-1，仅承接
+   *  程序焦点；对已离场的横幅 focus() 是静默 no-op，焦点会真落回 body）。 */
+  const bannerSlotRef = useRef<HTMLDivElement | null>(null);
+  const bannerRef = useRef<HTMLDivElement | null>(null);
+  /** 错误出现那一刻用户所在的可聚焦元素（粗粒度"触发控件"）——异步到达的流
+   *  错误没有同步触发点，"错误发生时焦点在哪"就是最诚实的近似；控件此后离场
+   *  或被禁用时由归宿链自然降级。 */
+  const errorTriggerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (error !== null && errorSeq > 0) {
+      errorTriggerRef.current =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+  }, [errorSeq, error]);
+  const handleDismissBanner = useCallback(() => {
+    const target = resolveDismissFocusTarget(
+      bannerRef.current,
+      bannerSlotRef.current,
+      errorTriggerRef.current,
+    );
+    setDismissedErrorSeq(errorSeq);
+    if (target !== null) target.focus();
+  }, [errorSeq]);
+
+  /** #1509（INT-1）：取消排队失败 → 队列区动作位（Composer 队列条旁）。只在失败
+   *  属于当前会话、且队列仍在场（有未投递项）时呈现——队列空了动作位就没了，
+   *  孤儿通知没有归属。 */
+  const queueCancelNotice = useMemo(
+    () =>
+      queueCancelError !== null
+      && queueCancelError.sessionId === selectedId
+      && (conversation?.undelivered.length ?? 0) > 0
+        ? { message: queueCancelError.message }
+        : null,
+    [queueCancelError, selectedId, conversation],
+  );
+
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A；#1177 §A.3 改名，现名「新建任务…」）：统一创建入口——
    *  `TaskCreationDialog` 组装好的 `StartSessionPayload`（prompt 唯一必填 +
    *  三档自主度 + 模型 + 运行位置），走 `submitTask` 的既有 SSE 接线创建并启动。
@@ -1395,6 +1446,42 @@ export default function App() {
   /** 判据与卡片挂载来源同宽（同 #1283 P2-1）：锁住的必须是有卡可答的那个。 */
   const planApprovalInputPending =
     planApprovalRequest !== null && planApprovalRequest.answer === null;
+
+  /* ── #1509（INT-1）：作答失败（`answerFailure`）只挂到**对齐中的那张卡/模态**——
+     会话与请求身份都对上才呈现；另一张卡的失败、切走再切回的旧失败都不冒充。
+     取代原先 `askUserError={error}` 的单槽接线：那时任何写通用槽的错误都会冒充
+     作答失败，而作答失败自身又会在顶部横幅再播报一次（双播报）。三个面
+     （问答卡 / 计划卡 / 约束模态）走同一条 user_input 恢复通道，同款身份门控。 */
+  const askUserError = useMemo(
+    () =>
+      answerFailure !== null
+      && askUserRequest !== null
+      && answerFailure.sessionId === selectedId
+      && answerFailure.requestId === askUserRequest.request_id
+        ? answerFailure.message
+        : null,
+    [answerFailure, askUserRequest, selectedId],
+  );
+  const planApprovalError = useMemo(
+    () =>
+      answerFailure !== null
+      && planApprovalRequest !== null
+      && answerFailure.sessionId === selectedId
+      && answerFailure.requestId === planApprovalRequest.request_id
+        ? answerFailure.message
+        : null,
+    [answerFailure, planApprovalRequest, selectedId],
+  );
+  const constraintErrorMessage = useMemo(
+    () =>
+      answerFailure !== null
+      && constraintRequest !== null
+      && answerFailure.sessionId === selectedId
+      && answerFailure.requestId === constraintRequest.request_id
+        ? answerFailure.message
+        : null,
+    [answerFailure, constraintRequest, selectedId],
+  );
   /** 面板上的草稿值：用户改过就用他的，没改过给一个**恰好合法**的默认
    *  （卡住的那一维的 `consumed + reserved + 1`，后端判据是"这一维恢复后必须放得下
    *  一次新准入"）——默认值零点击可提交，但它只是草稿初值，不是"权威 ceiling"。
@@ -1990,8 +2077,26 @@ export default function App() {
               </button>
             </div>
           )}
-          {/* #1367：断网这一类已下沉到对话区内联条（带重试），不再重复打横幅。 */}
-          {error && !bannerHiddenByInlineFailure && <div className="app-error">{error}</div>}
+          {/* #1367：断网这一类已下沉到对话区内联条（带重试），不再重复打横幅。
+              #1520：仅由横幅承载的错误（流断连 / 历史加载等）由**单一 alert**
+              承载（可被辅助技术感知）且可显式关闭；关闭按错误实例（`errorSeq`）
+              记身份，同类错误再发生 = 新实例，横幅重新出现——关闭不是把错误当
+              已解决，也不自动超时消失。槽位 div 常驻：横幅关闭卸载后，焦点链
+              最后一级落回槽位（tabindex=-1），不丢给 body。 */}
+          <div className="app-error-slot" ref={bannerSlotRef} tabIndex={-1}>
+            {error && !bannerHiddenByInlineFailure && dismissedErrorSeq !== errorSeq && (
+              <div className="app-error app-error-dismissible" role="alert" ref={bannerRef}>
+                <span className="app-error-text">{error}</span>
+                <button
+                  className="auth-banner-close"
+                  onClick={handleDismissBanner}
+                  aria-label="关闭提示"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+          </div>
           {/* #1193：run 致命异常且**计划从未生成**——服务端刻意不回滚 mode
               （fail-closed），会话停在 plan 档（只读、无计划）。横幅给出可读
               原因 + **显式**退出 plan 的入口（不自动回滚）；与 forkError 同形：
@@ -2183,7 +2288,7 @@ export default function App() {
               resuming={
                 resumingConstraintRequestId === constraintRequest.request_id || streaming
               }
-              errorMessage={error}
+              errorMessage={constraintErrorMessage}
               onOpenChange={handleConstraintDialogOpenChange}
               onSubmit={handleConstraintInputAnswer}
             />
@@ -2233,7 +2338,7 @@ export default function App() {
                     askUserResuming={
                       askUserRequest !== null && resumingAskUserRequestId === askUserRequest.request_id
                     }
-                    askUserError={error}
+                    askUserError={askUserError}
                     onAskUserAnswer={handleAskUserAnswer}
                     /* #1356：计划审批卡——同一条恢复通道的第三支；身份同样稳定。 */
                     planApprovalRequest={planApprovalRequest}
@@ -2241,7 +2346,7 @@ export default function App() {
                       planApprovalRequest !== null
                       && resumingPlanApprovalRequestId === planApprovalRequest.request_id
                     }
-                    planApprovalError={error}
+                    planApprovalError={planApprovalError}
                     onPlanApprovalAnswer={handlePlanApprovalAnswer}
                     /* #420 AC2：决策 POST 成功 → 对账一次，决策后事件必达 */
                     onApprovalDecided={resyncAfterDecision}
@@ -2302,6 +2407,9 @@ export default function App() {
                     undelivered={conversation?.undelivered ?? EMPTY_UNDELIVERED}
                     onSteerItem={handleSteerItem}
                     onCancelItem={handleCancelItem}
+                    /* #1509（INT-1）：取消排队失败的动作位——错误出现在触发它的
+                       取消按钮旁边（队列条），不再打到顶部横幅。 */
+                    queueCancelError={queueCancelNotice}
                     onEditItem={handleEditItem}
                     onFlush={handleFlush}
                     presetTask={presetTask}

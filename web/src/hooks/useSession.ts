@@ -654,7 +654,26 @@ export function useSession() {
    *  避免 effect 落地前先画一帧「暂无对话」空态。effect 仍按 `switchingSession`
    *  接管后续迁移（同会话对账不闪骨架）。 */
   const [loadingHistory, setLoadingHistory] = useState(() => mode.kind !== 'idle');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorRaw] = useState<string | null>(null);
+  /* #1509：通用错误槽的**实例序号**——每次写入非 null 文案自增，`setError(null)`
+   *  不增。App 侧横幅按"实例"关闭（#1520：关闭只影响同错误身份；同一文案再次
+   *  发生 = 新实例，必须重新出现——关闭不是把这类错误永久静音）。同槽全部
+   *  写入点零改动地拿到身份，不另造错误框架。 */
+  const [errorSeq, setErrorSeq] = useState(0);
+  const setError = useCallback((message: string | null) => {
+    if (message !== null) setErrorSeq((seq) => seq + 1);
+    setErrorRaw(message);
+  }, []);
+  /* #1509（INT-1）：动作错误按身份归属的两个专用槽。
+   *  - `queueCancelError`：取消排队失败 → 队列区（触发按钮所在的动作位）；
+   *  - `answerFailure`：`user_input` 恢复支（问答卡 / 计划卡 / 约束模态共用的
+   *    作答通道）失败 → 各自的卡/模态 alert 位（会话 + 请求身份）。
+   *  两者都不写通用 `error` 槽——原缺陷正是"错误打到了远离触发动作的顶部横幅"
+   *  与"同一条失败既进卡片又进横幅的双播报"。 */
+  const [queueCancelError, setQueueCancelError] = useState<{ sessionId: string; message: string } | null>(null);
+  const [answerFailure, setAnswerFailure] = useState<{ sessionId: string; requestId: string; message: string } | null>(null);
+  /** 取消尝试的代际计数：旧尝试的迟到失败不得覆盖新尝试的结果。 */
+  const queueCancelGenRef = useRef(0);
   /** #1367（P0-3）：**本次提交/续聊**的失败回执（断网类由此走对话区内联条）。
    *
    *  为什么不直接复用上面的 `error`：它是**单槽**，后面任何一条无关错误
@@ -979,7 +998,7 @@ export function useSession() {
     return () => {
       cancelled = true;
     };
-  }, [mode]);
+  }, [mode, setError]);
 
   // #1030（缺陷②）：待裁决清单的**主动**读面（`GET /api/sessions/{id}/recovery`，只读）。
   //
@@ -1413,7 +1432,7 @@ export function useSession() {
 
         sseRef.current = consumeSSE(res, onEvent, onStreamEnd, onStreamError);
     },
-    [refreshSessions, openWsStream],
+    [refreshSessions, openWsStream, setError],
   );
 
   /** #1504 C4：业务侧的**唯一开流入口**——代际闸（开流前后各一次：迟到的旧流
@@ -1643,7 +1662,7 @@ export function useSession() {
         return message;
       }
     },
-    [refreshSessions, attachLiveStream, openLiveStream, reportDetachedFailure],
+    [refreshSessions, attachLiveStream, openLiveStream, reportDetachedFailure, setError],
   );
 
   /** 刷新后接回**仍在服务端运行的** run（BUG-006）。
@@ -1706,7 +1725,7 @@ export function useSession() {
         setError(`继续接收失败：${(e as Error).message}`);
       }
     },
-    [openLiveStream],
+    [openLiveStream, setError],
   );
   useEffect(() => {
     resumeLiveStreamRef.current = resumeLiveStream;
@@ -2108,7 +2127,7 @@ export function useSession() {
         return false; // 任一失败路径：文本必须留在 composer（11 §6.1 第 164 行）
       }
     },
-    [attachLiveStream, openLiveStream, reportDetachedFailure],
+    [attachLiveStream, openLiveStream, reportDetachedFailure, setError],
   );
 
   /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
@@ -2409,6 +2428,8 @@ export function useSession() {
           },
     ): Promise<void> => {
       setError(null);
+      // 上一次的作答失败到此作废（#1509）：重试就是新的失败身份，槽里只留最新一次。
+      setAnswerFailure(null);
       // 与 sendFollowUp 入口同一套代际/流状态重置：这是一次新的在途执行。
       liveSidRef.current = sessionId;
       setReconnecting(false);
@@ -2422,10 +2443,17 @@ export function useSession() {
       /** 失败收尾：作废本代际（挂上的流与重连定时器一起失效）→ 回到 viewing
        *  同一会话（触发历史重读，把本地投影拉回服务器真值）→ 显示原因。
        *  用 `selectSession` 而不是 `setMode`：多出的那几步（取消订阅、清 stream
-       *  引用、忘掉接流去重记账）正是"这条流已经作废"该做的事。 */
+       *  引用、忘掉接流去重记账）正是"这条流已经作废"该做的事。
+       *  #1509（INT-1）：`user_input` 支的失败归**作答动作位**——问答卡 / 计划卡 /
+       *  约束模态都有自己的 `role="alert"` 错误位，写通用槽会让同一条失败在顶部
+       *  横幅再播报一次。预算恢复等无内联位的支保持走通用横幅。 */
       const fail = (message: string) => {
         if (streamGenRef.current !== gen) return;
         selectSession(sessionId);
+        if (request.kind === 'user_input') {
+          setAnswerFailure({ sessionId, requestId: request.inputRequest.request_id, message });
+          return;
+        }
         setError(message);
       };
 
@@ -2490,7 +2518,7 @@ export function useSession() {
         fail(`恢复失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, openLiveStream, selectSession],
+    [attachLiveStream, openLiveStream, selectSession, setError],
   );
 
   /** T7 #137：切换会话当前模型（POST /api/sessions/{id}/model）。
@@ -2676,23 +2704,33 @@ export function useSession() {
         setError(`投递失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, openLiveStream],
+    [attachLiveStream, openLiveStream, setError],
   );
 
   /** ADR-0030 D11：取消一条尚未消费的排队/引导项。后端写 `queue/cancelled`
    *  事件 → 经实时流（或下次 viewing 装载）投影摘除；这里不本地摘——事件流
    *  是唯一事实（不变量 #22），避免双份摘除路径。404 = 已消费/已取消（幂等
-   *  失败语义），静默。 */
+   *  失败语义），静默。
+   *  #1509（INT-1）：非 404 失败归**队列区动作位**（`queueCancelError`，带会话
+   *  身份），不再写通用横幅槽——错误要出现在触发它的取消按钮旁边，而不是
+   *  顶部。代际守卫：旧尝试的迟到失败不得覆盖新尝试的结果；成功（含 404 幂等
+   *  落定）清掉未处理的失败。 */
   const cancelItem = useCallback(
     async (sessionId: string, itemId: string) => {
+      const gen = ++queueCancelGenRef.current;
       try {
         await cancelQueueItem(sessionId, itemId);
+        if (queueCancelGenRef.current === gen) setQueueCancelError(null);
       } catch (e) {
         // 404 = 已取消/已消费（幂等失败语义）：静默，界面由事件流对账。
         // 其余失败（网络/服务端）必须上浮——静默会让用户以为已取消、
         // 请求根本没到服务器（审查 P3）。
-        if (e instanceof NotFoundError) return;
-        setError(`取消排队消息失败：${(e as Error).message}`);
+        if (e instanceof NotFoundError) {
+          if (queueCancelGenRef.current === gen) setQueueCancelError(null);
+          return;
+        }
+        if (queueCancelGenRef.current !== gen) return;
+        setQueueCancelError({ sessionId, message: `取消排队消息失败：${(e as Error).message}` });
       }
     },
     [],
@@ -2723,6 +2761,12 @@ export function useSession() {
     streaming,
     reconnecting,
     error,
+    /** #1509：`error` 的实例序号（横幅按实例关闭/重现的身份依据）。 */
+    errorSeq,
+    /** #1509（INT-1）：作答（user_input 恢复支）失败的动作位槽。 */
+    answerFailure,
+    /** #1509（INT-1）：取消排队失败的动作位槽（会话身份）。 */
+    queueCancelError,
     sendFailure,
     runFailedBeforePlan,
     sessionsError,
