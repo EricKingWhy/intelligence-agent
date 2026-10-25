@@ -1,10 +1,11 @@
 {
   "schema": "coverage-ratchet-whitelist/1",
   "consumed_by": "scripts/check_line_coverage_ratchet.py ratchet --whitelist",
-  "rule": "每条 = 一个**精确文件路径** + 非空 reason + 非空 platform。命中后该文件的**变更行**不进棘轮分母。",
+  "rule": "每条 = 一个**精确文件路径** + 非空 reason + 非空 platform。命中后该文件的**变更行**不进棘轮分母；即使该文件在覆盖率报告里根本不存在（容器内 / 平台专有），也照样放行，并在输出里标注\"报告里没有该文件（盲区）\"。",
   "forbidden": [
     "目录前缀（如 src/agent_harness/security/）——那是\"整域排除\"，解析期直接拒绝",
     "通配符（* ? [）——解析期直接拒绝",
+    "非规范化的路径（`./` `/` 前缀、首尾空白）——写进去也永远匹配不上，等于失效声明，解析期直接拒绝",
     "空 reason / 空 platform ——解析期直接拒绝",
     "因为\"这个文件覆盖率低\"而入册：本表只收**测不到**的盲区，不收\"没测\"的欠账"
   ],

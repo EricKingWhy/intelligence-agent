@@ -396,25 +396,20 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   各追加一个 `baseline` 步骤（**覆盖率命令逐字未改**）、
   `docs/agents/coverage-ratchet.whitelist.json`（盲区白名单）。设计与取舍：
   `docs/agents/1499-coverage-ratchet.md`。
-- **判定**：分母 = `git diff -U0 --no-renames <base>...HEAD` 里 `src/` 下**新增行号** ∩ 该文件的
-  **可执行行**；`covered*100 >= total*60` 通过（**恰好 60% 通过**，整数比较，不经浮点）；
-  未改行一律不进分母；白名单文件的变更行不进分母（解析期拒绝通配 / 目录前缀 / 空字段）；
-  纯移动需 `--move-only-note` **且** `git -M` 判 rename 两条同时成立，缺一照常计入；
-  零可执行变更 ⇒ 打印 `RATCHET EMPTY` 并退 0（空集合语义，理由见脚本 docstring）。
+- **判定**：分母 = 本次变更的**可执行行**（`src/` 下 `.py` 新增行 ∩ 报告里的可执行行），
+  阈值 60% 用整数比较 ⇒ **恰好 60% 通过**；未改行 / 白名单行 / 纯移动行不进分母。
+  六条口径的正文与取舍、以及**为什么不用全仓 `fail_under`（B 案被否的理由）只在**
+  `docs/agents/1499-coverage-ratchet.md` §2–§3 写全（此处不复制）。
 - **期望证据 / 退出码**：`RATCHET PASS` + `RATCHET FAIL` + `RATCHET EMPTY` 三态；
   `0` 通过 / `1` 未达标 / **`2` 不可判**（缺报告、缺基线、报告 sha256 与基线不符、基线树 ≠ 当前树、
-  改了 `src/` 但报告里没该文件、`--base` 解不出、白名单不合法）。**`2` 不是绿**。
-- **为什么不全仓 `fail_under`**（B 案否决理由）：coverage.py 官方文档原文 *"If the total coverage
-  measurement is under this value, then exit with a status code of 2."*，且明写非整数值要另配
-  `[report] precision`、`100` 会判任何小于 100 的值失败 ⇒ 全仓单一硬阈值对精度/取整敏感、
-  平台盲区直接假红、且与历史欠账耦合。分级形态的一手旁证：Lighthouse CI 的 `warn` 级
-  *"failure will not result in a non-zero exit code"*、pa11y-ci 的 `--threshold` 可按页面设。
-- **执行面**：`coverage-ratchet` 工作流带 `paths` 过滤（只在 `src/**` / `tests/**` / 棘轮自身变动时跑）
-  ⇒ **不能**挂成必需状态检查（被 paths 跳过的必需检查会永久 pending，见 `e2e-smoke.yml` 文件头）。
-  它是**非必需**检查；把红看成真信号、不看成"可忽略"。
-- **本票实测读数**（`2026-10-25`，Linux / Python 3.12.3 本机 `.venv`）：聚焦守卫 23 例
-  9 个变异体全被鉴别（每个变异体的失败集合见 `docs/phase_status/2026-10.md` 的 #1499 段）；
-  工作流未在 GitHub 上跑过（开 PR 后才有第一次 CI 读数），**本地不以任何方式冒充 CI 读数**。
+  git diff 读不出、改了 `src/` 但报告里没该文件、`--base` 解不出、白名单不合法）。**`2` 不是绿**。
+- **执行面**：`coverage-ratchet` 工作流用 **`paths` 白名单**（`src/**`、棘轮脚本、白名单文件、
+  工作流自身）——不是 `e2e-smoke.yml` 的 `paths-ignore` 机制。带 paths 过滤的检查**不能**挂成
+  必需状态检查（被跳过的必需检查会永久 pending，见 `e2e-smoke.yml` 文件头）；它是**非必需**检查，
+  但红就是真信号，不是"可忽略"。
+- **本票实测读数**（`2026-10-25`，Linux / Python 3.12.3 本机 `.venv`）：聚焦守卫与变异矩阵的
+  逐条读数见 PR 描述（本行不复制数字，避免同一事实两处写全后互相漂移）；工作流**未**在 GitHub
+  上跑过（开 PR 后才有第一次 CI 读数），本地不以任何方式冒充 CI 读数。
 
 ---
 

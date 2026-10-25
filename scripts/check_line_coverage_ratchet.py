@@ -42,20 +42,25 @@ code 2"*，且支持**按页面**单独设阈值 —— 即"可观测但不阻�
         --base origin/main
 
 退出码：`0` = 通过（含**空集合**语义，见下）/ `1` = 棘轮未达标 / `2` = **不可判**
-（报告或基线缺失、报告与基线不是同一份文件、基线测量的树不是当前树、`--base` 解不出）。
+（报告或基线缺失、报告与基线不是同一份文件、基线测量的树不是当前树、`git diff` 读不出来
+——含 `--base` 与 HEAD 没有共同祖先、`--base` 解不出、白名单不合法）。
 
 ## 判定口径（机械，全部可复核）
 
-- **分母** = `git diff -U0 <base>...HEAD` 里 `src/` 下**新增行的行号** ∩ 报告里该文件的**可执行行**
-  —— 即「本次改动引入的、本可以被执行到的行」。未改动的行永远不进分母。
+- **分母** = `git diff -U0 <base>...HEAD` 里 `src/` 下 **`.py`** 的**新增行号** ∩ 报告里该文件的
+  **可执行行** —— 即「本次改动引入的、本可以被执行到的行」。未改动的行永远不进分母；
+  非 `.py` 文件没有可执行行，既不进分母、也不构成"不可判"。
 - **分子** = 分母里报告命中数 > 0 的行。
 - **通过条件**用整数比较：`分子 * 100 >= 分母 * 60`（**恰好 60% 通过**）。不走浮点，
   所以没有 coverage.py `fail_under` 那条「对 precision / 取整敏感」的随机红。
 - **白名单**（`docs/agents/coverage-ratchet.whitelist.json`）按**精确文件路径**逐条给
   `reason` + `platform`；**不许通配、不许目录前缀、不许整域排除**（解析期 fail-closed）。
   命中白名单的文件，其变更行**不进分母**，并在输出里逐条打印理由。
-- **纯移动重构**：只有显式传 `--move-only-note "<说明>"` **且** git `-M` 判为 rename 的文件才跳过；
-  没有说明就照常计入分母（不存在"看起来像移动就自动放过"的通道）。
+  ⚠ 白名单判定**先于**「报告里没有这个文件」的不可判判定：盲区的主用途正是"报告里根本没有它"
+  （容器内代码 / 平台专有实现），顺序颠倒会让白名单永远救不了它该救的文件。
+- **纯移动重构**：只有显式传 `--move-only-note "<说明>"` **且** git `-M` 判为 **`R100`（逐字相同）**
+  的文件才跳过；`R<100`（移动 + 修改）与没有说明都照常计入分母 —— `-M` 默认阈值是 50% 相似度，
+  那是"改过"不是"纯移动"（不存在"看起来像移动就自动放过"的通道）。
 - **全仓总率**（报告 `lines-valid` / `lines-covered`）只打印、只写进基线，**不参与判定**。
 - **零可执行变更**（分母为空）⇒ 输出 `RATCHET EMPTY` 并 **exit 0**。理由：把空集合判成失败会让
   docs-only / 纯移动 PR 无故变红（正是 A 案要消灭的等待代价），判成"不可判"同样阻断正常 PR；
@@ -65,6 +70,7 @@ code 2"*，且支持**按页面**单独设阈值 —— 即"可观测但不阻�
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
@@ -74,6 +80,11 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
+
+
+class Undecidable(Exception):
+    """判定前提不成立（读不出 diff / 报告不是这棵树的 / 缺测量）⇒ 调用方退 2，绝不退化成绿。"""
+
 
 #: 仓库根。默认取脚本所在仓库；`COVERAGE_RATCHET_REPO` 只服务于测试里对临时仓库跑真 CLI
 #: （不设时行为完全不变）。所有 `git` 调用都在它下面跑。
@@ -86,8 +97,11 @@ RATCHET_THRESHOLD_PERCENT = 60
 #: 白名单默认落点。`docs/agents/` 与 `verification.map.tsv` 同族：它是**流程输入**，不是产品代码。
 DEFAULT_WHITELIST = os.path.join("docs", "agents", "coverage-ratchet.whitelist.json")
 
-#: 变更面的扫描面（只有这些前缀下的新增行才可能进分母）。
+#: 变更面的扫描面：`src/` 下 **`.py`** 的新增行。非 `.py` 文件（例如
+#: `src/agent_harness/attachments/image_media_types.snapshot.txt` 这类快照）在覆盖率报告里
+#: 没有行号、本来就不是可执行行 ⇒ 不进分母，也不能把棘轮打成"不可判"。
 SCOPE_PREFIX = "src/"
+SCOPE_SUFFIX = ".py"
 
 
 # --------------------------------------------------------------------------- #
@@ -133,8 +147,12 @@ def _repo_relative(filename: str, sources: list[str], repo_root: str) -> str | N
     再退回结构上可接受的第一个 —— 返回值只被当作"报告覆盖了这个文件"的键，落错会把
     "改了却没测"错判成"测了"，所以宁可返回 None（由调用方判不可判）。
     """
-    candidates: list[str] = []
-    for source in sources:
+    filename = filename.replace("\\", "/")  # Windows 分隔符的报告也认
+    # `<source>` 一个都不在仓库内（报告来自别的 checkout）⇒ candidates 为空 ⇒ 返回 None，
+    # 由调用方计数并打印（"报告不是这棵树的"必须看得见，不能静默丢）。
+    inside = [item for item in sources if _inside(item, repo_root)]
+    candidates: list[str] = [] if sources else [filename]  # 无 <source> 时 filename 即仓库相对
+    for source in inside:
         for candidate in (os.path.join(source, filename), filename):
             rel = os.path.relpath(os.path.abspath(candidate), repo_root)
             if not rel.startswith(".."):
@@ -143,6 +161,25 @@ def _repo_relative(filename: str, sources: list[str], repo_root: str) -> str | N
         if os.path.isfile(os.path.join(repo_root, rel)):
             return rel
     return candidates[0] if candidates else None
+
+
+def _inside(path: str, repo_root: str) -> bool:
+    rel = os.path.relpath(os.path.abspath(path), os.path.abspath(repo_root))
+    return not rel.startswith("..")
+
+
+def _unquote(raw: str) -> str:
+    """git 对含特殊字符的路径输出 C 风格的带引号形式（`"b/\344\270\255.py"`）。
+
+    普通 UTF-8 路径由 `-c core.quotePath=false` 直接给出字面量；这里只兜住仍然被引号包住的
+    极端路径（含引号 / 控制字符），解不出来就原样返回（宁可让该文件判"未测量"，不可错绑）。
+    """
+    if len(raw) < 2 or not (raw.startswith('"') and raw.endswith('"')):
+        return raw
+    try:
+        return codecs.escape_decode(raw[1:-1].encode())[0].decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return raw
 
 
 # --------------------------------------------------------------------------- #
@@ -167,22 +204,36 @@ def changed_lines(base: str, head: str = "HEAD") -> dict[str, set[int]]:
     用 `--no-renames`：重命名按「删旧 + 加新」计，于是"移动"是否豁免由 `renamed_paths()` 单独决定，
     两条判据不互相污染。`-U0` 保证每个 hunk 只有纯增块，`+c,0`（纯删）不产生行。
     """
-    proc = git("diff", "--no-color", "--no-ext-diff", "--no-renames", "--unified=0",
-               f"{base}...{head}")
+    proc = git("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
+               "--no-renames", "--unified=0", f"{base}...{head}")
     if proc.returncode != 0:
-        return {}
+        # rc≠0 = diff 读不出来（最常见：两侧没有共同祖先，`fatal: no merge base`）。
+        # **绝不能**当成"没有变更" —— 那会把一次读失败洗成 RATCHET EMPTY 的绿。
+        raise Undecidable(
+            f"git diff {base}...{head} 读不出来（rc={proc.returncode}）：{proc.stderr.strip()}")
     out: dict[str, set[int]] = {}
     current: str | None = None
+    pending_header = False  # 只有紧跟 `--- ` 的 `+++ ` 才是文件头
     for raw in proc.stdout.splitlines():
-        if raw.startswith("+++ "):
-            path = raw[4:].strip()
-            current = path.removeprefix("b/")
-            # 只看扫描面内的路径；面外的文件连 hunk 都不解析（否则 `@@` 会往不存在的键上写）。
-            if path == "/dev/null" or not current.startswith(SCOPE_PREFIX):
-                current = None
-            else:
-                out.setdefault(current, set())
-        elif raw.startswith("@@") and current:
+        if raw.startswith("diff --git "):
+            current, pending_header = None, False
+            continue
+        if pending_header:
+            pending_header = False
+            if raw.startswith("+++ "):
+                path = _unquote(raw[4:].strip()).removeprefix("b/")
+                # 只看扫描面内的 .py；面外的文件连 hunk 都不解析（否则 `@@` 会往不存在的键上写）。
+                current = path if (path.startswith(SCOPE_PREFIX)
+                                   and path.endswith(SCOPE_SUFFIX)) else None
+                if current:
+                    out.setdefault(path, set())
+            continue
+        if raw.startswith("--- "):
+            # 内容里以 `++ ` 开头的新增行在 patch 里长成 `+++ …`；不设这道状态机就会把它
+            # 误当文件头 ⇒ 该 hunk 剩余行**少算**分母（反向口子）。
+            pending_header = True
+            continue
+        if raw.startswith("@@") and current:
             match = re.search(r"\+(\d+)(?:,(\d+))?", raw)
             if not match:
                 continue
@@ -193,15 +244,30 @@ def changed_lines(base: str, head: str = "HEAD") -> dict[str, set[int]]:
 
 
 def renamed_paths(base: str, head: str = "HEAD") -> set[str]:
-    """`-M` 判出来的**新路径**集合（`R<score>` 行的目标侧）。"""
-    proc = git("diff", "--no-color", "--name-status", "-M", f"{base}...{head}")
+    """`-M` 判出来的**逐字相同**（`R100`）的 rename 目标路径。
+
+    只认 `R100`：`git -M` 的默认阈值是 50% 相似度，`R077` 是"移动 + 改动"，那部分新代码必须
+    照常进分母（票面 AC3 说的是**纯移动重构**）。`-z` 让路径免于引号/制表符转义。
+    """
+    proc = git("-c", "core.quotePath=false", "diff", "--no-color", "--name-status", "-M", "-z",
+               f"{base}...{head}")
     if proc.returncode != 0:
-        return set()
-    out = set()
-    for raw in proc.stdout.splitlines():
-        parts = raw.split("\t")
-        if len(parts) >= 3 and parts[0].startswith("R"):
-            out.add(parts[2])
+        raise Undecidable(
+            f"git diff --name-status {base}...{head} 读不出来（rc={proc.returncode}）："
+            f"{proc.stderr.strip()}")
+    fields = [field for field in proc.stdout.split("\0") if field]
+    out: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if status.startswith(("R", "C")):
+            if index + 2 >= len(fields):
+                break
+            if status == "R100":
+                out.add(fields[index + 2])
+            index += 3
+        else:
+            index += 2  # 状态 + 一个路径
     return out
 
 
@@ -232,6 +298,9 @@ def load_whitelist(path: str) -> dict[str, dict]:
             raise ValueError(f"{path}: 缺 path")
         if target.endswith("/") or any(ch in target for ch in "*?[") or ".." in target:
             raise ValueError(f"{path}: {target!r} 必须是精确文件路径（禁通配 / 目录前缀 / 上跳）")
+        if target != target.strip() or target.startswith(("./", "/")):
+            raise ValueError(
+                f"{path}: {target!r} 必须是规范化的仓库相对路径（无 `./` / `/` 前缀与首尾空白）")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError(f"{path}: {target!r} 缺 reason")
         if not isinstance(plat, str) or not plat.strip():
@@ -307,8 +376,7 @@ def cmd_ratchet(args: argparse.Namespace) -> int:
         print(f"❌ 棘轮不可判：{fail}")
         return 2
 
-    with open(args.baseline, encoding="utf-8") as handle:
-        baseline = json.load(handle)
+    # 基线已在 `_verify_inputs` 里读过并校验过（schema / sha / tree / 报告 sha256），不重复读。
     report, totals = parse_coverage_xml(args.report)
     if totals["files_outside_repo"]:
         print(f"⚠ 报告里有 {totals['files_outside_repo']} 个文件的 <source> 不在本仓库内，已跳过")
@@ -323,15 +391,25 @@ def cmd_ratchet(args: argparse.Namespace) -> int:
     if not base:
         print(f"❌ 棘轮不可判：--base {args.base} 解不出 commit")
         return 2
-    changed = changed_lines(args.base, args.head)
-    moved = renamed_paths(args.base, args.head) if args.move_only_note else set()
+    try:
+        changed = changed_lines(args.base, args.head)
+        moved = renamed_paths(args.base, args.head) if args.move_only_note else set()
+    except Undecidable as exc:
+        print(f"❌ 棘轮不可判：{exc}")
+        return 2
 
     denominator_lines: dict[str, set[int]] = {}
-    skipped_whitelist: list[tuple[str, set[int], dict]] = []
+    skipped_whitelist: list[tuple[str, set[int], dict, bool]] = []
     skipped_moved: list[tuple[str, set[int]]] = []
     unmeasured: list[str] = []
     for path, lines in sorted(changed.items()):
         executable = report.get(path)
+        if path in whitelist:
+            # 白名单**必须先于**"未测量"判定：盲区的主用途正是"报告里根本没有这个文件"
+            # （容器内代码 / 平台专有实现）。放在后面会让这份白名单永远救不了它该救的文件。
+            hit = lines & set(executable) if executable is not None else lines
+            skipped_whitelist.append((path, hit, whitelist[path], executable is None))
+            continue
         if executable is None:
             # 改了 src/ 下的文件却不在报告里：测量面没覆盖到它 ⇒ 不可判（不是"没有可执行行"）。
             unmeasured.append(path)
@@ -339,9 +417,7 @@ def cmd_ratchet(args: argparse.Namespace) -> int:
         hit = lines & set(executable)
         if not hit:
             continue
-        if path in whitelist:
-            skipped_whitelist.append((path, hit, whitelist[path]))
-        elif path in moved:
+        if path in moved:
             skipped_moved.append((path, hit))
         else:
             denominator_lines[path] = hit
@@ -353,21 +429,23 @@ def cmd_ratchet(args: argparse.Namespace) -> int:
         return 2
 
     if args.move_only_note and not skipped_moved:
-        print(f"⚠ --move-only-note 给了说明，但 git -M 没判出任何 rename（说明未生效，仅记录）："
-              f"{args.move_only_note.strip()[:80]}")
+        print(f"⚠ --move-only-note 给了说明，但 git -M 没判出任何 R100（逐字相同的纯移动）"
+              f"（说明未生效，仅记录）：{args.move_only_note.strip()[:80]}")
 
     total = sum(len(v) for v in denominator_lines.values())
     covered = sum(
         1 for path, lines in denominator_lines.items() for line in lines if report[path][line] > 0
     )
 
-    print(f"覆盖率棘轮：base={base[:12]} head={baseline['sha'][:12]}")
+    head_sha = rev_parse(args.head) or ""
+    print(f"覆盖率棘轮：base={base[:12]} head={head_sha[:12]}")
     print(f"  报告={args.report}（基线 sha256 对账通过）")
     print(f"  全仓总率（只记录、不判定）：{totals['lines_covered']}/{totals['lines_valid']}")
     if skipped_whitelist:
         print(f"  白名单排除 {len(skipped_whitelist)} 个文件的变更行：")
-        for path, lines, entry in skipped_whitelist:
-            print(f"   - {path}（{len(lines)} 行；platform={entry['platform']}；理由={entry['reason']}）")
+        for path, lines, entry, blind in skipped_whitelist:
+            where = "报告里没有该文件（盲区）" if blind else f"{len(lines)} 行"
+            print(f"   - {path}（{where}；platform={entry['platform']}；理由={entry['reason']}）")
     if skipped_moved:
         print(f"  纯移动跳过 {len(skipped_moved)} 个文件（说明：{args.move_only_note.strip()}）：")
         for path, lines in skipped_moved:
@@ -404,6 +482,10 @@ def _verify_inputs(args: argparse.Namespace) -> str | None:
         return f"基线记录读不出来：{exc}"
     if baseline.get("schema") != "coverage-baseline/1":
         return f"基线记录 schema 不认识：{baseline.get('schema')!r}"
+    for key in ("sha", "tree"):
+        value = baseline.get(key)
+        if not isinstance(value, str) or not value:
+            return f"基线记录缺 {key}（或类型不对）：{value!r}"
     recorded = (baseline.get("report") or {}).get("sha256")
     actual = _sha256(args.report)
     if recorded != actual:

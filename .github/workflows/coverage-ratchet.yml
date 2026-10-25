@@ -3,11 +3,10 @@
 # 为什么存在
 #
 # 本仓的行覆盖率此前**只打印、不判定**（gate1 / gate-nightly 的 `--cov-report=term/xml` 命令逐字
-# 未改，本工作流也不改它）。Issue #1499 的已裁结论 11（A 案）不设全局硬门限，只做两件事：
-#   ① **基线留痕**：gate1 / gate-nightly 每次跑完覆盖率后落一份 `artifacts/coverage-baseline.json`
-#      （SHA、tree、平台、测量范围、排除项、原始报告 sha256）——**那是"记录"，不是"门"**；
-#   ② **变更行棘轮**：**这个工作流**。PR 的变更可执行行（`git diff origin/main...HEAD` ∩ 覆盖率报告）
-#      低于 60% ⇒ 退出 1；未改行 / 白名单行不进分母；全仓总率只打印不判定。
+# 未改，本工作流也不改它）。Issue #1499 的已裁结论 11（A 案）不设全局硬门限，只做**基线留痕**
+# （gate1 / gate-nightly 各追加一步，只记录不判定）与**变更行棘轮**（本工作流）。
+# 判定口径的正文**只在** `scripts/check_line_coverage_ratchet.py` 的模块 docstring 与
+# `docs/agents/1499-coverage-ratchet.md` §3 写全；本文件不复述（同一事实只写全一次）。
 #
 # 为什么不在 gate0 里
 #
@@ -16,8 +15,9 @@
 #
 # 为什么**不是**必需状态检查（与 e2e-smoke 同一条教训，见该文件头部）
 #
-# 本工作流带 `paths-ignore`（只在 `src/**` 变动时跑）。把被 paths 过滤掉的检查挂成必需检查 ⇒
-# 不碰 src 的 PR 会永久停在 "Expected — waiting for status to be reported"、且重跑绕不开。
+# 本工作流用 `paths` **白名单**（不是 `e2e-smoke.yml` 那种 `paths-ignore`），只在 `src/**` 或棘轮
+# 自身变动时跑。把被 paths 过滤掉的检查挂成必需检查 ⇒ 不碰 src 的 PR 会永久停在
+# "Expected — waiting for status to be reported"、且重跑绕不开。
 # 所以它和 `e2e-smoke` 一样是**非必需**检查；要把它变成硬门，得先改分支保护（另需用户授权，
 # 不在本票范围内）。⚠ 这不等于"可以不看":PR 上它红 = 本次改动引入的可执行行覆盖不足。
 #
@@ -47,12 +47,15 @@ permissions:
   actions: write
 
 concurrency:
-  group: coverage-ratchet-${{ github.head_ref }}
+  # 与 `e2e-smoke.yml` 同源：用 PR 编号而非分支名 —— fork PR 的分支名可以重名，会互相取消。
+  group: coverage-ratchet-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   ratchet:
-    name: changed-lines >= 60%
+    # 作业名不要写成 "changed-lines >= 60%"：`RATCHET EMPTY` 时那枚勾也一样绿，
+    # 名字会把"没有变更的可执行行"读成"达标"。判定结论看日志里的 RATCHET 行。
+    name: coverage-ratchet
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -62,6 +65,9 @@ jobs:
           # 与 gate0.yml 同理：默认检出的是合成的 merge 提交，棘轮要算的是 PR 自己那棵树。
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+      - name: 取 base 分支（`--base origin/<base>` 要算 merge-base）
+        run: git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
       - name: 装 Python 3.13
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -77,9 +83,12 @@ jobs:
       - name: 准备 workspace 隔离测试所需的 Docker 镜像
         run: docker pull python:3-slim
       - name: 全量后端测试 + 覆盖率（与 gate1 逐字同命令）
-        # `continue-on-error` **只在断言层面**：测试红是 gate1 / pytest 的判定面（本作业不重复裁定），
-        # 棘轮的输入是覆盖率报告本身。若测试红到连报告都没产出，下一步的 baseline 会因为
-        # "找不到报告"退 2 —— 那是**不可判**，不是绿。
+        # `continue-on-error` **只在顺序层面**：先让棘轮读到报告、把判定与 artifact 落下来，
+        # 再由末尾那一步把这次测试的结果**如实变成作业结论**。
+        # 为什么不能就这么留在绿：`gate1` 只跑 `push: main` / 手动触发，**PR 侧没有第二个作业**
+        # 会跑全量 pytest —— 若这里把红吞掉，"PR 上全量测试红"就无人看见（棘轮本身不会假绿，
+        # 但整条 check 会报 ✔，而那是我方唯一会读到的信号）。
+        id: pytest
         continue-on-error: true
         run: |
           mkdir -p artifacts
@@ -100,6 +109,13 @@ jobs:
             --report artifacts/coverage.xml \
             --baseline artifacts/coverage-baseline.json \
             --base origin/${{ github.base_ref }}
+      - name: 测试结果就是作业结论（红不被棘轮的绿盖住）
+        if: steps.pytest.outcome == 'failure'
+        run: |
+          echo "❌ 全量 pytest 红（见 artifacts/pytest.xml）。棘轮读数仍已上传，但本作业判失败。"
+          echo "   PR 侧只有这个作业会跑全量 pytest（gate1 仅 push:main / 手动触发）⇒ 红必须在这里可见。"
+          exit 1
+
       - name: 上传报告（失败也传）
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

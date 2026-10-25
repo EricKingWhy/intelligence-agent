@@ -4,25 +4,30 @@
 用**真 CLI 子进程 + 真临时 git 仓库**跑（不 mock `git`、不 mock XML：mock 掉这两样，判据就
 只能在"我以为的输入形状"上成立）。
 
-覆盖票面 AC 的六条关键语义（每条都做过变异 —— 见各用例的 `mutation:` 说明）：
+覆盖票面 AC 的六条关键语义。带 `mutation:` 说明的用例是"删掉对应守卫就必然变红"的那几条
+（每轮修复的变异矩阵读数与实际失败集合记在 PR 描述里，不在本文件里复制数字）：
 
 1. 变更可执行行**恰 60% 通过**、**59% 失败**（整数比较，不经浮点）；
 2. **未改行不进分母**（基线里早就未覆盖的行不影响判定）；
 3. **白名单行不进分母**，且白名单拒绝通配 / 目录前缀 / 空理由（"整个安全域排除"过不了闸）；
-4. **缺失测量 / 旧报告**判 `2`（不可判），不假绿：报告不存在、基线不存在、报告与基线不是同一份、
-   基线不是当前树的、改了 `src/` 但报告里没有该文件，五种都试；
+4. **缺失测量 / 旧报告 / git 面读不出**判 `2`（不可判），不假绿：报告不存在、基线不存在、
+   报告与基线不是同一份、基线不是当前树的、改了 `src/` 但报告里没有该文件、`git diff` 非零，
+   六种都试；
 5. **零可执行变更** = 显式空集合通过（打印 `RATCHET EMPTY`，退出 0），不是静默绿；
-6. **纯移动**：没有 `--move-only-note` ⇒ 照常计入分母（可能变红）；有说明且 git `-M` 判为 rename ⇒ 跳过。
+6. **纯移动**：没有 `--move-only-note` ⇒ 照常计入分母（可能变红）；有说明且 git `-M` 判为
+   **`R100`（逐字相同）** ⇒ 跳过；`R<100`（移动 + 修改）照常计入。
    另附白名单/移动的正控与负控，以及 `baseline` 子命令的留痕字段齐全性。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from xml.sax.saxutils import quoteattr
 
 import pytest
 
@@ -42,7 +47,7 @@ COVERAGE_XML = """<?xml version="1.0" ?>
 def _xml(repo: Path, files: dict[str, list[tuple[int, int]]]) -> str:
     """造一份 coverage.py 形状的 Cobertura XML：`{相对路径: [(行号, 命中数)]}`。"""
     classes = "\n".join(
-        f'<class name="{Path(rel).name}" filename="{rel}">'
+        f"<class name={quoteattr(Path(rel).name)} filename={quoteattr(rel)}>"
         + "".join(f'<line number="{n}" hits="{h}"/>' for n, h in lines)
         + "</class>"
         for rel, lines in files.items()
@@ -418,7 +423,7 @@ def test_move_note_does_not_excuse_a_non_rename(repo: Path) -> None:
     proc = _ratchet(repo, report, base, "--move-only-note", "谎称纯移动")
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "git -M 没判出任何 rename" in proc.stdout
+    assert "git -M 没判出任何 R100" in proc.stdout
     assert "变更可执行行：0/5 = 0.00%" in proc.stdout
 
 
@@ -437,9 +442,9 @@ def test_baseline_records_sha_tree_platform_scope_exclusions_and_report(repo: Pa
     assert record["platform"] and record["python"]
     assert record["measurement_scope"] == "tests + --cov=src/agent_harness"
     assert record["exclusions"]["whitelist"].endswith("coverage-ratchet.whitelist.json")
+    # 拿**盘上文件**独立算一遍：把自己和自己比是恒真断言，钉不住任何东西。
     assert record["report"] == {"path": str(report),
-                                "sha256": record["report"]["sha256"]}
-    assert len(record["report"]["sha256"]) == 64
+                                "sha256": hashlib.sha256(report.read_bytes()).hexdigest()}
     # 全仓总率只落在 `totals_recorded_only`：字段名本身就是"不判定"的承诺。
     assert record["totals_recorded_only"]["lines_valid"] == 20
 
@@ -450,3 +455,226 @@ def test_baseline_refuses_when_the_report_is_missing(repo: Path) -> None:
 
     assert proc.returncode == 2
     assert "找不到覆盖率报告" in proc.stdout
+
+
+# ── 复核修复轮新增的守卫（每条都对应一个真实漏口，见 executor-notes 的 findings 表） ──
+
+
+def test_whitelist_excuses_a_file_absent_from_the_report(repo: Path) -> None:
+    """**白名单的主用途**：容器内 / 平台专有的文件在报告里根本没有 ⇒ 仍要能显式登记后放行。
+
+    mutation: 把白名单判定移回 `unmeasured` 之后 ⇒ 本用例退回 2（正是修前的漏口）。
+    """
+    (repo / "src" / "pkg" / "win.py").write_text("".join(f"w{i} = {i}\n" for i in range(1, 11)),
+                                                 encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add win module")
+    _append_lines(repo, 5)
+    report = _write_report(repo, {"src/pkg/mod.py": _mod_lines(5, 5)})
+    _whitelist(repo, [{"path": "src/pkg/win.py", "reason": "Win32 only", "platform": "windows"}])
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "变更可执行行：5/5 = 100.00%" in proc.stdout
+    assert "src/pkg/win.py（报告里没有该文件（盲区）；platform=windows；理由=Win32 only）" in proc.stdout
+
+
+def test_whitelist_absent_from_report_still_needs_reason_and_platform(repo: Path) -> None:
+    """放行盲区的前提仍是"精确文件 + 理由 + 平台"：不能让这条通道变成不写理由的豁免。"""
+    (repo / "src" / "pkg" / "win.py").write_text("w = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add win module")
+    report = _write_report(repo, {"src/pkg/mod.py": [(n, 1) for n in range(1, 21)]})
+    _whitelist(repo, [{"path": "src/pkg/win.py", "reason": "Win32 only"}])
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "白名单不合法" in proc.stdout
+
+
+def test_move_and_modify_is_not_excused_by_the_note(repo: Path) -> None:
+    """`R077`（移动 + 新加代码）不是"纯移动"：新增行必须照常进分母。
+
+    mutation: 把 `renamed_paths` 放宽成 `status.startswith("R")` ⇒ 13 行新增被整片豁免 ⇒ 转绿。
+    """
+    (repo / "src" / "pkg" / "moved.py").write_text(
+        "".join(f"m{i} = {i}\n" for i in range(1, 11)), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add module to move")
+    _git(repo, "branch", "-f", "baseline", "HEAD")
+    _git(repo, "mv", "src/pkg/moved.py", "src/pkg/moved2.py")
+    (repo / "src" / "pkg" / "moved2.py").write_text(
+        (repo / "src" / "pkg" / "moved2.py").read_text(encoding="utf-8")
+        + "".join(f"n{i} = {i}\n" for i in range(1, 4)), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "move and add 3 lines")
+    report = _write_report(repo, {"src/pkg/moved2.py": [(n, 0) for n in range(1, 14)]})
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base, "--move-only-note", "谎称纯移动：moved.py → moved2.py")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "变更可执行行：0/13 = 0.00%" in proc.stdout
+    assert "git -M 没判出任何 R100" in proc.stdout
+
+
+def test_undecidable_git_diff_does_not_become_an_empty_pass(repo: Path) -> None:
+    """`--base` 与 HEAD 没有共同祖先（`git diff` rc=128）⇒ 退 2，不许洗成 RATCHET EMPTY。
+
+    mutation: 让 `changed_lines` 在 rc≠0 时 `return {}` ⇒ 本用例变 0 绿（修前的形状）。
+    """
+    report = _write_report(repo, {"src/pkg/mod.py": [(n, 1) for n in range(1, 21)]})
+    _git(repo, "checkout", "--quiet", "--orphan", "orphan")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "orphan root")
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "棘轮不可判" in proc.stdout
+    assert "RATCHET EMPTY" not in proc.stdout
+
+
+def test_non_python_file_under_src_is_not_a_denominator_and_not_undecidable(repo: Path) -> None:
+    """`src/` 下的快照/数据文件没有"可执行行"：它既不该进分母，也不该把棘轮打成不可判。
+
+    mutation: 扫描面回到裸 `startswith("src/")` ⇒ 本用例退回 2（修前的形状）。
+    """
+    snapshot = repo / "src" / "pkg" / "types.snapshot.txt"
+    snapshot.write_text("a\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add snapshot")
+    snapshot.write_text("a\nb\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "change snapshot")
+    report = _write_report(repo, {"src/pkg/mod.py": [(n, 1) for n in range(1, 21)]})
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "RATCHET EMPTY" in proc.stdout
+
+
+def test_added_line_beginning_with_two_pluses_is_not_a_file_header(repo: Path) -> None:
+    """内容形如 `++ x` 的新增行在 patch 里长成 `+++ x`；它不能被当成文件头。
+
+    形状必须**跨两个 hunk**：第一个 hunk 的内容行扮成文件头之后，第二个 hunk 的 `@@`
+    会落到 `current is None` 上 ⇒ 后面那些新增行整段不计入分母（少算 = 反向漏口）。
+    mutation: 去掉 `--- ` → `+++ ` 的状态机、退回裸 `startswith("+++ ")` ⇒ 只算出 1/…。
+    """
+    path = repo / "src" / "pkg" / "mod.py"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    lines[1] = "++ x = 2"  # 第 2 行改成以 `++ ` 开头 ⇒ patch 里成为 `+++ x = 2`
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _append_lines(repo, 3)  # 第二个 hunk：纯新增 3 行
+    report = _write_report(repo, {"src/pkg/mod.py": _mod_lines(3, 0)})
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    # 分母必须只含**新增的 3 行**（第 2 行是替换，不计新增）；丢掉第二个 hunk 会变成 0/0。
+    assert "变更可执行行：0/3 = 0.00%" in proc.stdout
+
+
+def test_path_with_a_quote_is_unquoted_correctly(repo: Path) -> None:
+    """含 `"` 的路径即使 `core.quotePath=false` 也会被 git 加引号 + 反斜杠转义。
+
+    mutation: 让 `_unquote` 直通 ⇒ 键变成 `"b/src/we\"ird.py"`，与报告对不上 ⇒ 判"未测量"退 2。
+    """
+    weird = repo / "src" / "pkg" / 'we"ird.py'
+    weird.write_text("".join(f"q{i} = {i}\n" for i in range(1, 6)), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add quoted-path module")
+    report = _write_report(repo, {'src/pkg/we"ird.py': _mod_lines(5, 5, start=1)})
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "变更可执行行：5/5 = 100.00%" in proc.stdout
+
+
+def test_non_ascii_and_space_paths_are_matched(repo: Path) -> None:
+    """git 对特殊路径会加引号；棘轮要能把它还原成仓库相对路径（否则整份报告落错键）。"""
+    weird = repo / "src" / "pkg" / "中文 模块.py"
+    weird.write_text("".join(f"z{i} = {i}\n" for i in range(1, 11)), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add non-ascii module")
+    report = _write_report(repo, {"src/pkg/中文 模块.py": _mod_lines(10, 10, start=1)})
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    # 匹配不上时该文件会落进"未测量"或干脆不出现 ⇒ 断言必须钉住"它被认出来了且进了分母"。
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "变更可执行行：10/10 = 100.00%" in proc.stdout
+
+
+def test_report_from_another_checkout_is_counted_and_warned(repo: Path) -> None:
+    """`<source>` 全在仓库外（报告来自别的 checkout）⇒ 每个文件都被计数并打印告警。
+
+    静默丢弃会让"报告不是这棵树的"看不见：文件会凭空消失，剩下的行照样算出个比率。
+    """
+    _append_lines(repo, 5)
+    report = repo / "artifacts" / "coverage.xml"
+    report.parent.mkdir(exist_ok=True)
+    report.write_text(
+        '<coverage version="7.16.2" lines-valid="5" lines-covered="5">'
+        "<sources><source>/elsewhere/checkout/src</source></sources>"
+        '<packages><package name="."><classes>'
+        '<class name="mod.py" filename="pkg/mod.py">'
+        + "".join(f'<line number="{n}" hits="1"/>'
+                  for n in range(21, 26))
+        + "</class></classes></package></packages></coverage>",
+        encoding="utf-8")
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    # 报告认不出这个文件 ⇒ 判"未被测量"（不是"没有可执行行"），且外部源要被计数。
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "1 个文件的 <source> 不在本仓库内" in proc.stdout
+    assert "src/pkg/mod.py" in proc.stdout
+
+
+@pytest.mark.parametrize("bad_path", [
+    "./src/pkg/win.py",
+    " src/pkg/win.py",
+    "/src/pkg/win.py",
+])
+def test_whitelist_rejects_non_canonical_paths(repo: Path, bad_path: str) -> None:
+    """写进去却永远匹配不上的条目等于失效声明 ⇒ 解析期拒绝（而不是静默无关）。"""
+    _append_lines(repo, 5)
+    report = _write_report(repo, {"src/pkg/mod.py": _mod_lines(5, 5)})
+    _whitelist(repo, [{"path": bad_path, "reason": "r", "platform": "linux"}])
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "规范化的仓库相对路径" in proc.stdout
+
+
+def test_malformed_baseline_fields_are_undecidable_not_a_traceback(repo: Path) -> None:
+    """基线满足 schema 但缺 `sha` ⇒ 判不可判（退 2），不是 KeyError 崩栈。"""
+    _append_lines(repo, 5)
+    report = _write_report(repo, {"src/pkg/mod.py": _mod_lines(5, 5)})
+    out = repo / "artifacts" / "baseline.json"
+    out.write_text(json.dumps({"schema": "coverage-baseline/1",
+                               "report": {"path": str(report),
+                                          "sha256": __import__("hashlib")
+                                          .sha256(report.read_bytes()).hexdigest()}}),
+                   encoding="utf-8")
+
+    proc = _ratchet(repo, report, out)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr and "Traceback" not in proc.stdout
+    assert "基线记录缺 sha" in proc.stdout

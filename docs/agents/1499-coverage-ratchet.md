@@ -21,6 +21,7 @@
 | --- | --- | --- | --- |
 | **Lighthouse CI** `docs/configuration.md`（`GoogleChrome/lighthouse-ci` main） | `off` / `warn` / `error` 三级；`warn` 原文 *"the audit result will be checked, and the result will be printed to stderr, but failure will not result in a non-zero exit code"*；`error` 才 *"failure will result in a non-zero exit code"*；未列出的审计默认 `off` | 判定分**可观测**与**阻断**两档，门槛可按审计项逐条配置 | **ADAPT**：全仓总率走 `warn` 语义（打印 + 入基线，不判定），只有**变更行**这一条走 `error` 语义（< 60% 非零退出）。不引入新框架 |
 | **pa11y-ci** `README.md`（`pa11y/pa11y-ci` main） | `--threshold <number>` 原文 *"permit this number of errors, warnings, or notices, otherwise fail with exit code 2"*；且 *"You can also set `threshold` in your configuration's `defaults` or individual URL options. These thresholds apply per page"* | 门限是**分范围**的、可谈判的，不是全仓一个硬数 | **ADAPT**：判定面按"变更行"切分；盲区按**精确文件**登记（见 §4），不做"整域排除" |
+| **diff-cover** `README.rst` + `diff_cover_tool.py`（main） | `--fail-under` 原文 *"To have `diff-cover` and `diff-quality` return a non zero status code if the report quality/coverage percentage is below a certain threshold"*；实现 `if percent_covered >= fail_under … return 0`（**浮点** `percent_covered`，`>=` 语义）；`--exclude` 走 `fnmatch`；`--expand-coverage-report` 一节自陈 *"diff reports list all lines that changed, coverage reports usually list code statements. As a result, a change in a multi-line statement may not be analyzed"* | 它就是"变更行覆盖率"的原产工具 | **不采用（BUILD 侧保留）**：① 未在本仓依赖里（`pyproject.toml` / `uv.lock` 均无），引入 = 新增依赖，与 §9.5 第 5 级相悖；② 判定走浮点百分比 ⇒ 正是 B 案要绕开的那类精度面，本票要的是整数 `covered*100 >= total*60`；③ 它**不**提供"报告是否属于这棵树"的对账（sha256 + tree），而那正是 AC1 的核心；④ 白名单要"精确文件 + 理由 + 平台"的解析期护栏（AC3），`--exclude` 的 `fnmatch` 反而允许通配 |
 | **coverage.py** `config.html` `[report] fail_under`（B 案对照） | *"A target coverage percentage. If the total coverage measurement is under this value, then exit with a status code of 2."*；*"If you specify a non-integral value, you must also set `[report] precision` properly to make use of the decimal places."*；*"A setting of 100 will fail any value under 100, regardless of the number of decimal places of precision."* | 全仓单一硬阈值，**对精度/取整敏感** | **不采用**（DECIDE：B 案 = 票面否决项）。A 案用整数比较 `covered*100 >= total*60` 绕开取整面；且全仓总率只记录 |
 
 > 三条都是**机制旁证**，不是"行业强制值"：60% 这个数字来自票面裁决允许设定的低门槛，
@@ -37,13 +38,18 @@
 
 **判定口径**（全部机械）：
 
-1. 分母 = `git diff -U0 --no-renames <base>...HEAD` 里 `src/` 下**新增行号** ∩ 报告里该文件的
-   **可执行行**；分子 = 其中报告命中数 > 0 的行。
+1. 分母 = `git diff -U0 --no-renames <base>...HEAD` 里 `src/` 下 **`.py`** 的**新增行号** ∩
+   报告里该文件的**可执行行**；分子 = 其中报告命中数 > 0 的行。非 `.py`（快照 / 数据文件）
+   没有可执行行，既不进分母、也不该把判定打成不可判。
 2. `covered * 100 >= total * 60` ⇒ 通过（**恰好 60% 通过**，`>` 会把它判失败）。
-3. 白名单命中文件的变更行**不进分母**；白名单解析期拒绝通配 / 目录前缀 / 空字段。
-4. `--move-only-note <说明>` **且** `git diff -M` 判为 rename 才跳过；两者缺一照常计入。
-5. 全部不可判情形（缺报告、缺基线、报告 sha256 与基线不符、基线不是当前树、改了 `src/` 但报告里
-   没有该文件、`--base` 解不出、白名单不合法）⇒ **退出 2**，绝不退化成绿。
+3. 白名单命中文件的变更行**不进分母**；白名单解析期拒绝通配 / 目录前缀 / 非规范化路径 / 空字段。
+   **白名单判定先于「未测量」判定** —— 它要救的正是"报告里根本没有这个文件"的盲区（容器内代码、
+   平台专有实现）；顺序颠倒会让这份白名单永远救不了它该救的文件。
+4. `--move-only-note <说明>` **且** `git -M` 判为 **`R100`（逐字相同的纯移动）** 才跳过；
+   `R<100`（移动 + 修改）与缺说明都照常计入 —— `-M` 的默认相似度阈值是 50%，那是"改过"不是"纯移动"。
+5. 全部不可判情形（缺报告、缺基线、报告 sha256 与基线不符、基线不是当前树、`git diff` 读不出
+   ——含两侧无共同祖先、改了 `src/` 但报告里没有该文件、`--base` 解不出、白名单不合法）
+   ⇒ **退出 2**，绝不退化成绿。git 读失败被当成"没有变更"会把一次读失败洗成 `RATCHET EMPTY`。
 6. 分母为空 ⇒ 打印 `RATCHET EMPTY` 并退出 0（理由见下）。
 
 ### 3.1 零可执行变更为什么选"显式通过"
@@ -86,10 +92,11 @@
 ## 6. 已知边界（如实登记）
 
 1. **容器 / 子进程内的代码在本报告里本就看不见**：`--cov` 只追踪宿主进程树（`code_worker_runner.py`
-   是在 Docker 计算容器里单独执行的）。这类文件若被改动，会在 `ratchet` 判**不可判（2）**，
-   而不是静默算 0% —— 要放行必须显式登记进白名单。
-2. **`git -M` 的 rename 判定有 50% 相似度阈值**：大改后的"移动 + 修改"可能判不出 rename ⇒
-   按新增计。这是刻意保守的方向（宁可多算分母，不可少算）。
+   是在 Docker 计算容器里单独执行的）。这类文件被改动时，`ratchet` 判**不可判（2）**而不是静默算
+   0%；要放行必须**显式登记进白名单**（白名单判定先于"未测量"判定 —— 否则它救不了它该救的文件）。
+   白名单命中但报告里没有该文件时，输出会标注"报告里没有该文件（盲区）"，不让豁免隐形。
+2. **`git -M` 的 rename 判定有 50% 相似度阈值**：`R<100` 一律按新增计（只有 `R100` 才算纯移动）。
+   这是刻意保守的方向（宁可多算分母，不可少算）。
 3. **只覆盖 `src/` 的新增行**：`web/**`（TS）、`tui/**`、`scripts/**` 的变更行不在本棘轮分母内
    —— 它们各有多测/类型检查车道，且 coverage.py 不覆盖 TS。把这条写进 PR 描述与本文，避免
    "棘轮绿 = 全仓都测了"的误读。
