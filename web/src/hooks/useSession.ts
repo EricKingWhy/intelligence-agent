@@ -632,6 +632,22 @@ function cursorOf(conv: ConversationState | null, sessionId: string): number {
  * 标签页整段不轮询（tick 里看 visibilityState，spec 03 §18.3 同款纪律）。 */
 export const EXTERNAL_RUN_POLL_INTERVAL_MS = 5000;
 
+/** #1333 审查 P2：提交关联 ID 的唯一生成入口。`crypto.randomUUID` 是
+ *  secure-context-only API（HTTPS / localhost 才暴露；受支持部署面——
+ *  host_service fail-closed 只绑 loopback、远程面走 HTTPS 网关——都在安全
+ *  上下文内），但裸 HTTP 绑定非 loopback 地址这一不受支持形态下它是
+ *  undefined：直接调用会让**全部提交**在 POST 发出前抛 TypeError。回退用
+ *  `getRandomValues` 手拼同形 v4——调用点只把它当不透明关联串用，不依赖
+ *  密码学强度，形状一致是为了让两路生成可被同一断言钉住。 */
+export function newClientRequestId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   /** 首屏即从 localStorage 恢复上次选中的会话（BUG-005）。
@@ -1505,7 +1521,12 @@ export function useSession() {
         // WebSocket 接流（同一交付链路上实测逐帧到达，见 lib/wsStream.ts）。
         const baselineDetailed = await sessionIdBaselineDetailed();
         const clientBaselineAtMs = Date.now();
-        const started = startSession(payload);
+        // #1333（2026-10-20 已批准方案）：每次 POST 生成新的关联 UUID——
+        // 在**提交点**生成（不放进 payload：重试通道复用同一 payload 对象，
+        // 关联值必须逐次独立）；随创建请求落 SessionMeta 索引，认领改走
+        // 精确关联查询，20s 差分窗口内的「别的客户端/迟到会话」不再可被误认。
+        const clientRequestId = newClientRequestId();
+        const started = startSession(payload, { clientRequestId });
         // #1333：锚点必须钉在「本次 POST 发起时刻（服务端时钟）」，在这里
         // 一次算好、下面认领时复用。⚠ 若挪到 `raceEarlyResponse`（1200ms 早
         // 窗）之后才算（= 认领开始时刻），锚点会落到自己会话的创建时间之后，
@@ -1570,9 +1591,12 @@ export function useSession() {
         });
         let sid: string;
         try {
-          // #1333：把上面在 POST 发起时刻钉死的锚点交给认领，启用
-          // first_event_time 过滤 + 多候选 fail-closed。
-          sid = await discoverNewSessionId(baseline, { submittedAtServerMs });
+          // #1333：锚点（POST 发起时刻，服务端时钟）与关联 UUID 一并交给认领
+          // ——时间过滤 + 多候选 fail-closed 之外，候选集先由关联查询收窄。
+          sid = await discoverNewSessionId(baseline, {
+            submittedAtServerMs,
+            clientRequestId,
+          });
         } catch (e) {
           // POST 的迟到失败原因优先于「认领超时」/「认领歧义」：迟到失败
           // （如 401 / 5xx / 断网）是比认领结论更硬的事实（#1148 既有设计，
