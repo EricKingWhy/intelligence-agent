@@ -10,13 +10,14 @@
  *      不可得 = null，渲染层显示「—」，不编 0、不拿相邻事件间隔冒充耗时；
  *    - `status`：ok / fail / run / idle，失败筛选与状态色共用同一判据。
  *
- *  全局事件身份仍是 `eventKey()`（`lib/inspectorPanel.ts`）；Timeline 行的
- *  选中/展开/DOM id 用 `deriveTimelineEventKeys()` 给 seq-less 同键事件补序号，
- *  不改 `eventKey` 的全局语义。
+ *  全局事件身份仍是 `eventKey()`（`lib/inspectorPanel.ts`）；Timeline model 在
+ *  构建行时给 seq-less 同键事件补序号，不改 `eventKey` 的全局语义。
  */
 import { EventType } from '../types';
 import type { AgentEvent, ToolCall } from '../types';
 import { eventKey } from './inspectorPanel';
+import { groupEventsByRun, type RunGroup } from './timelineGroups';
+import { interpretToolResult } from './toolShapes';
 
 export type TimelineStatus = 'ok' | 'fail' | 'run' | 'idle';
 export type TimelineFilter = 'all' | 'tool' | 'model' | 'fail';
@@ -62,10 +63,6 @@ const IDLE_TYPES = new Set<string>([
   EventType.OPERATION_RECONCILE_REQUIRED,
 ]);
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
-}
-
 function timeMs(value: unknown): number | null {
   if (typeof value !== 'string' || !value) return null;
   const ms = Date.parse(value);
@@ -74,24 +71,6 @@ function timeMs(value: unknown): number | null {
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-/** `tool/result.data.content` 是后端 `ToolResult.model_dump_json()` 的字符串；
- *  兼容已解析对象（测试/未来契约）。`cancelled` 是中断 ≠ 失败（同投影口径）。 */
-function toolResultOutcome(data: Record<string, unknown>): { ok: boolean | null; cancelled: boolean } {
-  let parsed: unknown = data.content;
-  if (typeof parsed === 'string') {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch {
-      return { ok: null, cancelled: false };
-    }
-  }
-  const record = asRecord(parsed);
-  if (!record) return { ok: null, cancelled: false };
-  const inner = asRecord(record.data);
-  const cancelled = inner?.cancelled === true;
-  return { ok: typeof record.ok === 'boolean' ? record.ok : null, cancelled };
 }
 
 function toolStatus(status: ToolCall['status'] | undefined): TimelineStatus {
@@ -135,10 +114,9 @@ function baseStatus(e: AgentEvent): TimelineStatus {
     return 'ok';
   }
   if (e.type === EventType.TOOL_RESULT) {
-    const outcome = toolResultOutcome(e.data);
-    if (outcome.cancelled) return 'idle';
-    if (outcome.ok === true) return 'ok';
-    if (outcome.ok === false) return 'fail';
+    const { outcome } = interpretToolResult(e.data.content, 'serialized-or-object');
+    if (outcome === 'success') return 'ok';
+    if (outcome === 'failure') return 'fail';
     return 'idle';
   }
   return 'idle';
@@ -151,14 +129,17 @@ function baseStatus(e: AgentEvent): TimelineStatus {
  *
  *  只给 Timeline 渲染/交互用；`eventKey` 的全局语义（其他消费方的身份比较）不变。
  *  键只依赖 `events` 的追加顺序——事件只追加、不重排，所以窗口/筛选变化不会漂移。 */
+function nextTimelineEventKey(baseKey: string, seen: Map<string, number>): string {
+  const occurrence = seen.get(baseKey) ?? 0;
+  seen.set(baseKey, occurrence + 1);
+  return occurrence === 0 ? baseKey : `${baseKey}#${occurrence}`;
+}
+
 export function deriveTimelineEventKeys(events: readonly AgentEvent[]): Map<AgentEvent, string> {
   const seen = new Map<string, number>();
   const keys = new Map<AgentEvent, string>();
   for (const e of events) {
-    const base = eventKey(e);
-    const n = seen.get(base) ?? 0;
-    seen.set(base, n + 1);
-    keys.set(e, n === 0 ? base : `${base}#${n}`);
+    keys.set(e, nextTimelineEventKey(eventKey(e), seen));
   }
   return keys;
 }
@@ -266,6 +247,31 @@ export interface FilterCounts {
   fail: number;
 }
 
+export interface TimelineRow {
+  event: AgentEvent;
+  rawIndex: number;
+  rowKey: string;
+  timing: EventTiming | undefined;
+}
+
+/** Shared, light derivations for the Inspector timeline and its keyboard navigation. */
+export interface TimelineModel {
+  rows: readonly TimelineRow[];
+  eventKeys: ReadonlyMap<AgentEvent, string>;
+  timings: ReadonlyMap<string, EventTiming>;
+  callById: ReadonlyMap<string, ToolCall>;
+  runGroups: readonly RunGroup[];
+  counts: FilterCounts;
+  axis: TimelineAxis | null;
+  gapByIndex: ReadonlyMap<number, SeqGap>;
+}
+
+/** Filtered rows stay ordered and retain their full-session indices for grouping and gaps. */
+export interface TimelineView {
+  model: TimelineModel;
+  rows: readonly TimelineRow[];
+}
+
 /** 计数口径 = **当前时间线**（主会话）的全部事件；子会话在独立视图里，不并进主计数
  *  （定稿 notes §6 的「当前泳道」）。计数不受当前筛选影响——它回答「筛到会剩几条」。 */
 export function filterCounts(
@@ -328,6 +334,60 @@ export function seqGapMarkers(events: readonly AgentEvent[]): SeqGap[] {
     prevIndex = i;
   }
   return gaps;
+}
+
+/** Derive the complete light timeline model once; renderers add windowing and heavy content later. */
+export function deriveTimelineModel(
+  events: readonly AgentEvent[],
+  tools: readonly ToolCall[] = [],
+): TimelineModel {
+  const timings = deriveEventTimings(events, tools);
+  const seen = new Map<string, number>();
+  const eventKeys = new Map<AgentEvent, string>();
+  const rows: TimelineRow[] = [];
+  const counts: FilterCounts = { all: events.length, tool: 0, model: 0, fail: 0 };
+  for (let rawIndex = 0; rawIndex < events.length; rawIndex++) {
+    const event = events[rawIndex];
+    const baseKey = eventKey(event);
+    const rowKey = nextTimelineEventKey(baseKey, seen);
+    const timing = timings.get(baseKey);
+    const row = {
+      event,
+      rawIndex,
+      rowKey,
+      timing,
+    };
+    rows.push(row);
+    eventKeys.set(event, row.rowKey);
+
+    const category = eventCategory(event);
+    if (category === 'tool') counts.tool += 1;
+    else if (category === 'model') counts.model += 1;
+    if (timing?.status === 'fail') counts.fail += 1;
+  }
+  const callById = new Map(tools.map((tool) => [tool.tool_call_id, tool]));
+  const gapByIndex = new Map(seqGapMarkers(events).map((gap) => [gap.afterIndex, gap]));
+
+  return {
+    rows,
+    eventKeys,
+    timings,
+    callById,
+    runGroups: groupEventsByRun(events),
+    counts,
+    axis: timelineAxis(timings),
+    gapByIndex,
+  };
+}
+
+/** Filter the shared model without changing order, identity, or original event indices. */
+export function deriveTimelineView(model: TimelineModel, filter: TimelineFilter): TimelineView {
+  return {
+    model,
+    rows: filter === 'all'
+      ? model.rows
+      : model.rows.filter(({ event, timing }) => eventMatchesFilter(event, filter, timing)),
+  };
 }
 
 /** 本地时钟 HH:MM:SS（卡片元信息；完整时间戳仍由 hover 浮层提供）。 */

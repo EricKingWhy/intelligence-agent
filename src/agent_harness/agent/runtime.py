@@ -112,8 +112,8 @@ from agent_harness.context.builder import (
     ProtectedFactBudgetExceededError,
 )
 from agent_harness.context.compactor import (
-    _TRANSIENT_ERROR_CLASSES,
     CompactionPostWriteError,
+    is_transient_error_class,
 )
 from agent_harness.context.provider import ContextProvider
 from agent_harness.logging import log_event, new_span_id
@@ -949,7 +949,8 @@ def _is_retriable_compaction_failure(error: ContextWindowExceededError) -> bool:
     "再压一次"只在**摘要尝试被模型侧抖动打掉**时有意义（超时 / 传输 / 输出不成
     摘要 / 校验闸门拒绝）。其余每一条都是**结构性**的，再压必然同结果：
 
-    · 结构性词条（`_TRANSIENT_ERROR_CLASSES` 的补集，见 compactor 侧二分）；
+    · 结构性词条（compactor `is_transient_error_class` 的假集——二分归
+      compactor 所有）；
     · `ProtectedFactBudgetExceededError`（保护事实超独立预算，与摘要无关）；
     · `CompactionPostWriteError`（bracket **已落盘**，历史已变，重试会写出第二对）；
     · `failures` 为空（异常不是从压缩链出来的，无从判断）。
@@ -970,7 +971,7 @@ def _is_retriable_compaction_failure(error: ContextWindowExceededError) -> bool:
         return False
     failures = [f for f in (error.failures or ()) if f.attempt >= 1]
     return bool(failures) and all(
-        failure.error_class in _TRANSIENT_ERROR_CLASSES for failure in failures
+        is_transient_error_class(failure.error_class) for failure in failures
     )
 
 
@@ -1519,7 +1520,7 @@ class AgentRuntime:
                 value = getattr(steer, key, None)
                 if value is not None:
                     user_data[key] = value
-            user_event = session.append(
+            user_event = await session.append_async(
                 USER_MESSAGE,
                 user_data,
                 run_id=run_id, step_id=step_id,
@@ -1536,7 +1537,7 @@ class AgentRuntime:
                         self._context_builder.protected_fact_token_budget
                     ),
                 )
-            applied = session.append(
+            applied = await session.append_async(
                 STEER_APPLIED,
                 {"steer_id": steer.steer_id, "applied_seq": user_event.seq, "run_id": run_id},
                 run_id=run_id, step_id=step_id,
@@ -1757,7 +1758,7 @@ class AgentRuntime:
                 if existing_idempotent_messages:
                     user_event = existing_idempotent_messages[0]
                 else:
-                    user_event = session.append(USER_MESSAGE, message_data)
+                    user_event = await session.append_async(USER_MESSAGE, message_data)
                     yield to_agent_event(user_event)
                 # #1323：勾选「作为可复用规则」是用户的确定性手势——user/message
                 # 落盘后立即机械登记，不依赖模型当次是否调用 register_constraint。
@@ -1794,6 +1795,14 @@ class AgentRuntime:
                 run_id = launch_budget.run_id
                 turn_index = launch_budget.turn_index or 1
             else:
+                # 轮次边界（#1439 F-03）：记忆侧的 per-run 状态（consolidation 失败
+                # 预算）在新 run 开始时归零。上游 Hermes 把这个重置放在 turn 边界
+                # （`turn_context._reset_per_turn_agent_state`），本仓的对应边界是
+                # run 开始（一个 run 可以有多轮）。必须在 `resuming` 判定之后且只在
+                # 非续跑分支：同 run 续跑不重置计数器（`#312` 不变量），否则续跑会
+                # 重新获得 3 次自纠机会。此处还没有可终结的 run，故障由通知方法自己
+                # 吞掉（与 `_notify_memory_formation` 同一条旁路纪律）。
+                self._notify_memory_run_started()
                 run_id, turn_index = session.begin_run(
                     agent_id=self._agent_id, agent_profile=self._agent_profile,
                     # #226：请求侧模型标识落 durable 事件（同一 run 内只在 fallback 时换
@@ -1843,6 +1852,11 @@ class AgentRuntime:
             if not resuming:
                 # 按类型选取本 run 的 run/started——不假设 begin_run 恰好只追加一条事件。
                 # 续跑执行没有新的 run/started（逻辑 run 是同一个），跳过镜像。
+                # #1547（审查 F3）：run/started 是同步 append，同实例有更低 seq 的
+                # 在途写者时会被闸门暂存到 `begin_run` 返回之后；`next()` 无默认
+                # 值，快照里缺它就 StopIteration→RuntimeError（PEP 479）杀死整个
+                # run。先等闸门清空再扫。
+                await session.wait_gate_settled()
                 run_started = next(
                     e for e in session.since(arms.memory_event_start) if e.type == RUN_STARTED
                 )
@@ -2156,13 +2170,15 @@ class AgentRuntime:
                             collected.append(chunk)
                             reasoning_text = _extract_reasoning(chunk)
                             if reasoning_text:
-                                for streamed in streamer.offer_reasoning(
+                                # #1489：热路径走异步入口——durable 刷盘的等待不占
+                                # 事件循环（同 loop 的 SSE 心跳/其它会话照常推进）。
+                                for streamed in await streamer.offer_reasoning_async(
                                     reasoning_text, step=step_base + steps + 1,
                                 ):
                                     yield to_agent_event(streamed)
                             delta_text = _extract_text(chunk.content)
                             if delta_text:  # 空 content chunk（纯 tool_calls）不发 delta
-                                for streamed in streamer.offer_text(
+                                for streamed in await streamer.offer_text_async(
                                     delta_text, step=step_base + steps + 1,
                                 ):
                                     yield to_agent_event(streamed)
@@ -2194,7 +2210,9 @@ class AgentRuntime:
                         ai = AIMessage(content="")
                     arms.completed_model_response = ai
                     # 流结束：关思考块（completed）+ 落文本残余（合帧尾部）
-                    for streamed in streamer.end_step(step=step_base + steps + 1):
+                    for streamed in await streamer.end_step_async(
+                        step=step_base + steps + 1,
+                    ):
                         yield to_agent_event(streamed)
                 else:
                     invoke_task = asyncio.create_task(model_coord.ainvoke(
@@ -2384,7 +2402,7 @@ class AgentRuntime:
                 # 伪造）；run 级 usage_total 统一归集不分主备。
                 if fallback_transitions:
                     for transition in fallback_transitions:
-                        fallback_event = session.append(
+                        fallback_event = await session.append_async(
                             MODEL_FALLBACK,
                             {**transition.event_data(),
                              **({"usage": usage} if usage else {})},
@@ -2425,7 +2443,7 @@ class AgentRuntime:
                 defer_model_event = bool(tool_calls) and self.executor.tracks_operations
                 model_event: SessionEvent | None = None
                 if not defer_model_event:
-                    model_event = session.append(
+                    model_event = await session.append_async(
                         MODEL_COMPLETED,
                         model_data,
                         run_id=run_id,
@@ -2462,7 +2480,7 @@ class AgentRuntime:
                         ):
                             yield to_agent_event(refusal_event)
                     if defer_model_event:
-                        model_event = session.append(
+                        model_event = await session.append_async(
                             MODEL_COMPLETED,
                             model_data,
                             run_id=run_id,
@@ -2567,7 +2585,8 @@ class AgentRuntime:
                 # 要求 call 先于 running/output_delta，前端在工具在途期间就有
                 # 可关联的行；中断窗口也总是留下可配对修复的 call 事实。
                 for call in calls:
-                    call_event = self.executor.emit_call_event(
+                    # #1489：热路径走异步入口（每批 N 个 call 各一次 durable 写）。
+                    call_event = await self.executor.emit_call_event_async(
                         session, tool_call_id=call.id, tool_name=call.name,
                         args=call.args, run_id=run_id, step_id=step_base + steps,
                     )
@@ -2630,6 +2649,11 @@ class AgentRuntime:
                     current_constraint_tool_context_var.reset(tool_context_token)
                 # 执行期间追加的事件（tool/output_delta 等）镜像给流式消费者；
                 # web 订阅者经 session listener 实时收到（seq 幂等合并不重复）。
+                # #1547：exec 子调用在 worker 线程同步落 `tool/result`，其投递可能
+                # 被更低 seq 的在途写者推迟到 `execute_batch` 返回之后——一次性
+                # `since()` 快照（无 listener 通道补偿，尤其下方预算记账）先等
+                # 闸门清空再取，否则 `budget_delta` 会从账上永久消失。
+                await session.wait_gate_settled()
                 for event in session.since(tool_event_start):
                     yield to_agent_event(event)
                 # session 树账的工具计数点（`#318`）：从本批 `tool/result` 的
@@ -2640,7 +2664,7 @@ class AgentRuntime:
                 if tool_error is not None:
                     raise tool_error
                 if defer_model_event:
-                    model_event = session.append(
+                    model_event = await session.append_async(
                         MODEL_COMPLETED,
                         model_data,
                         run_id=run_id,
@@ -2659,13 +2683,13 @@ class AgentRuntime:
                     # 持久化顺序（延迟事件 → TOOL_RESULT）的单一 owner 是
                     # ToolExecutor.emit_*（批次 C 候选 3 + ADR-0016 §4.1 拆分）：
                     # Runtime 只消费已持久化事件并镜像，不再自己 append。
-                    for persisted_event in self.executor.emit_pending_events(
+                    for persisted_event in await self.executor.emit_pending_events_async(
                         session,
                         pending_events=execution.pending_events,
                         run_id=run_id, step_id=step_base + steps,
                     ):
                         yield to_agent_event(persisted_event)
-                    result_event = self.executor.emit_result_event(
+                    result_event = await self.executor.emit_result_event_async(
                         session, tool_call_id=execution.tool_call_id,
                         content=content, run_id=run_id, step_id=step_base + steps,
                         # 预算增量由执行域算好（唯一计数点），这里只原样落盘：
@@ -3322,7 +3346,7 @@ class AgentRuntime:
         `trigger_dimension` 用**模式名**（ADR-0048 D5）：它不是配置字段路径，因为
         stuck 没有"该抬高哪一个 ceiling"可言——恢复要的是外部输入的变化。
         """
-        event = arms.session.append(
+        event = await arms.session.append_async(
             GUARD_STUCK, signal.as_event_data(),
             run_id=arms.run_id, step_id=arms.envelope_step(steps),
         )
@@ -3530,7 +3554,7 @@ class AgentRuntime:
             # `#318`：`session` 键在 `run/paused.data` 顶层（limits 里已有 session 的
             # **ceiling**，这里补的是**账行 identity + consumed**）。缺席 = 没接 session 账。
             pause_data["session"] = session_payload
-        paused = arms.session.append(
+        paused = await arms.session.append_async(
             RUN_PAUSED,
             pause_data,
             run_id=arms.run_id, step_id=envelope_step,
@@ -3615,7 +3639,7 @@ class AgentRuntime:
                 and event.data.get("tool_call_id") == operation.tool_call_id
                 for event in session.events
             ):
-                appended.append(session.append(
+                appended.append(await session.append_async(
                     OPERATION_RECONCILE_REQUIRED,
                     {
                         "tool_call_id": operation.tool_call_id,
@@ -3808,7 +3832,7 @@ class AgentRuntime:
             # （脱敏纪律——value 已在源事件里，事件不复制第二份）。
             # 本臂每次主循环 build 失败进一次；closeout 的二次 build 失败不进
             # 本臂（见 docstring），发射恰一次。
-            arms.session.append(
+            await arms.session.append_async(
                 CONTEXT_PROTECTED_FACTS_EXCEEDED,
                 {
                     "budget_tokens": error.budget_tokens,
@@ -4234,6 +4258,28 @@ class AgentRuntime:
                 [e for e in session.since(start)
                  if e.type not in _MEMORY_EXCLUDED_EVENT_TYPES],
             )
+
+    def _notify_memory_run_started(self) -> None:
+        """新 run 开始边界把记忆侧的 per-turn 状态归零（#1439 F-03）。
+
+        只在新 run 调用（`resuming` 为假）：同 run 续跑不重置计数器（`#312` 不变量）。
+
+        端口用 `getattr` 而不是硬调用：`MemoryFormationNotifier` 只要求
+        `notify_run_finished`（终结接缝），轮次预算重置是**可选**能力；测试与集成
+        替身不实现它。缺席即没有可重置的东西——与 `_notify_memory_formation` 的
+        `notifier is None` 同一判据，而不是给每个替身补一个空方法。
+
+        **失败隔离**：本调用在 `begin_run` 之前，此刻抛异常等于"run 还没开始就失败"，
+        而记忆是旁路——坏了只落日志。
+        """
+        notifier = self._memory_formation
+        reset = getattr(notifier, "notify_run_started", None)
+        if not callable(reset):
+            return
+        try:
+            reset()
+        except Exception:
+            logger.exception("run 开始时的记忆侧重置失败（旁路，不影响本轮）")
 
     async def _notify_memory_formation(
         self, arms: _TerminalArms, *, terminal_status: str,

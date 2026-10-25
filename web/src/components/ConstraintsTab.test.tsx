@@ -189,6 +189,38 @@ describe('ConstraintsView（纯展示，SSR）', () => {
     expect(pressed.filter((v) => v === 'true').length).toBeGreaterThan(0);
   });
 
+  /* #1445 / F-04：chip 显示中文类型名；原始枚举只作 `typeFilter` 的**值**，
+   *  不是显示文本（`evidence_ref` 这类机器码不进界面）。 */
+  it('#1445：类型 chip 依次显示「全部类型 + 六个中文类型名」', () => {
+    const html = ssr({ facts: [ACTIVE] });
+    const labels = [...html.matchAll(/<button type="button" class="cn-chip[^"]*"[^>]*>([^<]*)<\/button>/g)]
+      .map((m) => m[1]);
+    expect(labels).toEqual([
+      '全部类型',
+      '约束',
+      '用户目标',
+      '授权',
+      '工作边界',
+      '失败尝试',
+      '证据引用',
+    ]);
+  });
+
+  it('#1445：面板不出现原始枚举作为显示文本', () => {
+    const html = plain(ssr({ facts: [ACTIVE], statusFilter: 'all' }));
+    expect(html).not.toMatch(
+      />\s*(?:constraint|user_goal|authorization|work_boundary|failed_approach|evidence_ref)\s*</,
+    );
+  });
+
+  it('#1445：FactRow 行内类型显示中文名（同面同枚举）', () => {
+    const rowType = (html: string): string =>
+      html.match(/<span class="cn-type">[\s\S]*?<\/span>([^<]*)<\/span>/)?.[1] ?? '';
+    expect(rowType(ssr({ facts: [ACTIVE], statusFilter: 'all' }))).toBe('约束');
+    const evidence: EffectiveConstraintRow = { ...ACTIVE, fact_id: 'f-ev', type: 'evidence_ref' };
+    expect(rowType(ssr({ facts: [evidence], statusFilter: 'all' }))).toBe('证据引用');
+  });
+
   /* #1419 R-1：汇总行的三个数都是真事实（总数 / 生效 / 已撤销），不编 pending。 */
   it('汇总行按真实状态计数（总数 · 生效 · 已撤销）', () => {
     const html = ssr({ facts: [ACTIVE, REVOKED, SUPERSEDED], statusFilter: 'all' });

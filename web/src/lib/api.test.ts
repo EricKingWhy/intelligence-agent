@@ -1501,6 +1501,23 @@ describe('createEmptySession — launch=false 只建会话（#204 裁定 §2/§3
     await expect(createEmptySession({ cwd: 'D:/x', auto_approve: true }))
       .rejects.toThrow('task 与 launch=false 互斥');
   });
+
+  /* #1467：`budget.run` 与 launch=false 后端 422 互斥（app.py `create_session`），
+     所以 `createEmptySession` 的字段表不再登记 `budget`。类型上已无该键——这里
+     刻意绕过类型锁（`as never`，仓库测试既有的绕过写法），钉的是**运行期**字段表：
+     旧实现的表里有 `budget` 构造器，调用方塞进来就会原样上线；现在构造器根本不
+     读这个键。类型锁与字段表是两道独立的闸，缺一道都能把 422 放出去。 */
+  it('调用方绕过类型塞 budget → 请求体仍不含 budget 键（#1467 运行期双保险）', async () => {
+    const cap = captureFetchWithHeaders(200, { session_id: 'sid-4' });
+    await createEmptySession({
+      cwd: 'D:/repos/alpha',
+      auto_approve: true,
+      budget: { run: { max_agent_turns_total: 5 } },
+    } as never);
+    expect(cap.calls[0].url).toBe('/api/sessions?launch=false');
+    expect(cap.calls[0].body).toEqual({ cwd: 'D:/repos/alpha', auto_approve: true });
+    expect(cap.calls[0].body).not.toHaveProperty('budget');
+  });
 });
 
 describe('resumeSession — 同 run 恢复的 ceiling 形状（`#313` / `#314`）', () => {
@@ -1860,5 +1877,40 @@ describe('getAttachmentLimits — 附件上限下发形状防御（#937 M-08 / P
   it('allowed_media_types 含非字符串 → 抛错（不伪造默认值）', async () => {
     captureFetch(200, { ...wireBody, allowed_media_types: ['image/png', 42] });
     await expect(getAttachmentLimits()).rejects.toThrow('allowed_media_types 不是字符串数组');
+  });
+});
+
+describe('#1333 client_request_id —— 创建载荷与关联查询的传输编码', () => {
+  const CID = '01234567-89ab-4cde-8f01-23456789abcd';
+
+  it('startSession 带 clientRequestId → body 带 client_request_id；不带 → 不发键', async () => {
+    const cap = captureFetch();
+    await startSession({ task: '干活' }, { clientRequestId: CID });
+    expect(cap.calls[0].body).toEqual({ task: '干活', client_request_id: CID });
+
+    await startSession({ task: '旧客户端路径' });
+    expect(cap.calls[1].body).not.toHaveProperty('client_request_id');
+  });
+
+  it('listSessions 关联查询 → URL 带 client_request_id（精确匹配语义）', async () => {
+    const capCorrelated = captureFetch(200, []);
+    await listSessions({ includeArchived: true, clientRequestId: CID });
+    expect(capCorrelated.calls[0].url).toBe(
+      `/api/sessions?include_archived=true&client_request_id=${CID}`,
+    );
+
+    const capEncoded = captureFetch(200, []);
+    await listSessions({ clientRequestId: 'a b/c?' });
+    expect(capEncoded.calls[0].url).toBe(
+      `/api/sessions?client_request_id=${encodeURIComponent('a b/c?')}`,
+    );
+
+    // 既有调用方零迁移：不传关联值时 URL 形状逐字不变
+    const capArchived = captureFetch(200, []);
+    await listSessions({ includeArchived: true });
+    expect(capArchived.calls[0].url).toBe('/api/sessions?include_archived=true');
+    const capPlain = captureFetch(200, []);
+    await listSessions();
+    expect(capPlain.calls[0].url).toBe('/api/sessions');
   });
 });

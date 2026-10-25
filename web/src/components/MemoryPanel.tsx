@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Brain, ChevronDown, ChevronUp, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { describeMemoryError, listProjects, MemoryError } from '../lib/api';
+import { resolveFocusReturnTarget, restoreFocusTarget } from './focusReturn';
 import {
   bulkDeleteMemoryRecords,
   countMemoryRoots,
@@ -34,6 +35,7 @@ import '../styles/memory-v2.css';
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  focusReturnTargetRef?: { current: HTMLElement | null };
 }
 
 const KIND_LABELS: Record<MemoryKind, string> = {
@@ -47,19 +49,25 @@ const SCOPE_LABELS: Record<MemoryScopeV2, string> = {
 };
 const CONTENT_CLAMP_THRESHOLD = 180;
 
-export function MemoryPanel({ open, onOpenChange }: Props) {
+export function MemoryPanel({ open, onOpenChange, focusReturnTargetRef }: Props) {
   const openerRef = useRef<HTMLElement | null>(null);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="palette-overlay" />
-        {open && <MemoryPanelBody openerRef={openerRef} />}
+        {open && <MemoryPanelBody openerRef={openerRef} focusReturnTargetRef={focusReturnTargetRef} />}
       </Dialog.Portal>
     </Dialog.Root>
   );
 }
 
-function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | null } }) {
+function MemoryPanelBody({
+  openerRef,
+  focusReturnTargetRef,
+}: {
+  openerRef: { current: HTMLElement | null };
+  focusReturnTargetRef?: { current: HTMLElement | null };
+}) {
   const [queryDraft, setQueryDraft] = useState('');
   const [filters, setFilters] = useState<MemoryFilters>({});
   const memories = useMemories(filters);
@@ -186,12 +194,14 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
     <Dialog.Content
       className="memory-panel memory-v2-panel"
       onOpenAutoFocus={() => {
-        openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const requestedTarget = focusReturnTargetRef?.current ?? null;
+        if (focusReturnTargetRef) focusReturnTargetRef.current = null;
+        openerRef.current = resolveFocusReturnTarget(requestedTarget ?? document.activeElement);
       }}
       onCloseAutoFocus={(event) => {
-        if (openerRef.current?.isConnected) {
+        if (openerRef.current) {
           event.preventDefault();
-          openerRef.current.focus();
+          restoreFocusTarget(openerRef.current);
         }
       }}
     >

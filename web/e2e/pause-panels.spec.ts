@@ -5,7 +5,7 @@
  *    `StuckPausedPanel.test.tsx`）只锁静态渲染；这里锁「事件载荷 → 投影 → 面板」
  *    的接线——两个面板共用 `.pause-panel-continuation`，两处各锁一条。
  * ② stuck 路由限制（`11 §6.1` MUST NOT 一键重试）：`reason=stuck` 走
- *    `StuckPausedPanel`，面板无 ceiling 输入框、无「恢复同一 run」按钮，且**不发**
+ *    `StuckPausedPanel`，面板无 ceiling 输入框、无「继续这次任务」按钮，且**不发**
  *    `POST /api/sessions/{id}/resume`（恢复需要变更依据）。
  * ③ 预算恢复 409：`POST /api/sessions/{id}/resume` 的请求体逐字（同 run CAS +
  *    budget_increase + 绝对 ceiling）；409 后界面显示后端 detail（`恢复被拒绝：…`），
@@ -101,7 +101,7 @@ test('① continuation 四键逐字上屏（PausedPanel）', async ({ page }) =>
 
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
-  await expect(panel).toContainText('已在预算到顶处暂停');
+  await expect(panel).toContainText('预算或安全上限已到，任务暂停了——不是出错');
   // 前三键按 CONTINUATION_SECTIONS 顺序渲染，第四键"下一步"为其后独立硬编码 li；文案逐字来自 run/paused 载荷。
   await expect(panel.locator('.pause-panel-continuation li')).toHaveText([
     '已完成：本逻辑 run 已消耗 3 个 agent turn；第二条已完成项',
@@ -111,7 +111,7 @@ test('① continuation 四键逐字上屏（PausedPanel）', async ({ page }) =>
   ]);
 });
 
-test('② stuck 暂停：引导面板不提供一键恢复，且不发 POST /resume', async ({ page }) => {
+test('② stuck 暂停：引导面板不提供一键继续，且不发 POST /resume', async ({ page }) => {
   let resumeCalls = 0;
   await routeApi(page, { sessions: [ROW], events: stuckFrames() });
   // 后注册的路由先匹配：若界面真的发了恢复请求，这里会记到（并如实回 409）。
@@ -128,9 +128,9 @@ test('② stuck 暂停：引导面板不提供一键恢复，且不发 POST /res
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await expect(panel).toContainText('已因疑似卡住暂停');
-  // 引导面：给的是 steer / 变更依据，并明说本面板不提供一键恢复。
-  await expect(panel).toContainText('提供新指示（steer）');
-  await expect(panel).toContainText('不提供一键恢复');
+  // 引导面：给的是 steer / 变更依据，并明说本面板不提供一键继续。
+  await expect(panel).toContainText('恢复方式：给出新指示——在下方输入框输入，按 Ctrl/Cmd+Enter 发送');
+  await expect(panel).toContainText('本面板不提供一键继续');
   await expect(panel).toContainText('恢复前置条件：需要相关 steer，或已记录的环境 / policy 变更');
   await expect(panel.locator('.pause-panel-continuation li')).toHaveText([
     '已完成：检测器连续 3 次观测到同工具同参数调用',
@@ -141,7 +141,7 @@ test('② stuck 暂停：引导面板不提供一键恢复，且不发 POST /res
 
   // 恢复控件必须一个都不在（无 ceiling 输入、无恢复按钮）。
   await expect(page.locator('#pause-resume-ceiling')).toHaveCount(0);
-  await expect(panel.getByRole('button', { name: '恢复同一 run' })).toHaveCount(0);
+  await expect(panel.getByRole('button', { name: '继续这次任务' })).toHaveCount(0);
   // Composer 不被禁用/遮挡：steer 通道保持可用。
   await expect(page.getByLabel('Agent 任务')).toBeEnabled();
   // wire 级：整个过程零 POST /resume。
@@ -160,7 +160,9 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   await routeApi(page, { sessions: [ROW] });
   // 重读 durable log 的观测点：409 后 useSession 必须 `selectSession` 同一会话，
   // 让历史装载 effect 重跑（不变量 #22：屏幕上的暂停事实以服务器那份为准）。
-  await page.route(new RegExp(`/api/sessions/${SID}/events$`), async (route: Route) => {
+  // （`(\\?.*)?`：#1526 起 /events 恒带 `?after_seq&limit` 查询串，`$` 裸锚定
+  // 匹配不上整条 URL，观测点静默失效——eventsCalls 恒 0、用例假红。）
+  await page.route(new RegExp(`/api/sessions/${SID}/events(\\?.*)?$`), async (route: Route) => {
     eventsCalls += 1;
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(frames) });
   });
@@ -186,8 +188,8 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   await expect.poll(() => eventsCalls).toBeGreaterThanOrEqual(1);
   const eventsCallsBeforeResume = eventsCalls;
 
-  await panel.getByLabel(/恢复用的绝对 ceiling/).fill('9999');
-  await panel.getByRole('button', { name: '恢复同一 run' }).click();
+  await panel.getByLabel(/恢复用的上限/).fill('9999');
+  await panel.getByRole('button', { name: '继续这次任务' }).click();
 
   // wire 级：同 run CAS + budget_increase + 抬高的绝对 ceiling（字段名由触发维度导出）。
   await expect.poll(() => resumeBody).toEqual({
@@ -204,7 +206,7 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   );
   // 409 零副作用：面板仍在、用户草稿不丢（改大再来一次即可）。
   await expect(panel).toBeVisible();
-  await expect(panel.getByLabel(/恢复用的绝对 ceiling/)).toHaveValue('9999');
+  await expect(panel.getByLabel(/恢复用的上限/)).toHaveValue('9999');
   // The paused virtual clock prevents viewing polls from satisfying this assertion.
   await expect.poll(() => eventsCalls).toBeGreaterThan(eventsCallsBeforeResume);
 });

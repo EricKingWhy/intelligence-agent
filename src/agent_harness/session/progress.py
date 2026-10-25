@@ -43,7 +43,7 @@ from typing import Any
 
 from agent_harness.session.derive import (
     ProtectedFact,
-    _bounded_goal_value,
+    bounded_goal_value,
     derive_protected_facts,
 )
 from agent_harness.session.event import (
@@ -1135,10 +1135,10 @@ def render_progress_brief_lines(doc: ProgressDocument) -> list[str]:
     全部动态文本走 ``_v`` 唯一脱敏出口（与正文渲染同一条纪律）。
 
     P2-5：这里注入的是**模型上下文**，必须与压缩摘要同一条 2000 字符口径
-    （``_bounded_goal_value``）；progress.md 正文由 ``render_progress_markdown``
+    （``bounded_goal_value``）；progress.md 正文由 ``render_progress_markdown``
     负责，仍是全文。不变量「完整保存 ≠ 完整注入」。"""
     goal = (
-        _bounded_goal_value(doc.goal, doc.goal_source_event_id)
+        bounded_goal_value(doc.goal, doc.goal_source_event_id)
         if doc.goal else None
     )
     lines = [f"原目标：{_v(goal)}" if goal else f"原目标：{_MISSING}"]

@@ -9,6 +9,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { formatClock } from '../lib/timelineView';
 import type { ToolCall } from '../types';
 import { ArtifactsTab } from './StepDetail';
 
@@ -86,7 +87,9 @@ describe('#1419 Artifacts A-1 卡片网格', () => {
     expect(meta).toContain('6 KiB');
     expect(meta).toContain('seq 13');
     expect(meta).toContain('write');
-    expect(meta).toContain('10:23');
+    const expectedClock = formatClock('2026-10-20T10:23:57.000Z');
+    expect(expectedClock).not.toBeNull();
+    expect(meta).toContain(expectedClock!.slice(0, 5));
     expect(c.querySelector('.art-badge')?.textContent).toContain('已生成');
   });
 

@@ -34,6 +34,7 @@ from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.memory.v2.capability import (
     InvalidMemoryPayload,
     MarkdownAuthorityError,
+    MemoryContentRejected,
     MemoryIndexDeletePending,
     StaleMemoryVersion,
 )
@@ -215,6 +216,21 @@ class MemoryPendingWrite(BaseModel):
     id: str
     payload: dict
     created_at: str
+
+
+class MemoryBlockedWrite(BaseModel):
+    """#1461：一条被审批门拦下的后台写入。``payload`` 是待 promote 的写入意图。"""
+
+    id: str
+    job_id: str
+    project_id: str | None = None
+    origin: str
+    reason: str
+    status: str
+    payload: dict
+    disposition_note: str | None = None
+    created_at: str
+    disposed_at: str | None = None
 
 
 class MemoryJourneyCard(BaseModel):
@@ -670,6 +686,94 @@ def register_memory_routes(app: FastAPI) -> None:
             entry_point=ENTRY_API, action="reject_staged", affected_count=1,
         )
         return {"id": staged_id, "status": "rejected"}
+
+    # ----------------------------------------------------------------------------------
+    # 被拦下的后台写入（#1461）
+    # ----------------------------------------------------------------------------------
+
+    async def _blocked_v2():
+        service = await _v2_service()
+        blocked = service.blocked
+        if blocked is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "write_approval_unavailable",
+                        "message": "此部署没有 markdown 权威面，因此没有被拦下的写入区。"},
+            )
+        return blocked
+
+    def _blocked_missing(blocked_id: str) -> HTTPException:
+        """行不存在 / 不是当前身份的：同一个 404（不泄露别人的 id 是否存在）。"""
+        return HTTPException(
+            status_code=404,
+            detail={"code": "memory_write_not_blocked",
+                    "message": f"没有这条被拦下的写入：{blocked_id}"},
+        )
+
+    @app.get("/api/memory-blocked")
+    async def list_blocked_memory_writes(
+        project_id: str | None = Query(None, min_length=1, max_length=256),
+        _: None = Depends(require_trusted_origin),
+    ) -> list[MemoryBlockedWrite]:
+        blocked = await _blocked_v2()
+        trusted = await _trusted_v2()
+        return [
+            MemoryBlockedWrite(
+                id=item.id, job_id=item.job_id, project_id=item.project_id,
+                origin=item.origin, reason=item.reason, status=item.status,
+                payload=item.payload, disposition_note=item.disposition_note,
+                created_at=item.created_at, disposed_at=item.disposed_at,
+            )
+            for item in await blocked.list_for(
+                trusted.tenant_id, trusted.user_id, project_id=project_id)
+        ]
+
+    @app.post("/api/memory-blocked/{blocked_id}/promote")
+    async def promote_blocked_memory_write(
+        blocked_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict:
+        blocked = await _blocked_v2()
+        trusted = await _trusted_v2()
+        try:
+            decision = await blocked.promote(blocked_id, trusted)
+        except KeyError as error:
+            raise _blocked_missing(blocked_id) from error
+        except StorageBusyError as error:
+            raise _storage_busy_error(error) from error
+        except MemoryContentRejected as error:
+            raise memory_http_error(error) from error
+        if not decision.applied:
+            # 409 而非 404：行还在，只是已被处置 / pin 漂移——用户可 discard 或重建。
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "memory_write_not_applied", "message": decision.reason},
+            )
+        record_memory_change(
+            entry_point=ENTRY_API, action="promote_blocked", affected_count=1,
+        )
+        return {"id": blocked_id, "status": "promoted"}
+
+    @app.post("/api/memory-blocked/{blocked_id}/discard")
+    async def discard_blocked_memory_write(
+        blocked_id: str,
+        _: None = Depends(require_trusted_origin),
+    ) -> dict:
+        blocked = await _blocked_v2()
+        trusted = await _trusted_v2()
+        try:
+            decision = await blocked.discard(blocked_id, trusted)
+        except KeyError as error:
+            raise _blocked_missing(blocked_id) from error
+        if not decision.applied:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "memory_write_not_applied", "message": decision.reason},
+            )
+        record_memory_change(
+            entry_point=ENTRY_API, action="discard_blocked", affected_count=1,
+        )
+        return {"id": blocked_id, "status": "discarded"}
 
     @app.get("/api/sessions/{session_id}/memory-recalls")
     async def get_session_memory_recalls(

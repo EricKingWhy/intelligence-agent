@@ -112,8 +112,10 @@ from agent_harness.agent.budget import (
     BudgetRejection,
 )
 from agent_harness.memory.errors import MemoryNotFound
-from agent_harness.model.config import UnsupportedReasoningEffort
-from agent_harness.model.provider import ModelClientConstructionError
+from agent_harness.model.config import (
+    ModelClientConstructionError,
+    UnsupportedReasoningEffort,
+)
 from agent_harness.sandbox.capabilities import (
     SandboxUnavailableError,
     probe_all_capabilities,
@@ -385,14 +387,41 @@ _MEMORY_ERROR_STATUS: dict[type[Exception], int] = {
 }
 
 
+#: memory 内容拒绝的机读归因头（#1440 C 案）：`MemoryContentRejected.reason_code` 过 HTTP
+#: 边界的载体。放在头里而不是 detail 里，403 的响应体形状才不变。CORS 暴露清单见
+#: `web/app.py::EXPOSED_CUSTOM_RESPONSE_HEADERS`（跨域拓扑下 JS 才读得到）。
+MEMORY_REASON_CODE_HEADER = "X-Memory-Reason-Code"
+
+
 def memory_http_error(exc: Exception) -> HTTPException:
     """memory 领域 / 归属异常 → `HTTPException`；状态码取自 `_MEMORY_ERROR_STATUS`。
 
-    与另外两张表同款：直接索引，未登记类型由覆盖测试先红挡住。
+    **沿 MRO 查找**（#1440 P2-1），不是另外两张表的精确类型索引：`MemoryContentRejected`
+    是 `PermissionError` 的子类，精确查表会 KeyError → 500，而它的语义与父类一致
+    （403，只是 detail 说真因）。子类命中父类那一行，登记面仍是本表。
+
+    携带 `reason_code` 的异常（目前只有 `MemoryContentRejected`，#1440 C 案）把机读码放进
+    响应头 `X-Memory-Reason-Code`：**detail 形状零变化**（仍是中文真因字符串，既有前端与
+    契约测试不用动），机读码只是多一个头。选头不选结构化 detail，是因为后者会改掉 memory
+    403 的响应体形状——那是既有产品契约（`tests/web/test_memory_api.py` 断言 detail 是字符串）。
+
+    未登记类型（MRO 上一条都不中）仍是 `KeyError`，由覆盖测试先红挡住。
     """
-    return HTTPException(
-        status_code=_MEMORY_ERROR_STATUS[type(exc)], detail=str(exc)
-    )
+    for cls in type(exc).__mro__:
+        status = _MEMORY_ERROR_STATUS.get(cls)
+        if status is not None:
+            reason_code = getattr(exc, "reason_code", None)
+            if reason_code is None:
+                return HTTPException(status_code=status, detail=str(exc))
+            return HTTPException(
+                status_code=status,
+                detail=str(exc),
+                # `.value`：`str, Enum` 的 `str()` 给的是成员名，码值才是契约。
+                headers={
+                    MEMORY_REASON_CODE_HEADER: str(getattr(reason_code, "value", reason_code)),
+                },
+            )
+    raise KeyError(type(exc))
 
 
 #: storage 共享库错误 → HTTP status 的第四张表（#515 / #569）。

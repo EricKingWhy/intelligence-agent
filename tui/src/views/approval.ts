@@ -3,8 +3,6 @@
  * TTY 内 y/N 键盘决策；非 TTY（管道/录制环境）默认拒绝（审批拒绝不可绕过）。
  * 决策通过 POST /api/sessions/{id}/approve 走服务端唯一入口。
  */
-import { Text, type Component } from "@earendil-works/pi-tui";
-
 import type { PendingApproval } from "../adapter.ts";
 import { GLYPHS, type IaTheme } from "../theme.ts";
 import { collapseArgs } from "../format.ts";
@@ -37,8 +35,4 @@ export function approvalLines(approval: PendingApproval, theme: IaTheme): string
   const preview = collapseArgs(approval.argumentsPreview);
   if (preview) lines.push(`${theme.dim(GLYPHS.branch)} ${preview}`);
   return lines;
-}
-
-export function approvalComponent(approval: PendingApproval, theme: IaTheme): Component {
-  return new Text(approvalLines(approval, theme).join("\n"));
 }

@@ -21,6 +21,7 @@ DSH 宁可 fail-closed 也不做字符串过滤）。破坏性命令分类器**�
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -180,7 +181,76 @@ _READONLY_COMMANDS = frozenset({
     "stat", "tree", "printenv", "which",
 })
 #: shell 连接符：出现任一即**不算只读**（保守——连接符后的命令无法从首 token 判定）。
-_SHELL_CONNECTORS = (";", "&&", "||", "|", "$(", "`", ">", "<", "&")
+_SHELL_CONNECTORS = (
+    ";", "&&", "||", "|", "$(", "`", ">", "<", "&", "{", "}", "\n", "\r",
+)
+#: 即使没有连接符，变量/命令替换也会把首词白名单变成未知语义 → ASK。
+_SHELL_EXPANSION_MARKERS = ("$",)
+_WINDOWS_ENV_EXPANSION = re.compile(
+    r"%(?:[A-Za-z_][A-Za-z0-9_]*(?::[^%\r\n]*)?|[0-9*]|~[0-9*])%"
+)
+_WINDOWS_BATCH_EXPANSION = re.compile(r"%(?:~|[0-9*])")
+
+#: `find` 只允许能证明把结果写到 stdout、且不会执行/删除/写文件的动作。
+_FIND_UNSAFE_ACTIONS = frozenset({
+    "-delete", "-exec", "-execdir", "-ok", "-okdir",
+    "-fprint", "-fprint0", "-fprintf", "-fls",
+})
+#: `find` 表达式里不带值的只读谓词/连接词。
+_FIND_SAFE_FLAGS = frozenset({
+    "!", "(", ")", "-a", "-and", "-o", "-or",
+    "-xdev", "-mount", "-depth", "-d", "-ignore_readdir_race",
+    "-noignore_readdir_race", "-print", "-print0", "-ls", "-quit",
+    "-prune", "-empty", "-readable", "-writable", "-executable",
+    "-true", "-false",
+})
+#: `find` 表达式里带一个值、但仍只读的谓词/选项。
+_FIND_SAFE_VALUE_OPTIONS = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+    "-type", "-xtype", "-size", "-amin", "-anewer", "-atime", "-cmin",
+    "-cnewer", "-ctime", "-mmin", "-mnewer", "-mtime", "-newer",
+    "-newermt", "-perm", "-user", "-uid", "-group", "-gid", "-inum",
+    "-links", "-maxdepth", "-mindepth", "-printf",
+})
+#: 少数仍在只读白名单中的命令带有明确的文件写出/生成选项。
+_READONLY_WRITE_OPTIONS = {
+    "tree": frozenset({"-o", "--outfile"}),
+    "file": frozenset({"-C", "--compile"}),
+}
+# 文件承载选项的内容可能再提供路径或模式，无法在这个轻量分类器中证明为安全。
+# 因而这些选项统一进入 ASK；短旗附着值和 `--option=value` 也由同一张表识别。
+# 长选项名同时按 GNU getopt_long 的无歧义前缀缩写匹配（`--files0` == `--files0-from`）。
+_READONLY_FILE_OPTIONS = {
+    "wc": frozenset({"--files0-from"}),
+    "grep": frozenset({"-f", "--file", "--exclude-from"}),
+    "file": frozenset({"-f", "--files-from", "-m", "--magic-file"}),
+    "head": frozenset({"--files0-from"}),
+    "diff": frozenset({"-X", "--exclude-from", "--from-file", "--to-file"}),
+    "date": frozenset({"-f", "--file"}),
+    "tree": frozenset({"--fromfile"}),
+}
+#: 附着值是**匹配模式**而不是待读路径清单的短旗：`grep -ifile` 是 `-i -f ile`，
+#: `ile` 里只有模式，不会引出更多文件读取，因此它的附着值只做路径判定
+#: （`grep -f/etc/passwd` 仍是 ASK）。空格形保持保守 ASK，不放宽既有 ALLOW 面。
+#: 豁免只适用于**簇内前置了其它旗**的形态（`-ifile`）；簇首就是 `-f` 的
+#: `-fpatterns.txt` 与空格形同语义，仍 ASK（#1484 修复轮 3 P2-8）。
+_PATTERN_FILE_FLAGS = {"grep": frozenset({"f"})}
+#: 每个命令里自带取值的短旗：短旗簇扫到它即停，其后字符是它的值而不是新旗。
+#: 缺项按"该旗不带值"处理（继续扫）；漏判方向是多看一个候选路径，不是少看。
+#: `diff -c`/`-u` 本身不带值（只有 `-C`/`-U` 带），故不在表里。
+_SHORT_VALUE_OPTIONS = {
+    "grep": frozenset("efmABCdD"),
+    "date": frozenset("dfrs"),
+    # GNU diff 取值的短旗：-C/-U/-W NUM、-F/-I RE、-S/-X FILE、-x PAT、-D NAME、-L LABEL。
+    # -c/-u 不带值（只有大写 -C/-U 带），所以不在表里。
+    "diff": frozenset("CSUWFIXxDL"),
+    "file": frozenset("fmFPe"),
+}
+#: 真实存在且恰好是某个文件承载选项前缀的非文件长选项：GNU 精确名优先于缩写，
+#: 不能因为 `--exclude-from` 就以 `--exclude` 前缀误伤 `grep/diff --exclude=PAT`。
+_EXACT_NON_FILE_OPTIONS = frozenset({"--exclude"})
+_DATE_QUERY_FLAGS = frozenset({"-u", "-R", "-I"})
+_HOSTNAME_QUERY_FLAGS = frozenset({"-a", "-A", "-d", "-f", "-i", "-I", "-s", "-y"})
 
 
 def classify_bash_command(command: str) -> RuleVerdict:
@@ -192,8 +262,12 @@ def classify_bash_command(command: str) -> RuleVerdict:
     - **DENY**：提权（sudo/doas/runas/su）；``rm`` 且参数含递归旗（``-r``/``-R``/
       ``--recursive``，含 ``-rf`` 等合并短旗）；``mkfs``/``format``/``dd``/``diskpart``
       或以 ``mkfs.`` 开头。
-    - **ALLOW**：首 token ∈ 只读白名单 **且** 命令不含任何 shell 连接符。
+    - **ALLOW**：首 token ∈ 只读白名单、命令不含 shell 语法，且参数只涉及
+      workspace-relative 的读操作；``find`` 仅放行可核验的查询表达式。
     - **ASK**：其余（含 ``git``——子命令读写难分；以及所有解析失败）。
+
+    这里的路径判断只是一层审批路由启发式：绝对路径、父目录遍历和 shell 展开不进免问
+    子集；它不宣称提供 OS 级路径围墙。
     """
     try:
         tokens = shlex.split(command, posix=True)
@@ -207,7 +281,12 @@ def classify_bash_command(command: str) -> RuleVerdict:
         return RuleVerdict.DENY
     if first == "rm" and any(_is_recursive_flag(token) for token in tokens[1:]):
         return RuleVerdict.DENY
-    if first in _READONLY_COMMANDS and not _has_shell_connector(command):
+    if (
+        first in _READONLY_COMMANDS
+        and not _has_shell_connector(command)
+        and not _has_shell_expansion(command)
+        and _readonly_arguments_are_safe(first, tokens[1:], command)
+    ):
         return RuleVerdict.ALLOW
     return RuleVerdict.ASK
 
@@ -225,6 +304,189 @@ def _is_recursive_flag(token: str) -> bool:
 
 def _has_shell_connector(command: str) -> bool:
     return any(connector in command for connector in _SHELL_CONNECTORS)
+
+
+def _has_shell_expansion(command: str) -> bool:
+    return (
+        any(marker in command for marker in _SHELL_EXPANSION_MARKERS)
+        or _WINDOWS_ENV_EXPANSION.search(command) is not None
+        or _WINDOWS_BATCH_EXPANSION.search(command) is not None
+    )
+
+
+def _readonly_arguments_are_safe(
+    first: str, args: list[str], command: str,
+) -> bool:
+    """只让可核验的读参数进入免问子集。
+
+    没有把 bash 变成 parser 或 OS sandbox：只拒绝能明确看出会越界、执行动作、写文件
+    或引入未知表达式的形状。无法证明安全就回到既有 ASK 路径。
+    """
+    if _has_outside_path_syntax(first, args, command):
+        return False
+    if _has_readonly_write_option(first, args):
+        return False
+    if _has_readonly_file_option(first, args):
+        return False
+    if first == "find":
+        return _is_safe_find_query(args)
+    if first == "hostname":
+        # 只接受可核验的查询旗；其余旗形一律回到 ASK，避免合并短旗漏判写分支。
+        return all(arg in _HOSTNAME_QUERY_FLAGS for arg in args)
+    if first == "date":
+        # 只接受纯查询旗与格式串；设置日期的短旗簇/长旗均不在白名单内。
+        # `-I` 的紧凑取值为 GNU 合法子集（`-Iseconds` / `-Idate`），仍只输出时间。
+        return all(
+            arg.startswith(("+", "-I")) or arg in _DATE_QUERY_FLAGS for arg in args
+        )
+    return True
+
+
+def _has_readonly_write_option(first: str, args: list[str]) -> bool:
+    """识别白名单命令中会生成文件或改变本地状态的显式选项。"""
+    options = _READONLY_WRITE_OPTIONS.get(first, frozenset())
+    for arg in args:
+        if arg in options:
+            return True
+        if first == "tree" and arg.startswith(("-o", "--outfile=")):
+            return True
+        if first == "file" and arg.startswith("--compile="):
+            return True
+    return False
+
+
+def _has_readonly_file_option(first: str, args: list[str]) -> bool:
+    """识别会从文件读取路径/模式的选项，包括合并短旗和附着值。
+
+    长选项按 GNU ``getopt_long`` 的无歧义前缀缩写匹配；短旗簇逐字符扫描，遇到
+    自带取值的旗即停——它的附着值交给 :func:`_path_candidates` 做路径判定
+    （``grep -ifile`` 是 ``-i -f ile``，不是 ``-i -f -i -l -e``）。
+    """
+    long_options = {
+        option
+        for option in _READONLY_FILE_OPTIONS.get(first, frozenset())
+        if option.startswith("--")
+    }
+    for arg in args:
+        if not arg.startswith("-") or arg in ("-", "--"):
+            # `--` 是选项终止符，不是长选项（GNU getopt 之后全是操作数）。
+            continue
+        if arg.startswith("--"):
+            if _matches_file_option(arg.split("=", 1)[0], long_options):
+                return True
+            continue
+        # 附着值同样是该选项的输入文件（`file -flist.txt` 的清单可再指向任意路径）。
+        # 只有模式来源的附着值（`grep -ifile` = `-i -f ile`）例外，交给路径判定；
+        # 簇首即 `-f<值>`（`grep -fpatterns.txt`）与空格形同语义，不豁免。
+        flag, attached = _scan_short_cluster(first, arg)
+        if flag is None:
+            continue
+        if (
+            attached is not None
+            and flag in _PATTERN_FILE_FLAGS.get(first, frozenset())
+            and arg[1] != flag
+        ):
+            continue
+        return True
+    return False
+
+
+def _matches_file_option(name: str, options: set[str]) -> bool:
+    """长选项是否指向文件承载选项；含 GNU 无歧义前缀缩写。
+
+    方向只有一个：**输入 token 是选项名前缀**（``--files0`` == ``--files0-from``）。
+    反向（token 比选项名更长，如 ``--files-with-matches`` vs ``--file``）在 GNU 下
+    是另一个选项，不是缩写（#1484 修复轮 3 P2-7）。
+    """
+    if name in _EXACT_NON_FILE_OPTIONS:
+        return False
+    return any(name == option or option.startswith(name) for option in options)
+
+
+def _scan_short_cluster(first: str, arg: str) -> tuple[str | None, str | None]:
+    """扫描 ``-abcVALUE``：返回（命中的文件承载旗, 其附着值）。
+
+    遇到自带取值的旗即停，其后字符是它的值而不是新旗。
+    """
+    file_flags = {
+        option[1]
+        for option in _READONLY_FILE_OPTIONS.get(first, frozenset())
+        if len(option) == 2 and option.startswith("-")
+    }
+    value_flags = _SHORT_VALUE_OPTIONS.get(first, frozenset())
+    body = arg[1:]
+    for index, char in enumerate(body):
+        if char in value_flags:
+            return (char if char in file_flags else None), (body[index + 1:] or None)
+    return None, None
+
+
+def _has_outside_path_syntax(first: str, args: list[str], command: str) -> bool:
+    """保守识别绝对路径、父目录遍历和常见 Windows 外部路径形状。"""
+    if (
+        "../" in command
+        or "..\\" in command
+        or _has_windows_absolute_path(command, args)
+    ):
+        return True
+    return any(_looks_like_outside_path(value) for value in _path_candidates(first, args))
+
+
+def _path_candidates(first: str, args: list[str]):
+    """返回参数本身及选项中的附着值，避免值绕过路径判定。"""
+    for arg in args:
+        yield arg
+        if "=" in arg:
+            yield arg.split("=", 1)[1]
+        elif arg.startswith("-") and not arg.startswith("--"):
+            _flag, attached = _scan_short_cluster(first, arg)
+            if attached:
+                yield attached
+
+
+def _has_windows_absolute_path(command: str, args: list[str]) -> bool:
+    """识别 shlex 会吞掉反斜杠的 Windows 路径或转义语法。
+
+    盘符只看每个 token 的开头（``C:x``）；参数中间的冒号是普通文件名/模式
+    （``notes:2026.txt``、``TODO:``），不当作盘符。
+    """
+    if "\\" in command:
+        return True
+    return any(len(arg) >= 2 and arg[0].isalpha() and arg[1] == ":" for arg in args)
+
+
+def _looks_like_outside_path(value: str) -> bool:
+    normalized = value.replace("\\", "/")
+    if normalized.startswith(("/", "//", "~")):
+        return True
+    if len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":":
+        return True
+    return ".." in normalized.split("/")
+
+
+def _is_safe_find_query(args: list[str]) -> bool:
+    """只接受 `find` 的查询谓词，不接受执行、删除或文件输出动作。"""
+    expression_started = False
+    index = 0
+    while index < len(args):
+        token = args[index]
+        lower = token.lower()
+        if lower in _FIND_UNSAFE_ACTIONS:
+            return False
+        if not expression_started and not token.startswith("-") and token not in {"!", "(", ")"}:
+            index += 1
+            continue
+        expression_started = True
+        if lower in _FIND_SAFE_FLAGS:
+            index += 1
+            continue
+        if lower in _FIND_SAFE_VALUE_OPTIONS:
+            if index + 1 >= len(args):
+                return False
+            index += 2
+            continue
+        return False
+    return True
 
 
 # ============================================================================

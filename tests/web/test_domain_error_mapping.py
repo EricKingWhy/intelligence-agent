@@ -13,6 +13,8 @@ import sqlite3
 import pytest
 
 from agent_harness.memory.errors import MemoryDomainError, MemoryNotFound
+from agent_harness.memory.v2.capability import MemoryContentRejected
+from agent_harness.memory.v2.types import UntrustedIdentityError
 from agent_harness.session.errors import SessionNotFound, SessionServiceError
 from agent_harness.storage.sqlite import StorageBusyError
 from agent_harness.web.domain_errors import (
@@ -271,14 +273,20 @@ def test_workspace_http_error_does_not_dress_domain_errors_as_path_errors():
 
 
 def test_memory_map_covers_every_domain_exception():
-    """`memory` 包的每个领域异常都必须显式登记（`memory_http_error` 直接索引）。
+    """`memory` 包的每个领域异常都必须显式登记（`memory_http_error` 沿 MRO 查找）。
 
-    与另外两张表同款的**正确性前提**：漏登记的类型一旦被端点捕获就是 KeyError，所以在这里
-    先红，而不是等到线上把一个 404 变成 500。
+    与另外两张表同款的**正确性前提**：MRO 上一行都不中的类型一旦被端点捕获就是 KeyError，
+    所以在这里先红，而不是等到线上把一个 404 变成 500。
+
+    #1440 P2-1 / P4-5：网只罩 `MemoryDomainError` 子类是不够的——`memory_http_error` 实际
+    接得住任何 `PermissionError` 子类（`MemoryContentRejected` / `UntrustedIdentityError`），
+    它们不在 `MemoryDomainError` 名下。所以遍历 `PermissionError` 子类 + 领域异常。
     """
-    missing = _all_subclasses(MemoryDomainError) - set(_MEMORY_ERROR_STATUS)
+    covered = set(_MEMORY_ERROR_STATUS)
+    reachable = _all_subclasses(MemoryDomainError) | _all_subclasses(PermissionError)
+    missing = {c for c in reachable if not covered & set(c.__mro__)}
     assert not missing, (
-        "以下 memory 领域异常未登记 HTTP 状态码："
+        "以下会流经 `memory_http_error` 的异常类沿 MRO 查不到状态码："
         f"{sorted(c.__name__ for c in missing)}"
     )
 
@@ -306,9 +314,22 @@ def test_memory_http_error_preserves_detail_and_rejects_unregistered_types():
 
     assert memory_http_error(PermissionError("不属于当前用户")).status_code == 403
 
-    # 未登记类型是编码错误：直接索引 → KeyError（由覆盖测试先红挡住），不静默 500。
+    # 未登记类型是编码错误：MRO 上一行都不中 → KeyError（由覆盖测试先红挡住），不静默 500。
     with pytest.raises(KeyError):
         memory_http_error(ValueError("session binding missing"))
+
+
+def test_memory_http_error_resolves_subclasses_along_mro():
+    """#1440 P2-1：子类按 MRO 命中父类那一行，detail 保留真因。
+
+    精确类型索引曾让 `MemoryContentRejected`（`PermissionError` 子类）KeyError → 500，
+    而基线对同样内容报 403。子类的语义与父类一致，只是文案说真因。
+    """
+    for cls in (MemoryContentRejected, UntrustedIdentityError):
+        http = memory_http_error(cls("真因文案"))
+        assert http.status_code == 403, cls.__name__
+        assert http.detail == "真因文案"
+
 
 
 # ── #515：第四张表（storage 共享库写锁词汇）──

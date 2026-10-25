@@ -86,6 +86,27 @@ describe('timelineHeadline（T-8 人话标题）', () => {
       .toBe('工具返回 · 完成');
   });
 
+  it('TOOL_RESULT：取消标志优先于 ok、message 和 call 的失败回退', () => {
+    const content = JSON.stringify({
+      ok: false,
+      error_code: 'COMMAND_CANCELLED',
+      message: 'cancelled',
+      data: { cancelled: true },
+    });
+    expect(timelineHeadline(
+      ev(EventType.TOOL_RESULT, { tool_call_id: 'c1', content }),
+      { ...call('bash', { command: 'sleep 1' }), status: 'failed' },
+    ).title).toBe('跑 sleep 1 · 已中断');
+    expect(timelineHeadline(ev(EventType.TOOL_RESULT, { content })).title)
+      .toBe('工具返回 · 已中断');
+  });
+
+  it('TOOL_RESULT：已解析对象仍不属于标题的正式输入契约', () => {
+    expect(timelineHeadline(
+      ev(EventType.TOOL_RESULT, { content: { ok: false, message: 'object error' } }),
+    ).title).toBe('工具返回 · 完成');
+  });
+
   it('TOOL_RESULT：纯文本内容不表达失败——成功的纯文本输出仍是「完成」', () => {
     /* 回归：`failureReason` 曾把任何非 `{ok:false}` 的内容当失败原因，于是每条
        `ls` / `cat` 的纯文本结果都显示成「失败：<stdout 首行>」。 */

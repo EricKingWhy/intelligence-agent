@@ -6,6 +6,21 @@
 - **Related**: Issue #303 / MEM-V2-7；ADR-0024、ADR-0031、ADR-0042；`docs/tickets/mem-v2-7-clean-slate-cutover.md`
 - **Supersedes**: ADR-0042 D10 的 V1/V2 共存状态、D11 中“不 cutover / 不启用 V2 formation”的非目标，以及 D12 中“cutover 归 #303”的待办状态；ADR-0031 #300 addendum 中“V1 store/fallback 尚未退役”的状态；ADR-0024 对生产应用仍装配 V1 `MemoryComponents` 的假设。V1 provider 类型与独立库 API 保留为未接线的兼容代码。
 
+**当前适用关系（2026-10-22，Issue #1490 / ADR-0056）**：
+
+- **继续适用**：D1 的**前两项主张**——生产应用只装配单一 Memory 运行时、单写单读、**不回退到
+  V1**；以及"V2 故障按 optional capability 降级"的失败语义。
+- **被取代（仅 D1 第三句）**：「SQLite 是唯一记录权威，Milvus 是 V2 派生索引」。当前内容权威是
+  Markdown（ADR-0056 §3.1）；SQLite 在 Memory 侧降为只读迁移档案，Milvus 仍是可重建派生索引。
+  依据裁决 1、2。
+- **D2–D7 保留为 #303 的历史执行记录**：clean-slate 的 allowlist、dry-run 计划哈希、fence、
+  不可逆声明与实测证据描述的是**已经发生的一次操作**，不因本次转向而重写。
+  **其"无备份销毁"授权仅属于 #303，不可复用**——本次转向的数据处置另按裁决 6（加密只读备份至
+  明确保留期）与裁决 3（逐项映射），**不得引用本 ADR 作为新迁移的销毁授权**。
+- **本票不做**：不删文件、不碰数据、不重跑 clean-slate、不预占 #1496。
+- **后继规格**：ADR-0056 §3.1/§3.7/§3.8；施工落点 #1492（冻结备份）、#1494、#1496。
+
+
 ## Context
 
 MEM-V2-1 到 MEM-V2-6 已交付 V2 生命周期、持久化、形成、召回与治理能力。并行期曾让 V1 与 V2 共存，以便逐票建设；但 V1 的 heuristic/final-answer 写回、`SESSION` 长期记忆和读取 fallback 与 PRD 中 V2 唯一权威及 `SESSION` 不属于长期记忆 scope 的规则冲突。Issue #303 授权在依赖集成后清除旧数据并收口生产接线。
@@ -15,6 +30,11 @@ MEM-V2-1 到 MEM-V2-6 已交付 V2 生命周期、持久化、形成、召回与
 ## Decisions
 
 ### D1 — 生产应用只装配 Memory V2
+
+> **决定级重开（2026-10-22，Issue #1490 / ADR-0056）**：依据裁决 1、2。**保留**：单写单读、生产
+> 装配不再可达 V1、V2 故障不回退 V1。**被取代**：本条末项「SQLite 是唯一记录权威，Milvus 是
+> V2 派生索引」——内容权威改为 Markdown，见 ADR-0056 §3.1；Milvus 仍为可重建派生索引（§3.8）。
+> **新结论指向**：ADR-0056 §3.1；施工落点 #1494（提交 seam）、#1495（读侧切换）。
 
 - Runtime assembly 不再注入 V1 `memory_writer`；生产 capability wiring 不装配 V1 `MemoryComponents`、V1 recall context、V1 memory tools 或 V1 API fallback。
 - 自动形成、recall/context、显式工具与治理 API 使用同一个 V2 service；SQLite 是唯一记录权威，Milvus 是 V2 派生索引。

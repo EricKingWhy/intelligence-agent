@@ -34,7 +34,7 @@ def catalog_app(tmp_path):
         agent_models=_AGENT_MODELS,
         provider_store_path=str(tmp_path / "model-providers.json"),
     )
-    return create_app(settings, enable_cors=False)
+    return create_app(settings, enable_cors=False, allow_testserver=True)
 
 
 @pytest.fixture
@@ -104,7 +104,7 @@ class TestModelsEndpoint:
                 "model_name": "deepseek-r1", "reasoning_effort": descriptor,
             }]),
         )
-        client = TestClient(create_app(settings, enable_cors=False))
+        client = TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
         models = client.get("/api/models").json()["models"]
         reasoning_model = next(m for m in models if m["id"] == "reasoning-model")
@@ -128,7 +128,7 @@ class TestModelsEndpoint:
                 "model_name": "deepseek-chat", "reasoning_effort": descriptor,
             }]),
         )
-        client = TestClient(create_app(settings, enable_cors=False))
+        client = TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
         models = client.get("/api/models").json()["models"]
         default_model = next(m for m in models if m["is_default"])
@@ -161,7 +161,7 @@ class TestModelsEndpoint:
             model_provider="deepseek", model_name="deepseek-chat",
             agent_models=agent_models,
         )
-        client = TestClient(create_app(settings, enable_cors=False))
+        client = TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
         body = client.get("/api/models").json()
         pro = next(m for m in body["models"] if m["id"] == "deepseek-pro")
         assert pro["metadata_source"] == "agent_models"
@@ -250,7 +250,7 @@ class TestSessionModelParam:
             ]),
             provider_store_path=str(tmp_path / "model-providers.json"),
         )
-        client = TestClient(create_app(settings, enable_cors=False))
+        client = TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
         seen: list[tuple[str, str | None]] = []
 
         def fake_factory(config, *, reasoning_effort=None, **kw):
@@ -291,7 +291,7 @@ class TestSessionModelParam:
                 "model_name": "deepseek-chat", "reasoning_effort": descriptor,
             }]),
         )
-        client = TestClient(create_app(settings, enable_cors=False))
+        client = TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
         response = client.post(
             "/api/sessions",
@@ -325,7 +325,7 @@ class TestSessionModelParam:
                 },
             }]),
         )
-        client = TestClient(create_app(settings, enable_cors=False))
+        client = TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
         response = client.post(
             "/api/sessions",
@@ -384,14 +384,14 @@ class TestStartupCatalogWarning:
         return [r.getMessage() for r in records]
 
     def test_startup_warns_when_provider_mismatches_default_chain(self, tmp_path):
-        app = create_app(self._settings(tmp_path, "qwen"), enable_cors=False)
+        app = create_app(self._settings(tmp_path, "qwen"), enable_cors=False, allow_testserver=True)
         messages = self._capture_startup_messages(app)
         assert any(
             "mimo-v2.6-flash" in m and "未被采纳" in m for m in messages
         ), messages
 
     def test_provider_match_is_silent_and_declaration_adopted(self, tmp_path):
-        app = create_app(self._settings(tmp_path, "mimo"), enable_cors=False)
+        app = create_app(self._settings(tmp_path, "mimo"), enable_cors=False, allow_testserver=True)
         messages = self._capture_startup_messages(app)
         assert not any("未被采纳" in m for m in messages), messages
 

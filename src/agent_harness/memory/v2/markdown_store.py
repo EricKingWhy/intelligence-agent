@@ -40,6 +40,8 @@ from agent_harness.memory.v2.threat_patterns import (
 from agent_harness.memory.v2.threat_patterns import (
     scan_for_threats,
 )
+from agent_harness.session.context import current_session_var, run_context_var
+from agent_harness.session.event import MEMORY_HUMAN_UPDATED
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +184,11 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 class MarkdownMemoryStore:
-    """有界、文件支撑的 curated memory；一次会话一个实例。
+    """有界、文件支撑的 curated memory；**进程级单例**，跨 run / session 复用。
 
-    ``_snapshot`` 在会话开始渲染一次并冻结（前缀缓存稳定，M9）；
+    ``_snapshot`` 按 session 冻结：首次渲染后，同一 session 内逐字节不变（前缀缓存稳定，
+    M9）；缓存按插入序 FIFO 淘汰最早的 session（上限 ``SNAPSHOT_CACHE_LIMIT``），被淘汰
+    的 session 下次渲染**重新读盘**——长寿进程里注入内容可能因此在会话中途变更。
     ``memory_entries`` / ``user_entries`` 是活状态，写即落盘。
     """
 
@@ -196,6 +200,7 @@ class MarkdownMemoryStore:
         user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
         memory_enabled: bool = True,
         user_profile_enabled: bool = True,
+        notification_mode: str = "on",
     ) -> None:
         self.directory = Path(memory_dir)
         self.memory_entries: list[str] = []
@@ -204,7 +209,12 @@ class MarkdownMemoryStore:
         self.user_char_limit = user_char_limit
         self.memory_enabled = memory_enabled
         self.user_profile_enabled = user_profile_enabled
-        #: session_id → {target: rendered}；会话开始渲染一次，会话结束才失效（M9）。
+        #: #1440 P3-3：漂移通知也遵守 `memory_notification_mode`（部署级档位）。
+        #: 默认 `on` 保持其它构造点（测试 / migration）行为不变。
+        self.notification_mode = str(notification_mode or "on").lower()
+        #: session_id → {target: rendered}；首次渲染后冻结，不随写入失效（M9/AC8）。
+        #: 没有会话结束钩子：回收只靠 `SNAPSHOT_CACHE_LIMIT` 的插入序 FIFO 淘汰，
+        #: 被淘汰的 session 下次渲染重新读盘。
         self._snapshot: dict[str, dict[str, str]] = {}
         self._consolidation_failures = 0
         # ponytail: 一把进程内互斥覆盖整个 `_mutate`；文件锁管跨进程，这把锁管
@@ -227,7 +237,17 @@ class MarkdownMemoryStore:
     # ------------------------------------------------------------------ 熔断
 
     def reset_consolidation_failures(self) -> None:
-        """轮次边界调用（新 run 开始）。"""
+        """轮次边界调用：每个新 run 开始时由记忆宿主归零（#1439 F-03）。
+
+        调用链：`AgentRuntime._drive` 的 run-start → `MemoryJobRunner.notify_run_started`
+        → 本方法。目标是让「连续失败数」回到 `MAX_CONSOLIDATION_FAILURES_PER_TURN`
+        所描述的 per-run 口径；不重置时它会跨 run 累积，长进程里后续 run 的自纠机会
+        被提前掐断。
+
+        **这是尽力而为的 per-run 预算，不是硬保证**：计数器是本进程单例上的裸 int，
+        没有 session/run 维度。并发 run 的 run-start 会互相把对方的计数清零，正在累计
+        的那一侧会被中途续满额度。单用户部署里并发 run 罕见，影响小。
+        """
         self._consolidation_failures = 0
 
     def _consolidation_failure(self, response: dict[str, Any]) -> dict[str, Any]:
@@ -265,6 +285,18 @@ class MarkdownMemoryStore:
             return path.read_text(encoding="utf-8-sig"), True
         except (OSError, UnicodeDecodeError):
             return "", False
+
+    def disk_entries(self, target: str) -> list[str] | None:
+        """**磁盘**上的活条目（去重）；文件存在但读不出来时返回 ``None``。
+
+        返回 ``None`` 而不是空列表，是因为调用方要区分"文件确实空了"与"这次没读到"：
+        对账拿后者当空集合会把派生层整片删掉。进程内 ``entries()`` 是会话快照，
+        另一个文件在整场会话里都不会刷新，不能替代这个读法。
+        """
+        raw, read_ok = self.read_raw_checked(self.path_for(target))
+        if not read_ok:
+            return None
+        return list(dict.fromkeys(self._parse_entries(raw)))
 
     def load_from_disk(self) -> None:
         """读入两个文件并把**当前会话**的快照冻住。
@@ -425,6 +457,39 @@ class MarkdownMemoryStore:
             return str(bak_path) + " (BACKUP FAILED — file unchanged on disk)"
         return str(bak_path)
 
+    def _notify_drift(self, target: str, backup: str, entries: Sequence[str]) -> None:
+        """#1353 §0 裁决 4 / #1440 F-07：漂移备份发生 → 用户侧通知。
+
+        载荷只带计数 / 指纹 / 备份指针，**不带正文**（不变量 #22：事件流不是第二份
+        记忆真相）。指纹算法与 `journey.memory_fingerprint` 逐字相同，但不能 import
+        它——journey 反向依赖本模块（环）。`entries` 是**被备份的那份磁盘内容**的解析
+        结果，不是本次写入后的条目。没有当前 Session（直调存储、无 run 上下文）就不发：
+        观察不能反过来要求调用方提供会话。通知失败只告警，绝不影响写入。
+        `notification_mode == "off"` 时不发（#1440 P3-3：部署级开关对两个通知源一致）。
+        """
+        if self.notification_mode == "off":
+            return
+        session = current_session_var.get()
+        if session is None:
+            return
+        try:
+            session.append(
+                MEMORY_HUMAN_UPDATED,
+                {
+                    "count": len(entries),
+                    "fingerprints": [
+                        hashlib.sha256(entry.strip().encode("utf-8")).hexdigest()[:12]
+                        for entry in entries
+                    ],
+                    "backup": backup,
+                    "target": target,
+                    "source": "markdown_drift",
+                },
+                run_id=run_context_var.get(),
+            )
+        except Exception as error:  # noqa: BLE001 — 通知是观察，不能破坏写入
+            logger.warning("漂移备份通知发送失败（%s）：%s", type(error).__name__, target)
+
     def _mutate(
         self, target: str, mutator: Callable[[list[str], int], Any], *, skip_drift: bool = False,
     ) -> dict[str, Any]:
@@ -436,8 +501,12 @@ class MarkdownMemoryStore:
 
         ``mutator`` 返回 ``(new_entries, message)`` 或 ``(new_entries, message, extra)``；
         返回任何 dict 时原样透传且**不落盘**（错误 dict，或只读闭包的 dry-run 结果）。
+        漂移备份已发生时，错误 dict 也合并 ``drift_backup``（#1440 F-07：失败路径不能
+        丢掉"备份在哪"这个事实，与成功路径同形）。
         """
         path = self.path_for(target)
+        bak: str | None = None
+        drift_entries: list[str] = []
         with self._guard, self._file_lock(path):
             raw, read_ok = self.read_raw_checked(path)
             if not read_ok:
@@ -445,17 +514,23 @@ class MarkdownMemoryStore:
             bak = None if skip_drift else self._detect_external_drift(target, raw)
             # 漂移时仍以磁盘为准：解析结果就是权威内容，写回只是规范化。
             self._set_entries(target, list(dict.fromkeys(self._parse_entries(raw))))
+            if bak:
+                drift_entries = list(self._entries_for(target))
             result = mutator(self._entries_for(target), self._char_limit(target))
             if isinstance(result, dict):
-                return result
-            self._set_entries(target, result[0])
-            self._ensure_directory()
-            self._write_file(path, result[0])
-            extra_fields = result[2] if len(result) > 2 else {}
-            response = self._success_response(target, result[1], **extra_fields)
-            if bak:
-                response["drift_backup"] = bak
-            return response
+                response = {**result, "drift_backup": bak} if bak else result
+            else:
+                self._set_entries(target, result[0])
+                self._ensure_directory()
+                self._write_file(path, result[0])
+                extra_fields = result[2] if len(result) > 2 else {}
+                response = self._success_response(target, result[1], **extra_fields)
+                if bak:
+                    response["drift_backup"] = bak
+        if bak:
+            # 锁外发通知：事件写盘（fsync）不该占着记忆文件的写锁。
+            self._notify_drift(target, bak, drift_entries)
+        return response
 
     def _failure_with_entries(self, target: str, message: str) -> dict[str, Any]:
         """携带活条目列表的 consolidation 失败，让模型就地合并。"""
@@ -516,6 +591,11 @@ class MarkdownMemoryStore:
         # add 会重写整个文件，所以要和其他写路径一样走漂移备份：手改后追加不是漂移
         # （`_detect_external_drift` 只在 round-trip 失败或单条超限时返回备份路径），
         # 但**无法 round-trip** 的手改会在 add 时被静默规范化——没有备份就等于吞掉。
+        # 这是对上游 `add(..., skip_drift=True)`（`memory_tool_store.py:294-296`）的
+        # **有意偏差**：#1353 §0 裁决 1（漂移语义反转：手改合法 → 备份 + 以文件为准）
+        # 的必然推论，与 F-08 同源；追认记录见 #1441「#1353 偏差清单追认」，已落盘于
+        # https://github.com/EricKingWhy/intelligence-agent/issues/1353#issuecomment-6315586413
+        # （含 a-05 实测证据）。回退成上游不对称会重新制造「add 时手改不备份」的洞。
         return self._mutate(target, _add)
 
     def _replace_sync(

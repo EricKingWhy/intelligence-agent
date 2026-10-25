@@ -83,7 +83,7 @@
 
 .ctx-insights-heading span {
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: var(--text-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -113,7 +113,7 @@
   color: var(--text-tertiary);
   cursor: pointer;
   font: inherit;
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 4px 9px;
   white-space: nowrap;
 }
@@ -235,7 +235,7 @@
 .ctx-insights-kpi-value small {
   color: var(--text-tertiary);
   font-family: var(--font-ui);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 400;
   letter-spacing: 0;
 }
@@ -277,7 +277,7 @@
 
 .ctx-insights-card-sub {
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: var(--text-xs);
   line-height: 1.5;
   margin: 3px 0 0;
 }
@@ -287,7 +287,7 @@
   color: var(--text-tertiary);
   display: flex;
   flex-wrap: wrap;
-  font-size: 10px;
+  font-size: var(--text-xs);
   gap: 4px 18px;
   justify-content: space-between;
   padding-top: 9px;
@@ -299,7 +299,7 @@
   border-radius: 999px;
   color: var(--text-secondary);
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.3px;
   padding: 3px 8px;
 }
@@ -316,7 +316,7 @@
   color: var(--accent-text);
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
+  font-size: var(--text-xs);
   padding: 3px 9px;
   white-space: nowrap;
 }
@@ -346,7 +346,7 @@
 .ctx-insights-axis {
   fill: var(--text-tertiary);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
 
@@ -384,7 +384,7 @@
 
 .ctx-insights-heat-wd {
   color: var(--text-tertiary);
-  font-size: 8px;
+  font-size: var(--text-xs);
   line-height: 11px;
   text-align: right;
   width: 10px;
@@ -405,7 +405,7 @@
 
 .ctx-insights-heat-mon {
   color: var(--text-tertiary);
-  font-size: 8px;
+  font-size: var(--text-xs);
   line-height: 14px;
   white-space: nowrap;
 }
@@ -460,7 +460,7 @@ button.ctx-insights-heat-cell:hover {
   align-items: center;
   color: var(--text-tertiary);
   display: flex;
-  font-size: 9px;
+  font-size: var(--text-xs);
   gap: 3px;
   justify-content: flex-end;
 }
@@ -554,7 +554,7 @@ button.ctx-insights-heat-cell:hover {
   align-items: center;
   border-radius: var(--radius-sm);
   display: grid;
-  font-size: 11px;
+  font-size: var(--text-xs);
   gap: 9px;
   grid-template-columns: 7px minmax(0, 1fr) auto 48px;
   padding: 4px 6px;
@@ -581,14 +581,14 @@ button.ctx-insights-heat-cell:hover {
 .ctx-insights-legend-value {
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
 
 .ctx-insights-legend-pct {
   color: var(--text-tertiary);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-align: right;
 }
 
@@ -644,7 +644,7 @@ button.ctx-insights-heat-cell:hover {
   color: var(--text-tertiary);
   display: flex;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
   justify-content: space-between;
 }
@@ -664,7 +664,7 @@ button.ctx-insights-heat-cell:hover {
   color: var(--text-tertiary);
   display: flex;
   flex-wrap: wrap;
-  font-size: 10px;
+  font-size: var(--text-xs);
   gap: 6px 16px;
 }
 
@@ -745,7 +745,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   border-radius: var(--radius-sm);
   display: flex;
   flex-wrap: wrap;
-  font-size: 10px;
+  font-size: var(--text-xs);
   gap: 5px 14px;
   min-height: 30px;
   padding: 7px 9px;
@@ -766,7 +766,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   border-radius: 999px;
   color: var(--accent-text);
   font-family: var(--font-ui);
-  font-size: 9px;
+  font-size: var(--text-xs);
   margin-left: 6px;
   padding: 1px 6px;
 }
@@ -802,7 +802,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   align-items: baseline;
   border-top: 1px solid var(--border-subtle);
   display: grid;
-  font-size: 11px;
+  font-size: var(--text-xs);
   gap: 12px;
   grid-template-columns: 56px minmax(0, 1fr) auto;
   padding: 8px 2px;
@@ -814,7 +814,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
 
 .ctx-insights-event-seq {
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .ctx-insights-event-label {
@@ -824,7 +824,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
 .ctx-insights-event-time {
   color: var(--text-tertiary);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 /* ── 会话列表 ─────────────────────────────────────────────────────── */
@@ -856,7 +856,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--text-xs);
   height: 28px;
   padding: 0 9px;
   width: 190px;
@@ -872,7 +872,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
 
 /* 排序档比时间窗 / tabs 更密（卡片头内），只覆盖字号与内边距。 */
 .ctx-insights-sort button {
-  font-size: 10px;
+  font-size: var(--text-xs);
   padding: 4px 8px;
 }
 
@@ -901,7 +901,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   border-radius: 999px;
   color: var(--text-tertiary);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--text-xs);
   letter-spacing: 0;
   padding: 0 5px;
 }
@@ -962,7 +962,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   color: var(--text-tertiary);
   display: flex;
   flex-wrap: wrap;
-  font-size: 10px;
+  font-size: var(--text-xs);
   gap: 3px 10px;
 }
 
@@ -988,7 +988,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
 
 .ctx-insights-session-tokens span {
   color: var(--text-tertiary);
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 /* ── Fleet ────────────────────────────────────────────────────────── */
@@ -1048,7 +1048,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
 
 .ctx-insights-fleet-role {
   color: var(--text-tertiary);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.4px;
   text-transform: uppercase;
 }
@@ -1057,7 +1057,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   border: 1px solid var(--border-subtle);
   border-radius: 999px;
   color: var(--text-secondary);
-  font-size: 9px;
+  font-size: var(--text-xs);
   padding: 1px 7px;
 }
 
@@ -1086,7 +1086,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
 
 .ctx-insights-fleet-id {
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
 
@@ -1106,12 +1106,12 @@ g:hover > .ctx-insights-trend-bar.is-negative {
 
 .ctx-insights-fleet-tokens span {
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .ctx-insights-fleet-active {
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 /* ── 空态 / 错误 / 骨架 ───────────────────────────────────────────── */
@@ -1123,7 +1123,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   color: var(--text-tertiary);
   display: flex;
   flex-direction: column;
-  font-size: 11px;
+  font-size: var(--text-xs);
   gap: 6px;
   justify-content: center;
   min-height: 72px;
@@ -1156,7 +1156,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
 
 .ctx-insights-error span {
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
 
@@ -1169,7 +1169,7 @@ g:hover > .ctx-insights-trend-bar.is-negative {
   cursor: pointer;
   flex: 0 0 auto;
   font: inherit;
-  font-size: 11px;
+  font-size: var(--text-xs);
   padding: 4px 10px;
 }
 

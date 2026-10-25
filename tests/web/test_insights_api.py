@@ -48,7 +48,7 @@ def _client(tmp_path, **overrides) -> TestClient:
     settings = Settings(
         workspace_dir=str(tmp_path), model_api_key="sk-test", **overrides
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _days_ago(days: int) -> datetime:
@@ -60,6 +60,7 @@ def _seed(tmp_path, sessions: dict[str, list[tuple[str, dict, int]]]) -> None:
     app = create_app(
         Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=False,
+        allow_testserver=True,
     )
     store = app.state.agent.store
 
@@ -96,6 +97,7 @@ def _request_events(tmp_path, sid: str) -> list[SessionEvent]:
     app = create_app(
         Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=False,
+        allow_testserver=True,
     )
     return app.state.agent.store.read_events(sid)
 
@@ -230,6 +232,7 @@ def test_overview_composition_only_counts_snapshotted_sessions(tmp_path) -> None
     app = create_app(
         Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=False,
+        allow_testserver=True,
     )
     app.state.agent.context_snapshots["s1"] = (
         {"messages": 1000, "system_prompt": 200, "skills": 30, "other": 7},
@@ -319,6 +322,7 @@ def test_context_timeline_turn_granularity_collapses_a_run(tmp_path) -> None:
     app = create_app(
         Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=False,
+        allow_testserver=True,
     )
     store = app.state.agent.store
 
@@ -357,6 +361,7 @@ def test_context_timeline_skips_failed_requests_without_usage(tmp_path) -> None:
     app = create_app(
         Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=False,
+        allow_testserver=True,
     )
     store = app.state.agent.store
 
@@ -395,6 +400,7 @@ def test_context_timeline_turn_fold_keeps_usage_when_last_attempt_failed(tmp_pat
     app = create_app(
         Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=False,
+        allow_testserver=True,
     )
     store = app.state.agent.store
 
@@ -554,6 +560,7 @@ def test_context_timeline_window_matches_context_usage_when_snapshot_present(tmp
     app = create_app(
         Settings(workspace_dir=str(tmp_path), model_api_key="sk-test"),
         enable_cors=False,
+        allow_testserver=True,
     )
     app.state.agent.context_snapshots["s1"] = (
         {"messages": 3000, "system_prompt": 500, "skills": 0, "other": 0},

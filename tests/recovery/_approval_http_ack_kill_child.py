@@ -103,7 +103,9 @@ async def _main() -> None:
         workspace_dir=str(root),
         model_api_key="sk-test",
         enable_cors=False,
-    ))
+    ),
+    allow_testserver=True,
+    )
     server = uvicorn.Server(uvicorn.Config(
         app,
         host="127.0.0.1",

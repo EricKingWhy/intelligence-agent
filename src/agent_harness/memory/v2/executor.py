@@ -55,10 +55,10 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,6 +75,7 @@ from agent_harness.memory.v2.budget import (
     MemoryModelRole,
     next_attempt,
 )
+from agent_harness.memory.v2.capability import MemoryContentRejected
 from agent_harness.memory.v2.formation import (
     AdjudicatedContent,
     AdjudicationAction,
@@ -93,6 +94,7 @@ from agent_harness.memory.v2.jobs import (
     ProtectedFactExtractionState,
     SqliteMemoryV2JobStore,
 )
+from agent_harness.memory.v2.origin import BACKGROUND_REVIEW, reset_origin, set_origin
 from agent_harness.memory.v2.policy import select_candidates
 from agent_harness.memory.v2.projection import (
     MAX_SIMILAR_MEMORIES,
@@ -115,6 +117,7 @@ from agent_harness.memory.v2.types import (
     SourceType,
     TrustedMemoryIdentity,
 )
+from agent_harness.memory.v2.write_approval import BLOCKED_REASON, _identity
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.fallback import is_transient_model_error
 from agent_harness.session import RUN_COMPLETED, USER_MESSAGE, Session, SessionEvent
@@ -127,6 +130,8 @@ from agent_harness.session.event import MEMORY_DEGRADED, MEMORY_UPDATED
 from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 def _observation_hash(value: Any) -> str:
@@ -518,6 +523,9 @@ class MemoryJobResult:
     written: tuple[MemoryRecordV2, ...] = ()
     attempts: int = 0
     fallback_used: bool = False
+    #: #1461：`outcome=BLOCKED` 时落进 `memory_v2_blocked` 的行 id（零记录写入，
+    #: 所以 `written` 为空）。只能走返回值：runner 手里的 `job` 是执行**前**的快照。
+    blocked_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,6 +558,9 @@ class _RunState:
     actions: dict[str, int] = field(default_factory=dict)
     discarded: dict[str, int] = field(default_factory=dict)
     memory_ids: list[str] = field(default_factory=list)
+    #: #1461：gate 开时落进 `memory_v2_blocked` 的行 id，与因跨 job 同内容被抑制的组数。
+    blocked_ids: list[str] = field(default_factory=list)
+    suppressed_duplicates: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -562,6 +573,8 @@ class _RunState:
             "actions": dict(self.actions),
             "discarded": dict(self.discarded),
             "memory_ids": list(self.memory_ids),
+            "blocked_ids": list(self.blocked_ids),
+            "suppressed_duplicates": self.suppressed_duplicates,
         }
 
 
@@ -571,6 +584,26 @@ class _Degraded(Exception):
     def __init__(self, reason: DegradedReason) -> None:
         super().__init__(reason.value)
         self.reason = reason
+
+
+def _tagged(
+    work: Callable[[aiosqlite.Connection], Awaitable[T]],
+) -> Callable[[aiosqlite.Connection], Awaitable[T]]:
+    """给写入事务包一层 ``BACKGROUND_REVIEW`` 打标（#1438 F-02）。
+
+    打在 ``work`` 而不是整个 ``run``：模型调用与检索是**读**，标的是"这次写入是谁发起的"；
+    范围收在事务内也保证退出即还原（异常路径同样走 `finally`），不会漏到同 task 的
+    后续前台调用上。
+    """
+
+    async def tagged(connection: aiosqlite.Connection) -> T:
+        token = set_origin(BACKGROUND_REVIEW)
+        try:
+            return await work(connection)
+        finally:
+            reset_origin(token)
+
+    return tagged
 
 
 class _NothingToApply(Exception):
@@ -607,6 +640,7 @@ class MemoryJobExecutor:
         limits: MemoryBudgetLimits = DEFAULT_BUDGET_LIMITS,
         clock: Callable[[], float] = time.monotonic,
         observer: Callable[[str, dict[str, Any]], None] | None = None,
+        blocked: Any | None = None,
     ) -> None:
         self._jobs = jobs
         self._writer = writer
@@ -616,6 +650,9 @@ class MemoryJobExecutor:
         self._limits = limits
         self._clock = clock
         self._observer = observer
+        #: #1461：gate 开时的落点。`Any` 而不是那个类：`write_approval` 已经由本模块
+        #: import（`_identity`），反向标注会让两个模块的依赖方向看起来是双向的。
+        self._blocked = blocked
 
     # ----------------------------------------------------------------------------------
     # 入口
@@ -626,10 +663,15 @@ class MemoryJobExecutor:
         run_events: Sequence[SessionEvent], roles: MemoryModelRoles,
         history: Sequence[SessionEvent] = (), sink: MemoryJobEventSink | None = None,
         explicit_remember: bool = False, fallback_enabled: bool = True,
+        write_approval: bool = False,
     ) -> MemoryJobResult | None:
         """执行作业；`None` = 竞争失败（属主不是我 / lease 过期 / 已终结）——无副作用。
 
         已终结的 job 直接返回它的终态（幂等调用，AC7 的"零重复"在入口这一层就成立）。
+
+        `write_approval`（#1461）由 runner 按**运行时**设置传入：为真时写入不进记录表，
+        而是在同一事务里落进 `memory_v2_blocked` 等人处置（`_apply_blocked`）。默认关，
+        与 `MemorySettingsV2.write_approval` 的默认值一致，既有直调点行为不变。
         """
         if job.stage.is_terminal:
             self._observe("replay", {
@@ -755,7 +797,8 @@ class MemoryJobExecutor:
                     sink=sink)
             return await self._apply(job, worker_id=worker_id, actions=actions, state=state,
                                      run_id=run_id, sink=sink, refs=refs,
-                                     relevant_memories=relevant_memories)
+                                     relevant_memories=relevant_memories,
+                                     write_approval=write_approval)
         except _Degraded as failure:
             return await self._degrade(job, worker_id=worker_id, run_id=run_id, sink=sink,
                                        state=state, reason=failure.reason)
@@ -1182,6 +1225,7 @@ class MemoryJobExecutor:
         state: _RunState, run_id: str | None,
         sink: MemoryJobEventSink | None, refs: Mapping[str, str],
         relevant_memories: Sequence[MemoryRecordV2],
+        write_approval: bool = False,
     ) -> MemoryJobResult | None:
         """在**一个事务**里写入全部动作与 job 终态（AC6 / AC7）。
 
@@ -1193,7 +1237,14 @@ class MemoryJobExecutor:
         翻完就落盘。翻早了（比如裁决一回来就把候选改成真 id）会让"模型引的东西"没法再被
         校验，翻晚了这个函数就是唯一还看得见别名的位置——落进记录里的必须是真实 id，
         否则那条记忆的 provenance 指向一个不存在的句柄。
+
+        `write_approval`（#1461）为真时整段让给 `_apply_blocked`：审批门开着，这批动作
+        一条记录都不写，改为在同一事务里落进 `memory_v2_blocked`。gate 关的路径逐字不动。
         """
+        if write_approval:
+            return await self._apply_blocked(
+                job, worker_id=worker_id, actions=actions, state=state, run_id=run_id,
+                sink=sink, refs=refs, relevant_memories=relevant_memories)
         state.phase = MemoryJobStage.APPLYING.value
 
         async def work(
@@ -1230,7 +1281,7 @@ class MemoryJobExecutor:
         try:
             committed = await self._jobs.commit_with_outcome(
                 job_id=job.job_id, worker_id=worker_id, outcome=MemoryJobOutcome.COMMITTED,
-                state=state.as_dict, work=work)
+                state=state.as_dict, work=_tagged(work))
         except _NothingToApply:
             # 事务已回滚（零写入）⇒ 改记安静成功：没有任何变更，就不是 COMMITTED。
             return await self._complete_quietly(
@@ -1274,6 +1325,92 @@ class MemoryJobExecutor:
             job_id=job.job_id, stage=MemoryJobStage.COMPLETED,
             outcome=MemoryJobOutcome.COMMITTED, reason=None, written=committed,
             attempts=state.attempts, fallback_used=state.fallback_used)
+
+    async def _apply_blocked(
+        self, job: MemoryFormationJob, *, worker_id: str,
+        actions: Sequence[tuple[AdjudicationResult, MemoryScope]],
+        state: _RunState, run_id: str | None,
+        sink: MemoryJobEventSink | None, refs: Mapping[str, str],
+        relevant_memories: Sequence[MemoryRecordV2],
+    ) -> MemoryJobResult | None:
+        """#1461：审批门开着 ⇒ 零记录写入，把**写入意图**整批落进 `memory_v2_blocked`。
+
+        两段，都在 `commit_with_outcome` 的那**一笔**事务里：
+
+        1. **校验段（零写入）**：逐条复现写路径的校验与 draft 构造，异常集合与 `_apply`
+           完全相同（逐条隔离、同样经 `_discard_key` 归因）。校验不过的动作不落行——
+           给用户一条注定 promote 失败的待办是更坏的拒绝。
+        2. **落行段**：存活集按 identity 分组（一个 job 至多两组：user_global / project），
+           逐组查重后插行。行里存的是**已解析的写入意图**（refs 已翻成真实 event_id、
+           pin 已钉住），所以 promote 不需要 job 与 refs 就能重放。
+
+        与 job 终态同事务是 AC7① 的机制根：崩溃 ⇒ 全回滚 ⇒ job 非终态、零 blocked 行，
+        恢复扫描重跑一次即可，不会留下半批待办。提交后**不**调 `mirror_committed`
+        （一条记录都没写），也**不**发 `memory/updated`（人面事件归 runner）。
+        """
+        state.phase = MemoryJobStage.APPLYING.value
+        blocked = self._blocked
+        if blocked is None:
+            # 装配错误：gate 开着却没有 blocked 面。响亮失败，不静默落成"没拦住"。
+            raise RuntimeError("write_approval is on but no BlockedWriteStore is wired")
+
+        async def work(connection: aiosqlite.Connection) -> tuple[str, ...]:
+            surviving: list[dict[str, Any]] = []
+            written: dict[str, int] = {}
+            for verdict, candidate_scope in actions:
+                try:
+                    item = _blocked_action(
+                        verdict, job=job, refs=refs, candidate_scope=candidate_scope,
+                        relevant_memories=relevant_memories)
+                except (PermissionError, KeyError, ValueError, _UnresolvedEvidence) as error:
+                    key = _discard_key(error)
+                    state.discarded[key] = state.discarded.get(key, 0) + 1
+                    continue
+                surviving.append(item)
+                written[verdict.action.value] = written.get(verdict.action.value, 0) + 1
+            state.actions = written
+            if not surviving:
+                # 与写路径同一出口：一条都不成立就不是"被拦下"，是没什么可写的（AC2）。
+                raise _NothingToApply
+            for identity, project_id, group in _blocked_groups(job, surviving):
+                blocked_id = await blocked.insert_in(
+                    connection, job_id=job.job_id, identity=identity,
+                    project_id=project_id, payload={"actions": group})
+                if blocked_id is None:
+                    # 同 identity 同内容已经有人处置过：不再问第二遍（票面 §4.3）。
+                    state.suppressed_duplicates += 1
+                else:
+                    state.blocked_ids.append(blocked_id)
+            return tuple(state.blocked_ids)
+
+        try:
+            committed = await self._jobs.commit_with_outcome(
+                job_id=job.job_id, worker_id=worker_id, outcome=MemoryJobOutcome.BLOCKED,
+                reason=BLOCKED_REASON, state=state.as_dict, work=_tagged(work))
+        except _NothingToApply:
+            return await self._complete_quietly(
+                job, worker_id=worker_id, reason=None, state=state, run_id=run_id, sink=sink)
+        except Exception:
+            logger.exception("Memory V2 formation blocked-apply failed")
+            raise _Degraded(DegradedReason.APPLY_FAILED) from None
+        if committed is None:
+            return await self._lost(job.job_id)
+        state.phase = MemoryJobStage.COMPLETED.value
+        blocked_ids = tuple(committed)
+        self._observe("apply", {
+            "job_id": job.job_id, "session_id": job.session_id,
+            "stage": MemoryJobStage.COMPLETED.value,
+            "outcome": "blocked", "count": len(blocked_ids),
+            "blocked_ids": list(blocked_ids),
+            "suppressed_duplicates": state.suppressed_duplicates,
+            "actions": dict(state.actions),
+            "scope": "project" if job.trusted.project_id else "user_global",
+        })
+        return MemoryJobResult(
+            job_id=job.job_id, stage=MemoryJobStage.COMPLETED,
+            outcome=MemoryJobOutcome.BLOCKED, reason=BLOCKED_REASON,
+            attempts=state.attempts, fallback_used=state.fallback_used,
+            blocked_ids=blocked_ids)
 
     async def _apply_one(
         self, connection: aiosqlite.Connection, verdict: AdjudicationResult, *,
@@ -1469,6 +1606,71 @@ def _draft_from(
     )
 
 
+def _blocked_action(
+    verdict: AdjudicationResult, *, job: MemoryFormationJob, refs: Mapping[str, str],
+    candidate_scope: MemoryScope, relevant_memories: Sequence[MemoryRecordV2],
+) -> dict[str, Any]:
+    """#1461：把一条裁决变成**可重放的写入意图**（`_apply_blocked` 的校验段）。
+
+    这里只做校验与 draft 构造，一次存储写入都不发生——校验不过就抛，与写路径的异常集合
+    相同，由调用方逐条隔离。pin 取 `relevant_memories` 里那条目标行的四个字段：promote
+    时拿它跟库内当前行比对（快照只作钉存来源，不作校验依据）。
+    """
+    if verdict.action is AdjudicationAction.INVALIDATE:
+        assert verdict.target_memory_id is not None  # 契约保证（§6.3）
+        _validate_adjudication_target(
+            verdict.target_memory_id, candidate_scope=candidate_scope,
+            trusted=job.trusted, relevant_memories=relevant_memories)
+        return {"action": "invalidate", "scope": candidate_scope.value, "draft": None,
+                "pin": _pin(_target(verdict.target_memory_id, relevant_memories))}
+    content = verdict.result
+    assert content is not None  # ADD / UPDATE 的契约保证，见 formation.AdjudicationResult
+    draft = _draft_from(content, job, refs)
+    if verdict.action is AdjudicationAction.ADD:
+        return {"action": "add", "scope": candidate_scope.value,
+                "draft": draft.model_dump(mode="json"), "pin": None}
+    assert verdict.target_memory_id is not None
+    _validate_adjudication_target(
+        verdict.target_memory_id, candidate_scope=candidate_scope,
+        trusted=job.trusted, relevant_memories=relevant_memories)
+    return {"action": "update", "scope": candidate_scope.value,
+            "draft": draft.model_dump(mode="json"),
+            "pin": _pin(_target(verdict.target_memory_id, relevant_memories))}
+
+
+def _target(
+    memory_id: str, relevant_memories: Sequence[MemoryRecordV2],
+) -> MemoryRecordV2:
+    """校验刚通过的目标行（`_validate_adjudication_target` 保证它在这批里）。"""
+    return next(memory for memory in relevant_memories if memory.id == memory_id)
+
+
+def _pin(record: MemoryRecordV2) -> dict[str, Any]:
+    """promote 时的乐观钉存：四个字段全等才算目标没动过。"""
+    return {"memory_id": record.id, "root_id": record.root_id,
+            "version": record.version, "updated_at": record.updated_at}
+
+
+def _blocked_groups(
+    job: MemoryFormationJob, actions: Sequence[dict[str, Any]],
+) -> list[tuple[str, str | None, list[dict[str, Any]]]]:
+    """按 identity 分组（一个 job 至多两组：`user_global` / `project`）。
+
+    行 = **一组同 identity 的动作**，不是一条动作：promote 要在一笔事务里放行整组，
+    逐条放行会造出 block 时从未存在过的混合状态（设计 §3/§4）。
+    """
+    groups: list[tuple[str, str | None, list[dict[str, Any]]]] = []
+    for scope in (MemoryScope.USER_GLOBAL, MemoryScope.PROJECT):
+        group = [item for item in actions if item["scope"] == scope.value]
+        if not group:
+            continue
+        project_id = job.trusted.project_id if scope is MemoryScope.PROJECT else None
+        trusted = TrustedMemoryIdentity(
+            tenant_id=job.tenant_id, user_id=job.user_id, project_id=project_id)
+        groups.append((_identity(trusted), project_id, group))
+    return groups
+
+
 def _memory_payload(memory: ProjectedMemory) -> dict[str, Any]:
     """裁决输入里的既有记忆：与 formation 侧同一套最小可见面（无身份字段）。"""
     return {"memory_id": memory.memory_id, "kind": memory.kind, "scope": memory.scope,
@@ -1534,12 +1736,16 @@ def _tally(values: Iterable[str]) -> dict[str, int]:
 def _discard_key(error: BaseException) -> str:
     """一条动作被丢弃的稳定归因（进 job 的 `state.discarded`）。
 
-    `_UnresolvedEvidence` 在前（它是 `ValueError` 的子类，先判才不会落进末条）；`PermissionError`
-    次之（`UntrustedIdentityError` 是它的子类，而"越权"比"冲突"更值得单独看见——把越权归进
+    `_UnresolvedEvidence` 在前（它是 `ValueError` 的子类，先判才不会落进末条）；
+    `MemoryContentRejected` 次之（#1440 P4：它是 `PermissionError` 的子类，但"内容被拒"
+    不是越权，混进 `target_unauthorized` 会让诊断读错因）；`PermissionError` 再其次
+    （`UntrustedIdentityError` 是它的子类，而"越权"比"冲突"更值得单独看见——把越权归进
     "冲突"会让一次跨用户的 UPDATE 尝试看起来像一次普通版本竞争）。
     """
     if isinstance(error, _UnresolvedEvidence):
         return "evidence_unresolved"
+    if isinstance(error, MemoryContentRejected):
+        return "content_rejected"
     if isinstance(error, PermissionError):
         return "target_unauthorized"
     if isinstance(error, KeyError):

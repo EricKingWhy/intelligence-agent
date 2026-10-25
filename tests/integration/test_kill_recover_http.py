@@ -59,7 +59,9 @@ def test_kill_scan_auto_adjudicates_write_call(tmp_path: Path):
     settings = Settings(
         _env_file=None, workspace_dir=str(root), model_api_key="sk-test"
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     with TestClient(app) as client:  # lifespan：启动扫描恰一次
         # 启动扫描已用自动裁决结清 write（MUTATING + 未声明 replay_safe），
         # 快照端点不再显示 needs_manual_reconcile。

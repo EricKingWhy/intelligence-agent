@@ -105,6 +105,7 @@ from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.model.config import ModelConfig
 from agent_harness.model.provider import create_chat_model
 from agent_harness.session import (
+    MEMORY_HUMAN_BLOCKED,
     MEMORY_HUMAN_UPDATED,
     USER_MESSAGE,
     Session,
@@ -336,13 +337,21 @@ def run_slice_bounds(
 
 @runtime_checkable
 class MemoryFormationNotifier(Protocol):
-    """运行时把一轮终结交给记忆形成的唯一入口（#298 T7b）。
+    """运行时把一轮的**终结**交给记忆形成的唯一入口（#298 T7b / #1439 F-03）。
 
     为什么是 Protocol，而不是让 `agent/runtime.py` 直接收 `MemoryJobRunner`：Runtime
     需要的只是"把这一轮告诉宿主"这一件事，而 `MemoryJobRunner` 是**作业宿主子系统**
     ——它自己拥有服务循环、认领、恢复、模型调用器与事件出口。让 agent 核心依赖那一整套
     （连同它背后的 jobs / executor / policy / formation 全链）等于把"运行时收尾"与
     "记忆作业怎么跑"焊在一起；而这个端口只有一行签名。
+
+    `notify_run_finished` 是终结入队，必须幂等、且不许把故障抛回 Runtime。
+
+    **轮次重置是端口之外的可选扩展能力。** Runtime 用 `getattr` 探测
+    `notify_run_started`（Hermes `turn_context._reset_per_turn_agent_state` 的
+    turn-start 同位）：只关心终结接缝的替身（集成测试的合成宿主）不必为一个空操作补齐
+    方法，生产宿主 `MemoryJobRunner` 则两个都实现（同样幂等、同样不抛）。所以这里不
+    声明它——声明了就等于说"替身必须有它"，与探测口径矛盾。
 
     `MemoryJobRunner` 在结构上满足它（因此它没有被继承）。`runtime_checkable` 让装配层
     能对"给进来的东西真的满足契约"下断言，而不是只靠注解。
@@ -423,8 +432,31 @@ class MemoryJobRunner:
         return self._max_concurrency
 
     # ----------------------------------------------------------------------------------
-    # 入队（Runtime 的终结臂调用）
+    # 轮次边界（Runtime 的 run-start / 终结臂调用）
     # ----------------------------------------------------------------------------------
+
+    def notify_run_started(self) -> None:
+        """一次 run 开始：把「本轮 consolidation 失败预算」归零（#1439 F-03）。
+
+        与 Hermes `turn_context._reset_per_turn_agent_state`（turn start 统一重置）同位：
+        markdown store 是**进程级单例**（`build_memory_v2_service` 建一次，跨 run 复用），
+        不在这里归零，计数就会跨 run 累积、长进程里后续 run 第 1 次失败就被判 TERMINAL。
+
+        同步、不抛：Runtime 在 run 的最前面调它，那时还没有可终结的 run，抛异常会变成
+        "run 没开始就失败"。store 缺席（纯 SQLite 部署 / 未接 markdown）时是 no-op。
+
+        **预算是进程级而非 run 级**（与上面的单例同源）：计数器挂在共享 store 上，
+        没有 session/run 维度。并发 run 的 run-start 会互相把对方的计数清零——单用户
+        部署里并发 run 罕见，影响小；多用户共享一个进程时这是真实的口径缺口，彻底
+        修法要按 session 分桶，超出本票范围。
+        """
+        try:
+            markdown = getattr(self.memory_v2, "markdown", None)
+            reset = getattr(markdown, "reset_consolidation_failures", None)
+            if callable(reset):
+                reset()
+        except Exception:
+            logger.exception("Memory V2 run-start 重置失败（旁路，不影响本轮）")
 
     async def notify_run_finished(
         self, *, session_id: str, run_id: str, terminal_status: str,
@@ -656,31 +688,36 @@ class MemoryJobRunner:
                 # #1039：降级开关**每 job 运行时读**（与 `extraction_enabled` 同链），
                 # 让面板改动对随后执行的 job 立即生效；无 V2 service 时退回构造期默认。
                 fallback_enabled = self._fallback_enabled
+                write_approval = False
                 if self.memory_v2 is not None:
                     trusted = TrustedMemoryIdentity(
                         tenant_id=job.tenant_id, user_id=job.user_id,
                         project_id=job.project_id,
                     )
                     try:
-                        fallback_enabled = (
-                            await self.memory_v2.get_settings(trusted)
-                        ).fallback_enabled
+                        settings = await self.memory_v2.get_settings(trusted)
+                        fallback_enabled = settings.fallback_enabled
+                        write_approval = settings.write_approval
                     except Exception:
                         # 读设置是本 job 的**附加**输入，不是执行的前提：设置存储抖一下不应把
                         # 一轮记忆判成 JOB_FAILED。但也**不能**退回"默认开"——在用户可能已明确
                         # 关掉开关的前提下，一次读取抖动不得把治理选择翻回开（记忆内容可能随之
                         # 外泄到备用 provider）。故 fail-closed：本次不尝试确定性 fallback
                         # （= #1039 之前的保守行为，任务仍以终态收口，下一轮 job 读到设置即恢复）。
+                        # #1461 同一条道理，但保守侧相反：gate 的宽松侧是"关"，所以读失败时
+                        # 按**开**处理（写入落 blocked 等人处置，而不是直落盘）。
                         logger.exception(
                             "Memory V2 job %s: cannot read per-user settings; treating the "
-                            "deterministic fallback switch as disabled for this job",
+                            "deterministic fallback switch as disabled and the write-approval "
+                            "gate as enabled for this job",
                             job.job_id,
                         )
                         fallback_enabled = False
+                        write_approval = True
                 result = await self._executor.run(
                     job, worker_id=self._worker_id, run_events=run_events,
                     history=history, roles=self._roles, sink=self._sink_for(job),
-                    fallback_enabled=fallback_enabled,
+                    fallback_enabled=fallback_enabled, write_approval=write_approval,
                 )
             except Exception:
                 logger.exception("Memory V2 job %s failed outside the executor", job.job_id)
@@ -702,8 +739,30 @@ class MemoryJobRunner:
         - 事件载荷**只带计数与指纹/指针**（不变量 #22）。摘要行本身（verbose 档带
           内容预览）只进日志；
         - `off` 档连日志摘要也不生成（`summarize_*` 自己返回空）。
+
+        #1461 补一条边界：`BLOCKED` 报的是"写入被拦下"这一**事实**（计数 + 行 id），
+        不是内容摘要——没有已提交内容可摘，也刻意不摘（被拦下的内容还没经过人）。
         """
-        if result is None or result.outcome is not MemoryJobOutcome.COMMITTED:
+        if result is None or result.outcome not in (
+            MemoryJobOutcome.COMMITTED, MemoryJobOutcome.BLOCKED,
+        ):
+            return
+        if result.outcome is MemoryJobOutcome.BLOCKED:
+            logger.info(
+                "Memory V2 job %s: %d write(s) blocked for approval (%s)",
+                job.job_id, len(result.blocked_ids), ", ".join(result.blocked_ids),
+            )
+            if self._notification_mode == "off":
+                return
+            self._sink_for(job).emit(
+                MEMORY_HUMAN_BLOCKED,
+                {
+                    "count": len(result.blocked_ids),
+                    "blocked_ids": list(result.blocked_ids),
+                    "job_id": job.job_id,
+                },
+                run_id=job.run_id,
+            )
             return
         if not result.written:
             return

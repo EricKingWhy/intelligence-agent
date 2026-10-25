@@ -1,8 +1,8 @@
 """#1353 AC6：不喊关键词也能记住——真实 harness run → 真实后台 review job → markdown 落盘。
 
 票面判据（原文）：固定 fixture 对话（含 3 个可记忆事实：用户姓名 / 偏好 / 环境事实，
-**不含"记住"关键词**）跑完一个真实 harness run（后台 review，N=10 turns 触发或压缩前
-触发），MEMORY.md / USER.md 新增条目覆盖全部 3 个事实。
+**不含"记住"关键词**）跑完一个真实 harness run（后台 review，N=10 turns 触发），
+MEMORY.md / USER.md 新增条目覆盖全部 3 个事实。
 
 # "端到端"在这里的边界
 
