@@ -94,7 +94,7 @@ async def test_no_instruction_files_leave_the_model_request_unchanged(
     expected_context = DEFAULT_REGISTRY.assemble("runtime:context_snapshot", {
         "cwd": str(Path.cwd()),
         "os": f"{platform.system()} {platform.release()}",
-        "date": date.today().isoformat(),  # noqa: DTZ011 - matches runtime local-date prompt.
+        "date": date.today().isoformat(),  # matches runtime local-date prompt.
     }).meta_user_text
 
     assert sum(
