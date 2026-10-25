@@ -1006,14 +1006,13 @@ export interface ConversationState {
 /** 进度清单行（#381 W-27；PRD 长任务 §7.1 五字段，`task/plan_updated.data.items`）。
  *  status 的封闭三态（pending / in_progress / completed）由服务端 handler 硬校验
  *  （PRD §7.2，session/plan.py）；前端类型刻意放宽为 string——投影不改写未知值，
- *  未知状态的渲染容错归 PlanList（票面：双 in_progress 只高亮第一个、不崩）。 */
-export interface PlanItem {
-  id: string;
-  content: string;
-  activeForm: string;
-  status: string;
-  source: string;
-}
+ *  未知状态的渲染容错归 PlanList（票面：双 in_progress 只高亮第一个、不崩）。
+ *
+ *  #1498 起**定义只有一份**（`tui/src/shared/event-semantics.ts`，与 TUI 同一份
+ *  解析函数的返回类型）；这里只转出，不再各写一份同形接口。 */
+import type { PlanItem } from '../../tui/src/shared/event-semantics.ts';
+
+export type { PlanItem };
 
 /** ADR-0030 §2 术语表的前端镜像：queue（等下个 run）与 steer（同 run 注入 /
  *  降级投递）两种载体。`kind` 决定投递边界；id 是 queue_id（queue）或

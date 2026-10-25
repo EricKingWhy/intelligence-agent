@@ -71,7 +71,7 @@ def _client(tmp_path: Path) -> TestClient:
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test"
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _create_payload(task: str = "先出计划") -> dict[str, Any]:

@@ -60,7 +60,11 @@ async def test_http_200_approval_survives_barrier_kill_and_startup_recovery(
         async with httpx.AsyncClient(timeout=None) as client, client.stream(
             "POST",
             f"http://127.0.0.1:{port}/api/sessions",
-            json={"task": "等待一次高危工具审批", "permission_mode": "workspace-write"},
+            json={
+                "task": "等待一次高危工具审批",
+                "permission_mode": "workspace-write",
+                "sandbox_backend": "local",
+            },
         ) as response:
             assert response.status_code == 200
             async for line in response.aiter_lines():
@@ -107,16 +111,19 @@ async def test_http_200_approval_survives_barrier_kill_and_startup_recovery(
         await asyncio.wait_for(process.wait(), timeout=10)
 
         # 新 AppState/lifespan 执行真实启动扫描与恢复，不复用崩溃进程内存。
-        restart_app = create_app(Settings(
-            _env_file=None,
-            workspace_dir=str(tmp_path),
-            model_api_key="sk-test",
-            enable_cors=False,
-        ))
+        restart_app = create_app(
+            Settings(
+                _env_file=None,
+                workspace_dir=str(tmp_path),
+                model_api_key="sk-test",
+                enable_cors=False,
+            ),
+            allow_testserver=True,
+        )
         async with restart_app.router.lifespan_context(restart_app):
             transport = httpx.ASGITransport(app=restart_app)
             async with httpx.AsyncClient(
-                transport=transport, base_url="http://restart.test"
+                transport=transport, base_url="http://127.0.0.1:8000"
             ) as client:
                 stale = await client.post(
                     f"/api/sessions/{session_id}/approve",

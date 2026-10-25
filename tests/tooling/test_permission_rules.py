@@ -81,6 +81,227 @@ class TestBashClassification:
     def test_readonly_subset_allowed(self, command: str) -> None:
         assert classify_bash_command(command) is RuleVerdict.ALLOW
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find . -exec echo {} +",
+            "find . -execdir echo {} +",
+            "find . -ok echo {} +",
+            "find . -okdir echo {} +",
+            "find . -delete",
+            "find . -fprint result.txt",
+            "find . -fprint0 result.txt",
+            "find . -fprintf result.txt %p",
+            "find . -fls result.txt",
+            "find . -name x -delete",
+            "cat local.txt > result.txt",
+            "cat ../outside.txt",
+            "cat ./../outside.txt",
+            "cat /etc/passwd",
+            "cat ~",
+            "cat %TEMP%",
+            "cat $HOME/x",
+            "cat C:secret.txt",
+            "cat {/etc,}/passwd",
+            "cat %~dp0secret.txt",
+            r"cat C:\outside.txt",
+            r"cat \outside.txt",
+            "cat local.txt\nrm local.txt",
+            "tree -o result.txt",
+            "file -C",
+        ],
+    )
+    def test_readonly_subset_rejects_actions_and_outside_paths(
+        self, command: str,
+    ) -> None:
+        """Unsafe actions, paths, shell syntax, and writer flags must not bypass approval."""
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "wc -c --files0-from=/tmp/rev1484-out/list.txt",
+            "grep -f/etc/passwd .",
+            "grep --file=/etc/passwd .",
+            "grep --exclude-from=/etc/passwd .",
+            "file -f/etc/passwd",
+            "file --files-from=/etc/passwd",
+            "head --files0-from=x",
+            "diff --from-file=/etc/passwd",
+            "date -f/etc/passwd",
+        ],
+    )
+    def test_file_consuming_options_require_approval(self, command: str) -> None:
+        """文件承载选项不能进入可证明安全的免问子集。"""
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # GNU getopt_long 接受无歧义前缀；`--files0` 就是 `--files0-from`。
+            "wc -c --files0=list.txt",
+            "wc -c --files0-fro=list.txt",
+            "wc -c --files0-fro list.txt",
+        ],
+    )
+    def test_long_option_abbreviations_require_approval(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 短旗附着值与空格形一样能承载工作区外路径。
+            "diff -X/etc/passwd a.txt b.txt",
+            "file -m/etc/passwd README.md",
+            "diff --exclude-from=/etc/passwd a.txt b.txt",
+            "file --magic-file=/etc/passwd README.md",
+            "tree --fromfile=/etc/passwd",
+            "tree --fromfile /etc/passwd",
+            # 相对值：路径判定看不出越界，只有选项表本身能拦（文件内容可再指向外部）。
+            "diff -Xexcl.txt a.txt b.txt",
+            "file -mmagic.mgc README.md",
+            "tree --fromfile=list.txt",
+        ],
+    )
+    def test_attached_file_option_values_require_approval(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 票面要求的两条之一：`file --magic-file=` 现已进表（P1-3）由表拦，
+            # `cat/stat --nope=` 是真正的表外选项，只由 `=` 提取段拦住。
+            "file --magic-file=/etc/passwd README.md",
+            "cat --nope=/etc/passwd",
+            "stat --nope=/etc/passwd",
+        ],
+    )
+    def test_equals_attached_value_is_a_path_candidate(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 盘符判定只看 token 开头：参数中间的冒号不是盘符。
+            "cat notes:2026.txt",
+            "grep -n TODO: src/app.py",
+            'grep -rn "key:" .',
+            "echo done:",
+        ],
+    )
+    def test_colon_inside_argument_is_not_a_drive_letter(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # GNU getopt_long 只把「输入 token 是选项名前缀」当缩写；反向（token 更长）
+            # 是另一个选项，不是缩写。`--` 是选项终止符，不是长选项本身。
+            "grep -rn --files-with-matches TODO src/",
+            "grep -- files",
+        ],
+    )
+    def test_reverse_long_prefix_and_terminator_are_allowed(self, command: str) -> None:
+        """反向长选项前缀与 `--` 终止符不得被文件承载选项表误伤（P2-7）。"""
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    def test_pattern_file_attached_value_inside_cluster_remains_allowed(self) -> None:
+        """集内：簇内前置了其它旗的 `-f` 附着值（`-ifile` = `-i -f ile`）仍 ALLOW。"""
+        assert classify_bash_command("grep -ifile README.md") is RuleVerdict.ALLOW
+
+    def test_pattern_file_attached_value_at_cluster_start_is_asked(self) -> None:
+        """集外：簇首 `-f<相对值>` 与空格形同语义，恢复 ASK（P2-8）。"""
+        assert classify_bash_command("grep -fpatterns.txt src/app.py") is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 短旗簇逐字符扫描：`-e`/`-i` 的取值不是文件承载选项；
+            # `-if` 仍在簇内触达 `-f`，附着值走路径判定。
+            "grep -efile README.md",
+            "grep -ifile README.md",
+            "date -Iseconds",
+            "date -Idate",
+        ],
+    )
+    def test_short_flag_values_remain_allowed(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    @pytest.mark.parametrize("command", ["grep -if/etc/passwd .", "file -Nm/etc/passwd"])
+    def test_attached_value_inside_cluster_is_path_checked(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "find .",
+            "find . -maxdepth 2 -type f -print",
+            "find . -name '*.py' -print0",
+            "find . -printf '%p'",
+            "date +%Y",
+        ],
+    )
+    def test_safe_find_queries_remain_allowed(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    def test_find_unknown_expression_is_asked(self) -> None:
+        assert classify_bash_command("find . -unknown-action") is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "date 2026-01-01",
+            "date --set=2026-01-01",
+            "date -s2026-01-01",
+            "date -us20260101",
+            "date -u -s20260101",
+        ],
+    )
+    def test_date_setter_is_asked(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "date",
+            "date +%Y",
+            "date -u",
+            "date -R",
+            "date -I",
+            "date -u +%Y",
+            "hostname",
+            "hostname -a",
+            "hostname -A",
+            "hostname -d",
+            "hostname -f",
+            "hostname -i",
+            "hostname -I",
+            "hostname -s",
+            "hostname -y",
+        ],
+    )
+    def test_query_only_date_and_hostname_flags_remain_allowed(
+        self, command: str,
+    ) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "hostname NAME",
+            "hostname -F FILE",
+            "hostname -F/etc/hostname",
+            "hostname -bF/etc/hostname",
+            "hostname --file=/etc/hostname",
+        ],
+    )
+    def test_hostname_mutating_forms_are_asked(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
+    @pytest.mark.parametrize("command", ["find . -maxdepth", "find . -type"])
+    def test_incomplete_find_expression_is_asked(self, command: str) -> None:
+        assert classify_bash_command(command) is RuleVerdict.ASK
+
     def test_pipe_connector_not_readonly(self) -> None:
         """含 `|` 连接符 → 不算只读（ASK）。"""
         assert classify_bash_command("ls -la | grep x") is RuleVerdict.ASK

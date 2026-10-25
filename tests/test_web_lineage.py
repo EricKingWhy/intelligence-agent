@@ -18,14 +18,18 @@ from agent_harness.web.app import create_app
 
 def _client(tmp_path):
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     return TestClient(app)
 
 
 def _build_family(tmp_path) -> None:
     """r(root) → fork f1（经 meta 行模拟）→ d1（delegation 边）。"""
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
     meta_store = app.state.agent.session_meta_store
 

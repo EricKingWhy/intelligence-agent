@@ -69,6 +69,23 @@ export function AskUserCard({
   const [collapsed, setCollapsed] = useState(false);
   const [closed, setClosed] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  /* #1523 AC3：最终提交（提交/整卡跳过）后的焦点落点。`resuming` 会把按钮置禁用——
+   * 禁用瞬间浏览器把焦点丢给 body；成功则卡片整体卸载。两段都不能悬空：提交即把
+   * 焦点落到明确可操作位置（composer 输入框，App 的既有落点惯例——命令面板关闭、
+   * run 启动都落 `#composer-input`）；失败（卡仍在、错误出现）把焦点拉回触发提交的
+   * 那个按钮，重试路径连续。 */
+  const submittedRef = useRef(false);
+  const lastActionBtnRef = useRef<HTMLButtonElement | null>(null);
+  const landFinalFocus = (btn: HTMLButtonElement | null) => {
+    submittedRef.current = true;
+    if (btn) lastActionBtnRef.current = btn;
+    document.getElementById('composer-input')?.focus();
+  };
+  useEffect(() => {
+    if (!submittedRef.current || !errorMessage) return;
+    // `resuming` 结束后按钮已重新可用；只回焦不重放任何动作。
+    lastActionBtnRef.current?.focus();
+  }, [errorMessage]);
 
   const lastIndex = questions.length - 1;
   const question = questions[index];
@@ -98,13 +115,14 @@ export function AskUserCard({
     reachNext(index);
     if (index < lastIndex) setIndex(index + 1);
   };
-  const skipCard = () => {
+  const skipCard = (btn: HTMLButtonElement | null) => {
     onSubmit({
       request_id: request.request_id,
       questions: questions.map((item) => ({ question: item.question, answer: null })),
     });
+    landFinalFocus(btn);
   };
-  const submit = () => {
+  const submit = (btn: HTMLButtonElement | null) => {
     onSubmit({
       request_id: request.request_id,
       questions: questions.map((item, i) => ({
@@ -112,6 +130,7 @@ export function AskUserCard({
         answer: toAnswerValue(drafts[i] ?? null, item.options.map((o) => o.label)),
       })),
     });
+    landFinalFocus(btn);
   };
 
   // 展开自定义行即聚焦输入框（mockup 行为）。
@@ -254,13 +273,13 @@ export function AskUserCard({
           <button type="button" className="ask-user-btn ask-user-skip-question" onClick={skipQuestion}>
             跳过此题
           </button>
-          <button type="button" className="ask-user-btn ask-user-skip" onClick={skipCard} disabled={resuming}>
+          <button type="button" className="ask-user-btn ask-user-skip" onClick={(e) => skipCard(e.currentTarget)} disabled={resuming}>
             跳过
           </button>
           <button
             type="button"
             className="ask-user-btn primary ask-user-submit"
-            onClick={submit}
+            onClick={(e) => submit(e.currentTarget)}
             disabled={resuming}
           >
             提交

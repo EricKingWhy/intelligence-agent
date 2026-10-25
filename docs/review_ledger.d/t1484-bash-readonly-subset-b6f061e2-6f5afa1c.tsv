@@ -1,0 +1,1 @@
+2026-10-23	#1484 修复轮 targeted verification（非新独立双轴审查）：针对 fresh review 的 P1-1、P2-1/2/3、P3-1/2 完成最小修复与反控；修复前 P0/P1/P2/P3/P4=0/1/3/3/0，修复提交 6f5afa1c；focused 120 passed，ruff clean，变异两项均按预期变红。	b6f061e2b07ee59b84e7155a3503d43a70320e41..6f5afa1c34d0ac509a611ec5533d6e5af3c86cfd

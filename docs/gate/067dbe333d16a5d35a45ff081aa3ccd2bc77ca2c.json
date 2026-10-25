@@ -1,0 +1,141 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-23T23:51:00+08:00",
+  "sha": "067dbe333d16a5d35a45ff081aa3ccd2bc77ca2c",
+  "tree": "59ebf9c2aedcfe7a5b997989cbe9e8aff040deca",
+  "argv": [],
+  "result": "FAIL",
+  "passed": 5,
+  "total": 7,
+  "failed": [
+    "guards",
+    "coverage"
+  ],
+  "env_failures": [],
+  "wall_seconds": 143.3,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "missing",
+    "ruff": "ruff 0.16.6",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.85.0",
+    "tsc": "Version 6.0.3"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.09,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 6.88,
+      "cwd": ".",
+      "argv": [
+        "~/AppData/Local/Programs/Python/Python312/Scripts/ruff.EXE",
+        "check",
+        "."
+      ],
+      "command": "~/AppData/Local/Programs/Python/Python312/Scripts/ruff.EXE check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 1.86,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 124.58,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "stylelint",
+      "desc": "stylelint（web/src 的 CSS：禁颜色字面量）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 9.88,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/stylelint/bin/stylelint.mjs",
+        "--config",
+        "stylelint.config.mjs",
+        "src/**/*.css"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/stylelint/bin/stylelint.mjs --config stylelint.config.mjs src/**/*.css"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 0.0,
+      "cwd": ".",
+      "argv": null,
+      "command": null,
+      "blocked": "找不到 .venv 解释器",
+      "output_tail": [
+        "工具缺失：找不到 .venv 解释器"
+      ]
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "FAIL",
+      "rc": 1,
+      "seconds": 0.0,
+      "cwd": ".",
+      "argv": null,
+      "command": null,
+      "blocked": "找不到 .venv 解释器",
+      "output_tail": [
+        "工具缺失：找不到 .venv 解释器"
+      ]
+    }
+  ]
+}

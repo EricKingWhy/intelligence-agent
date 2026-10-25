@@ -11,6 +11,17 @@
 `MemoryComponents` 包（下文 D1）；② 子决策 4「存储主权归我们」（SQLite 权威 / Milvus 索引）
 **收敛为 `builtin` provider 的内部性质**，不再是跨所有 provider 的普遍不变量（D1 的直接后果）。
 
+**当前适用关系（2026-10-22，Issue #1490 / ADR-0056）**：
+- **标为历史**：D1 的 `MemoryComponents` 五件套作为 Memory provider 边界。该五件套在生产装配中
+  已不存在，只剩同实现的名字白名单。
+- **继续适用**：通用 Capability seam（`CapabilityRegistry` + provider 名字解析）；D2 的两个插拔
+  层次；D4 命名收口（`langmem` = 兼容别名、`builtin` = 规范名，别名可保留而不保 V1 实现）；
+  D5 未知 provider 装配期硬失败；D6 生命周期归 provider。
+- **被取代**：D3 分派表里以五件套为边界的条目（随 D1 一并降为历史）；「生命周期归 provider」
+  中的**当前内容提交**部分改由 ADR-0056 §3.1 的单一提交 seam 承担，provider 仍负责自身初始化/关闭。
+- **不做**：不为单实现新造空 adapter。
+- **后继规格**：ADR-0056 §3.1、§7；施工落点 #1491（V1 退役）、#1494（提交 seam）。
+
 ---
 
 ## Context
