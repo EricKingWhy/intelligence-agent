@@ -5,7 +5,8 @@
 只能在"我以为的输入形状"上成立）。
 
 覆盖票面 AC 的六条关键语义。带 `mutation:` 说明的用例是"删掉对应守卫就必然变红"的那几条
-（每轮修复的变异矩阵读数与实际失败集合记在 PR 描述里，不在本文件里复制数字）：
+（变异矩阵的读数与失败集合落在 `docs/agents/verification.md` §2 ⑯ 与
+`docs/phase_status/2026-10.md` 的 #1499 节，本文件不复制数字）：
 
 1. 变更可执行行**恰 60% 通过**、**59% 失败**（整数比较，不经浮点）；
 2. **未改行不进分母**（基线里早就未覆盖的行不影响判定）；
@@ -706,3 +707,150 @@ def test_malformed_baseline_fields_are_undecidable_not_a_traceback(repo: Path) -
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "Traceback" not in proc.stderr and "Traceback" not in proc.stdout
     assert "基线记录缺 sha" in proc.stdout
+
+
+# ── 本轮（收尾轮）复核 findings 的守卫：每条都对应一个真实漏口 ────────────────
+
+
+def test_malformed_report_shapes_are_undecidable_not_a_traceback(repo: Path) -> None:
+    """报告形状坏掉（非 XML / `<line>` 缺 number）⇒ 退 2，不是崩栈退 1。
+
+    mutation: 去掉 `ET.ParseError` / `number is None` 护栏 ⇒ 本用例拿到 rc=1 + Traceback。
+    """
+    _append_lines(repo, 5)
+    report = repo / "artifacts" / "coverage.xml"
+    report.parent.mkdir(exist_ok=True)
+    baseline = repo / "artifacts" / "baseline.json"
+    baseline.write_text(json.dumps({
+        "schema": "coverage-baseline/1", "sha": _git(repo, "rev-parse", "HEAD"),
+        "tree": _git(repo, "rev-parse", "HEAD^{tree}"),
+        "report": {"path": str(report), "sha256": ""},
+    }), encoding="utf-8")
+
+    for body in ("<coverage><not-closed>",  # 非合法 XML
+                 '<coverage lines-valid="1" lines-covered="1">'
+                 "<sources><source>" + (repo / "src").as_posix() + "</source></sources>"
+                 '<packages><package name="."><classes>'
+                 '<class name="mod.py" filename="pkg/mod.py"><line hits="1"/></class>'
+                 "</classes></package></packages></coverage>"):  # <line> 缺 number
+        report.write_text(body, encoding="utf-8")
+        baseline.write_text(json.dumps({
+            "schema": "coverage-baseline/1", "sha": _git(repo, "rev-parse", "HEAD"),
+            "tree": _git(repo, "rev-parse", "HEAD^{tree}"),
+            "report": {"path": str(report), "sha256": hashlib.sha256(report.read_bytes()).hexdigest()},
+        }), encoding="utf-8")
+
+        proc = _ratchet(repo, report, baseline)
+
+        assert proc.returncode == 2, (body, proc.stdout + proc.stderr)
+        assert "Traceback" not in proc.stderr and "Traceback" not in proc.stdout
+        assert "棘轮不可判" in proc.stdout
+
+
+@pytest.mark.parametrize("bad", [
+    [1, 2, 3],  # 顶层是 list ⇒ `.get` 会 AttributeError
+    "not-a-dict",  # 顶层是标量
+    {"schema": "coverage-baseline/1", "sha": "a" * 40, "tree": "b" * 40, "report": "not-a-dict"},
+])
+def test_malformed_baseline_shapes_are_undecidable_not_a_traceback(repo: Path, bad) -> None:
+    """基线顶层非对象 / `report` 非对象 ⇒ 退 2（文档承诺的"不可判"），不是崩栈退 1。
+
+    mutation: 去掉 `isinstance(baseline, dict)` 与 `isinstance(report_field, dict)` 两道护栏
+    ⇒ 本用例拿到 rc=1 + `AttributeError`。
+    """
+    _append_lines(repo, 5)
+    report = _write_report(repo, {"src/pkg/mod.py": _mod_lines(5, 5)})
+    out = repo / "artifacts" / "baseline.json"
+    out.write_text(json.dumps(bad), encoding="utf-8")
+
+    proc = _ratchet(repo, report, out)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr and "Traceback" not in proc.stdout
+    assert "必须是对象" in proc.stdout
+
+
+def test_move_only_note_from_the_environment_is_honoured(repo: Path) -> None:
+    """CI 没有命令行参数可传 ⇒ 说明必须能从 env 读（PR 标签注入的正是这条）。
+
+    mutation: 把 `default=os.environ.get(...)` 改回 `default=""` ⇒ 本用例变 1（移动按新增计）。
+    """
+    _move_module(repo)
+    report = _write_report(repo, {"src/pkg/moved2.py": [(n, 0) for n in range(1, 11)]})
+    base = _baseline(repo, report)
+
+    env = dict(os.environ, COVERAGE_RATCHET_REPO=str(repo),
+               COVERAGE_RATCHET_MOVE_ONLY_NOTE="PR #1 显式声明纯移动")
+    proc = subprocess.run([sys.executable, str(SCRIPT), "ratchet", "--report", str(report),
+                           "--baseline", str(base), "--base", "baseline"],
+                          cwd=repo, capture_output=True, text=True, env=env, check=False)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "纯移动跳过 1 个文件" in proc.stdout
+    assert "PR #1 显式声明纯移动" in proc.stdout
+
+
+def test_relative_whitelist_path_resolves_against_the_repo_root(repo: Path) -> None:
+    """相对 `--whitelist` 按 `REPO_ROOT` 解析，不按 cwd：否则从别的目录起跑时白名单静默变空表。
+
+    mutation: 去掉 `load_whitelist` 里的 `_from_repo(path)` ⇒ 本用例拿到 rc=2（白名单文件自己
+    落进"未测量"）。
+    """
+    (repo / "src" / "pkg" / "win.py").write_text("w0 = 0\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add win module")
+    _append_lines(repo, 5)
+    report = _write_report(repo, {"src/pkg/mod.py": _mod_lines(5, 5)})
+    _whitelist(repo, [{"path": "src/pkg/win.py", "reason": "Win32 only", "platform": "windows"}])
+    base = _baseline(repo, report)
+
+    env = dict(os.environ, COVERAGE_RATCHET_REPO=str(repo))
+    proc = subprocess.run(  # cwd 刻意是仓库**外**的 tmp 目录
+        [sys.executable, str(SCRIPT), "ratchet", "--report", str(report), "--baseline", str(base),
+         "--base", "baseline", "--whitelist", "docs/agents/coverage-ratchet.whitelist.json"],
+        cwd=repo.parent, capture_output=True, text=True, env=env, check=False)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "src/pkg/win.py（报告里没有该文件（盲区）" in proc.stdout
+
+
+def test_pure_move_is_excused_even_when_the_report_has_no_entry_for_it(repo: Path) -> None:
+    """移动判定先于「未测量」：搬走的文件在报告里可能还是旧路径。
+
+    形状：基线里 `moved.py` 有覆盖记录，分支上 `git mv` 成 `moved2.py`，报告仍按**旧路径**产出
+    （真实 coverage 数据在改名提交前后是可能仍带旧路径的）。正确结论 = 显式声明 + R100 ⇒ 跳过。
+    mutation: 把 `path in moved` 移回 `executable is None` 之后 ⇒ 本用例变 2（未测量）。
+    """
+    (repo / "src" / "pkg" / "moved.py").write_text(
+        "".join(f"m{i} = {i}\n" for i in range(1, 11)), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add module to move")
+    _git(repo, "branch", "-f", "baseline", "HEAD")
+    _git(repo, "mv", "src/pkg/moved.py", "src/pkg/moved2.py")
+    _git(repo, "commit", "--quiet", "-m", "move module")
+    report = _write_report(repo, {"src/pkg/moved.py": [(n, 0) for n in range(1, 11)]})
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base, "--move-only-note", "纯移动：moved.py → moved2.py")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "纯移动跳过 1 个文件" in proc.stdout
+    assert "src/pkg/moved2.py" in proc.stdout
+
+
+def test_zero_hit_changed_file_is_dropped_from_the_denominator_output(repo: Path) -> None:
+    """`if not hit: continue` 删掉后语义不变的一半：新增行全不可执行 ⇒ 分母为空、显式 EMPTY。
+
+    这条钉住"删死代码"没改行为（空交集的文件不该被塞进分母）。
+    """
+    _append_lines(repo, 3)
+    # 报告里该文件的可执行行只有基线那 20 行，新增的 21-23 都不是可执行行
+    report = _write_report(repo, {"src/pkg/mod.py": [(n, 1) for n in range(1, 21)]})
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "RATCHET EMPTY" in proc.stdout
+
+

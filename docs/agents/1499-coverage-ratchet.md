@@ -21,11 +21,12 @@
 | --- | --- | --- | --- |
 | **Lighthouse CI** `docs/configuration.md`（`GoogleChrome/lighthouse-ci` main） | `off` / `warn` / `error` 三级；`warn` 原文 *"the audit result will be checked, and the result will be printed to stderr, but failure will not result in a non-zero exit code"*；`error` 才 *"failure will result in a non-zero exit code"*；未列出的审计默认 `off` | 判定分**可观测**与**阻断**两档，门槛可按审计项逐条配置 | **ADAPT**：全仓总率走 `warn` 语义（打印 + 入基线，不判定），只有**变更行**这一条走 `error` 语义（< 60% 非零退出）。不引入新框架 |
 | **pa11y-ci** `README.md`（`pa11y/pa11y-ci` main） | `--threshold <number>` 原文 *"permit this number of errors, warnings, or notices, otherwise fail with exit code 2"*；且 *"You can also set `threshold` in your configuration's `defaults` or individual URL options. These thresholds apply per page"* | 门限是**分范围**的、可谈判的，不是全仓一个硬数 | **ADAPT**：判定面按"变更行"切分；盲区按**精确文件**登记（见 §4），不做"整域排除" |
-| **diff-cover** `README.rst` + `diff_cover_tool.py`（main） | `--fail-under` 原文 *"To have `diff-cover` and `diff-quality` return a non zero status code if the report quality/coverage percentage is below a certain threshold"*；实现 `if percent_covered >= fail_under … return 0`（**浮点** `percent_covered`，`>=` 语义）；`--exclude` 走 `fnmatch`；`--expand-coverage-report` 一节自陈 *"diff reports list all lines that changed, coverage reports usually list code statements. As a result, a change in a multi-line statement may not be analyzed"* | 它就是"变更行覆盖率"的原产工具 | **不采用（BUILD 侧保留）**：① 未在本仓依赖里（`pyproject.toml` / `uv.lock` 均无），引入 = 新增依赖，与 §9.5 第 5 级相悖；② 判定走浮点百分比 ⇒ 正是 B 案要绕开的那类精度面，本票要的是整数 `covered*100 >= total*60`；③ 它**不**提供"报告是否属于这棵树"的对账（sha256 + tree），而那正是 AC1 的核心；④ 白名单要"精确文件 + 理由 + 平台"的解析期护栏（AC3），`--exclude` 的 `fnmatch` 反而允许通配 |
+| **diff-cover** `README.rst` + `diff_cover_tool.py`（main） | `--fail-under` 原文 *"To have `diff-cover` and `diff-quality` return a non zero status code if the report quality/coverage percentage is below a certain threshold"*；实现 `if percent_covered >= fail_under … return 0`（`>=` 语义；`total_percent_covered()` 默认 `return int(total_percent)` **整数截断**，只有传 `--total-percent-float` 才 `round(total_percent, 2)`）；`--exclude` 走 `fnmatch`；`--expand-coverage-report` 一节自陈 *"diff reports list all lines that changed, coverage reports usually list code statements. As a result, a change in a multi-line statement may not be analyzed"* | 它就是"变更行覆盖率"的原产工具 | **不采用（BUILD 侧保留）**：① 未在本仓依赖里（`pyproject.toml` / `uv.lock` 均无），引入 = 新增依赖，与 §9.5 第 5 级相悖；② 它的默认判定是**截断后的整数**（`int()` 向下取整）⇒ 57.9% 会显示/比较成 57、59.9% 成 59，显示值与判定值同源却都不等于真实比率；本票要的是**不截断**的精确比较 `covered*100 >= total*60`，两种实现都会在边界上给出不同结论；③ 它**不**提供"报告是否属于这棵树"的对账（sha256 + tree），而那正是 AC1 的核心；④ 白名单要"精确文件 + 理由 + 平台"的解析期护栏（AC3），`--exclude` 的 `fnmatch` 反而允许通配 |
 | **coverage.py** `config.html` `[report] fail_under`（B 案对照） | *"A target coverage percentage. If the total coverage measurement is under this value, then exit with a status code of 2."*；*"If you specify a non-integral value, you must also set `[report] precision` properly to make use of the decimal places."*；*"A setting of 100 will fail any value under 100, regardless of the number of decimal places of precision."* | 全仓单一硬阈值，**对精度/取整敏感** | **不采用**（DECIDE：B 案 = 票面否决项）。A 案用整数比较 `covered*100 >= total*60` 绕开取整面；且全仓总率只记录 |
 
-> 前三条是**机制旁证**，第四条是**反面参照**（B 案被否的理由）；四条都不是"行业强制值"：
-> 60% 这个数字来自票面裁决允许设定的低门槛，本票不冒称它是实测值或行业标准。
+> 表中只有**前两行是 ADAPT**（Lighthouse CI / pa11y-ci 的分级与分范围机制）；第 3 行 diff-cover
+> 与第 4 行 coverage.py 都是**不采用**——前者是同题原产工具的取舍对照，后者是 B 案的**反面参照**。
+> 四条都不是"行业强制值"：60% 这个数字来自票面裁决允许设定的低门槛，本票不冒称它是实测值或行业标准。
 
 ## 3. 设计（落点与职责边界）
 
@@ -101,5 +102,5 @@
    —— 它们各有多测/类型检查车道，且 coverage.py 不覆盖 TS。`src/` 下的非 `.py`（快照/数据）
    没有可执行行，同样不进分母。把这条写进 PR 描述与本文，避免"棘轮绿 = 全仓都测了"的误读。
 4. **本工作流的等待代价**：与 gate1 backend 作业同形同命令（`uv sync` + 全量 pytest + 覆盖率），
-   单人 PR 每碰一次 `src/**` 就多等这一轮。实测读数见 PR 描述（本文件不复制数字，避免漂移）；
-   引用时连同来源与机器负载一起给。
+   单人 PR 每碰一次 `src/**`（本票起还含 `tests/**`）就多等这一轮。**实测分钟数与机器负载的唯一
+   落点是** `docs/agents/verification.md` §2 ⑯（本文件只留指针，不复制数字以免两处漂移）。

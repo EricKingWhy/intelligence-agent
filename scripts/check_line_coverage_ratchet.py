@@ -42,8 +42,9 @@ code 2"*，且支持**按页面**单独设阈值 —— 即"可观测但不阻�
         --base origin/main
 
 退出码：`0` = 通过（含**空集合**语义，见下）/ `1` = 棘轮未达标 / `2` = **不可判**
-（报告或基线缺失、报告与基线不是同一份文件、基线测量的树不是当前树、`git diff` 读不出来
-——含 `--base` 与 HEAD 没有共同祖先、`--base` 解不出、白名单不合法）。
+（报告或基线缺失、报告不是合法 XML、报告里有无法定位的 `<line>`、报告与基线不是同一份文件、
+基线字段形状不对、基线测量的树不是当前树、`git diff` 读不出来 —— 含 `--base` 与 HEAD
+没有共同祖先、`--base` 解不出、白名单不合法）。
 
 ## 判定口径（机械，全部可复核）
 
@@ -58,9 +59,12 @@ code 2"*，且支持**按页面**单独设阈值 —— 即"可观测但不阻�
   命中白名单的文件，其变更行**不进分母**，并在输出里逐条打印理由。
   ⚠ 白名单判定**先于**「报告里没有这个文件」的不可判判定：盲区的主用途正是"报告里根本没有它"
   （容器内代码 / 平台专有实现），顺序颠倒会让白名单永远救不了它该救的文件。
-- **纯移动重构**：只有显式传 `--move-only-note "<说明>"` **且** git `-M` 判为 **`R100`（逐字相同）**
-  的文件才跳过；`R<100`（移动 + 修改）与没有说明都照常计入分母 —— `-M` 默认阈值是 50% 相似度，
-  那是"改过"不是"纯移动"（不存在"看起来像移动就自动放过"的通道）。
+- **纯移动重构**：只有显式声明（`--move-only-note "<说明>"` 或环境变量
+  `COVERAGE_RATCHET_MOVE_ONLY_NOTE`；CI 入口 = 给 PR 打 `coverage-ratchet:move-only` 标签，
+  工作流据此注入该 env）**且** git `-M` 判为 **`R100`（逐字相同）** 的文件才跳过；
+  `R<100`（移动 + 修改）与没有声明都照常计入分母 —— `-M` 默认阈值是 50% 相似度，那是"改过"
+  不是"纯移动"（不存在"看起来像移动就自动放过"的通道）。移动判定**先于**「未测量」判定：
+  搬走的文件在报告里可能仍是旧路径，否则一次合法移动会被打成不可判。
 - **全仓总率**（报告 `lines-valid` / `lines-covered`）只打印、只写进基线，**不参与判定**。
 - **零可执行变更**（分母为空）⇒ 输出 `RATCHET EMPTY` 并 **exit 0**。理由：把空集合判成失败会让
   docs-only / 纯移动 PR 无故变红（正是 A 案要消灭的等待代价），判成"不可判"同样阻断正常 PR；
@@ -115,8 +119,11 @@ def parse_coverage_xml(path: str, repo_root: str = REPO_ROOT) -> tuple[dict, dic
     （例如跑的是别的 checkout 的报告）该文件被**跳过并计数**，由调用方打印 —— 静默丢弃会让
     "报告不是这棵树的"这件事看不见。
     """
-    tree = ET.parse(path)
-    root = tree.getroot()
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        # 读得出来才谈得上判定；解析失败是"不可判"（退 2），不是崩栈（退 1）。
+        raise Undecidable(f"覆盖率报告不是合法 XML {path}：{exc}") from exc
     sources = [s.text.strip() for s in root.iter("source") if s.text and s.text.strip()]
     files: dict[str, dict[int, int]] = {}
     outside = 0
@@ -130,7 +137,14 @@ def parse_coverage_xml(path: str, repo_root: str = REPO_ROOT) -> tuple[dict, dic
             continue
         hits = files.setdefault(rel, {})
         for line in cls.iter("line"):
-            hits[int(line.get("number"))] = int(line.get("hits") or 0)
+            number = line.get("number")
+            if number is None:
+                # 缺行号的 <line> 无法定位到任何一行 ⇒ 这份报告的"可执行行"不可信。
+                raise Undecidable(f"覆盖率报告 {path} 里有 <line> 缺 number 属性")
+            try:
+                hits[int(number)] = int(line.get("hits") or 0)
+            except ValueError as exc:
+                raise Undecidable(f"覆盖率报告 {path} 的行号/命中数不是整数：{exc}") from exc
     totals = {
         "lines_valid": int(root.get("lines-valid") or 0),
         "lines_covered": int(root.get("lines-covered") or 0),
@@ -150,10 +164,14 @@ def _repo_relative(filename: str, sources: list[str], repo_root: str) -> str | N
     filename = filename.replace("\\", "/")  # Windows 分隔符的报告也认
     # `<source>` 一个都不在仓库内（报告来自别的 checkout）⇒ candidates 为空 ⇒ 返回 None，
     # 由调用方计数并打印（"报告不是这棵树的"必须看得见，不能静默丢）。
-    inside = [item for item in sources if _inside(item, repo_root)]
+    # 相对 `<source>` 按 repo_root 解析（不是 cwd）：`--cov=src/x` 从仓库根跑出来的报告就长这样，
+    # 按 cwd 解析会把整份报告判成"来自别的 checkout"。
+    inside = [item for item in sources if _inside(_from_repo(item), repo_root)]
     candidates: list[str] = [] if sources else [filename]  # 无 <source> 时 filename 即仓库相对
     for source in inside:
-        for candidate in (os.path.join(source, filename), filename):
+        # 两个候选都要先按 repo_root 解析：`os.path.abspath` 用的是 **cwd**，从仓库外起跑时
+        # 裸 `filename` 会被算成 `../src/…` 而丢弃，只剩「source + filename」这个错候选。
+        for candidate in (_from_repo(os.path.join(source, filename)), _from_repo(filename)):
             rel = os.path.relpath(os.path.abspath(candidate), repo_root)
             if not rel.startswith(".."):
                 candidates.append(rel.replace(os.sep, "/"))
@@ -161,6 +179,11 @@ def _repo_relative(filename: str, sources: list[str], repo_root: str) -> str | N
         if os.path.isfile(os.path.join(repo_root, rel)):
             return rel
     return candidates[0] if candidates else None
+
+
+def _from_repo(path: str) -> str:
+    """相对路径按 `REPO_ROOT` 解析（绝对路径原样返回）。"""
+    return path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
 
 
 def _inside(path: str, repo_root: str) -> bool:
@@ -204,10 +227,11 @@ def changed_lines(base: str, head: str = "HEAD") -> dict[str, set[int]]:
     用 `--no-renames`：重命名按「删旧 + 加新」计，于是"移动"是否豁免由 `renamed_paths()` 单独决定，
     两条判据不互相污染。`-U0` 保证每个 hunk 只有纯增块，`+c,0`（纯删）不产生行。
 
-    ⚠ 用 `--output-indicator-new='>'` 把**内容行**换成 `>` 前缀：patch 里文件头的 `+++ ` 与
-    "内容以 `++ ` 开头的新增行"一字不差，删行方向同理（内容 `-- x` ⇒ `--- x` 冒充文件头）。
-    靠行首前缀猜边界，任一方向都会把后续 hunk 吃掉 —— 少算分母就是假绿。
-    换掉内容行的前缀之后，`+++ ` 只可能出现在文件头，歧义从根上消失。
+    ⚠ 用 `--output-indicator-new='>'` 把**新增内容行**换成 `>` 前缀：patch 里文件头的 `+++ ` 与
+    "内容以 `++ ` 开头的新增行"一字不差，靠行首前缀猜边界会把后续 hunk 一起吃掉 —— 少算分母
+    就是假绿。换掉新增行前缀之后，`+++ ` 只可能出现在文件头。
+    删除行**不**需要同样处理：解析只以 `+++ ` 定界，`--- ` 从不参与判断（删行的 `-- x` 渲染成
+    `--- x` 也无害）。别把这条读成"两侧都换过"——只有 new 一侧换了前缀。
     """
     proc = git("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
                "--no-renames", "--unified=0", "--output-indicator-new=>", f"{base}...{head}")
@@ -222,8 +246,7 @@ def changed_lines(base: str, head: str = "HEAD") -> dict[str, set[int]]:
         if raw.startswith("diff --git "):
             current = None
             continue
-        # 内容行现在是 `>…`（见 docstring），不会再冒充 `+++ ` 文件头；`--- ` / `+++ `
-        # 因此只可能是文件头，位置也无歧义。
+        # 新增内容行现在是 `>…`（见 docstring），不会再冒充 `+++ ` 文件头。
         if raw.startswith("+++ "):
             path = _unquote(raw[4:].strip()).removeprefix("b/")
             # 只看扫描面内的 .py；面外的文件连 hunk 都不解析（否则 `@@` 会往不存在的键上写）。
@@ -279,6 +302,9 @@ def load_whitelist(path: str) -> dict[str, dict]:
     形状护栏是为了 AC3「不把整个安全域排除来过闸」：每条必须是**精确文件路径** + 非空
     `reason` / `platform`。通配符、目录前缀、空字段一律拒绝。
     """
+    # 相对路径按 `REPO_ROOT` 解析（不是 cwd）：从别的目录起跑时，cwd 相对路径会让白名单静默
+    # 变成空表 ⇒ 白名单文件本身落进"未测量" ⇒ 退 2。CI 的 cwd 恰好是仓库根，故只在本地咬人。
+    path = _from_repo(path)
     if not os.path.isfile(path):
         return {}
     with open(path, encoding="utf-8") as handle:
@@ -329,7 +355,11 @@ def cmd_baseline(args: argparse.Namespace) -> int:
     if not head:
         print(f"❌ 基线失败：{args.head} 解不出 commit")
         return 2
-    _, totals = parse_coverage_xml(args.report)
+    try:
+        _, totals = parse_coverage_xml(args.report)
+    except Undecidable as exc:
+        print(f"❌ 基线失败：{exc}")
+        return 2
     record = {
         "schema": "coverage-baseline/1",
         "sha": head,
@@ -376,7 +406,11 @@ def cmd_ratchet(args: argparse.Namespace) -> int:
         return 2
 
     # 基线已在 `_verify_inputs` 里读过并校验过（schema / sha / tree / 报告 sha256），不重复读。
-    report, totals = parse_coverage_xml(args.report)
+    try:
+        report, totals = parse_coverage_xml(args.report)
+    except Undecidable as exc:
+        print(f"❌ 棘轮不可判：{exc}")
+        return 2
     if totals["files_outside_repo"]:
         print(f"⚠ 报告里有 {totals['files_outside_repo']} 个文件的 <source> 不在本仓库内，已跳过")
 
@@ -409,17 +443,17 @@ def cmd_ratchet(args: argparse.Namespace) -> int:
             hit = lines & set(executable) if executable is not None else lines
             skipped_whitelist.append((path, hit, whitelist[path], executable is None))
             continue
+        if path in moved:
+            # 纯移动的判定也要先于"未测量"：搬走的文件在报告里可能还是旧路径（或根本没有），
+            # 那种情况下"未测量"会把一次已显式声明 + git 判为 R100 的移动打成退 2。
+            skipped_moved.append((path, lines & set(executable) if executable is not None else lines))
+            continue
         if executable is None:
             # 改了 src/ 下的文件却不在报告里：测量面没覆盖到它 ⇒ 不可判（不是"没有可执行行"）。
             unmeasured.append(path)
             continue
         hit = lines & set(executable)
-        if not hit:
-            continue
-        if path in moved:
-            skipped_moved.append((path, hit))
-        else:
-            denominator_lines[path] = hit
+        denominator_lines[path] = hit
 
     if unmeasured:
         print("❌ 棘轮不可判：以下文件被改动但不在覆盖率报告里（测量范围没覆盖 / 报告不是这棵树的）：")
@@ -479,13 +513,19 @@ def _verify_inputs(args: argparse.Namespace) -> str | None:
             baseline = json.load(handle)
     except (OSError, ValueError) as exc:
         return f"基线记录读不出来：{exc}"
+    if not isinstance(baseline, dict):
+        # 顶层是 list / 标量时 `.get` 会 AttributeError 崩栈（退 1），而契约是不可判（退 2）。
+        return f"基线记录顶层必须是对象，实得 {type(baseline).__name__}"
     if baseline.get("schema") != "coverage-baseline/1":
         return f"基线记录 schema 不认识：{baseline.get('schema')!r}"
     for key in ("sha", "tree"):
         value = baseline.get(key)
         if not isinstance(value, str) or not value:
             return f"基线记录缺 {key}（或类型不对）：{value!r}"
-    recorded = (baseline.get("report") or {}).get("sha256")
+    report_field = baseline.get("report")
+    if not isinstance(report_field, dict):
+        return f"基线记录的 report 字段必须是对象，实得 {type(report_field).__name__}"
+    recorded = report_field.get("sha256")
     actual = _sha256(args.report)
     if recorded != actual:
         return (f"报告与基线不是同一份文件（基线记 {str(recorded)[:16]}… / 实测 {actual[:16]}…）"
@@ -535,8 +575,10 @@ def build_parser() -> argparse.ArgumentParser:
     ratchet.add_argument("--base", default="origin/main")
     ratchet.add_argument("--head", default="HEAD")
     ratchet.add_argument("--whitelist", default=DEFAULT_WHITELIST)
-    ratchet.add_argument("--move-only-note", default="",
-                        help="显式声明「本 PR 是纯移动/重命名」的说明；不给则移动按新增计")
+    ratchet.add_argument("--move-only-note", default=os.environ.get("COVERAGE_RATCHET_MOVE_ONLY_NOTE", ""),
+                        help="显式声明「本 PR 是纯移动/重命名」的说明；不给则移动按新增计。"
+                             "CI 侧入口 = 给 PR 打 `coverage-ratchet:move-only` 标签"
+                             "（工作流经 env COVERAGE_RATCHET_MOVE_ONLY_NOTE 注入）")
     ratchet.set_defaults(func=cmd_ratchet)
     return parser
 
