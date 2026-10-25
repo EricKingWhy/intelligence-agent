@@ -38,6 +38,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
 | 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
 | `evaluation/live_gate/**` 或票面要求"真模型 + 生产工具"的证据 | ⑮ Live Gate（**需真凭证**；`validate` 复核入库证据） | 人工，冻结树（不进推送前 60s 快车道） |
+| `src/**` 的变更行（PR 面） | ⑯ 变更行覆盖率棘轮（60%；基线留痕随 gate1 / nightly） | CI（`coverage-ratchet` 工作流，**非必需检查**） |
 | 只想重跑失败的那一条 | `python scripts/gate0.py --only <lane>` | 人工 |
 | 一次改动只重跑受影响的那些 | `python scripts/gate0.py --affected <rev>`（见 §2 ⑭；<rev> 亦可为 `A..B`；**只内联 pytest 子集**） | 人工 |
 
@@ -385,6 +386,58 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   ② 不得用替身或 Fake 结果充当 Live Gate 读数（`#305` 明文）——机制用例的替身只落 `tmp_path`、只测判定语义；
   ③ 它**不替代**集成前完整门禁（§4）：本车道回答"真模型 + 生产工具这条链真的通"，不回答 lint / 类型 / 前端 / e2e；
   ④ 后续场景（#319 的五类）只需 `register_scenario` 注册，runner 与 validator 直接复用。
+
+### ⑯ 覆盖率基线留痕与变更行棘轮（`#1499`）
+
+- **命令**：
+  - 基线留痕（只记录、不判定）：`python scripts/check_line_coverage_ratchet.py baseline
+    --report artifacts/coverage.xml --out artifacts/coverage-baseline.json --scope "<测量范围>"`
+  - 变更行棘轮：`python scripts/check_line_coverage_ratchet.py ratchet
+    --report artifacts/coverage.xml --baseline artifacts/coverage-baseline.json --base origin/main
+    [--move-only-note "<纯移动说明>"]`
+- **落点**：`scripts/check_line_coverage_ratchet.py`（判据唯一实现）、
+  `.github/workflows/coverage-ratchet.yml`（PR 侧执行）、`gate1.yml` / `gate-nightly.yml`
+  各追加一个 `baseline` 步骤（**覆盖率命令逐字未改**）、
+  `docs/agents/coverage-ratchet.whitelist.json`（盲区白名单）。设计与取舍：
+  `docs/agents/1499-coverage-ratchet.md`。
+- **判定**：分母 = 本次变更的**可执行行**（`src/` 下 `.py` 新增行 ∩ 报告里的可执行行），
+  阈值 60% 用整数比较 ⇒ **恰好 60% 通过**；未改行 / 白名单行 / 纯移动行不进分母。
+  六条机械口径的正文**只在** `scripts/check_line_coverage_ratchet.py` 的模块 docstring 写全
+  （唯一事实源）；**B 案被否的理由**只在 `docs/agents/1499-coverage-ratchet.md` §2。此处都只留指针。
+- **期望证据 / 退出码**：`RATCHET PASS` + `RATCHET FAIL` + `RATCHET EMPTY` 三态；
+  `0` 通过 / `1` 未达标 / **`2` 不可判**（缺报告、缺基线、报告 sha256 与基线不符、基线树 ≠ 当前树、
+  git diff 读不出、改了 `src/` 但报告里没该文件、`--base` 解不出、白名单不合法）。**`2` 不是绿**。
+- **执行面**：`coverage-ratchet` 工作流用 **`paths` 白名单**（`src/**`、棘轮脚本、白名单文件、
+  工作流自身）——不是 `e2e-smoke.yml` 的 `paths-ignore` 机制。带 paths 过滤的检查**不能**挂成
+  必需状态检查（被跳过的必需检查会永久 pending，见 `e2e-smoke.yml` 文件头）；它是**非必需**检查，
+  但红就是真信号，不是"可忽略"。
+- **本票实测读数**（`2026-10-25`，Linux / Python 3.12.3 本机 `.venv`，`nproc=2`）：
+  - 聚焦守卫 `tests/tooling/test_line_coverage_ratchet.py` + `tests/test_verification_map.py`
+    = **67 passed / 墙钟 16s**（`loadavg` 1.0–1.3）。
+  - 全量（沙箱 `shell/ia-test`，4 vCPU，分块串行、每块独立 basetemp 于 clone 之外）：
+    31 个 `tests/<dir>` 块 + 仓根块共 32 次 `CHUNK_RC`，零收集期中断 / 零 INTERNALERROR。
+    - **终态树**（HEAD `57983c8b2` / tree `62c21d225`，含与 `origin/main 7cb72258a` 的 sync merge）：
+      **9414 passed / 1 failed / 156 skipped / 43 deselected**，墙钟 **775s（12.9 分钟）**。
+      唯一一条红 = `tests/memory/test_writeback.py::test_late_writeback_append_cannot_resurrect_a_deleted_session`
+      **既有负载敏感 flake**（基线树 `f49223ff4` 同频复现：整文件 6 轮 2 红、单测 3 轮 3 绿；
+      且 `git diff f49223ff4..HEAD -- src/ tests/memory/` 为空 ⇒ 机械排除本票引入）。
+    - **受影响块重验**（第三次 sync merge `bf4fb6cf8` 从 main 带入 2 个 `src/` + 2 个 `tests/` 文件后，
+      按 §8.1「旧读数不传递」在新树 `745caf159` / tree `1ecb68d668` 上重跑这三块）：`tests/sandbox`
+      **237 passed / 59 skipped**（84s）、`tests/tooling` **597 passed**（18s）、`tests/web`
+      **1267 passed**（272s），三块 rc=0、合计 **2101 passed / 0 failed**、墙钟 **386s**。
+    - 前一棵树（`1dc34195` / tree `4bdbc27c0`）：**9372 passed / 2 failed**，墙钟 **783s**。第二条红
+      `test_real_ledger_passes_after_the_431_fix` 是**台账行未落的预期红**（协议 §8.2 第 4 条），
+      落行后终态树复跑**已转绿**，验证了当时的定性。
+  - 变异矩阵（N2–N8，七条）：**全部变红且失败集合互不相同**。另有一条**候选**护栏 N1
+    （给删除行加 `--output-indicator-old`）经复审判定**不成立**：解析器只以 `+++ ` 定界、`--- `
+    从不参与判断，该旗不承重 ⇒ 加它就是假守卫，故按源码事实把注释收窄，不留钉不住的断言。
+    （不记成"变异存活"：候选护栏本不存在，"去掉它"的变更量为零，跑出来的绿是恒真结果。）
+  - **等待代价**（AC3 末项，本行的存在理由）：本作业 = `uv sync --locked --all-extras` +
+    `docker pull python:3-slim` + 全量 pytest + 覆盖率，与 `gate1.yml` 的 backend 作业同形。
+    单人 PR 每碰一次 `src/**` 或 `tests/**` 就多等**一轮全量**：上表实测的 **775–783s（≈13 分钟，
+    4 vCPU / 空载 `loadavg` 0.4–0.9）** 就是这轮的等待代价量级（两棵独立树的两次实测，差 8s 属抖动）；同机有别的 agent 并发时实测被拖到
+    **22 分钟**并因根盘写满（ENOSPC）失败重跑过一次。引用时连同来源与负载一起给，别只抄数字。
+  - 工作流**未**在 GitHub 上跑过（开 PR 后才有第一次 CI 读数），本地不以任何方式冒充 CI 读数。
 
 ---
 
