@@ -61,7 +61,7 @@ Roadmap Phase 12 冻结交付 5 项：WebSearchProvider、独立 `web_search` To
 
 ## 后果
 
-- 正面：模型获得 agentic web 检索 + KB/web 统一替换点；同错熔断堵住步数/token 烧穿；Model Fallback 给瞬时故障韧性；两个新 SessionEvent 让调用链全透明（白盒，deepseek-harness 风格）。
+- 正面：模型获得 agentic web 检索 + KB/web 共享数据形状 `RetrievalHit`、各域各自的替换点/注入点；同错熔断堵住步数/token 烧穿；Model Fallback 给瞬时故障韧性；两个新 SessionEvent 让调用链全透明（白盒，deepseek-harness 风格）。
 - 权衡：同错熔断精确指纹可能漏「args 抖动」场景（等实测再加规范化）；Model Fallback 两级不含质量判断（瞬时切、不判答案质量）；web 无二次读取工具（citation 只溯源）。
 - 前端协作：`tool_failure_guard` + `model_fallback` 两个新事件类型需前端投影适配（后端定义形状、前端消费）。
 - DEFER 新增：质量型 Model Fallback（LLM judge）、oh-my-pi 全链（role/wildcard/cooldown 切回）、`fetch_url` 通用网页抓取工具、web 二次读取工具、自动 web 检索编排（学术 CRAG）。
