@@ -92,7 +92,7 @@ def _client(workspace: Path, *, needs_auth: bool = False):
     settings = Settings(
         _env_file=None, workspace_dir=str(workspace), model_api_key="test-key"
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     capability = MCPCapability(
         connections=[FakeConnection("playwright", needs_auth=needs_auth), FakeConnection("github")],
         tools=[
@@ -128,7 +128,7 @@ def _client_without_mcp(workspace: Path, *, capabilities: str = ""):
         model_api_key="test-key",
         capabilities=capabilities,
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     wiring = SimpleNamespace(lifecycle=[], skills=_SkillsCapability(), mcp_packages=[])
     app.state.agent = _FakeAgent(settings, wiring)
     return TestClient(app)
@@ -313,7 +313,7 @@ def test_config_level_disabled_server_is_listed(workspace: Path) -> None:
     settings = Settings(
         _env_file=None, workspace_dir=str(workspace), model_api_key="test-key"
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     wiring = SimpleNamespace(
         lifecycle=[
             MCPCapability(
@@ -465,7 +465,7 @@ def test_config_disabled_server_rejects_selection_writes(workspace: Path) -> Non
     settings = Settings(
         _env_file=None, workspace_dir=str(workspace), model_api_key="test-key"
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     app.state.agent = _FakeAgent(
         settings,
         SimpleNamespace(lifecycle=[capability], skills=_SkillsCapability(), mcp_packages=[]),
@@ -497,7 +497,7 @@ def test_config_disabled_server_rejects_require_confirm_too(workspace: Path) -> 
     settings = Settings(
         _env_file=None, workspace_dir=str(workspace), model_api_key="test-key"
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     app.state.agent = _FakeAgent(
         settings,
         SimpleNamespace(lifecycle=[capability], skills=_SkillsCapability(), mcp_packages=[]),

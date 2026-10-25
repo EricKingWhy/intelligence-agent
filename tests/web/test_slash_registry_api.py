@@ -111,7 +111,7 @@ def _client(
         lifecycle=[_mcp_capability()],
         skills=_SkillsCapability(entries, disabled) if entries is not None else None,
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     app.state.agent = _FakeAgent(settings, wiring)
     return TestClient(app)
 

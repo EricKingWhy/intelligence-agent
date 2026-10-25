@@ -570,7 +570,20 @@ class WatchtowerService:
 
 
     async def _attach_existing_run_monitors(self) -> None:
-        """Adopt live runs resumed by a user after an earlier wait paused them."""
+        """Adopt live runs resumed by a user after an earlier wait paused them.
+
+        Also re-dispatches a `fired` fire that never wrote `run/started` (#1546):
+        `_dispatch` marks the fire `fired` as soon as `resume_and_launch` returns,
+        but the run is a detached task that has not written `run/started` yet.
+        A crash in that window used to orphan the fire forever — recovery only
+        scanned `dispatching`, and this loop returned early for a session with
+        no live run, leaving only a `user/message` on disk.
+
+        The judge is durable fact only (`run/started` present or not); no extra
+        state column. Re-dispatch goes through the existing `_dispatch`, whose
+        "message durable, run not started ⇒ resume once" branch is idempotent
+        on fire_id, so no second `user/message` appears.
+        """
         for rule, execution in await self.store.list_fired():
             if execution.fire_id in self._monitored_fire_ids:
                 continue
@@ -579,6 +592,15 @@ class WatchtowerService:
                     session_id=execution.session_id,
                 )
             except SessionNotFound:
+                continue
+            # A live run means a prior `_dispatch` just launched and the run task
+            # simply hasn't been scheduled far enough to write `run/started`.
+            # That is not an orphan; re-dispatching would hit `ActiveRunConflict`
+            # and mis-record the fire as `launch_failed`.
+            if handle.run is None and not any(
+                event.type == RUN_STARTED for event in handle.events
+            ):
+                await self._dispatch(rule, execution)
                 continue
             self._monitor(
                 handle, rule.rule_id, execution.fire_id,

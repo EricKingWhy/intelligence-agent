@@ -1,0 +1,1 @@
+2026-10-25	#1597 ruff 修复笔（f6a60a53）：仅 tests/tooling/test_integration_scripts.py 一处 ClassVar 注解，无行为变化；ruff 复查绿 + 冒烟 7/7 复跑绿	b7bf6adc2116aa4e80fb0ea1506bedd140e23606..f6a60a53e8130e9e0ddde60c8362e49096718083

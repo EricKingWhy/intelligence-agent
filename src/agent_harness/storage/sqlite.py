@@ -481,19 +481,22 @@ CREATE TABLE IF NOT EXISTS session_meta (
     parent_session_id   TEXT,
     origin              TEXT,
     fork_point_seq      INTEGER,
-    project_key         TEXT
+    project_key         TEXT,
+    client_request_id   TEXT
 )
 """
 
-#: 存量库加列迁移用（lineage 三列 Phase 14 / T1、`project_key` #1191 Phase 2）。
-#: CREATE TABLE IF NOT EXISTS 只惠及新库——旧 schema 的库靠这里逐列补齐，
-#: 按列名判存（幂等），旧行新列 NULL。旧 lineage 行 NULL = root 语义；
-#: 旧 `project_key` NULL = 未补写（读取侧回退到按 cwd 现场解析，票面 §三.3）。
+#: 存量库加列迁移用（lineage 三列 Phase 14 / T1、`project_key` #1191 Phase 2、
+#: `client_request_id` #1333）。CREATE TABLE IF NOT EXISTS 只惠及新库——旧 schema
+#: 的库靠这里逐列补齐，按列名判存（幂等），旧行新列 NULL。旧 lineage 行 NULL =
+#: root 语义；旧 `project_key` NULL = 未补写（读取侧回退到按 cwd 现场解析，
+#: 票面 §三.3）；旧 `client_request_id` NULL = 旧客户端创建（认领关联查询不命中）。
 _EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
     ("parent_session_id", "TEXT"),
     ("origin", "TEXT"),
     ("fork_point_seq", "INTEGER"),
     ("project_key", "TEXT"),
+    ("client_request_id", "TEXT"),
 )
 
 
@@ -597,6 +600,12 @@ class SqliteSessionMetaStore(SessionMetaStore):
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_SESSION_META_DDL)
             await self._ensure_extra_columns(connection)
+            # #1333：关联值精确查询的索引。必须在加列迁移**之后**建——存量库
+            # 先补列、索引才有着落。
+            await connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_meta_client_request_id "
+                "ON session_meta(client_request_id)"
+            )
             await connection.commit()
 
     @staticmethod
@@ -617,8 +626,9 @@ class SqliteSessionMetaStore(SessionMetaStore):
                 """
                 INSERT INTO session_meta (
                     session_id, created_at, agent_id, last_checkpoint_seq, archived,
-                    parent_session_id, origin, fork_point_seq, project_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    parent_session_id, origin, fork_point_seq, project_key,
+                    client_request_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     last_checkpoint_seq = excluded.last_checkpoint_seq,
@@ -637,6 +647,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
                     meta.origin,
                     meta.fork_point_seq,
                     meta.project_key,
+                    meta.client_request_id,
                 ),
             )
             await connection.commit()
@@ -659,6 +670,18 @@ class SqliteSessionMetaStore(SessionMetaStore):
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 "SELECT * FROM session_meta ORDER BY created_at, session_id"
+            )
+            rows = await cursor.fetchall()
+        return [self._to_meta(row) for row in rows]
+
+    async def get_by_client_request_id(self, client_request_id: str) -> list[SessionMeta]:
+        """见 `SessionMetaStore.get_by_client_request_id`（#1333）。"""
+        async with _connect(self.database_path) as connection:
+            connection.row_factory = aiosqlite.Row
+            cursor = await connection.execute(
+                "SELECT * FROM session_meta WHERE client_request_id = ? "
+                "ORDER BY created_at, session_id",
+                (client_request_id,),
             )
             rows = await cursor.fetchall()
         return [self._to_meta(row) for row in rows]

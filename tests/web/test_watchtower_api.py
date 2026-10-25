@@ -19,7 +19,7 @@ def _client(tmp_path: Path, monkeypatch, *, enable_cors: bool = False) -> TestCl
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
     )
-    return TestClient(create_app(settings, enable_cors=enable_cors))
+    return TestClient(create_app(settings, enable_cors=enable_cors, allow_testserver=True))
 
 
 def _body(**overrides) -> dict:
@@ -48,7 +48,9 @@ async def test_watchtower_start_failure_cleans_up_timeout_ticker(
     monkeypatch.chdir(tmp_path)
     app = create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
-    ))
+    ),
+    allow_testserver=True,
+    )
     state = app.state.agent
 
     async def fail_start():

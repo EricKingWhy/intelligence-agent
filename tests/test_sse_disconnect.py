@@ -84,7 +84,9 @@ async def _start_server(tmp_path, monkeypatch, model):
     app = create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
-    ))
+    ),
+    allow_testserver=True,
+    )
     uv_config = uvicorn.Config(app, host="127.0.0.1", port=0,
                                log_level="error", lifespan="on")
     server = uvicorn.Server(uv_config)

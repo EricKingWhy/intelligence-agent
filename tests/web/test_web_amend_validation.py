@@ -48,7 +48,7 @@ def bare_client(tmp_path):
         provider_store_path=str(tmp_path / "model-providers.json"),
         enable_cors=False,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 @pytest.fixture
@@ -60,7 +60,7 @@ def wired_client(tmp_path):
         provider_store_path=str(tmp_path / "model-providers.json"),
         enable_cors=False,
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     wiring = CapabilityWiring()
     wiring.context_providers = [_FakeMemoryProvider()]
     from agent_harness.capability.base import CapabilityRegistry

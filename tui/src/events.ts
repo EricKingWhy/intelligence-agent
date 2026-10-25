@@ -18,28 +18,18 @@ export interface EventEnvelope {
   capability?: string;
 }
 
-/** 事件类型词汇（docs/EVENT_VOCABULARY.md 的子集；TUI 首版消费面）。 */
-export const EVENT = {
-  USER_MESSAGE: "user/message",
-  TEXT_DELTA: "text/delta",
-  MODEL_COMPLETED: "model/completed",
-  REASONING_DELTA: "reasoning/delta",
-  REASONING_COMPLETED: "reasoning/completed",
-  TOOL_CALL: "tool/call",
-  TOOL_RESULT: "tool/result",
-  TOOL_OUTPUT_DELTA: "tool/output_delta",
-  TOOL_APPROVAL_REQUESTED: "tool/approval-requested",
-  PERMISSION_RESOLVED: "permission/resolved",
-  ARTIFACT_CREATED: "artifact/created",
-  ARTIFACT_EXTERNALIZED: "artifact/externalized",
-  RUN_STARTED: "run/started",
-  RUN_COMPLETED: "run/completed",
-  RUN_FAILED: "run/failed",
-  RUN_PAUSED: "run/paused",
-  RUN_RESUMED: "run/resumed",
-  RUN_INTERRUPTED: "run/interrupted",
-  TASK_PLAN_UPDATED: "task/plan_updated",
-} as const;
+/**
+ * 事件类型词汇：**不是手抄表**，直接 re-export 生成物。
+ *
+ * #1498（G-1）：此前这里是 19 条手抄（`docs/EVENT_VOCABULARY.md` 的子集），
+ * 与 `web/src/generated/event-types.ts`（74 条）构成第四份词汇副本，且 TUI 侧
+ * 没有任何断言把它钉到生成物上。现在唯一来源是 `src/agent_harness/session/event.py`，
+ * 经 `scripts/gen_event_types.py` 同时生成 web 与本包两份产物；
+ * `tui/test/event-vocabulary.test.ts` 守住「本文件不得再出现手抄事件字面量」。
+ * 取值全部来自生成物，消费面仍由 `adapter.ts` 的 switch 决定（未投影的类型落 default）。
+ */
+export { EventType as EVENT } from "./generated/event-types.ts";
+export type { EventTypeValue } from "./generated/event-types.ts";
 
 /** 解析 SSE data 行 -> 信封；形状不合返回 null（坏帧丢弃，不投影）。 */
 export function parseEnvelope(raw: string): EventEnvelope | null {

@@ -25,7 +25,7 @@ def provider_app(tmp_path):
         model_provider="deepseek", model_name="deepseek-chat",
         provider_store_path=str(tmp_path / "model-providers.json"),
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     # 测试注入内存凭据后端：SystemCredentialStore 在 Windows 上就是真实凭据
     # 管理器——测试 key 会写进系统级存储并在用例间泄漏（实测 my-proxy 残留）。
     # keyring 注入（memory backend）是 ADR-0032 §10 T3 的既有口径。
@@ -110,7 +110,7 @@ class TestCrudEndpoints:
             model_provider="deepseek", model_name="deepseek-chat",
             provider_store_path=str(tmp_path / "model-providers.json"),
         )
-        app = create_app(settings, enable_cors=False)
+        app = create_app(settings, enable_cors=False, allow_testserver=True)
         assert type(app.state.agent.provider_store.credentials).__name__ == "SystemCredentialStore"
         client = TestClient(app)
 
@@ -163,6 +163,35 @@ class TestValidation:
     def test_empty_models_is_422(self, client):
         resp = client.post("/api/model-providers", json=_body(models=[]))
         assert resp.status_code == 422
+
+    # #1485 端点误配置守卫（裁决 25 B）：元数据/link-local 目标在保存期就拒。
+    @pytest.mark.parametrize("url", [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[fe80::1]/v1",
+        "http://metadata.google.internal/",
+    ])
+    def test_metadata_base_url_is_422_with_guard_message(self, client, url):
+        resp = client.post("/api/model-providers", json=_body(base_url=url))
+        assert resp.status_code == 422
+        assert "误配置守卫" in resp.json()["detail"]
+        assert client.get("/api/model-providers").json()["providers"] == []
+
+    def test_owner_loopback_base_url_still_saves(self, client):
+        """AC(b)：所有者的 loopback / 内网地址不受守卫影响。"""
+        for url in ("http://127.0.0.1:11434/v1", "http://192.168.1.5:8000/v1"):
+            resp = client.post("/api/model-providers", json=_body(id="local", base_url=url))
+            assert resp.status_code in (200, 201), resp.text
+            assert resp.json()["base_url"] == url
+
+    def test_payload_cannot_set_guard_allowlist(self, client):
+        """AC(b)：外部输入改不了例外来源（`extra="forbid"` ⇒ 422，不是静默忽略）。"""
+        for field in ("endpoint_allowlist", "model_endpoint_allowlist"):
+            resp = client.post(
+                "/api/model-providers",
+                json=_body(base_url="http://169.254.169.254/v1", **{field: ["169.254.169.254"]}),
+            )
+            assert resp.status_code == 422
+        assert client.get("/api/model-providers").json()["providers"] == []
 
 
 # ── T6：连接测试走真实构造路径 ───────────────────────────────────────
@@ -232,6 +261,19 @@ class TestConnectionTest:
 
     def test_test_missing_provider_is_404(self, client):
         assert client.post("/api/model-providers/ghost/test").status_code == 404
+
+    def test_guard_rejection_is_classified_before_network_error(self):
+        """#1485：openai 把守卫异常包成 APIConnectionError——归类必须是 endpoint_blocked。"""
+        from agent_harness.model.endpoint_guard import EndpointBlockedError
+        from agent_harness.web.model_providers import _classify_failure
+
+        blocked = EndpointBlockedError("目标被误配置守卫拒绝：169.254.169.254（云元数据）")
+        wrapped = RuntimeError("Connection error.")
+        wrapped.__cause__ = blocked
+
+        reason, copy = _classify_failure(wrapped)
+        assert reason == "endpoint_blocked"
+        assert "误配置守卫" in copy
 
     def test_test_without_credentials_is_rejected(self, client):
         # 无 key 的 provider：测试连接应给出可读失败，不是 500。

@@ -40,7 +40,9 @@ def _app(tmp_path, monkeypatch):
         model_provider="deepseek",
         capabilities="{}",
         enable_cors=False,
-    ))
+    ),
+    allow_testserver=True,
+    )
 
 
 def _wait_for_run(

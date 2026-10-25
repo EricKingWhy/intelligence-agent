@@ -49,7 +49,9 @@ async def _start_server(tmp_path, monkeypatch):
     app = create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
-    ))
+    ),
+    allow_testserver=True,
+    )
     lifespan_task = None
 
     async def _track_lifespan_task(scope, receive, send):
@@ -171,7 +173,8 @@ async def test_start_server_reaps_uvicorn_lifespan_task_after_startup_timeout(
                 cleaned_up.set()
 
     monkeypatch.setattr(
-        "agent_harness.web.app.create_app", lambda _settings: _stalled_app
+        "agent_harness.web.app.create_app",
+        lambda _settings, **_kwargs: _stalled_app,
     )
     monkeypatch.setattr(
         sys.modules[__name__], "_SERVER_START_TIMEOUT_SECONDS", 2.0, raising=False

@@ -1,0 +1,906 @@
+{
+  "issue": 1531,
+  "measurement": {
+    "model": "gpt-4o-2024-08-06",
+    "encoding": "o200k_base",
+    "tokenizer": "tiktoken",
+    "tokenizer_version": "0.13.0",
+    "pydantic_version": "2.13.4",
+    "langchain_core_version": "1.6.6",
+    "langchain_openai_version": "1.5.0",
+    "python_version": "3.13.5",
+    "serialization": "json.dumps(ensure_ascii=False, separators=(',', ':')); dictionary insertion order preserved",
+    "token_definition": "len(encoding.encode(serialized_tool_definitions)); this is a reproducible schema JSON estimate, not an API billing quote",
+    "tool_count": 11,
+    "tool_names": [
+      "read",
+      "write",
+      "bash",
+      "edit",
+      "apply_patch",
+      "glob",
+      "grep",
+      "git_status",
+      "git_diff",
+      "update_plan",
+      "read_artifact"
+    ],
+    "title_count_before": 47,
+    "title_count_after": 36,
+    "tokens_before": 2777,
+    "tokens_after": 2705,
+    "tokens_saved": 72,
+    "before_sha256": "56694cee34d60b556fb1af0002e10a85cf8ac4312640ad23cf8a2d0ad5ba3b30",
+    "after_sha256": "1be9383dd3b0d84688c6dfec5a6175657160a57e9a46a82f0f51e21635204d67",
+    "changed_paths": [
+      {
+        "tool": "read",
+        "path": "parameters.title",
+        "before": "_ReadArgs",
+        "after": null
+      },
+      {
+        "tool": "write",
+        "path": "parameters.title",
+        "before": "_WriteArgs",
+        "after": null
+      },
+      {
+        "tool": "bash",
+        "path": "parameters.title",
+        "before": "_BashArgs",
+        "after": null
+      },
+      {
+        "tool": "edit",
+        "path": "parameters.title",
+        "before": "_EditArgs",
+        "after": null
+      },
+      {
+        "tool": "apply_patch",
+        "path": "parameters.title",
+        "before": "_ApplyPatchArgs",
+        "after": null
+      },
+      {
+        "tool": "glob",
+        "path": "parameters.title",
+        "before": "_GlobArgs",
+        "after": null
+      },
+      {
+        "tool": "grep",
+        "path": "parameters.title",
+        "before": "_GrepArgs",
+        "after": null
+      },
+      {
+        "tool": "git_status",
+        "path": "parameters.title",
+        "before": "_GitStatusArgs",
+        "after": null
+      },
+      {
+        "tool": "git_diff",
+        "path": "parameters.title",
+        "before": "_GitDiffArgs",
+        "after": null
+      },
+      {
+        "tool": "update_plan",
+        "path": "parameters.title",
+        "before": "_UpdatePlanArgs",
+        "after": null
+      },
+      {
+        "tool": "read_artifact",
+        "path": "parameters.title",
+        "before": "_ReadArgs",
+        "after": null
+      }
+    ],
+    "historical_report": {
+      "tokens_before": 2575,
+      "title_tokens": 269,
+      "status": "reported in issue; not reproduced"
+    }
+  },
+  "definitions_before": [
+    {
+      "name": "read",
+      "description": "读取 workspace 内的文本文件内容。参数：path 为 workspace 内的文件路径（相对路径或绝对路径，必须在 workspace 范围内）；offset 为起始行号（1-based，默认 1）。单次最多返回 2000 行或 50KB（先到为准），超出时附 [Showing lines X-Y of N. Use offset=Y+1 to continue.] 标记，按提示传 offset 续读。",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "workspace 内的文件相对路径，如 'src/main.py'",
+            "title": "Path",
+            "type": "string"
+          },
+          "offset": {
+            "default": 1,
+            "description": "起始行号（1-based）。大文件续读用：截断标记会提示下一次的 offset。",
+            "minimum": 1,
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "_ReadArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "write",
+      "description": "覆盖写入 workspace 内的文件。参数：path 为文件路径，content 为要写入的完整文本（会完全替换原有内容）。适合创建新文件或整体重写已有文件。",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "workspace 内的文件相对路径，如 'src/main.py'",
+            "title": "Path",
+            "type": "string"
+          },
+          "content": {
+            "description": "要写入文件的完整文本内容（覆盖已有内容）",
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "title": "_WriteArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "bash",
+      "description": "在 workspace 内执行 shell 命令。注意：工具名 bash 是历史名称，实际解释器是 cmd.exe（不是 bash），请按该解释器的语法书写命令。Windows cmd.exe 注意事项：单引号不是引用符、$VAR 不展开、cat/ls/grep 等 Unix 命令通常不可用（用 type/dir/findstr 代替）、Unix 风格重定向（如 2>/dev/null）无效。含内部换行的多行命令会被直接拒绝（cmd.exe 会把整串静默丢弃、什么都不执行），请写成单行，或先用 write 工具把脚本写入文件再执行。参数：command 为要执行的 shell 命令字符串。返回 exit_code、stdout、stderr——命令返回非零 exit_code 不代表工具调用失败，应读取 stdout/stderr 判断命令执行结果。",
+      "parameters": {
+        "properties": {
+          "command": {
+            "description": "要在 workspace 内执行且至少包含一个非空白字符的 shell 命令",
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "title": "_BashArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "edit",
+      "description": "对 workspace 内文件做精确字符串替换（exact old_string → new_string）。参数：path 文件路径，old_string 要替换的确切字符串，new_string 新字符串，replace_all=True 时替换所有匹配（默认 False，要求唯一匹配）。0 匹配返回未找到错误，多于 1 处匹配返回多个匹配错误。",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "workspace 内的文件相对路径",
+            "title": "Path",
+            "type": "string"
+          },
+          "old_string": {
+            "description": "要被替换的确切字符串（不能为空）",
+            "minLength": 1,
+            "title": "Old String",
+            "type": "string"
+          },
+          "new_string": {
+            "description": "替换后的新字符串",
+            "title": "New String",
+            "type": "string"
+          },
+          "replace_all": {
+            "default": false,
+            "description": "True 时替换所有匹配；False 时仅允许唯一匹配",
+            "title": "Replace All",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ],
+        "title": "_EditArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "apply_patch",
+      "description": "对单个文件原子地应用多个补丁块（hunks）。参数：path 文件路径，hunks 是一个有序列表，每项含 old_string 和 new_string。任意一块匹配失败（0 或多于 1 处）则整个操作失败、文件不被改动。适合对同一文件做多处相关修改。",
+      "parameters": {
+        "$defs": {
+          "_Hunk": {
+            "properties": {
+              "old_string": {
+                "description": "要被替换的确切字符串（不能为空）",
+                "minLength": 1,
+                "title": "Old String",
+                "type": "string"
+              },
+              "new_string": {
+                "description": "替换后的新字符串",
+                "title": "New String",
+                "type": "string"
+              }
+            },
+            "required": [
+              "old_string",
+              "new_string"
+            ],
+            "title": "_Hunk",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "path": {
+            "description": "workspace 内的文件相对路径",
+            "title": "Path",
+            "type": "string"
+          },
+          "hunks": {
+            "description": "有序补丁块列表，至少 1 块",
+            "items": {
+              "$ref": "#/$defs/_Hunk"
+            },
+            "minItems": 1,
+            "title": "Hunks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "hunks"
+        ],
+        "title": "_ApplyPatchArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "glob",
+      "description": "按 glob 模式列出 workspace 内匹配的文件路径。参数：pattern glob 模式（如 '**/*.py'、'src/test_*.py'），max_results 返回上限（默认 100）。用于查找文件，不做内容搜索。",
+      "parameters": {
+        "properties": {
+          "pattern": {
+            "description": "glob 模式，如 '**/*.py' 或 'src/test_*.py'",
+            "title": "Pattern",
+            "type": "string"
+          },
+          "max_results": {
+            "default": 100,
+            "description": "返回上限，防上下文爆炸",
+            "minimum": 1,
+            "title": "Max Results",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "title": "_GlobArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "grep",
+      "description": "在 workspace 文件内容里做正则搜索。参数：pattern 正则表达式，include 文件名 glob 过滤（如 '*.py'），超长匹配行截断到 500 字符（可用 read 按行号看原文），path 搜索范围子目录，max_results 匹配上限（默认 100）。返回匹配的文件路径、行号、行文本。",
+      "parameters": {
+        "properties": {
+          "pattern": {
+            "description": "正则表达式",
+            "minLength": 1,
+            "title": "Pattern",
+            "type": "string"
+          },
+          "path": {
+            "default": ".",
+            "description": "搜索范围子目录，相对 workspace",
+            "title": "Path",
+            "type": "string"
+          },
+          "include": {
+            "default": "*",
+            "description": "文件名 glob 过滤（如 '*.py'）",
+            "title": "Include",
+            "type": "string"
+          },
+          "max_results": {
+            "default": 100,
+            "description": "匹配上限（最多 1000），防上下文爆炸；命中过多请细化 pattern",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Max Results",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "title": "_GrepArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "git_status",
+      "description": "查询 workspace 的 git 状态（只读）。返回 porcelain 格式的改动文件列表。参数：pathspec 可选路径过滤。不会执行 commit / push / reset 等写操作。",
+      "parameters": {
+        "properties": {
+          "pathspec": {
+            "default": "",
+            "description": "可选路径过滤，如 'src/' 或 'README.md'（纯路径，不支持通配符、pathspec magic 与 `..` 段）",
+            "title": "Pathspec",
+            "type": "string"
+          }
+        },
+        "title": "_GitStatusArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "git_diff",
+      "description": "查询 workspace 的 git 差异（只读）。参数：staged=True 看暂存区差异，path 可选路径过滤。不会执行 commit / push / reset 等写操作。",
+      "parameters": {
+        "properties": {
+          "staged": {
+            "default": false,
+            "description": "True 时查看暂存区差异（git diff --staged）",
+            "title": "Staged",
+            "type": "boolean"
+          },
+          "path": {
+            "default": "",
+            "description": "可选路径过滤（纯路径，不支持通配符与 `..` 段）",
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "title": "_GitDiffArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "update_plan",
+      "description": "提交/更新任务进度清单（每次提交**完整清单**，不是增量）。什么时候用：开始一项工作时把它置为 in_progress（同时把上一项置回 pending 或 completed）；完成一项立即置 completed。约束：同一时刻至多一项 in_progress；completed 不可回退（要撤销就新增一项）；清单至多 50 条（超了就合并相邻项）。校验失败时错误信息会附当前清单——按它修正后重新提交全表。注意：本工具只汇报**执行进度**。在 plan 档要**请求开工授权**时用 `submit_plan`（提交计划正文、暂停 run 等用户批准），两者不要混用。",
+      "parameters": {
+        "$defs": {
+          "_PlanItemArg": {
+            "additionalProperties": false,
+            "description": "清单行（PRD §7.1 五字段）。`extra=\"forbid\"`：多塞字段直接非法参数。\n\n`activeForm` 直接以 camelCase 作 python 字段名、不绕 alias：registry 导出\n模型菜单用 `args_schema.model_json_schema()`，不带 `by_alias`\n（tooling/contract.py 的 args_schema 契约）——alias 会让模型面看到\n`active_form`，与事件 payload / PRD §7.1 相悖。直名让 schema、payload、\npython 三处同名，零转译。",
+            "properties": {
+              "id": {
+                "description": "稳定字符串，整表覆盖时的对齐键",
+                "minLength": 1,
+                "title": "Id",
+                "type": "string"
+              },
+              "content": {
+                "description": "任务描述（一句话，可执行）",
+                "minLength": 1,
+                "title": "Content",
+                "type": "string"
+              },
+              "activeForm": {
+                "description": "进行中显示形式（Claude Code TaskCreate 同款字段）",
+                "minLength": 1,
+                "title": "Activeform",
+                "type": "string"
+              },
+              "status": {
+                "description": "pending | in_progress | completed",
+                "title": "Status",
+                "type": "string"
+              },
+              "source": {
+                "description": "initializer | user | agent",
+                "title": "Source",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "content",
+              "activeForm",
+              "status",
+              "source"
+            ],
+            "title": "_PlanItemArg",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "description": "整表覆盖：items 是**全量**清单，不是增量补丁。\n\n刻意不在 pydantic 上设 `max_length`：>50 必须由 handler（`apply_plan_update`）\n拒绝，错误文案才带\"合并相邻项 + 当前完整清单\"（PRD §7.2 的自修复通道）——\n参数校验层短路会把这条通道掐断。校验长在 handler 上，不在工具上。",
+        "properties": {
+          "items": {
+            "description": "完整任务清单（每次提交全表，至多 50 条）。单 in_progress；completed 不可回退。",
+            "items": {
+              "$ref": "#/$defs/_PlanItemArg"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "_UpdatePlanArgs",
+        "type": "object"
+      }
+    },
+    {
+      "name": "read_artifact",
+      "description": "读取之前被自动保存为外置产物的大输出（如 bash 的长 stdout）的局部内容。参数：artifact_ref（从工具结果的 artifact_ref 获得），start_line/end_line 按行范围读取，keyword 按关键词过滤，max_lines 返回行数上限（默认 200），max_chars_per_line 单行字符上限（默认 2000，超限可放宽）。",
+      "parameters": {
+        "properties": {
+          "artifact_ref": {
+            "description": "要读取的外置产物 ID（从工具结果的 artifact_ref 或 ARTIFACT_EXTERNALIZED 事件获得）",
+            "title": "Artifact Ref",
+            "type": "string"
+          },
+          "start_line": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "起始行号（1-based）",
+            "title": "Start Line"
+          },
+          "end_line": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "结束行（含）",
+            "title": "End Line"
+          },
+          "keyword": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "关键词过滤，只返回含此关键词的行",
+            "title": "Keyword"
+          },
+          "max_lines": {
+            "default": 200,
+            "description": "返回行数上限（默认 200，最大 1000）",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "max_chars_per_line": {
+            "default": 2000,
+            "description": "单行字符上限（默认 2000）。单行被截断时返回体携带 truncated 与 full_length，可放宽本参数重新读取更长片段。",
+            "maximum": 20000,
+            "minimum": 1,
+            "title": "Max Chars Per Line",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifact_ref"
+        ],
+        "title": "_ReadArgs",
+        "type": "object"
+      }
+    }
+  ],
+  "definitions_after": [
+    {
+      "name": "read",
+      "description": "读取 workspace 内的文本文件内容。参数：path 为 workspace 内的文件路径（相对路径或绝对路径，必须在 workspace 范围内）；offset 为起始行号（1-based，默认 1）。单次最多返回 2000 行或 50KB（先到为准），超出时附 [Showing lines X-Y of N. Use offset=Y+1 to continue.] 标记，按提示传 offset 续读。",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "workspace 内的文件相对路径，如 'src/main.py'",
+            "title": "Path",
+            "type": "string"
+          },
+          "offset": {
+            "default": 1,
+            "description": "起始行号（1-based）。大文件续读用：截断标记会提示下一次的 offset。",
+            "minimum": 1,
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "write",
+      "description": "覆盖写入 workspace 内的文件。参数：path 为文件路径，content 为要写入的完整文本（会完全替换原有内容）。适合创建新文件或整体重写已有文件。",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "workspace 内的文件相对路径，如 'src/main.py'",
+            "title": "Path",
+            "type": "string"
+          },
+          "content": {
+            "description": "要写入文件的完整文本内容（覆盖已有内容）",
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "bash",
+      "description": "在 workspace 内执行 shell 命令。注意：工具名 bash 是历史名称，实际解释器是 cmd.exe（不是 bash），请按该解释器的语法书写命令。Windows cmd.exe 注意事项：单引号不是引用符、$VAR 不展开、cat/ls/grep 等 Unix 命令通常不可用（用 type/dir/findstr 代替）、Unix 风格重定向（如 2>/dev/null）无效。含内部换行的多行命令会被直接拒绝（cmd.exe 会把整串静默丢弃、什么都不执行），请写成单行，或先用 write 工具把脚本写入文件再执行。参数：command 为要执行的 shell 命令字符串。返回 exit_code、stdout、stderr——命令返回非零 exit_code 不代表工具调用失败，应读取 stdout/stderr 判断命令执行结果。",
+      "parameters": {
+        "properties": {
+          "command": {
+            "description": "要在 workspace 内执行且至少包含一个非空白字符的 shell 命令",
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "edit",
+      "description": "对 workspace 内文件做精确字符串替换（exact old_string → new_string）。参数：path 文件路径，old_string 要替换的确切字符串，new_string 新字符串，replace_all=True 时替换所有匹配（默认 False，要求唯一匹配）。0 匹配返回未找到错误，多于 1 处匹配返回多个匹配错误。",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "workspace 内的文件相对路径",
+            "title": "Path",
+            "type": "string"
+          },
+          "old_string": {
+            "description": "要被替换的确切字符串（不能为空）",
+            "minLength": 1,
+            "title": "Old String",
+            "type": "string"
+          },
+          "new_string": {
+            "description": "替换后的新字符串",
+            "title": "New String",
+            "type": "string"
+          },
+          "replace_all": {
+            "default": false,
+            "description": "True 时替换所有匹配；False 时仅允许唯一匹配",
+            "title": "Replace All",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "apply_patch",
+      "description": "对单个文件原子地应用多个补丁块（hunks）。参数：path 文件路径，hunks 是一个有序列表，每项含 old_string 和 new_string。任意一块匹配失败（0 或多于 1 处）则整个操作失败、文件不被改动。适合对同一文件做多处相关修改。",
+      "parameters": {
+        "$defs": {
+          "_Hunk": {
+            "properties": {
+              "old_string": {
+                "description": "要被替换的确切字符串（不能为空）",
+                "minLength": 1,
+                "title": "Old String",
+                "type": "string"
+              },
+              "new_string": {
+                "description": "替换后的新字符串",
+                "title": "New String",
+                "type": "string"
+              }
+            },
+            "required": [
+              "old_string",
+              "new_string"
+            ],
+            "title": "_Hunk",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "path": {
+            "description": "workspace 内的文件相对路径",
+            "title": "Path",
+            "type": "string"
+          },
+          "hunks": {
+            "description": "有序补丁块列表，至少 1 块",
+            "items": {
+              "$ref": "#/$defs/_Hunk"
+            },
+            "minItems": 1,
+            "title": "Hunks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "hunks"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "glob",
+      "description": "按 glob 模式列出 workspace 内匹配的文件路径。参数：pattern glob 模式（如 '**/*.py'、'src/test_*.py'），max_results 返回上限（默认 100）。用于查找文件，不做内容搜索。",
+      "parameters": {
+        "properties": {
+          "pattern": {
+            "description": "glob 模式，如 '**/*.py' 或 'src/test_*.py'",
+            "title": "Pattern",
+            "type": "string"
+          },
+          "max_results": {
+            "default": 100,
+            "description": "返回上限，防上下文爆炸",
+            "minimum": 1,
+            "title": "Max Results",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "grep",
+      "description": "在 workspace 文件内容里做正则搜索。参数：pattern 正则表达式，include 文件名 glob 过滤（如 '*.py'），超长匹配行截断到 500 字符（可用 read 按行号看原文），path 搜索范围子目录，max_results 匹配上限（默认 100）。返回匹配的文件路径、行号、行文本。",
+      "parameters": {
+        "properties": {
+          "pattern": {
+            "description": "正则表达式",
+            "minLength": 1,
+            "title": "Pattern",
+            "type": "string"
+          },
+          "path": {
+            "default": ".",
+            "description": "搜索范围子目录，相对 workspace",
+            "title": "Path",
+            "type": "string"
+          },
+          "include": {
+            "default": "*",
+            "description": "文件名 glob 过滤（如 '*.py'）",
+            "title": "Include",
+            "type": "string"
+          },
+          "max_results": {
+            "default": 100,
+            "description": "匹配上限（最多 1000），防上下文爆炸；命中过多请细化 pattern",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Max Results",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "git_status",
+      "description": "查询 workspace 的 git 状态（只读）。返回 porcelain 格式的改动文件列表。参数：pathspec 可选路径过滤。不会执行 commit / push / reset 等写操作。",
+      "parameters": {
+        "properties": {
+          "pathspec": {
+            "default": "",
+            "description": "可选路径过滤，如 'src/' 或 'README.md'（纯路径，不支持通配符、pathspec magic 与 `..` 段）",
+            "title": "Pathspec",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "git_diff",
+      "description": "查询 workspace 的 git 差异（只读）。参数：staged=True 看暂存区差异，path 可选路径过滤。不会执行 commit / push / reset 等写操作。",
+      "parameters": {
+        "properties": {
+          "staged": {
+            "default": false,
+            "description": "True 时查看暂存区差异（git diff --staged）",
+            "title": "Staged",
+            "type": "boolean"
+          },
+          "path": {
+            "default": "",
+            "description": "可选路径过滤（纯路径，不支持通配符与 `..` 段）",
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "update_plan",
+      "description": "提交/更新任务进度清单（每次提交**完整清单**，不是增量）。什么时候用：开始一项工作时把它置为 in_progress（同时把上一项置回 pending 或 completed）；完成一项立即置 completed。约束：同一时刻至多一项 in_progress；completed 不可回退（要撤销就新增一项）；清单至多 50 条（超了就合并相邻项）。校验失败时错误信息会附当前清单——按它修正后重新提交全表。注意：本工具只汇报**执行进度**。在 plan 档要**请求开工授权**时用 `submit_plan`（提交计划正文、暂停 run 等用户批准），两者不要混用。",
+      "parameters": {
+        "$defs": {
+          "_PlanItemArg": {
+            "additionalProperties": false,
+            "description": "清单行（PRD §7.1 五字段）。`extra=\"forbid\"`：多塞字段直接非法参数。\n\n`activeForm` 直接以 camelCase 作 python 字段名、不绕 alias：registry 导出\n模型菜单用 `args_schema.model_json_schema()`，不带 `by_alias`\n（tooling/contract.py 的 args_schema 契约）——alias 会让模型面看到\n`active_form`，与事件 payload / PRD §7.1 相悖。直名让 schema、payload、\npython 三处同名，零转译。",
+            "properties": {
+              "id": {
+                "description": "稳定字符串，整表覆盖时的对齐键",
+                "minLength": 1,
+                "title": "Id",
+                "type": "string"
+              },
+              "content": {
+                "description": "任务描述（一句话，可执行）",
+                "minLength": 1,
+                "title": "Content",
+                "type": "string"
+              },
+              "activeForm": {
+                "description": "进行中显示形式（Claude Code TaskCreate 同款字段）",
+                "minLength": 1,
+                "title": "Activeform",
+                "type": "string"
+              },
+              "status": {
+                "description": "pending | in_progress | completed",
+                "title": "Status",
+                "type": "string"
+              },
+              "source": {
+                "description": "initializer | user | agent",
+                "title": "Source",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "content",
+              "activeForm",
+              "status",
+              "source"
+            ],
+            "title": "_PlanItemArg",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "description": "整表覆盖：items 是**全量**清单，不是增量补丁。\n\n刻意不在 pydantic 上设 `max_length`：>50 必须由 handler（`apply_plan_update`）\n拒绝，错误文案才带\"合并相邻项 + 当前完整清单\"（PRD §7.2 的自修复通道）——\n参数校验层短路会把这条通道掐断。校验长在 handler 上，不在工具上。",
+        "properties": {
+          "items": {
+            "description": "完整任务清单（每次提交全表，至多 50 条）。单 in_progress；completed 不可回退。",
+            "items": {
+              "$ref": "#/$defs/_PlanItemArg"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "read_artifact",
+      "description": "读取之前被自动保存为外置产物的大输出（如 bash 的长 stdout）的局部内容。参数：artifact_ref（从工具结果的 artifact_ref 获得），start_line/end_line 按行范围读取，keyword 按关键词过滤，max_lines 返回行数上限（默认 200），max_chars_per_line 单行字符上限（默认 2000，超限可放宽）。",
+      "parameters": {
+        "properties": {
+          "artifact_ref": {
+            "description": "要读取的外置产物 ID（从工具结果的 artifact_ref 或 ARTIFACT_EXTERNALIZED 事件获得）",
+            "title": "Artifact Ref",
+            "type": "string"
+          },
+          "start_line": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "起始行号（1-based）",
+            "title": "Start Line"
+          },
+          "end_line": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "结束行（含）",
+            "title": "End Line"
+          },
+          "keyword": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "关键词过滤，只返回含此关键词的行",
+            "title": "Keyword"
+          },
+          "max_lines": {
+            "default": 200,
+            "description": "返回行数上限（默认 200，最大 1000）",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "max_chars_per_line": {
+            "default": 2000,
+            "description": "单行字符上限（默认 2000）。单行被截断时返回体携带 truncated 与 full_length，可放宽本参数重新读取更长片段。",
+            "maximum": 20000,
+            "minimum": 1,
+            "title": "Max Chars Per Line",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifact_ref"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}
