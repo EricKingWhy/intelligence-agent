@@ -65,7 +65,9 @@ SDD 的完整门禁（后端全量 `pytest` + 前端 `tsc/vitest/oxlint/playwrig
 
 from __future__ import annotations
 
+import ast
 import functools
+import hashlib
 import json
 import os
 import re
@@ -74,6 +76,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from typing import Literal, NamedTuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(REPO_ROOT, "web")
@@ -124,6 +127,12 @@ COLUMNS = ("surface", "layer", "sub_features", "how_to_get_to_it",
 #: 而不是等到 `--affected` 静默少跑一条）。`tests/test_verification_map.py` 另存一份**独立副本**——
 #: 那是刻意的交叉对账（与它那份独立匹配器同理），不是可以合并的重复。
 GATE0_LANE_IDS = ("diff-check", "ruff", "oxlint", "tsc", "stylelint", "guards", "coverage")
+# Frozen compatibility shape for receipts created before the stylelint lane was added.
+_GATE0_LEGACY_LANE_IDS = ("diff-check", "ruff", "oxlint", "tsc", "guards", "coverage")
+_GATE0_RECEIPT_LANE_MANIFESTS = (
+    frozenset(GATE0_LANE_IDS),
+    frozenset(_GATE0_LEGACY_LANE_IDS),
+)
 HEAVY_LANE_IDS = ("pytest-full", "pytest-clean", "vitest", "build", "e2e", "live")
 LANE_VOCAB = (*GATE0_LANE_IDS, *HEAVY_LANE_IDS)
 
@@ -181,6 +190,13 @@ def _git_env_clean(env: dict | None) -> dict:
 def _receipt_lane_env(extra: dict | None) -> dict:
     """`--replay` 复核路径的车道 env：落盘 env 叠在父环境上，同过 `_git_env_clean`。"""
     return _git_env_clean(dict(os.environ, **(extra or {})))
+
+
+class ReceiptCheckResult(NamedTuple):
+    ok: bool
+    detail: str
+    warn_only: bool
+    status: Literal["clear", "violations", "attested", "error"]
 
 
 class Lane:
@@ -454,6 +470,12 @@ _DOC_PATTERN_FALLBACK = (
 )
 #: 收据文件名：`docs/gate/<被测树 40 位 sha>.json`（入库文件名 = 引用口径）。
 _RECEIPT_RE = re.compile(r"^docs/gate/([0-9a-f]{40})\.json$")
+_LEDGER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_COVERAGE_BASE_RE = re.compile(r"^覆盖区间:\s*([0-9a-f]{7,40})\.\.HEAD\s*$", re.MULTILINE)
+_COVERAGE_COUNTS_RE = re.compile(
+    r"^提交总数\s+(\d+)\s*/\s*已审查\s+(\d+)\s*/\s*待判定\s+(\d+)\s*$",
+    re.MULTILINE,
+)
 
 
 @functools.cache
@@ -474,9 +496,341 @@ def _git_at(repo_root, *args: str) -> subprocess.CompletedProcess:
     return git("-C", str(repo_root), *args)
 
 
+def _git_at_bytes(repo_root, *args: str,
+                  input_bytes: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+    """Binary Git probe for tree paths/blob contents used by ledger fingerprinting."""
+    return subprocess.run(
+        ["git", "-C", str(repo_root), *args], input=input_bytes,
+        capture_output=True, check=False,
+    )
+
+
+def _cat_file_batch(repo_root, objects: list[bytes]) -> dict[bytes, tuple[bytes, bytes, bytes] | None]:
+    """Read many Git objects with one process; missing objects map to None."""
+    requests = list(dict.fromkeys(objects))
+    if not requests:
+        return {}
+    proc = _git_at_bytes(
+        repo_root, "cat-file", "--batch",
+        input_bytes=b"".join(obj + b"\n" for obj in requests),
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"git cat-file --batch failed: {detail[:200]}")
+
+    result: dict[bytes, tuple[bytes, bytes, bytes] | None] = {}
+    cursor = 0
+    for requested in requests:
+        header_end = proc.stdout.find(b"\n", cursor)
+        if header_end < 0:
+            raise ValueError("truncated git cat-file batch header")
+        fields = proc.stdout[cursor:header_end].split()
+        if len(fields) == 2 and fields[1] == b"missing":
+            result[requested] = None
+            cursor = header_end + 1
+            continue
+        if len(fields) != 3:
+            raise ValueError("malformed git cat-file batch header")
+        if re.fullmatch(rb"[0-9a-f]{40}", requested) and fields[0] != requested:
+            raise ValueError("git cat-file returned an unexpected object id")
+        try:
+            size = int(fields[2])
+        except ValueError as exc:
+            raise ValueError("invalid git cat-file batch object size") from exc
+        content_start = header_end + 1
+        content_end = content_start + size
+        if content_end >= len(proc.stdout) or proc.stdout[content_end:content_end + 1] != b"\n":
+            raise ValueError("truncated git cat-file batch object")
+        result[requested] = (fields[0], fields[1], proc.stdout[content_start:content_end])
+        cursor = content_end + 1
+    if cursor != len(proc.stdout):
+        raise ValueError("unexpected trailing data from git cat-file batch")
+    return result
+
+
+def _cat_file_path_batch(
+    repo_root, paths: list[bytes],
+) -> dict[bytes, tuple[bytes, bytes, bytes] | None]:
+    """Resolve many commit paths, then fetch each distinct blob only once."""
+    requests = list(dict.fromkeys(paths))
+    if not requests:
+        return {}
+    proc = _git_at_bytes(
+        repo_root, "cat-file", "--batch-check",
+        input_bytes=b"".join(path + b"\n" for path in requests),
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"git cat-file --batch-check failed: {detail[:200]}")
+    lines = proc.stdout.splitlines()
+    if len(lines) != len(requests):
+        raise ValueError("truncated git cat-file batch-check output")
+    blob_ids: dict[bytes, bytes] = {}
+    result: dict[bytes, tuple[bytes, bytes, bytes] | None] = {}
+    for path, line in zip(requests, lines, strict=True):
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == b"missing":
+            result[path] = None
+        elif (len(fields) == 3 and re.fullmatch(rb"[0-9a-f]{40}", fields[0])
+              and fields[1] == b"blob"):
+            blob_ids[path] = fields[0]
+        else:
+            result[path] = None
+    contents = _cat_file_batch(repo_root, list(dict.fromkeys(blob_ids.values())))
+    result.update({path: contents.get(blob_id) for path, blob_id in blob_ids.items()})
+    return result
+
+
+def _gate0_lanes_from_source(source: bytes) -> tuple[str, ...] | None:
+    """Read a literal historical Gate-0 lane declaration without executing it."""
+    try:
+        module = ast.parse(source.decode("utf-8"))
+    except (UnicodeDecodeError, SyntaxError):
+        return None
+    bindings = []
+    for node in ast.walk(module):
+        if (isinstance(node, ast.Name) and node.id == "GATE0_LANE_IDS"
+                and not isinstance(node.ctx, ast.Load)):
+            bindings.append(node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == "GATE0_LANE_IDS":
+                bindings.append(node)
+        elif isinstance(node, ast.ExceptHandler) and node.name == "GATE0_LANE_IDS":
+            bindings.append(node)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name == "GATE0_LANE_IDS":
+                bindings.append(node)
+        elif isinstance(node, ast.MatchMapping) and node.rest == "GATE0_LANE_IDS":
+            bindings.append(node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound_name = alias.asname or (
+                    alias.name.partition(".")[0] if isinstance(node, ast.Import)
+                    else alias.name
+                )
+                if bound_name == "GATE0_LANE_IDS" or alias.name == "*":
+                    bindings.append(alias)
+    if len(bindings) != 1 or not isinstance(bindings[0], ast.Name):
+        return None
+    assignments = []
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id == "GATE0_LANE_IDS"
+               for target in targets):
+            if len(targets) != 1 or value is None:
+                return None
+            assignments.append(value)
+    if len(assignments) != 1:
+        return None
+    try:
+        lane_ids = ast.literal_eval(assignments[0])
+    except (ValueError, TypeError):
+        return None
+    if (
+        not isinstance(lane_ids, (tuple, list))
+        or not lane_ids
+        or any(not isinstance(name, str) or not name.strip() for name in lane_ids)
+        or len(set(lane_ids)) != len(lane_ids)
+    ):
+        return None
+    return tuple(lane_ids)
+
+
+def _git_tree_entries(content: bytes) -> list[tuple[bytes, bytes, bytes]]:
+    """Decode Git's binary tree format into (mode, name, object id) entries."""
+    entries = []
+    cursor = 0
+    while cursor < len(content):
+        mode_end = content.find(b" ", cursor)
+        name_end = content.find(b"\0", mode_end + 1) if mode_end >= 0 else -1
+        oid_start = name_end + 1
+        oid_end = oid_start + 20  # this repository uses SHA-1 object ids
+        if mode_end < 0 or name_end < 0 or oid_end > len(content):
+            raise ValueError("malformed Git tree object")
+        entries.append((content[cursor:mode_end], content[mode_end + 1:name_end],
+                        content[oid_start:oid_end]))
+        cursor = oid_end
+    return entries
+
+
+def _review_ledger_digest(contents: list[tuple[bytes, bytes]]) -> str:
+    digest = hashlib.sha256(b"intelligence-agent/review-ledger/v1\0")
+    for path, content in sorted(contents):
+        normalized = content.replace(b"\r\n", b"\n")
+        digest.update(len(path).to_bytes(8, "big"))
+        digest.update(path)
+        digest.update(len(normalized).to_bytes(8, "big"))
+        digest.update(normalized)
+    return digest.hexdigest()
+
+
+def _review_ledger_sha256_many(repo_root, root_trees: dict[str, bytes]) -> dict[str, str]:
+    """Fingerprint many historical trees with batched tree/blob reads."""
+    root_docs: dict[str, bytes | None] = {}
+    docs_requests: set[bytes] = set()
+    for root_oid, content in root_trees.items():
+        docs_oid = next((oid.hex().encode("ascii") for mode, name, oid in _git_tree_entries(content)
+                         if name == b"docs" and mode == b"40000"), None)
+        root_docs[root_oid] = docs_oid
+        if docs_oid is not None:
+            docs_requests.add(docs_oid)
+
+    docs_objects = _cat_file_batch(repo_root, sorted(docs_requests))
+    root_files: dict[str, list[tuple[bytes, bytes]]] = {oid: [] for oid in root_trees}
+    docs_shards: dict[bytes, bytes | None] = {}
+    for root_oid, docs_oid in root_docs.items():
+        if docs_oid is None:
+            continue
+        obj = docs_objects.get(docs_oid)
+        if obj is None or obj[1] != b"tree":
+            raise ValueError("cannot read docs tree for review ledger")
+        docs_entries = _git_tree_entries(obj[2])
+        shard_oid = None
+        for mode, name, oid in docs_entries:
+            if name == b"review_ledger.tsv":
+                if mode not in {b"100644", b"100755"}:
+                    raise ValueError("review_ledger.tsv must be a regular file")
+                root_files[root_oid].append((b"docs/review_ledger.tsv", oid.hex().encode("ascii")))
+            elif name == b"review_ledger.d":
+                if mode != b"40000":
+                    raise ValueError("review_ledger.d must be a directory")
+                shard_oid = oid.hex().encode("ascii")
+        docs_shards[docs_oid] = shard_oid
+
+    pending: dict[bytes, list[tuple[str, bytes]]] = {}
+    for root_oid, docs_oid in root_docs.items():
+        shard_oid = docs_shards.get(docs_oid) if docs_oid is not None else None
+        if shard_oid is not None:
+            pending.setdefault(shard_oid, []).append((root_oid, b"docs/review_ledger.d/"))
+    while pending:
+        objects = _cat_file_batch(repo_root, sorted(pending))
+        next_pending: dict[bytes, list[tuple[str, bytes]]] = {}
+        for tree_oid, contexts in pending.items():
+            obj = objects.get(tree_oid)
+            if obj is None or obj[1] != b"tree":
+                raise ValueError("cannot read review-ledger shard tree")
+            for mode, name, oid in _git_tree_entries(obj[2]):
+                if mode == b"40000":
+                    child_oid = oid.hex().encode("ascii")
+                    for root_oid, prefix in contexts:
+                        next_pending.setdefault(child_oid, []).append(
+                            (root_oid, prefix + name + b"/"),
+                        )
+                elif mode in {b"100644", b"100755"} and name.endswith(b".tsv"):
+                    blob_oid = oid.hex().encode("ascii")
+                    for root_oid, prefix in contexts:
+                        root_files[root_oid].append((prefix + name, blob_oid))
+                elif mode not in {b"100644", b"100755"}:
+                    raise ValueError("review-ledger entries must be regular files or directories")
+        pending = next_pending
+
+    blob_requests = sorted({blob_oid for files in root_files.values()
+                            for _path, blob_oid in files})
+    blob_objects = _cat_file_batch(repo_root, blob_requests)
+    digests = {}
+    for root_oid, files in root_files.items():
+        contents = []
+        for path, blob_oid in files:
+            obj = blob_objects.get(blob_oid)
+            if obj is None or obj[1] != b"blob":
+                raise ValueError("cannot read review-ledger blob")
+            contents.append((path, obj[2]))
+        digests[root_oid] = _review_ledger_digest(contents)
+    return digests
+
+
+def review_ledger_sha256(repo_root, revision: str) -> str:
+    """Hash every tracked review-ledger TSV in a Git tree, independent of the worktree.
+
+    Paths are sorted and length-framed with their contents; CRLF is normalized to LF.
+    This includes every row and description in the legacy file and sharded ledger.
+    `git cat-file --batch` keeps large sharded ledgers to one content subprocess.
+    """
+    listed = _git_at_bytes(
+        repo_root, "ls-tree", "-r", "-z", "--full-tree", revision,
+        "--", "docs/review_ledger.tsv", "docs/review_ledger.d",
+    )
+    if listed.returncode != 0:
+        detail = listed.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"cannot list review ledger at {revision}: {detail[:200]}")
+
+    ledger_blobs: list[tuple[bytes, bytes]] = []
+    for record in listed.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path = record.split(b"\t", 1)
+            mode, kind, oid = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError("malformed git ls-tree response for review ledger") from exc
+        if path == b"docs/review_ledger.d" and (mode != b"040000" or kind != b"tree"):
+            raise ValueError("review_ledger.d must be a directory")
+        is_ledger_file = (
+            path == b"docs/review_ledger.tsv"
+            or (path.startswith(b"docs/review_ledger.d/") and path.endswith(b".tsv"))
+        )
+        if is_ledger_file and (mode not in {b"100644", b"100755"} or kind != b"blob"):
+            raise ValueError(f"review-ledger entry must be a regular file: {path!r}")
+        if kind != b"blob":
+            continue
+        if not (
+            path == b"docs/review_ledger.tsv"
+            or (path.startswith(b"docs/review_ledger.d/") and path.endswith(b".tsv"))
+        ):
+            continue
+        ledger_blobs.append((path, oid))
+
+    objects = _cat_file_batch(repo_root, [oid for _path, oid in ledger_blobs])
+    contents = []
+    for path, oid in ledger_blobs:
+        obj = objects.get(oid)
+        if obj is None or obj[1] != b"blob":
+            raise ValueError("cannot read review ledger blob")
+        contents.append((path, obj[2]))
+    return _review_ledger_digest(contents)
+
+
+def _review_ledger_coverage(repo_root, results: list[tuple[Lane, int, float, str]]) -> dict | None:
+    """Capture the coverage lane's immutable base and row counts."""
+    lanes = [(rc, output) for lane, rc, _seconds, output in results if lane.name == "coverage"]
+    if len(lanes) != 1:
+        return None
+    _rc, output = lanes[0]
+    base_match = _COVERAGE_BASE_RE.search(output)
+    counts_match = _COVERAGE_COUNTS_RE.search(output)
+    if base_match is None or counts_match is None:
+        return None
+    base_proc = _git_at(repo_root, "rev-parse", "--verify", f"{base_match.group(1)}^{{commit}}")
+    base = base_proc.stdout.strip().lower()
+    if base_proc.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", base):
+        return None
+    total, covered, pending = (int(value) for value in counts_match.groups())
+    if total != covered + pending:
+        return None
+    return {"base": base, "total": total, "covered": covered}
+
+
+def _review_ledger_receipt(repo_root, tested_sha: str,
+                           results: list[tuple[Lane, int, float, str]]) -> dict:
+    """The ledger and coverage evidence attached to one measured Git tree."""
+    return {
+        "sha256": review_ledger_sha256(repo_root, tested_sha),
+        "coverage": _review_ledger_coverage(repo_root, results),
+    }
+
+
 #: receipt-present 检查的引入提交（#1338 改动 3 那笔）。钉死为常量：豁免边界是历史事实，
 #: 不随 "receipt-present" 字面量的增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
 _RECEIPT_BOOTSTRAP_SHA = "1a28072df74955f8091297bb5b9a096c8c18c4cf"
+# A receipt requires a ledger binding when its tested Gate-0 source contains this marker.
+_LEDGER_BINDING_MARKER = "review-ledger-binding-v1"
 
 
 def receipt_bootstrap_sha(repo_root=None) -> str | None:
@@ -494,26 +848,55 @@ def head_tree_receipts(repo_root=None) -> dict:
     有效 iff：可解析 JSON、`sha` 字段 == 文件名、`tree` == `git rev-parse <sha>^{tree}`、
     `result` == "PASS"、**`passed`/`total` 为 int 且相等**（缺字段时两边都是 None，
     `None == None` 为真，必须显式拒绝——否则三字段手写收据能顶掉整条在场检查）。
+    新收据还须带 `review_ledger`，其摘要按收据 `sha` 对应的 Git tree 重算。仅 rollout 提交之前
+    的历史收据可缺字段；rollout 之后缺字段即 invalid。不从当前 HEAD 或工作树补造旧收据的指纹。
     其余一律 invalid（**当它不存在** = fail-closed）。
     """
     repo_root = repo_root or REPO_ROOT
-    proc = _git_at(repo_root, "ls-tree", "-r", "--name-only", "HEAD", "--", "docs/gate/")
+    proc = _git_at_bytes(
+        repo_root, "ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", "docs/gate/",
+    )
     receipts: dict = {}
     if proc.returncode != 0:
         return receipts
-    for raw in proc.stdout.split("\n"):
-        path = raw.strip()
-        m = _RECEIPT_RE.match(path)
-        if not m:
+    receipt_blobs: dict[str, bytes] = {}
+    for record in proc.stdout.split(b"\0"):
+        if not record:
             continue
-        sha = m.group(1)
-        show = _git_at(repo_root, "show", f"HEAD:{path}")
-        if show.returncode != 0:
+        try:
+            metadata, path = record.split(b"\t", 1)
+            _mode, kind, blob_oid = metadata.split(b" ", 2)
+        except ValueError:
+            return receipts
+        m = re.fullmatch(rb"docs/gate/([0-9a-f]{40})\.json", path)
+        if m is None or kind != b"blob":
+            continue
+        sha = m.group(1).decode("ascii")
+        receipt_blobs[sha] = blob_oid
+    if not receipt_blobs:
+        return receipts
+
+    tree_requests = {sha: sha.encode("ascii") + b"^{tree}" for sha in receipt_blobs}
+    try:
+        objects = _cat_file_batch(
+            repo_root,
+            list(receipt_blobs.values()) + list(tree_requests.values()),
+        )
+    except (OSError, ValueError) as exc:
+        return {
+            sha: {"valid": False, "reason": f"无法批量读取收据对象：{exc}"}
+            for sha in receipt_blobs
+        }
+    parsed: dict[str, tuple[dict, str, bytes]] = {}
+    lane_manifests: dict[str, frozenset[str]] = {}
+    for sha, blob_oid in receipt_blobs.items():
+        receipt_object = objects.get(blob_oid)
+        if receipt_object is None or receipt_object[1] != b"blob":
             receipts[sha] = {"valid": False, "reason": "git show 失败"}
             continue
         try:
-            obj = json.loads(show.stdout)
-        except ValueError:
+            obj = json.loads(receipt_object[2].decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
             receipts[sha] = {"valid": False, "reason": "不是合法 JSON"}
             continue
         if not isinstance(obj, dict):
@@ -523,20 +906,144 @@ def head_tree_receipts(repo_root=None) -> dict:
             receipts[sha] = {"valid": False,
                              "reason": f"sha 字段 {obj.get('sha')!r} 与文件名不符"}
             continue
-        treeproc = _git_at(repo_root, "rev-parse", f"{sha}^{{tree}}")
-        tree = treeproc.stdout.strip()
-        if treeproc.returncode != 0 or not tree or obj.get("tree") != tree:
+        tree_request = tree_requests[sha]
+        tree_object = objects.get(tree_request)
+        if tree_object is None or tree_object[1] != b"tree" or obj.get("tree") != tree_object[0].decode("ascii"):
             receipts[sha] = {"valid": False, "reason": "tree 字段与 git rev-parse 不符"}
             continue
         passed, total = obj.get("passed"), obj.get("total")
         if (
             obj.get("result") != "PASS"
-            or not (isinstance(passed, int) and isinstance(total, int))
+            or not (type(passed) is int and type(total) is int and total > 0)
             or passed != total
         ):
             receipts[sha] = {"valid": False, "reason": "result/passed/total 不是全绿"}
             continue
-        receipts[sha] = {"valid": True, "reason": ""}
+        lanes = obj.get("lanes")
+        if not isinstance(lanes, list) or len(lanes) != total:
+            receipts[sha] = {"valid": False, "reason": "车道清单数量与 total 不符"}
+            continue
+        lane_names = [lane.get("name") for lane in lanes if isinstance(lane, dict)]
+        if (
+            len(lane_names) != total
+            or any(not isinstance(name, str) or not name.strip() for name in lane_names)
+            or len(set(lane_names)) != total
+        ):
+            receipts[sha] = {"valid": False, "reason": "车道清单名称缺失或重复"}
+            continue
+        if frozenset(lane_names) not in _GATE0_RECEIPT_LANE_MANIFESTS:
+            receipts[sha] = {"valid": False, "reason": "车道清单名称不匹配已知 Gate-0 车道"}
+            continue
+        if any(
+            lane.get("status") != "PASS"
+            or type(lane.get("rc")) is not int
+            or lane.get("rc") != 0
+            for lane in lanes
+        ):
+            receipts[sha] = {"valid": False, "reason": "车道清单不是全绿"}
+            continue
+        parsed[sha] = (obj, tree_object[0].decode("ascii"), tree_object[2])
+        lane_manifests[sha] = frozenset(lane_names)
+
+    manifest_shas = list(lane_manifests)
+    try:
+        source_objects = _cat_file_path_batch(
+            repo_root,
+            [sha.encode("ascii") + b":scripts/gate0.py"
+             for sha in manifest_shas],
+        )
+        source_error = ""
+    except (OSError, ValueError) as exc:
+        source_objects = {}
+        source_error = f"：{exc}"
+    eligible: dict[str, tuple[dict, str, str | None]] = {}
+    lane_definition_cache: dict[bytes, tuple[str, ...] | None] = {}
+    for sha, (obj, tree, _content) in parsed.items():
+        source = source_objects.get(sha.encode("ascii") + b":scripts/gate0.py")
+        source_lanes = None
+        if source is not None and source[1] == b"blob":
+            if source[0] not in lane_definition_cache:
+                lane_definition_cache[source[0]] = _gate0_lanes_from_source(source[2])
+            source_lanes = lane_definition_cache[source[0]]
+        if source_lanes is None or frozenset(source_lanes) != lane_manifests[sha]:
+            receipts[sha] = {
+                "valid": False,
+                "reason": "车道清单与被测 Gate-0 定义不符" + source_error,
+            }
+            continue
+        if "review_ledger" not in obj:
+            # A missing source cannot prove this was a legacy Gate-0 tree; fail closed.
+            if source is None or source[1] != b"blob" or _LEDGER_BINDING_MARKER.encode() in source[2]:
+                receipts[sha] = {
+                    "valid": False,
+                    "reason": ("review_ledger 缺失（该收据位于 ledger-binding rollout 之后"
+                               + source_error + "）"),
+                }
+                continue
+            eligible[sha] = (obj, tree, None)
+            continue
+
+        binding = obj["review_ledger"]
+        if not isinstance(binding, dict):
+            receipts[sha] = {"valid": False, "reason": "review_ledger 不是对象"}
+            continue
+        recorded_digest = binding.get("sha256")
+        if not isinstance(recorded_digest, str) or not _LEDGER_SHA256_RE.fullmatch(recorded_digest):
+            receipts[sha] = {"valid": False, "reason": "review_ledger.sha256 格式无效"}
+            continue
+        coverage = binding.get("coverage")
+        if not isinstance(coverage, dict):
+            receipts[sha] = {"valid": False, "reason": "review_ledger.coverage 缺失或无效"}
+            continue
+        coverage_base = coverage.get("base")
+        coverage_total = coverage.get("total")
+        coverage_covered = coverage.get("covered")
+        if (
+            not isinstance(coverage_base, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", coverage_base)
+            or not isinstance(coverage_total, int)
+            or isinstance(coverage_total, bool)
+            or not isinstance(coverage_covered, int)
+            or isinstance(coverage_covered, bool)
+            or coverage_total <= 0
+            or coverage_covered < 0
+            or coverage_covered > coverage_total
+        ):
+            receipts[sha] = {"valid": False, "reason": "review_ledger.coverage 摘要无效"}
+            continue
+        eligible[sha] = (obj, tree, recorded_digest)
+
+    root_trees = {tree: content for _obj, tree, content in parsed.values()}
+    try:
+        ledger_fingerprints = _review_ledger_sha256_many(
+            repo_root,
+            {tree: root_trees[tree] for _obj, tree, _digest in eligible.values()},
+        )
+    except (OSError, ValueError) as exc:
+        ledger_fingerprints = {}
+        ledger_error = str(exc)
+    else:
+        ledger_error = ""
+
+    for sha, (obj, tree, recorded_digest) in eligible.items():
+        measured_digest = ledger_fingerprints.get(tree)
+        if measured_digest is None:
+            reason = "无法读取被测树台账指纹：" + (ledger_error or "Git tree 不可读")
+            if recorded_digest is None:
+                reason = "无法为历史收据读取被测树台账指纹：" + (ledger_error or "Git tree 不可读")
+            receipts[sha] = {"valid": False, "reason": reason}
+            continue
+        if recorded_digest is not None and recorded_digest != measured_digest:
+            receipts[sha] = {
+                "valid": False,
+                "reason": "review_ledger.sha256 与被测树台账内容不符",
+            }
+            continue
+        receipts[sha] = {
+            "valid": True,
+            "reason": "",
+            "ledger_sha256": recorded_digest or measured_digest,
+        }
     return receipts
 
 
@@ -599,36 +1106,64 @@ def transfer_diff_docs_only(repo_root, p: str, c: str) -> bool:
     return all(len(r) >= 2 and r[0] in ("A", "M") and _doc_pattern().match(r[1]) for r in rows)
 
 
-def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
-    """收据在场检查（#1338 改动 3）⇒ (ok, detail, warn_only)。
+def _receipt_matches_first_landing(repo_root, tested_sha: str) -> bool:
+    """Reject edits to an attestation after its first committed landing."""
+    path = f"docs/gate/{tested_sha}.json"
+    additions = _git_at(
+        repo_root, "log", "--diff-filter=A", "--format=%H", "HEAD", "--", path,
+    )
+    if additions.returncode != 0:
+        return False
+    commits = [line for line in additions.stdout.splitlines() if line]
+    if not commits:
+        return False
+    # git log is newest-first; the oldest add keeps delete/re-add from replacing the evidence.
+    original = _git_at(repo_root, "rev-parse", "--verify", f"{commits[-1]}:{path}")
+    current = _git_at(repo_root, "rev-parse", "--verify", f"HEAD:{path}")
+    return (
+        original.returncode == 0
+        and current.returncode == 0
+        and original.stdout.strip() == current.stdout.strip()
+    )
+
+
+def receipt_present_check(repo_root=None, bootstrap_sha=None,
+                          *, _allow_current_full_run_receipt: bool = False) -> ReceiptCheckResult:
+    """收据在场检查（#1338 改动 3），返回结构化状态与可读详情。
 
     对 `merge-base(origin/main, HEAD)..HEAD` 里每笔**非纯 docs、非纯收据落盘**、且晚于 bootstrap
     B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受三种形状：
     ① t = c 自身；②（§8.1 传递）t = 第一父 p 且 p..c 的差异是 docs-only；③ t != c、t 在本区间内、
-    c 是 t 的祖先、**且 c 与 t 同一冻结树**（`c^{tree} == t^{tree}`）——即批次冻结在树 F 后整批
-    只跑一次全量，每笔 c 的 t 都是后代 F。
-
-    ③ 落地票面对 t 的定义（"t 是 c 的被测树"，t = c 与 t = 父+传递只是实例）：字面只认
-    "t = c 或父"会要求**每笔代码提交各跑一次门禁**，与改动标题"每棵冻结树只跑一次全量"及
-    PR #1336 的既有实践（7 笔代码提交、1 枚冻结 tip 读数）冲突。merge commit 不需特判：同步合并
-    的树真被测过就有后代读数，没测过的新树照旧红（SDD §8.1 的 fail-closed 语义）。找不到 = 违规。
+    c 是 t 的祖先，且 c..t 的最终差异仅为 docs-only（含同一冻结树）。这允许完整重跑后以新收据
+    重新认证代码树，同时禁止未重跑的账本漂移继续引用旧指纹。
     """
     repo_root = repo_root or REPO_ROOT
     mb = _git_at(repo_root, "merge-base", "origin/main", "HEAD")
     base = mb.stdout.strip()
     if mb.returncode != 0 or not base:
-        return (False, f"cannot determine merge-base: {(mb.stderr or mb.stdout).strip()[:200]}",
-                False)
+        return ReceiptCheckResult(
+            False, f"cannot determine merge-base: {(mb.stderr or mb.stdout).strip()[:200]}",
+            False, "error",
+        )
     bootstrap = bootstrap_sha or receipt_bootstrap_sha(repo_root)
     if not bootstrap:
-        return (False, ('cannot locate receipt-present bootstrap commit'
-                        '（scripts/gate0.py 的历史里找不到 "receipt-present"）'), False)
+        return ReceiptCheckResult(
+            False, ('cannot locate receipt-present bootstrap commit'
+                    '（scripts/gate0.py 的历史里找不到 "receipt-present"）'),
+            False, "error",
+        )
 
     rev = _git_at(repo_root, "rev-list", f"{base}..HEAD")
     if rev.returncode != 0:
-        return False, f"cannot list commits: {rev.stderr.strip()[:200]}", False
+        return ReceiptCheckResult(False, f"cannot list commits: {rev.stderr.strip()[:200]}",
+                                  False, "error")
     commits = [x for x in rev.stdout.split("\n") if x.strip()]
     range_set = set(commits)
+    try:
+        current_ledger = review_ledger_sha256(repo_root, "HEAD")
+    except (OSError, ValueError) as exc:
+        return ReceiptCheckResult(False, f"cannot fingerprint HEAD review ledger: {exc}",
+                                  False, "error")
 
     scope = []
     for c in commits:
@@ -643,31 +1178,53 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
 
     receipts = head_tree_receipts(repo_root)
     violations = []
+    stale_ledger_violations = []
+    modified_receipt_violations = []
     for c in scope:
         parents = _git_at(repo_root, "rev-list", "--parents", "-n", "1", c).stdout.split()[1:]
         p1 = parents[0] if parents else None
-        acceptable = receipts.get(c, {}).get("valid", False) or (
-            p1 is not None
-            and receipts.get(p1, {}).get("valid", False)
-            and transfer_diff_docs_only(repo_root, p1, c)
+        candidates: list[str] = []
+        if receipts.get(c, {}).get("valid", False):
+            candidates.append(c)
+        if (p1 is not None and receipts.get(p1, {}).get("valid", False)
+                and transfer_diff_docs_only(repo_root, p1, c)):
+            candidates.append(p1)
+
+        c_tree = _git_at(repo_root, "rev-parse", f"{c}^{{tree}}").stdout.strip()
+        for t in receipts:
+            if t == c or t not in range_set or not receipts[t].get("valid", False):
+                continue
+            if _git_at(repo_root, "merge-base", "--is-ancestor", c, t).returncode != 0:
+                continue
+            t_tree = _git_at(repo_root, "rev-parse", f"{t}^{{tree}}").stdout.strip()
+            if c_tree and t_tree and (
+                c_tree == t_tree or transfer_diff_docs_only(repo_root, c, t)
+            ):
+                candidates.append(t)
+
+        # Old-format receipts derive their baseline from the tested tree. Every receipt must
+        # still match the current committed ledger, otherwise a docs-only edit silently preserves
+        # stale evidence.
+        matching_ledger = [
+            t for t in candidates
+            if receipts[t].get("ledger_sha256") == current_ledger
+        ]
+        modified_receipts = [
+            t for t in matching_ledger
+            if not _receipt_matches_first_landing(repo_root, t)
+        ]
+        acceptable = any(
+            t not in modified_receipts
+            for t in matching_ledger
         )
-        if not acceptable:
-            # ③ 批次冻结树：t 在区间内、t != c、c 是 t 的祖先、**且 c 与 t 同一冻结树**
-            # （`c^{tree} == t^{tree}`）⇒ c 的被测树就是后代 t。只判祖先不判树，会让 tip
-            # 的一张收据免检所有更早的代码提交（#1338 P1-1），fail-open；树比对失败 ⇒ 不认。
-            c_tree = _git_at(repo_root, "rev-parse", f"{c}^{{tree}}").stdout.strip()
-            for t in receipts:
-                if t == c or t not in range_set or not receipts[t].get("valid", False):
-                    continue
-                if _git_at(repo_root, "merge-base", "--is-ancestor", c, t).returncode != 0:
-                    continue
-                t_tree = _git_at(repo_root, "rev-parse", f"{t}^{{tree}}").stdout.strip()
-                if c_tree and t_tree and c_tree == t_tree:
-                    acceptable = True
-                    break
+        stale_only = bool(candidates) and not matching_ledger
         if not acceptable:
             subject = _git_at(repo_root, "log", "-1", "--format=%s", c).stdout.strip()
             violations.append((c, subject))
+            if stale_only:
+                stale_ledger_violations.append((c, subject))
+            elif modified_receipts:
+                modified_receipt_violations.append((c, subject))
 
     # 首周 warn-only（#1338）：从 bootstrap 提交时间起 7 天内只告警不红；日期解析失败 ⇒ 不宽限。
     warn_only = False
@@ -682,11 +1239,35 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
               f"范围 {len(commits)} 笔 / 被查 {len(scope)} 笔 / 违规 {len(violations)} 笔"
               + ("（首周 warn-only）" if warn_only else "")]
     for sha, subject in violations:
-        detail.append(f"missing receipt for {sha[:12]} {subject}")
+        if (sha, subject) in stale_ledger_violations:
+            detail.append(f"stale ledger fingerprint for {sha[:12]} {subject}")
+        elif (sha, subject) in modified_receipt_violations:
+            detail.append(f"receipt changed after first landing for {sha[:12]} {subject}")
+        else:
+            detail.append(f"missing receipt for {sha[:12]} {subject}")
+    head = _git_at(repo_root, "rev-parse", "--verify", "HEAD^{commit}")
+    if (violations and _allow_current_full_run_receipt
+            and head.returncode == 0 and head.stdout.strip()):
+        head_sha = head.stdout.strip()
+        head_tree_proc = _git_at(repo_root, "rev-parse", f"{head_sha}^{{tree}}")
+        head_tree = head_tree_proc.stdout.strip()
+        if head_tree_proc.returncode == 0 and head_tree and all(
+            _git_at(repo_root, "merge-base", "--is-ancestor", sha, head_sha).returncode == 0
+            and (
+                _git_at(repo_root, "rev-parse", f"{sha}^{{tree}}").stdout.strip() == head_tree
+                or transfer_diff_docs_only(repo_root, sha, head_sha)
+            )
+            for sha, _subject in violations
+        ):
+            detail.append("处置：本次完整 Gate-0 会复核当前 HEAD，并记录绑定该树与台账的新收据")
+            return ReceiptCheckResult(True, "\n".join(detail), warn_only, "attested")
     if violations and not warn_only:
         detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，"
                       "或从第一父提交传递读数（仅限 docs-only 改动）")
-    return len(violations) == 0, "\n".join(detail), warn_only
+    return ReceiptCheckResult(
+        not violations, "\n".join(detail), warn_only,
+        "violations" if violations else "clear",
+    )
 
 
 def run_lane(lane: Lane) -> tuple[int, float, str]:
@@ -896,7 +1477,8 @@ def _env_overrides(lane: Lane) -> dict[str, str]:
 def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
                 results: list[tuple[Lane, int, float, str]],
                 affected: dict | None, changed: list[str],
-                worktree: dict | None = None) -> dict:
+                worktree: dict | None = None,
+                review_ledger: dict | None = None) -> dict:
     """拼出落盘的读数文档。
 
     **票面 #293 的字段要求**（`sha` + `^{tree}` + 每车道结论 + 墙钟 + 工具版本）由
@@ -941,7 +1523,7 @@ def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
          "signature": e["env_signature"]["id"], "evidence": e["env_signature"]["evidence"]}
         for e in lanes if "env_signature" in e
     ]
-    return {
+    doc = {
         "schema": 1,
         "gate": "gate0",
         "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -977,6 +1559,9 @@ def reading_doc(*, head: str, tree: str, argv: list[str], wall: float,
         },
         "lanes": lanes,
     }
+    if review_ledger is not None:
+        doc["review_ledger"] = review_ledger
+    return doc
 
 
 #: 未被跟踪、但**可能被某条车道读进来**的后缀 ⇒ 出现就拒绝落盘（fail-closed）。
@@ -1071,8 +1656,12 @@ def write_reading(*, head: str, tree: str, argv: list[str], wall: float,
     checkout 该 sha 跑，要么本次只是「看一眼」就加 `--no-record`。
     ⇒ 这段是本机制**固有的自指**（树里的文件无法认证它自己），如实写在这里，别读成 bug。
     """
+    review_ledger = _review_ledger_receipt(REPO_ROOT, head, results)
     doc = reading_doc(head=head, tree=tree, argv=argv, wall=wall, results=results,
-                      affected=affected, changed=changed, worktree=worktree)
+                      affected=affected, changed=changed, worktree=worktree,
+                      review_ledger=review_ledger)
+    if doc["result"] == "PASS" and review_ledger["coverage"] is None:
+        raise ValueError("coverage lane output cannot be recorded in review_ledger receipt")
     out_dir = os.path.join(REPO_ROOT, GATE_DIR)
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{head}.json")
@@ -1181,22 +1770,43 @@ def usage() -> int:
     return 0
 
 
-def _apply_receipt_check(results: list[tuple[Lane, int, float, str]]) -> None:
+def _apply_receipt_check(results: list[tuple[Lane, int, float, str]],
+                         *, will_record_receipt: bool = False) -> None:
     """receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 7 条）。
 
     只在 guards 本身全绿时跑；收据缺失且不在首周 warn-only 内 ⇒ 把该车道改写成失败。
+    一次完整、全绿且确实会落盘的运行可自举当前 HEAD 的首张收据。
     就地改写 `results`（与原来 main() 里的内联逻辑逐行等价）。
     """
     for i, (lane, rc, secs, out) in enumerate(results):
         if lane.name == "guards":
             if rc == 0:
-                ok, detail, warn = receipt_present_check()
-                if not ok:
-                    if warn:
+                full_run = (
+                    will_record_receipt
+                    and [other.name for other, _rc, _s, _o in results]
+                    == [lane.name for lane in build_lanes("")]
+                )
+                full_pass = full_run and all(
+                    other_rc == 0 for _other, other_rc, _s, _o in results
+                )
+                coverage_only_failure = full_run and {
+                    other.name for other, other_rc, _s, _o in results if other_rc != 0
+                } == {"coverage"}
+                check = receipt_present_check(
+                    _allow_current_full_run_receipt=full_pass,
+                )
+                if not check.ok:
+                    if check.warn_only:
                         print("warn-only receipt-present (#1338 change 3, first week): alert only, not counted")
-                        print(detail)
+                        print(check.detail)
+                    elif coverage_only_failure and check.status == "violations":
+                        print("⚠ receipt-present deferred until coverage is green; this run cannot issue a PASS receipt")
+                        print(check.detail)
                     else:
-                        results[i] = (lane, 1, secs, out + "\n" + detail)
+                        results[i] = (lane, 1, secs, out + "\n" + check.detail)
+                elif full_pass and check.status == "attested":
+                    print("⚠ receipt-present: this successful full run will record a fresh HEAD receipt")
+                    print(check.detail)
             break
 
 
@@ -1319,7 +1929,8 @@ def main(argv: list[str]) -> int:
         print(f"[{idx}/{len(lanes)}] {lane.name:11s} {'PASS' if rc == 0 else 'FAIL'}  {secs:6.2f}s")
         results.append((lane, rc, secs, out))
 
-    _apply_receipt_check(results)
+    record_here = record and not only and not affected_rev and not since
+    _apply_receipt_check(results, will_record_receipt=record_here)
 
     wall = time.time() - started
     for lane, rc, _secs, out in results:
@@ -1338,7 +1949,6 @@ def main(argv: list[str]) -> int:
     # ── 读数落盘（issue #293）：门禁读数的**唯一来源** ─────────────────────────────
     # 只在**裸全量**运行时落盘：`--since` / `--only` / `--affected` 都是局部读数（推送范围 / 单车道 /
     # 受影响面），写进同一个 `<sha>.json` 会把该树的全量结论覆写掉。落盘前还要求工作树干净（见下）。
-    record_here = record and not only and not affected_rev and not since
     if record and not record_here:
         print("读数：本次是局部运行（--since / --only / --affected）"
               "⇒ **不落盘**（那不是全量门禁读数，避免覆写该树的全量结论）")
@@ -1373,7 +1983,7 @@ def main(argv: list[str]) -> int:
                                  results=results, affected=affected, changed=changed,
                                  worktree=divergence)
             print(f"读数已落盘：{_rel(path)}")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             # fail-closed：读数的唯一来源写不出来 ⇒ 这条"通过"不可引用（与"核对不了就不放行"同向）。
             print(f"❌ 读数落盘失败：{exc}")
             return 1
