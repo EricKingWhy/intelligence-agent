@@ -799,7 +799,7 @@ class ContextCompactor:
         # C-6 #642：early 段每条消息的来源区间（提前到摘要尝试之前，与成功后
         # 的 source_seq 区间计算共用同一次推导；语义与原成功路径逐字一致）。
         # #710 方向 C：同一份 early_ranges 同时供第 0 节承载位的来源指针
-        # （_assemble_summary/_validate_summary）复用。
+        # （#1506：随尝试输入一并交给摘要接口）复用。
         # W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
         # （ToolMessage.content 原位替换），但消息数与顺序不变——调用方
         # 传来的 ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。
@@ -808,7 +808,6 @@ class ContextCompactor:
             messages, events, source_ranges, prefix_end, cut,
             supports_vision=supports_vision,
         )
-        trusted_summaries = _trusted_summary_indices(early, early_ranges, events)
         prompt = SystemMessage(
             content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
         )
@@ -858,9 +857,6 @@ class ContextCompactor:
                     early_ranges = (
                         early_ranges[:narrow_cut - prefix_end]
                         if early_ranges is not None else None
-                    )
-                    trusted_summaries = _trusted_summary_indices(
-                        early, early_ranges, events,
                     )
                     request = narrowed_request
                     request_token_estimate = narrowed_token_estimate
@@ -988,24 +984,18 @@ class ContextCompactor:
                     raise _SummaryRejected("non_text", "Summary must be plain text")
                 if not response.content.strip():
                     raise _SummaryRejected("empty_summary", "Summary must not be empty")
-                model_sections = _parse_summary_sections(
-                    response.content, _MODEL_SUMMARY_HEADINGS,
-                )
-                candidate_summary_text = _assemble_summary(
-                    early, model_sections, protected_facts, trusted_summaries,
-                    source_ranges=early_ranges, events=events,
-                )
-                _validate_summary(
-                    candidate_summary_text, early, protected_facts,
-                    trusted_summaries, source_ranges=early_ranges, events=events,
-                )
-                # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
-                # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
-                # 既有调用面）或会话无清单时 plan_items 为空 ⇒ 闸门不启用——空接缝
-                # 语义保留，无清单会话的行为逐字节等价。窗口推导见尝试循环之前
-                # （#1026 前移：分块请求注入计划块与闸门共用同一投影）。
-                if events is not None:
-                    _validate_plan_section(candidate_summary_text, plan_items)
+                # #1506 裁决 19：文法（parse/assemble）与校验次序（validate →
+                # plan gate）收进 `_compose_verified_summary`——本调用方只提交一次
+                # 摘要尝试输入，四步全过才拿回候选文本（条件门内置于接口：
+                # `events is None` ⇒ 计划闸门不启用，W-29 #383 空接缝语义精确保持）。
+                candidate_summary_text = _compose_verified_summary(_SummaryAttempt(
+                    early=early,
+                    response_content=response.content,
+                    source_ranges=early_ranges,
+                    events=events,
+                    protected_facts=protected_facts,
+                    plan_items=plan_items,
+                ))
                 early_tokens = estimate_message_tokens(early)
                 summary_message = HumanMessage(
                     content=candidate_summary_text,
@@ -1874,6 +1864,59 @@ def _validate_plan_section(
             "Plan section is inconsistent with the progress plan; "
             f"in-progress item(s) missing: {', '.join(missing)}",
         )
+
+
+@dataclass(frozen=True)
+class _SummaryAttempt:
+    """一次摘要尝试的完整输入（#1506）。语义数据只在此打包一次。"""
+
+    #: 本次摘要覆盖的 early 窗口（#639 缩小后为缩小段）。
+    early: list[AnyMessage]
+    #: 模型响应正文（调用方已完成 AIMessage/非空文本检查）。
+    response_content: str
+    #: 与 `early` 逐条对应的来源区间；None = 区间不可用（直连调用面）。
+    source_ranges: list[tuple[int, int] | None] | None = None
+    events: list[SessionEvent] | None = None
+    protected_facts: list[ProtectedFact] | None = None
+    #: 计划窗口投影（已按 A-vis 收窄）；仅 `events is not None` 时参与闸门。
+    plan_items: tuple[PlanItem, ...] = ()
+
+
+def _compose_verified_summary(attempt: _SummaryAttempt) -> str:
+    """#1506 裁决 19：一次摘要尝试 → 一份核验过的候选摘要（四阶段的唯一串接点）。
+
+    次序**只在这里**：parse（模型四节文法）→ assemble（程序化四节 + 转义）→
+    validate（程序化节逐字比对）→ plan gate（`events is not None` 才启用，
+    W-29 #383 空接缝语义精确保持）。四步全过才返回文本；任一步抛原异常
+    （`_SummaryRejected` 携带 `error_class`、其余 ValueError 由 `_classify_failure`
+    归类），调用方拿不到部分结果——「Commit candidate state only after every
+    validation gate passes」由此成为接口契约，而非调用点注释。
+
+    调用方只提交一次尝试输入，不再知道先 parse 还是先 assemble，也不需要知道
+    `events`/`source_ranges` 该在第几步传。
+
+    本函数按模块全局名调用四个阶段：`test_844_plan_gate_window.py` 用
+    `monkeypatch.setattr(compactor, "_validate_plan_section", spy)` 观测闸门输入，
+    该观测面因此仍然成立。
+    """
+    trusted_summaries = _trusted_summary_indices(
+        attempt.early, attempt.source_ranges, attempt.events,
+    )
+    model_sections = _parse_summary_sections(
+        attempt.response_content, _MODEL_SUMMARY_HEADINGS,
+    )
+    summary = _assemble_summary(
+        attempt.early, model_sections, attempt.protected_facts,
+        trusted_summaries,
+        source_ranges=attempt.source_ranges, events=attempt.events,
+    )
+    _validate_summary(
+        summary, attempt.early, attempt.protected_facts, trusted_summaries,
+        source_ranges=attempt.source_ranges, events=attempt.events,
+    )
+    if attempt.events is not None:
+        _validate_plan_section(summary, attempt.plan_items)
+    return summary
 
 
 def _validate_tool_blocks(messages: list[AnyMessage]) -> None:

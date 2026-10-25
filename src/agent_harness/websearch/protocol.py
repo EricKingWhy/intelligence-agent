@@ -1,10 +1,11 @@
-"""统一检索协议 + Web Search 域专用协议（ADR-0014 决策 7-10）。
+"""Web Search 域协议（ADR-0014 决策 7-10，决策 7 由 #1507 修订）。
 
-RetrievalProvider 是 Knowledge 与 Web 共享的窄协议：
-- 只含 search；KB 额外保留 chunk 生命周期方法（不污染通用契约）。
-- 替换 provider = 替换策略类；调用方不感知底层（不变量：加搜索方式只加策略类）。
+KB 与 Web **共享数据形状**（RetrievalHit 是引用/证据的通用货币），
+但**各自返回自己的类型**：`WebSearchProvider.search` 返回 `list[WebHit]`，
+KB 侧走 `KnowledgeVectorStore.search` + `KnowledgeService.retrieve` 返回
+`KnowledgeHit`。没有跨域 provider 协议——替换 provider = 替换策略类，
+调用方不感知底层（不变量：加搜索方式只加策略类）。
 
-WebSearchProvider 继承窄协议；WebHit 是 Web 域返回形状。
 错误统一 WebSearchError(category)——脱敏不含请求参数（同 MilvusKnowledgeVectorStore）。
 """
 
@@ -27,21 +28,6 @@ class RetrievalHit:
     content: str
     score: float
     metadata: dict = field(default_factory=dict)
-
-
-@runtime_checkable
-class RetrievalProvider(Protocol):
-    """Knowledge 与 Web 共享的窄检索协议。"""
-
-    async def search(
-        self,
-        query: str,
-        *,
-        k: int = 5,
-        gl: str | None = None,
-        hl: str | None = None,
-        freshness: str | None = None,
-    ) -> list[RetrievalHit]: ...
 
 
 @dataclass(frozen=True)
@@ -78,7 +64,7 @@ class WebSearchError(Exception):
 
 @runtime_checkable
 class WebSearchProvider(Protocol):
-    """Web 域专用协议：实现 RetrievalProvider.search，返回 WebHit 列表。
+    """Web 域专用协议：返回 WebHit 列表。
 
     adapter 各自处理 HTTP verb / auth / locale 映射；调用方不感知。
     """

@@ -166,6 +166,12 @@ export default function App() {
     // （显式报警），也不让整条内联错误通道静默消失。测试替身由各 `App.*.test.tsx`
     // 的 mock 显式补全这两个键。
     sendFailure,
+    // #1521：这三个键带显式缺省（与 sendFailure 的「不设缺省」立场不同——那是
+    // 故障通道，静默消失即 bug；这三个是纯 UI 态，缺省 = 无失败/无提示，且
+    // useSession 侧测试已钉死返回形状）。缺省让既有 App 测试替身不必逐一补键。
+    historyLoadError = null,
+    missingSessionNotice = null,
+    dismissMissingSessionNotice = () => {},
     runFailedBeforePlan,
     sessionsError,
     titlesById,
@@ -1130,6 +1136,23 @@ export default function App() {
         ? { message: queueCancelError.message }
         : null,
     [queueCancelError, selectedId, conversation],
+  );
+  /** #1521 FE-05：首开 / 换会话历史加载失败的专属面板数据。仅当失败属于**当前
+   *  选中**会话且该会话尚无投影时交给 Conversation——旧形状是空态「暂无对话」+
+   *  错误横幅矛盾同现；同会话后台重读失败时 conversation 在场 ⇒ 不派生，横幅
+   *  语义不变。重试 = `reloadConversation(selectedId)`（既有「就地对账」通路，
+   *  不新增 API，也不自建第二套刷新语义）。
+   *  useMemo 是 Conversation 侧 memo 契约的要求（ADR-0037 D5.3）：prop 身份稳定，
+   *  失败在场时也不让 `memo` 恒 miss。 */
+  const historyLoadFailure = useMemo(
+    () =>
+      historyLoadError !== null &&
+      selectedId !== null &&
+      historyLoadError.sid === selectedId &&
+      conversation === null
+        ? { message: historyLoadError.message, onRetry: () => reloadConversation(selectedId) }
+        : null,
+    [historyLoadError, selectedId, conversation, reloadConversation],
   );
 
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A；#1177 §A.3 改名，现名「新建任务…」）：统一创建入口——
@@ -2134,6 +2157,20 @@ export default function App() {
               </button>
             </div>
           )}
+          {/* #1521 FE-06：显式点行命中 404 的温和提示（信息级，可关闭）。启动恢复
+              过期 id 的安静复位不经这条通道——刷新循环弹错是用户处理不了的错误。 */}
+          {missingSessionNotice && (
+            <div className="app-notice" role="status">
+              <span>{missingSessionNotice}</span>
+              <button
+                className="auth-banner-close"
+                onClick={() => dismissMissingSessionNotice()}
+                aria-label="关闭提示"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
           {/* 分叉失败提示带上它属于哪个会话：只属于发起它的那个会话，切走自然
               不再渲染（不用 effect 清空——那会多一次渲染，也会留下「清空」与
               「切会话」两份状态需要同步）。 */}
@@ -2319,6 +2356,7 @@ export default function App() {
                   <Conversation
                     conversation={conversation}
                     loadingHistory={historySkeleton}
+                    historyLoadFailure={historyLoadFailure}
                     density={density}
                     disclosure={disclosure}
                     reasoningDisclosure={reasoningDisclosure}

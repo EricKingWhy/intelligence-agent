@@ -66,6 +66,11 @@ import { ConversationSkeleton } from './ConversationSkeleton';
 interface Props {
   conversation: ConversationState | null;
   loadingHistory: boolean;
+  /** #1521 FE-05：**首次加载**历史失败面（App 由 `historyLoadError` 派生，仅当
+   *  失败属于当前选中会话且该会话尚无投影时非空）。非空 ⇒ 空分支改渲染失败
+   *  面板（原因 + 就地重试），不画「暂无对话」——一次没成功的加载不是空态。
+   *  null = 正常空态语义（真实空历史 / idle）。 */
+  historyLoadFailure?: { message: string; onRetry: () => void } | null;
   /** Trace Density 四档（Brief 冻结决策）——控制执行链节点粒度。 */
   density: TraceDensity;
   /** L0-L2 展开状态（manual override ?? density 默认）。缺省 = 无手动层。 */
@@ -198,7 +203,7 @@ export const ErrorBar = memo(function ErrorBar({
  * 逐项稳定性核对表、否决 `areEqual` 的理由、以及"该重渲染时必须重渲染"的守卫用例，
  * 见 `docs/adr/0037-projection-reference-stability-and-events-version.md` D5.3。
  */
-export const Conversation = memo(function Conversation({ conversation, loadingHistory, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer, planApprovalRequest = null, planApprovalResuming = false, planApprovalError = null, onPlanApprovalAnswer, submitFailure = null, onRetrySubmit, retryPending = false, suppressRunFailure = false }: Props) {
+export const Conversation = memo(function Conversation({ conversation, loadingHistory, historyLoadFailure = null, density, disclosure, reasoningDisclosure, jumpRequest, onPresetTask, onFocusTool, onOpenSession, onInspectChild, onFork, onEditTurn, goneApprovalIds, onApprovalGone, onApprovalDecided, supportsVision = null, askUserRequest = null, askUserResuming = false, askUserError = null, onAskUserAnswer, planApprovalRequest = null, planApprovalResuming = false, planApprovalError = null, onPlanApprovalAnswer, submitFailure = null, onRetrySubmit, retryPending = false, suppressRunFailure = false }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Follow-mode（pi-mono TUI 语言）：贴底跟随流式增长；用户上滚即脱离跟随，
   // 出现「↓ 最新」浮标一键回归。纯视图状态，不碰投影（#22）。
@@ -520,6 +525,28 @@ export const Conversation = memo(function Conversation({ conversation, loadingHi
   }
 
   if (!conversation || conversation.turns.length === 0) {
+    // #1521 FE-05：首开 / 换会话的历史加载失败走专属面板——旧形状是空态
+    // 「暂无对话」+ 顶部错误横幅矛盾同现：一次没成功的加载被说成「暂无对话」，
+    // 且只能换会话才能重试。失败面保留 `failureBars`（提交失败与历史失败是
+    // 独立通道，同帧在场时都要看得见），只替换空态主体。
+    if (historyLoadFailure) {
+      return (
+        <div className="conversation">
+          {failureBars}
+          <div className="conversation-empty">
+            <div className="empty-state" role="alert">
+              <div className="empty-hero">历史加载失败</div>
+              <div className="empty-sub">{historyLoadFailure.message}</div>
+              <div className="empty-examples">
+                <button className="example-chip" onClick={historyLoadFailure.onRetry}>
+                  重试
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="conversation">
         {failureBars}

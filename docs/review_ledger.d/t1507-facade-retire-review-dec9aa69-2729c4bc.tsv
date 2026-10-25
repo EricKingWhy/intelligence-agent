@@ -1,0 +1,1 @@
+2026-10-25	#1507 fresh 复核 verdict PASS-WITH-FINDINGS（P0=0/P1=0/P2=3/P3=3/P4=1）：代码提交 2729c4bc1（退役 RetrievalProvider facade 与 KnowledgeRetrievalProvider 适配器）的审查覆盖；P2-1 外部兼容证据已落盘 #1507 issue 评论（复核 §5.3 可复现查询串+命中数）；P3-1 由 4d4e7fdf3 修复；P2-3 收据另行提交。	dec9aa69..2729c4bc1
