@@ -857,5 +857,3 @@ def test_zero_hit_changed_file_is_dropped_from_the_denominator_output(repo: Path
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "RATCHET EMPTY" in proc.stdout
-
-
