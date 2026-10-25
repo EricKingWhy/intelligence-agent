@@ -369,7 +369,7 @@ def _archive_posix_tree_fd_relative(
 class DockerSandbox(Sandbox):
     """Run Coding Tools inside an isolated Docker container."""
 
-    _container_exec_states = weakref.WeakValueDictionary()
+    _container_exec_states: ClassVar[weakref.WeakValueDictionary[str, _ContainerExecState]] = weakref.WeakValueDictionary()
     _container_exec_states_lock = threading.Lock()
     _poisoned_container_exec_states: ClassVar[dict[str, _ContainerExecState]] = {}
 

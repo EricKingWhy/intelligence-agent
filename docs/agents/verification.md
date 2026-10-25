@@ -167,6 +167,10 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
        的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
 - **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
   `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
+  读失败日志**别只 grep `missing receipt`**：warn-only（首周宽限）期该子检查的违规行带
+  行内前缀 **`warn-only missing receipt for …`**（#1598），单行自证不计数；无前缀的
+  `missing receipt for` 即硬口径阻断项，另有文末 `失败车道：coverage`/`guards` 汇总与
+  `❌ 未审查且未声明` 行可交叉确认（2026-10-25 #1578 诊断实录）。
   被测树 `t` 接受的形状见 `scripts/gate0.py::receipt_present_check` 的 docstring（**④ = 分支冻结
   tip 覆盖**，#1553 用户 2026-10-23 亲裁 A 案）：多笔代码提交的分支**不必逐笔各跑一次全量**——
   tip 树跑过一次全量、其后至 HEAD 每笔都是纯 docs / 纯收据落盘，则中间各笔按 ④ 视为被那棵被测树
@@ -439,6 +443,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | 全量 pytest 后期若干 `tests/evaluation/*` "随机"失败 | safe-delete shim 的跨测试删除配额 | `./scripts/run_tests_clean.sh`（清空 `PYTHONPATH`） |
 | `os.symlink` 静默 no-op（不抛异常、不创建） | 沙箱文件保护 | 相关用例先探针再归因，别当成自己改出来的 bug |
 | 分钟级脚本被 SIGTERM、且重定向文件是空的 | 前台跑长任务 + stdout 块缓冲 | 长跑放后台跑（`run_in_background`），或先落盘再读 |
+| MSYS（Git Bash）里 `ln -s <目录> <名>` 变成**整树深拷贝**而非链接 | MSYS 对目录默认不做符号链接（无 `winsymlinks` 特权时退化为复制） | 借用另一 checkout 的 `node_modules` 等大目录用 junction：`cmd //c mklink //j <名> <目标>`；用完 `rmdir <名>` 只删链接本身。删前核实它是 junction 不是真目录（2026-10-25 实测 `ln -s` 复制了整个 `node_modules`，删起来又慢又有误删原件风险） |
 
 `.gitattributes` 钉住 `*.sh` 的 `eol=lf` 与 `*.ps1` 的 `eol=crlf`（**不是**都 `lf`——2026-09-22 两轴审查指出此处笔误）；**无扩展名的 git hook**（`.githooks/pre-push`）
 2026-09-22 已单独加规则——否则 `core.autocrlf=true` 会把它检出成 CRLF，`exit 1\r` 这种行直接坏掉。
