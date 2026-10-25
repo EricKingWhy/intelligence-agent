@@ -11,7 +11,7 @@
 
 1. 冻结 spec 11 的流式面清单是 CLI / FastAPI SSE / Web Session Inspector，不含 TUI；grep "tui/终端/terminal" 零命中。按 `AGENTS.md` §1.1，实现与冻结规格冲突应报告 Gap，而不是回写规格。
 2. TUI 在其他 ADR 中只以**既存客户端**身份被引用（ADR-0016 的 detached-run 常驻附着客户端与 `SeqCursor` seq 语义；ADR-0046 的 client-presence 暂停触发方；ADR-0017 把「步进式 TUI replay」列为 DEFER），从未有一份记录回答「TUI 在本项目架构里是什么」。
-3. #1498 的 Tracker 收尾登记（`fc00bac7a`）在 #1504 收尾（`6b0d22a79`）中被删除且月档无承接，进度链断裂（由 #1607 在月档补录修复，与本 ADR 互为指针）。
+3. #1498 的 Tracker 收尾登记（`fc00bac7a`）在 PR #1580 merge `abe4c6667`（#1488 线）的冲突解决中被覆盖删除（`6b0d22a79` 为纯追加，非删除笔）且月档无承接，进度链断裂（由 #1607 在月档补录修复，与本 ADR 互为指针）。
 
 本 ADR 不新增任何能力、不改运行时行为，只把**已经存在的事实**钉进架构记录，并上报 spec Gap。
 
