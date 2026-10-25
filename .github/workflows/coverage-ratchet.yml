@@ -57,7 +57,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: 检出（PR 头提交；全量历史用于 merge-base 与 diff）
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（Dependabot 维护 SHA pin）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1（Dependabot 维护 SHA pin）
         with:
           # 与 gate0.yml 同理：默认检出的是合成的 merge 提交，棘轮要算的是 PR 自己那棵树。
           ref: ${{ github.event.pull_request.head.sha }}
