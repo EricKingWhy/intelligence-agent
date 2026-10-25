@@ -28,10 +28,24 @@ vi.mock('../lib/api', async (importOriginal) => {
   };
 });
 
+// ⚠ `sessionIdBaselineDetailed` / `discoverNewSessionId` 在 `lib/wsStream`，不在
+// `lib/api`（同 detachedFailure 测试的注）：认领基线读不到即走降级路径，
+// 本文件不考时钟锚点。测试⑨的 submitTask 要走真实认领入口，必须有这个 mock
+// 兜住，否则测试里会发起真实 fetch。
+vi.mock('../lib/wsStream', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/wsStream')>();
+  return {
+    ...actual,
+    sessionIdBaselineDetailed: vi.fn(async () => ({ ids: new Set<string>(), serverNowMs: null })),
+    discoverNewSessionId: vi.fn(),
+  };
+});
+
 import {
   NotFoundError,
   listSessions,
   getSessionEvents,
+  startSession,
 } from '../lib/api';
 import { SELECTED_SESSION_KEY } from '../lib/sessionRestore';
 import { useSession } from './useSession';
@@ -156,6 +170,29 @@ describe('#1521 FE-05：首次加载失败 / 真实空态 / 后台重读失败�
     expect(captured.hook!.historyLoadError).toBeNull();
     expect(captured.hook!.conversation?.session_id).toBe(OTHER);
   });
+
+  it('A 失败 → 切 B 也失败：失败面跟随当前会话（审查 B-F4：失败→失败顺序切换）', async () => {
+    vi.mocked(getSessionEvents).mockImplementation(async (sid: string) => {
+      throw new Error(`炸-${sid}`);
+    });
+    await mount();
+    await act(async () => { captured.hook!.selectSession('s-a'); });
+    await act(async () => {});
+    expect(captured.hook!.historyLoadError).toEqual({
+      sid: 's-a',
+      message: expect.stringContaining('炸-s-a'),
+    });
+
+    await act(async () => { captured.hook!.selectSession('s-b'); });
+    await act(async () => {});
+    // 面板归属新失败：A 的原文不得残留
+    expect(captured.hook!.historyLoadError).toEqual({
+      sid: 's-b',
+      message: expect.stringContaining('炸-s-b'),
+    });
+    expect(captured.hook!.conversation).toBeNull();
+    expect(captured.hook!.error).toBeNull();
+  });
 });
 
 describe('#1521 FE-06：显式点击 404 给温和提示并刷列表；启动恢复 404 保持安静复位', () => {
@@ -198,5 +235,21 @@ describe('#1521 FE-06：显式点击 404 给温和提示并刷列表；启动恢
     await act(async () => { captured.hook!.selectSession(OTHER); });
     await act(async () => {});
     expect(captured.hook!.missingSessionNotice).toBeNull();
+  });
+
+  it('提示在场 → 提交新任务 → 提示清场（审查 A-F2：清场发生在 submitTask 入口，早于认领结果）', async () => {
+    vi.mocked(getSessionEvents).mockRejectedValue(new NotFoundError());
+    await mount();
+    await act(async () => { captured.hook!.selectSession(SID); });
+    await act(async () => {});
+    expect(captured.hook!.missingSessionNotice).not.toBeNull();
+
+    // 认领失败也无妨：入口清场不依赖认领结果
+    vi.mocked(getSessionEvents).mockReset();
+    vi.mocked(getSessionEvents).mockResolvedValue([]);
+    vi.mocked(startSession).mockRejectedValue(new Error('网络中断：POST /api/sessions'));
+    await act(async () => { await captured.hook!.submitTask({ task: '新任务' }); });
+    expect(captured.hook!.missingSessionNotice).toBeNull();
+    expect(captured.hook!.historyLoadError).toBeNull();
   });
 });

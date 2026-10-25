@@ -987,7 +987,9 @@ export function useSession() {
           // 判据是 `explicitSelectRef` 是否到过该 sid：启动恢复的初始 mode 不经
           // `selectSession` ⇒ ref 为 null，不进这条支，安静复位语义不变。
           if (explicitSelectRef.current === sid) {
-            setMissingSessionNotice('这个会话已不存在——可能已被删除。列表已刷新。');
+            // 「正在刷新」而非「已刷新」（审查 F4）：refreshSessions 是 void 异步，
+            // 失败另有 sessionsError 通道——提示先于事实会说出假话。
+            setMissingSessionNotice('这个会话已不存在——可能已被删除。列表正在刷新。');
             void refreshSessions();
           }
           return;
@@ -1515,6 +1517,12 @@ export function useSession() {
     ): Promise<string | null> => {
       setError(null);
       setSendFailure(null);
+      // #1521（审查 A-F2）：提交新任务 = 上一轮装载失败面与温和提示一并退场
+      // ——它们挂在旧会话的装载动作上，用户已明确向前走。historyLoadError 的
+      // App 侧门（sid 匹配 + conversation===null）本就让残留不可见，这里清掉
+      // 是把「不跨会话存活」从渲染门兜底升级为状态事实。
+      setHistoryLoadError(null);
+      setMissingSessionNotice(null);
       setConversation(null);
       liveSidRef.current = null;
       setReconnecting(false);
