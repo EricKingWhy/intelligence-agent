@@ -30,13 +30,13 @@ from agent_harness.host_service import (
     HostEndpointInfo,
     HostServiceError,
     HostTokenStore,
-    _loopback_url,
     attach_probe,
     clear_endpoint,
     describe_lock_error_with_attach,
     host_skills_request_proof,
     host_skills_response_proof,
     host_token_username,
+    loopback_url,
     publish_endpoint,
     query_attached_skill_catalog,
     read_endpoint,
@@ -241,7 +241,7 @@ def test_endpoint_read_host_shape_falls_back_to_loopback(
 
 def test_loopback_url_and_cli_attach_message_use_bound_ipv6_host(monkeypatch) -> None:
     endpoint = HostEndpointInfo(pid=1, port=51820, host="::1")
-    assert _loopback_url(endpoint.host, endpoint.port, "") == "http://[::1]:51820"
+    assert loopback_url(endpoint.host, endpoint.port, "") == "http://[::1]:51820"
 
     monkeypatch.setattr(
         host_service,
