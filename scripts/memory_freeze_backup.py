@@ -16,11 +16,13 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import stat
 import sys
 import tarfile
+import tempfile
 from collections import Counter
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -290,6 +292,36 @@ def _prepare_output(path: Path, workspace: Path) -> Path:
     return resolved
 
 
+def _publish_no_clobber(temporary: Path, output: Path) -> None:
+    try:
+        if os.name == "nt":
+            os.rename(temporary, output)
+        else:
+            os.link(temporary, output)
+            with suppress(OSError):
+                temporary.unlink()
+    except FileExistsError as error:
+        raise BackupError(f"refusing to overwrite existing backup output: {output}") from error
+    except OSError as error:
+        raise BackupError(f"cannot publish encrypted backup without overwrite: {error}") from error
+
+
+def _cleanup_archive_temporary(
+    temporary: Path, *, original_error: BaseException | None = None, published_output: Path | None = None
+) -> None:
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as cleanup_error:
+        detail = f"could not remove encrypted temporary archive {temporary}: {cleanup_error}"
+        if original_error is not None:
+            detail += f"; original failure: {original_error}"
+        if published_output is not None:
+            detail += f"; backup may already be published at {published_output}"
+        raise BackupError(detail) from (original_error or cleanup_error)
+
+
 def _load_key(key_env: str) -> bytes:
     if not KEY_ENV_RE.fullmatch(key_env):
         raise BackupError(f"invalid key environment variable name: {key_env!r}")
@@ -502,10 +534,10 @@ def _inventory_signature(inventory: list[dict[str, Any]]) -> bytes:
 
 def _online_backup(source: Path) -> tuple[bytes, dict[str, Any]]:
     try:
-        source_connection = sqlite3.connect(source, timeout=5)
+        source_uri = f"{source.resolve().as_uri()}?mode=ro&immutable=1"
+        source_connection = sqlite3.connect(source_uri, timeout=5, uri=True)
         destination_connection = sqlite3.connect(":memory:")
         try:
-            source_connection.execute("PRAGMA query_only=ON")
             source_connection.backup(destination_connection, pages=128, sleep=0.05)
             destination_connection.commit()
             snapshot = destination_connection.serialize()
@@ -569,11 +601,13 @@ def _make_archive(
     key: bytes,
 ) -> None:
     completed = False
+    created = False
     try:
         nonce = os.urandom(NONCE_SIZE)
         encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
         encryptor.authenticate_additional_data(FORMAT_MAGIC)
         with output.open("xb") as destination:
+            created = True
             destination.write(FORMAT_MAGIC)
             destination.write(nonce)
             writer = _EncryptedWriter(destination, encryptor)
@@ -597,10 +631,18 @@ def _make_archive(
             os.fsync(destination.fileno())
         os.chmod(output, 0o600)
         completed = True
-    finally:
-        if not completed:
-            with suppress(OSError):
+    except BaseException as error:
+        if created and not completed:
+            try:
                 output.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_error:
+                raise BackupError(
+                    f"could not remove incomplete encrypted archive {output}: {cleanup_error}; "
+                    f"original failure: {error}"
+                ) from error
+        raise
 
 
 class _EncryptedReader:
@@ -683,7 +725,9 @@ def _allowed_archive_members(manifest: dict[str, Any]) -> set[str]:
     return allowed
 
 
-def _restore_stream(archive_path: Path, destination: Path, key: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
+def _restore_stream(
+    archive_path: Path, destination: Path, key: bytes, restore_root: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest: dict[str, Any] | None = None
     proof: dict[str, Any] | None = None
     seen: set[str] = set()
@@ -707,7 +751,7 @@ def _restore_stream(archive_path: Path, destination: Path, key: bytes) -> tuple[
                     raise BackupError("backup manifest is not valid JSON") from error
                 _validate_manifest(manifest_value)
                 _ensure_not_inside(
-                    destination,
+                    restore_root,
                     Path(manifest_value["workspace_root"]).expanduser().resolve(),
                     "restore root",
                 )
@@ -827,6 +871,8 @@ def _validate_manifest(manifest: Any) -> None:
             or not re.fullmatch(r"[0-9a-f]{64}", item["snapshot_sha256"])
         ):
             raise BackupError(f"restored manifest snapshot hash {name!r} is invalid")
+    if not any(item["present"] for item in databases.values()):
+        raise BackupError("restored manifest contains no Memory SQLite database")
 
 
 def _restore_source_check(root: Path, inventory: list[dict[str, Any]]) -> bool:
@@ -1081,6 +1127,8 @@ def _backup(
         snapshot, database = _online_backup(source)
         snapshots[name] = snapshot
         databases[name] = database
+    if not any(database["present"] for database in databases.values()):
+        raise BackupError("workspace contains no Memory SQLite database to preserve")
     manifest = {
         "schema_version": 1,
         "workspace_root": str(workspace),
@@ -1093,18 +1141,24 @@ def _backup(
         "source_files": before,
         "databases": databases,
     }
-    temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
+    temporary = output.with_name(f".{output.name}.{os.getpid()}.{secrets.token_hex(16)}.tmp")
+    temporary_created = False
     try:
         _make_archive(workspace, before, snapshots, manifest, proof, temporary, key)
+        temporary_created = True
         after = _source_inventory(workspace)
         if _inventory_signature(before) != _inventory_signature(after):
             raise BackupError("workspace changed during freeze; writer proof is not sufficient")
         if _sha256_file(writer_proof) != proof_hash:
             raise BackupError("writer proof changed during freeze; restart with fresh evidence")
-        os.replace(temporary, output)
-    finally:
-        with suppress(OSError):
-            temporary.unlink()
+        _publish_no_clobber(temporary, output)
+    except BaseException as error:
+        if temporary_created:
+            _cleanup_archive_temporary(temporary, original_error=error)
+        raise
+    else:
+        if temporary_created:
+            _cleanup_archive_temporary(temporary, published_output=output)
     return {
         "result": "backup_created",
         "archive": str(output),
@@ -1126,37 +1180,62 @@ def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[st
         raise BackupError(f"encrypted backup is not a file: {archive}")
     _reject_reparse_components(restore_root_arg.expanduser(), "restore root")
     restore_root = restore_root_arg.expanduser().resolve()
-    if restore_root.exists() and any(restore_root.iterdir()):
-        raise BackupError(f"restore root must be new or empty: {restore_root}")
+    if restore_root.exists():
+        if not restore_root.is_dir():
+            raise BackupError(f"restore root must be a directory: {restore_root}")
+        if any(restore_root.iterdir()):
+            raise BackupError(f"restore root must be new or empty: {restore_root}")
     key = _load_key(key_env)
-    manifest, proof = _restore_stream(archive, restore_root, key)
-    source_match = _restore_source_check(restore_root, manifest["source_files"])
-    databases_match, table_counts, database_manifests, integrity_checks = _restore_database_check(
-        restore_root, manifest["databases"]
-    )
-    if not source_match or not databases_match:
-        raise BackupError("restored source files or database table manifests do not match")
-    receipt = {
-        "result": "restore_rehearsal_passed",
-        "archive_sha256": _sha256_file(archive),
-        "restore_root": str(restore_root),
-        "source_files_match": source_match,
-        "source_file_manifest": manifest["source_files"],
-        "database_tables_match": databases_match,
-        "database_table_counts": table_counts,
-        "database_manifests": database_manifests,
-        "integrity_checks": integrity_checks,
-        "databases_readable": True,
-        "manifest_match": True,
-        "retention_until": manifest["retention_until"],
-        "writer_categories": manifest["writer_categories"],
-        "writer_proof_mode": manifest.get("writer_proof_mode", "legacy"),
-        "runtime_loaded": False,
-        "retrieval_registered": False,
-        "proof_schema_version": proof["schema_version"],
-    }
-    _write_json(restore_root / "restore-receipt.json", receipt)
-    return receipt
+    try:
+        restore_root.parent.mkdir(parents=True, exist_ok=True)
+        staging_root = Path(
+            tempfile.mkdtemp(prefix=f".{restore_root.name}.restore-", dir=restore_root.parent)
+        )
+    except OSError as error:
+        raise BackupError(f"could not create private restore staging directory: {error}") from error
+    try:
+        manifest, proof = _restore_stream(archive, staging_root, key, restore_root)
+        source_match = _restore_source_check(staging_root, manifest["source_files"])
+        databases_match, table_counts, database_manifests, integrity_checks = (
+            _restore_database_check(staging_root, manifest["databases"])
+        )
+        if not source_match or not databases_match:
+            raise BackupError("restored source files or database table manifests do not match")
+        receipt = {
+            "result": "restore_rehearsal_passed",
+            "archive_sha256": _sha256_file(archive),
+            "restore_root": str(restore_root),
+            "source_files_match": source_match,
+            "source_file_manifest": manifest["source_files"],
+            "database_tables_match": databases_match,
+            "database_table_counts": table_counts,
+            "database_manifests": database_manifests,
+            "integrity_checks": integrity_checks,
+            "databases_readable": True,
+            "manifest_match": True,
+            "retention_until": manifest["retention_until"],
+            "writer_categories": manifest["writer_categories"],
+            "writer_proof_mode": manifest.get("writer_proof_mode", "legacy"),
+            "runtime_loaded": False,
+            "retrieval_registered": False,
+            "proof_schema_version": proof["schema_version"],
+        }
+        _write_json(staging_root / "restore-receipt.json", receipt)
+        if restore_root.exists():
+            try:
+                restore_root.rmdir()
+            except OSError as error:
+                raise BackupError(f"restore root changed during restore: {restore_root}") from error
+        try:
+            os.rename(staging_root, restore_root)
+        except FileExistsError as error:
+            raise BackupError(f"restore root appeared during restore: {restore_root}") from error
+        except OSError as error:
+            raise BackupError(f"could not publish verified restore: {error}") from error
+        return receipt
+    finally:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
 
 
 def _parser() -> argparse.ArgumentParser:

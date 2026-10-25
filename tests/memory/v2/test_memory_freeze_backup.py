@@ -9,6 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from scripts import memory_freeze_backup
+
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "memory_freeze_backup.py"
 
@@ -29,6 +33,190 @@ def run_tool(*args: str, env: dict[str, str] | None = None) -> subprocess.Comple
 
 def key_env() -> dict[str, str]:
     return {"MEMORY_BACKUP_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii")}
+
+
+def test_online_backup_does_not_create_a_missing_source_database(tmp_path: Path) -> None:
+    source = tmp_path / "vanished.db"
+
+    with pytest.raises(memory_freeze_backup.BackupError, match="SQLite Online Backup API failed"):
+        memory_freeze_backup._online_backup(source)
+
+    assert not source.exists()
+
+
+def test_backup_rejects_a_workspace_without_a_memory_database(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+    for name in memory_freeze_backup.DATABASE_NAMES:
+        for suffix in ("", *memory_freeze_backup.DATABASE_SIDECARS):
+            (workspace / f"{name}{suffix}").unlink(missing_ok=True)
+
+    output = tmp_path / "offline" / "memory-backup.iab"
+    result = run_tool(
+        "backup",
+        "--workspace",
+        str(workspace),
+        "--output",
+        str(output),
+        "--writer-proof",
+        str(workspace / "writer-proof.json"),
+        "--rehearsal-fixture",
+        env=key_env(),
+    )
+
+    assert result.returncode != 0
+    assert "no memory sqlite database" in result.stderr.lower()
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("kept_database", memory_freeze_backup.DATABASE_NAMES)
+def test_backup_and_restore_accept_one_memory_database(
+    tmp_path: Path, kept_database: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+    for name in memory_freeze_backup.DATABASE_NAMES:
+        if name == kept_database:
+            continue
+        for suffix in ("", *memory_freeze_backup.DATABASE_SIDECARS):
+            (workspace / f"{name}{suffix}").unlink(missing_ok=True)
+
+    key = key_env()
+    archive = tmp_path / "offline" / "memory-backup.iab"
+    backed_up = run_tool(
+        "backup",
+        "--workspace",
+        str(workspace),
+        "--output",
+        str(archive),
+        "--writer-proof",
+        str(workspace / "writer-proof.json"),
+        "--rehearsal-fixture",
+        env=key,
+    )
+    assert backed_up.returncode == 0, backed_up.stderr
+
+    restored = run_tool(
+        "restore",
+        "--archive",
+        str(archive),
+        "--restore-root",
+        str(tmp_path / "restore"),
+        env=key,
+    )
+    assert restored.returncode == 0, restored.stderr
+    assert set(json.loads(restored.stdout)["database_manifests"]) == {kept_database}
+
+
+def test_backup_publish_does_not_clobber_a_racing_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+    output = tmp_path / "offline" / "memory-backup.iab"
+    monkeypatch.setenv("MEMORY_BACKUP_KEY", key_env()["MEMORY_BACKUP_KEY"])
+
+    def create_racing_destination(*args: object) -> None:
+        temporary = args[5]
+        assert isinstance(temporary, Path)
+        temporary.write_bytes(b"new encrypted backup")
+        output.write_bytes(b"existing destination")
+
+    monkeypatch.setattr(memory_freeze_backup, "_make_archive", create_racing_destination)
+
+    with pytest.raises(memory_freeze_backup.BackupError, match="refusing to overwrite"):
+        memory_freeze_backup._backup(
+            workspace,
+            output,
+            workspace / "writer-proof.json",
+            "MEMORY_BACKUP_KEY",
+            True,
+        )
+
+    assert output.read_bytes() == b"existing destination"
+
+
+def test_archive_failure_preserves_a_preexisting_temporary_path(tmp_path: Path) -> None:
+    temporary = tmp_path / ".memory-backup.iab.1234.tmp"
+    temporary.write_bytes(b"preexisting file")
+
+    with pytest.raises(FileExistsError):
+        memory_freeze_backup._make_archive(tmp_path, [], {}, {}, {}, temporary, b"k" * 32)
+
+    assert temporary.read_bytes() == b"preexisting file"
+
+
+def test_archive_failure_reports_when_owned_temporary_cannot_be_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary = tmp_path / ".memory-backup.iab.partial.tmp"
+    original_unlink = Path.unlink
+
+    def fail_archive(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated archive write failure")
+
+    def fail_temporary_cleanup(path: Path, *args: object, **kwargs: object) -> None:
+        if path == temporary:
+            raise PermissionError("simulated cleanup failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(memory_freeze_backup, "_tar_add_bytes", fail_archive)
+    monkeypatch.setattr(Path, "unlink", fail_temporary_cleanup)
+
+    with pytest.raises(memory_freeze_backup.BackupError) as error:
+        memory_freeze_backup._make_archive(tmp_path, [], {}, {}, {}, temporary, b"k" * 32)
+
+    assert str(temporary) in str(error.value)
+    assert "simulated cleanup failure" in str(error.value)
+    assert temporary.exists()
+
+
+def test_backup_validation_failure_reports_owned_temporary_cleanup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+    monkeypatch.setenv("MEMORY_BACKUP_KEY", key_env()["MEMORY_BACKUP_KEY"])
+    output = tmp_path / "offline" / "memory-backup.iab"
+    original_inventory = memory_freeze_backup._source_inventory
+    inventory_calls = 0
+    temporary_paths: list[Path] = []
+
+    def write_temporary_archive(*args: object) -> None:
+        temporary = args[5]
+        assert isinstance(temporary, Path)
+        temporary_paths.append(temporary)
+        temporary.write_bytes(b"encrypted temporary")
+
+    def change_inventory(root: Path) -> list[dict[str, object]]:
+        nonlocal inventory_calls
+        inventory_calls += 1
+        return original_inventory(root) if inventory_calls == 1 else []
+
+    original_unlink = Path.unlink
+
+    def fail_temporary_cleanup(path: Path, *args: object, **kwargs: object) -> None:
+        if temporary_paths and path == temporary_paths[0]:
+            raise PermissionError("simulated cleanup failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(memory_freeze_backup, "_make_archive", write_temporary_archive)
+    monkeypatch.setattr(memory_freeze_backup, "_source_inventory", change_inventory)
+    monkeypatch.setattr(Path, "unlink", fail_temporary_cleanup)
+
+    with pytest.raises(memory_freeze_backup.BackupError) as error:
+        memory_freeze_backup._backup(
+            workspace,
+            output,
+            workspace / "writer-proof.json",
+            "MEMORY_BACKUP_KEY",
+            True,
+        )
+
+    assert str(temporary_paths[0]) in str(error.value)
+    assert "simulated cleanup failure" in str(error.value)
+    assert "workspace changed during freeze" in str(error.value)
+    assert temporary_paths[0].exists()
 
 
 def test_backup_requires_a_complete_writer_proof(tmp_path: Path) -> None:
@@ -253,6 +441,8 @@ def test_restore_rejects_tampered_ciphertext(tmp_path: Path) -> None:
     )
     assert restored.returncode != 0
     assert "authentication" in restored.stderr.lower()
+    assert not (tmp_path / "tampered-restore").exists()
+    assert not list(tmp_path.glob(".tampered-restore.restore-*"))
 
 
 def test_writer_proof_cannot_use_a_local_lock_as_evidence(tmp_path: Path) -> None:

@@ -111,11 +111,19 @@ restore receipt 必须显示 source files、database tables、row/table manifest
 `integrity_check` 全部匹配，并内嵌完整 `source_file_manifest`、各表状态/旧键/lease/provenance
 摘要和行哈希。种子 V2 workspace 同时包含带 lease 的 forming job 与带 idempotency key、终态
 及 outcome 的 completed job。加密 manifest 还绑定原 workspace 路径，工具会拒绝把恢复根放回
-原 workspace；输出目录必须是 workspace 运行目录之外的全新隔离位置。
+原 workspace；输出目录必须是 workspace 运行目录之外的全新隔离位置。至少存在 `memory.db` 或
+`memory-v2.db` 才允许生成成功备份；两者都缺失会失败，不会把没有 SQLite 历史的 workspace
+报为归档成功。恢复也会拒绝没有数据库快照的 manifest。生产验收时，所有者必须将 manifest 的
+absent 数据库项与 workspace 预期来源清单逐项核对；若预期存在但缺失，停止验收。
+
+恢复过程会把解密文件先写到目标父目录下的私有暂存目录；只有 GCM 认证、归档成员、source/db
+哈希与完整性检查全部通过后才发布恢复目录。认证或校验失败时会清理暂存内容。
 
 ## 生产执行（待所有者在场）
 
-本仓库没有生产数据库，以下步骤在本票中没有被假装执行：
+当前 issue worktree 未包含生产数据库；其他本地 clone 的 workspace 不自动纳入本票。所有者须
+指定每个 deployment workspace，并把 manifest 的 absent 数据库项与预期来源清单逐项核对。
+以下生产步骤仍待 owner 在场执行：
 
 1. 所有者按上表完成六类 writer 的停写/围住，审阅证据并生成完整 `writer-proof.json`；
    生产 backup 不得使用 `--rehearsal-fixture`。
