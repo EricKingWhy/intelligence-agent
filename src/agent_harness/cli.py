@@ -130,7 +130,10 @@ from agent_harness.session.service import SessionContextCompaction
 from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.session_archive import install_session_archive
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
-from agent_harness.tooling.approve_policy import ApprovePolicyStore
+from agent_harness.tooling.approve_policy import (
+    ApprovePolicyStore,
+    LegacyImportError,
+)
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
@@ -3926,7 +3929,10 @@ def _main_approvals(argv: list[str]) -> None:
         print(approvals_policy_list_command())
         return
     if args.policy_command == "import-legacy":
-        print(approvals_policy_import_legacy_command())
+        output, failed = approvals_policy_import_legacy_command()
+        print(output)
+        if failed:
+            raise SystemExit(2)
         return
     output, confirm_required = approvals_policy_remove_command(
         args.rule_id, yes=args.yes,
@@ -3977,18 +3983,31 @@ def approvals_policy_list_command(*, project_root: Path | str | None = None) -> 
 
 def approvals_policy_import_legacy_command(
     *, project_root: Path | str | None = None,
-) -> str:
-    """`approvals policy import-legacy` 的可测核心：显式迁移旧位规则（#1487）。
+) -> tuple[str, bool]:
+    """`approvals policy import-legacy` 的可测核心：返回 `(文本, 是否失败)`（#1487）。
 
     为什么必须显式（不能 Runtime 自动导）：旧位在 agent 可达空间，自动信任它 =
     信任 agent 自建文件——F21「显式授权」在迁移面上的落点。语义全部来自
     `ApprovePolicyStore.import_legacy`：严格校验（created_at 可解析、command 档
     无换行）、按 id 去重（控制侧已有同 id 时控制侧胜）、幂等。
+
+    `failed=True` 时调用方 `SystemExit(2)`（对齐 remove 的确认拒结名额）：旧文件
+    **在场但读不动**（`LegacyImportError`，A 轴审查 P3-1）必须与「迁移完成」区分
+    ——如实报错、不给删除建议，防止用户按提示删掉可能含可恢复规则的坏文件。
     """
     store = _approve_policy_store(project_root)
     if not store.legacy_present:
-        return "（未发现旧工作区规则文件，无需迁移）"
-    result = store.import_legacy()
+        return ("（未发现旧工作区规则文件，无需迁移）", False)
+    try:
+        result = store.import_legacy()
+    except LegacyImportError as e:
+        return (
+            (
+                f"旧工作区规则文件存在但无法解析，未导入任何规则：{e}\n"
+                f"请人工检查 {store.legacy_path}（未改动、不会自动删除）。"
+            ),
+            True,
+        )
     lines = [
         (
             f"已从 {store.legacy_path} 导入 {len(result.imported)} 条规则"
@@ -4001,7 +4020,7 @@ def approvals_policy_import_legacy_command(
         for rule in result.imported
     )
     lines.append("旧文件迁移完成后不再被任何代码读取，可手动删除。")
-    return "\n".join(lines)
+    return ("\n".join(lines), False)
 
 
 def approvals_policy_remove_command(

@@ -46,6 +46,9 @@ import-legacy`（用户手势，F21 在迁移面的落点）；`import_legacy()`
 解析 + command 档 key 无换行（与 `add_rule` 同红线）。不合规跳过计数不中断；
 按 id 去重且**控制侧已有同 id 时控制侧胜**；重复执行零导入。`list` 命令在
 `legacy_present` 时附提示行（只探测不读取）。控制文件在场后旧位内容零效力。
+旧文件**在场但整体读不动 / 坏 JSON / 形态不对** ⇒ `LegacyImportError`（CLI
+如实报错 + exit 2 + 不给删除建议）——「读不动」与「没有规则」必须区分，
+否则用户会按「迁移完成可删除」的提示删掉可能含可恢复规则的坏文件。
 
 **D4 — 逐引擎可写性矩阵（验收口径）。**
 
@@ -86,6 +89,10 @@ hermeticity 反而变好（旧测试全靠 tmp 项目根隔离，新测试 env �
   旧位文件手动迁移——把旧文件拷到新项目根再跑 import-legacy 即可）。
 - local bash 同权残余（D4 第三行）：消除它需要进程级隔离（独立 UID /
   job object），属新工程票范围，不在本票。
+- `ToolExecutor` 构造期经 `default_control_root()` 间接依赖 `Path.home()`
+  可解析（env 未设时）：home 不可解析的进程会在构造期 fail-fast。与仓内先例
+  `config.py`（模块导入期即调 `Path.home()`）同类的进程级要求，非新失败类，
+  登记不修（A 轴审查 P4-3）。
 
 **未闭合（解除条件）**：
 

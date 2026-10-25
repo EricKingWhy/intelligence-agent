@@ -112,10 +112,15 @@ def default_control_root() -> Path:
     内构造 store，没有可逐点传参的缝；测试隔离（不污染真实 home）与部署钉根
     （控制目录放指定卷）都走它。与 ``Settings.provider_store_path`` 同根
     （``<home>/.agent-harness/``），形态对标 ``~/.claude/projects``。
+
+    空串是部署脚本变量展开失败的常见产物：**忽略并回落默认**（钉根被丢弃必须
+    留 warning，不能静默）；``~`` 前缀会 ``expanduser`` 展开（env 值不经过 shell）。
     """
     override = os.environ.get(_CONTROL_ENV)
     if override:
-        return Path(override)
+        return Path(override).expanduser()
+    if override is not None:
+        logger.warning("%s 设为空串，忽略该覆盖并回落默认控制目录", _CONTROL_ENV)
     return Path.home() / _POLICY_DIRNAME / _CONTROL_DIRNAME
 
 
@@ -123,9 +128,10 @@ def project_key(project_root: Path | str) -> str:
     """控制目录内区分不同项目的文件名：resolved 根路径的 sha256 hex。
 
     为什么要 hash 而不是原文路径：跨平台文件名安全（Windows 盘符冒号 / 反斜杠 /
-    Linux 路径分隔符都不能直接当文件名），且同一项目 symlink / 大小写变体 resolve
-    后归一到同一 key——三处构造点（显式传入 / ``cwd`` 回落）对同一项目算出同一
-    份控制文件，不因传入口径差分家。
+    Linux 路径分隔符都不能直接当文件名），且同一**存在**项目根的 symlink /
+    大小写变体 resolve 后归一到同一 key（Windows 的 ``resolve`` 只规范存在路径
+    的组件大小写，不存在的路径不归一）——三处构造点（显式传入 / ``cwd`` 回落，
+    二者都指向存在路径）对同一项目算出同一份控制文件，不因传入口径差分家。
     """
     resolved = str(Path(project_root).resolve())
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()
@@ -197,6 +203,15 @@ class LegacyImportResult:
     skipped: int
 
 
+class LegacyImportError(Exception):
+    """旧位文件在场但整体不可读 / 坏 JSON / 形态不对（迁移面专用，P3-1）。
+
+    ``load`` 对坏数据 fail-closed（当没有规则）；迁移不能这么坍缩——命令输出
+    会建议删除旧文件，把「读不动」报成「迁移完成可删除」会诱导用户删掉可能
+    含可恢复规则的坏文件。CLI 捕获它：如实提示 + 退出码 2 + 不给删除建议。
+    """
+
+
 def _parse_legacy_rule(entry: object) -> ApprovePolicyRule | None:
     """严格解析一条旧位规则条目；不合规返回 ``None``（导入侧跳过并计数）。
 
@@ -245,7 +260,16 @@ class ApprovePolicyStore:
         control_root: Path | str | None = None,
     ) -> None:
         self._project_root = Path(project_root)
-        root = Path(control_root) if control_root is not None else default_control_root()
+        if control_root is not None:
+            # 空串 / Path() 的 str 形态是 "."（A 轴审查 P3-2）：控制文件会被放回
+            # 当前目录——正是本票要迁出的 agent 领地，宁可 fail-fast 不静默接受。
+            root = Path(control_root)
+            if not str(root).strip() or str(root) == ".":
+                raise ValueError(
+                    "control_root 不能为空值（会把控制文件放回当前目录，agent 领地）"
+                )
+        else:
+            root = default_control_root()
         self.path = root / f"{project_key(self._project_root)}.json"
         self.legacy_path = self._project_root / _POLICY_DIRNAME / _POLICY_FILENAME
 
@@ -296,8 +320,12 @@ class ApprovePolicyStore:
         控制侧已有同 id 规则时**控制侧胜**（旧位不改写已有授权）；文件内重复 id
         只导入首条。幂等：重复执行时全为重复 id，零导入、零重复。整批经文件锁
         串行化（与 ``add_rule`` / ``remove_rule`` 同一把锁，防并发丢更新）。
+
+        旧文件**在场但整体读不动 / 坏 JSON / 形态不对**时抛 ``LegacyImportError``
+        （A 轴审查 P3-1）：迁移输出会建议用户删除旧文件，「读不动」必须与
+        「没有规则」区分开——把坏文件谎报成「迁移完成可删除」是数据丢失路径。
         """
-        entries = self._load_entries(self.legacy_path)
+        entries = self._read_legacy_strict()
         if not entries:
             return LegacyImportResult(imported=[], skipped=0)
         imported: list[ApprovePolicyRule] = []
@@ -317,6 +345,27 @@ class ApprovePolicyStore:
             if imported:
                 self.save(rules)
         return LegacyImportResult(imported=imported, skipped=skipped)
+
+    def _read_legacy_strict(self) -> list:
+        """读旧位 rules 原始条目；缺失 → ``[]``，在场但读不动 → ``LegacyImportError``。
+
+        与 ``load`` 的 fail-closed（读不动当没有规则）刻意不同：迁移是**销毁性
+        建议的入口**（命令输出提示可删旧文件），必须把「读不动」如实抛给调用方。
+        """
+        if not self.legacy_present:
+            return []
+        try:
+            raw = self.legacy_path.read_text(encoding="utf-8")
+        except (OSError, ValueError) as e:
+            raise LegacyImportError(f"旧规则文件读取失败：{e}") from e
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise LegacyImportError(f"旧规则文件不是合法 JSON：{e}") from e
+        entries = payload.get("rules") if isinstance(payload, dict) else None
+        if not isinstance(entries, list):
+            raise LegacyImportError('旧规则文件顶层不是 {"rules": [...]} 形态')
+        return entries
 
     def save(self, rules: list[ApprovePolicyRule]) -> None:
         """原子落盘（临时文件 + ``os.replace``）：崩溃不产生半截文件丢规则。"""
@@ -436,6 +485,7 @@ def _atomic_write(path: Path, text: str) -> None:
 __all__ = [
     "ApprovePolicyRule",
     "ApprovePolicyStore",
+    "LegacyImportError",
     "LegacyImportResult",
     "PolicyGranularity",
     "default_control_root",

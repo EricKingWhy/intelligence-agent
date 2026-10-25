@@ -39,6 +39,7 @@ from agent_harness.tooling.approval import (
 from agent_harness.tooling.approve_policy import (
     ApprovePolicyRule,
     ApprovePolicyStore,
+    LegacyImportError,
     LegacyImportResult,
     PolicyGranularity,
     default_control_root,
@@ -149,6 +150,9 @@ def test_default_control_root_env_override_and_home_default(
     pinned = tmp_path / "pinned"
     monkeypatch.setenv(_ENV_OVERRIDE, str(pinned))
     assert default_control_root() == pinned
+    # P4-1：空串（部署变量展开失败产物）不当作覆盖——回落默认并留痕，不静默丢钉根。
+    monkeypatch.setenv(_ENV_OVERRIDE, "")
+    assert default_control_root() == Path.home() / ".agent-harness" / "approve-policy"
 
 
 def test_explicit_control_root_param_wins(tmp_path: Path) -> None:
@@ -156,6 +160,15 @@ def test_explicit_control_root_param_wins(tmp_path: Path) -> None:
     project.mkdir()
     store = ApprovePolicyStore(project, control_root=explicit)
     assert store.path.parent == explicit
+
+
+@pytest.mark.parametrize("empty", ["", Path(), "."])
+def test_empty_control_root_param_rejected(tmp_path: Path, empty) -> None:
+    """P3-2：空 control_root 的 Path 语义是「当前目录」= 把控制文件放回 agent 领地。"""
+    project = tmp_path / "proj"
+    project.mkdir()
+    with pytest.raises(ValueError, match="agent 领地"):
+        ApprovePolicyStore(project, control_root=empty)
 
 
 def test_three_production_sites_share_one_control_file(
@@ -301,6 +314,44 @@ def test_import_legacy_without_file_is_noop(tmp_path: Path) -> None:
     assert store.legacy_present is False
 
 
+def test_import_legacy_corrupt_whole_file_raises(tmp_path: Path) -> None:
+    """A 轴审查 P3-1：旧文件在场但整体读不动 ⇒ LegacyImportError，不当「没有规则」。
+
+    迁移输出会建议删旧文件——「读不动」必须如实上抛，坏文件里可能有可恢复规则。
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    target = project / _LEGACY_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{ not json", encoding="utf-8")
+    store = ApprovePolicyStore(project)
+    with pytest.raises(LegacyImportError, match="合法 JSON"):
+        store.import_legacy()
+    assert not store.path.exists(), "迁移失败不得半途写出控制文件"
+
+
+def test_import_legacy_invalid_utf8_raises(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    target = project / _LEGACY_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"\xff\xfe{\"rules\": []}")
+    store = ApprovePolicyStore(project)
+    with pytest.raises(LegacyImportError, match="读取失败"):
+        store.import_legacy()
+
+
+def test_import_legacy_wrong_top_level_shape_raises(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    target = project / _LEGACY_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('["r1"]', encoding="utf-8")
+    store = ApprovePolicyStore(project)
+    with pytest.raises(LegacyImportError, match="形态"):
+        store.import_legacy()
+
+
 # ── agent 执行进程不可达（围栏矩阵）────────────────────────────────────────
 
 
@@ -416,7 +467,10 @@ def test_docker_agent_cannot_reach_control_dir(
         assert sandbox.exec("test -e /workspace/.agent-harness").exit_code != 0
     finally:
         sandbox.delete()
-        # 本用例真实写入本机 home 控制根（canary），清理干净不留测试残渣。
+        # 本用例真实写入本机 home 控制根（canary），清理干净不留测试残渣——
+        # add_rule 还会留 <hash>.json.lock 旁路锁文件（A 轴审查 P4-4），一并删。
         store.path.unlink(missing_ok=True)
+        with suppress(OSError):
+            (Path(str(store.path) + ".lock")).unlink(missing_ok=True)
         with suppress(OSError):
             store.path.parent.rmdir()

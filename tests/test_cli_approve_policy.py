@@ -201,7 +201,8 @@ def _seed_legacy(tmp_path: Path, *rules: ApprovePolicyRule) -> Path:
 def test_import_legacy_moves_rules_into_control_file(tmp_path: Path) -> None:
     legacy = _seed_legacy(tmp_path, _rule("r1"), _rule("r2"))
     before = legacy.read_bytes()
-    output = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    output, failed = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    assert failed is False
     assert "导入 2 条" in output
     assert "跳过 0 条" in output
     assert _ids(tmp_path) == ["r1", "r2"]
@@ -210,7 +211,8 @@ def test_import_legacy_moves_rules_into_control_file(tmp_path: Path) -> None:
 
 
 def test_import_legacy_without_legacy_file_is_noop(tmp_path: Path) -> None:
-    output = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    output, failed = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    assert failed is False
     assert "无需迁移" in output
     assert not ApprovePolicyStore(tmp_path).path.exists()
 
@@ -218,10 +220,31 @@ def test_import_legacy_without_legacy_file_is_noop(tmp_path: Path) -> None:
 def test_import_legacy_is_idempotent(tmp_path: Path) -> None:
     _seed_legacy(tmp_path, _rule("r1"))
     cli.approvals_policy_import_legacy_command(project_root=tmp_path)
-    second = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    second, failed = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    assert failed is False
     assert "导入 0 条" in second
     assert "跳过 1 条" in second
     assert _ids(tmp_path) == ["r1"]
+
+
+def test_import_legacy_corrupt_file_fails_honestly(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A 轴审查 P3-1：旧文件在场但坏 JSON ⇒ 如实失败，绝不给「可删除」建议。"""
+    legacy = _seed_legacy(tmp_path, _rule("r1"))
+    legacy.write_text("{ not json", encoding="utf-8")
+    output, failed = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    assert failed is True
+    assert "无法解析" in output
+    assert "可手动删除" not in output
+    assert "请人工检查" in output
+    assert _ids(tmp_path) == []
+    assert legacy.read_text(encoding="utf-8") == "{ not json"
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(monkeypatch, tmp_path, ["approvals", "policy", "import-legacy"])
+    assert excinfo.value.code == 2
+    again = capsys.readouterr()
+    assert "无法解析" in again.out
 
 
 def test_list_hints_legacy_presence(tmp_path: Path) -> None:
