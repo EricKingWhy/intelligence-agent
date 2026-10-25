@@ -88,6 +88,8 @@ interface HookView {
   loadingHistory: boolean;
   historySkeleton: boolean;
   error: string | null;
+  /** #1521：首载失败专槽（本文件迁移例断言「失败不再进 error 横幅」要读它）。 */
+  historyLoadError: { sid: string; message: string } | null;
   selectSession: (id: string | null) => void;
 }
 
