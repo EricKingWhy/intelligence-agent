@@ -68,7 +68,6 @@ from urllib.parse import urlsplit
 
 import anyio
 import httpx2
-from openai import DefaultAsyncHttpxClient, DefaultHttpxClient
 
 #: 拦截网段。只放云元数据 / link-local——**不放** RFC1918、loopback、198.18/15。
 _BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
@@ -122,30 +121,67 @@ class EndpointBlockedError(RuntimeError):
     """目标被误配置守卫拒绝——请求未发出，凭据未发送。"""
 
 
-class _GuardedSyncClient(DefaultHttpxClient):  # type: ignore[misc]
-    """`openai.DefaultHttpxClient` + GC 时关闭（SDK 自带 wrapper 未导出，见下）。"""
+#: 惰性构建的守卫客户端类缓存（#1527）。#1485 的两个子类原本放模块级，
+#: ``from openai import …`` 因此成了 ``cli/agent.runtime → model.failure → 本模块``
+#: 这条导入链的必经站——CLI 轻入口被拖去加载整个 provider SDK。导入期本模块
+#: 只付 stdlib 成本；openai（及其 httpx2）推迟到真正构造客户端那一刻。
+#: 多线程同时首调的竞态是**良性**的（最坏两对类对象、一份胜出，功能等价；
+#: openai 首导本身被 import 锁串行化，类对象无任何外部身份消费者——审查
+#: Correctness 轴 P4 已核），不为它加锁。
+_GUARDED_CLIENT_CLASSES: tuple[type, type] | None = None
 
-    def __del__(self) -> None:
-        try:
-            if not self.is_closed:
-                self.close()
-        except Exception:  # noqa: BLE001, S110 — 析构期不能抛
-            pass
 
+def _guarded_client_classes() -> tuple[type, type]:
+    """构建（并缓存）挂 GC 关闭的守卫客户端类；基类来自 openai，故按需导入。
 
-class _GuardedAsyncClient(DefaultAsyncHttpxClient):  # type: ignore[misc]
-    """同上，异步版。
-
-    与 openai `AsyncHttpxClientWrapper` 同形：只在**有运行中的 loop** 时能排队关闭，
-    否则（解释器退出 / 同步上下文里被 GC）静默跳过——连接随进程回收，析构期不能抛。
+    守卫语义与 #1485 完全一致：仍继承 ``openai.DefaultHttpxClient`` /
+    ``DefaultAsyncHttpxClient``（补齐 SDK 自己会用的 timeout / limits /
+    follow_redirects=True），``__del__`` 的 GC 关闭与异步版"只在有运行中 loop
+    时排队关闭"的限制原样保留；缓存保证多次构造拿到同一对类对象。
     """
+    global _GUARDED_CLIENT_CLASSES
+    if _GUARDED_CLIENT_CLASSES is not None:
+        return _GUARDED_CLIENT_CLASSES
+    from openai import DefaultAsyncHttpxClient, DefaultHttpxClient
 
-    def __del__(self) -> None:
-        try:
-            if not self.is_closed:
-                asyncio.get_running_loop().create_task(self.aclose())
-        except Exception:  # noqa: BLE001, S110
-            pass
+    class _GuardedSyncClient(DefaultHttpxClient):  # type: ignore[misc]
+        """`openai.DefaultHttpxClient` + GC 时关闭（SDK 自带 wrapper 未导出，见下）。"""
+
+        def __del__(self) -> None:
+            try:
+                if not self.is_closed:
+                    self.close()
+            except Exception:  # noqa: BLE001, S110 — 析构期不能抛
+                pass
+
+    class _GuardedAsyncClient(DefaultAsyncHttpxClient):  # type: ignore[misc]
+        """同上，异步版。
+
+        与 openai `AsyncHttpxClientWrapper` 同形：只在**有运行中的 loop** 时能排队关闭，
+        否则（解释器退出 / 同步上下文里被 GC）静默跳过——连接随进程回收，析构期不能抛。
+        """
+
+        def __del__(self) -> None:
+            try:
+                if not self.is_closed:
+                    asyncio.get_running_loop().create_task(self.aclose())
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+    _GUARDED_CLIENT_CLASSES = (_GuardedSyncClient, _GuardedAsyncClient)
+    return _GUARDED_CLIENT_CLASSES
+
+
+def _new_guarded_sync_client() -> httpx2.Client:
+    """#1570 的 pinned transport 按「类即工厂」造跨源临时客户端；#1527 起类收进
+    惰性工厂，这里保持同一无参调用形状。"""
+    sync_cls, _ = _guarded_client_classes()
+    return sync_cls()
+
+
+def _new_guarded_async_client() -> httpx2.AsyncClient:
+    _, async_cls = _guarded_client_classes()
+    return async_cls()
 
 
 _PINNED_ADDRESS_EXTENSION = "agent_harness.endpoint_guard.pinned_address"
@@ -383,7 +419,7 @@ class _PinnedSyncTransport(httpx2.BaseTransport):
     ) -> None:
         self._inner = inner
         self._mount = mount
-        self._client_factory: Callable[[], httpx2.Client] = _GuardedSyncClient
+        self._client_factory: Callable[[], httpx2.Client] = _new_guarded_sync_client
         self._primary_origin: tuple[str, str, int | None] | None = None
         self._origin_lock = threading.Lock()
 
@@ -431,7 +467,7 @@ class _PinnedAsyncTransport(httpx2.AsyncBaseTransport):
     ) -> None:
         self._inner = inner
         self._mount = mount
-        self._client_factory: Callable[[], httpx2.AsyncClient] = _GuardedAsyncClient
+        self._client_factory: Callable[[], httpx2.AsyncClient] = _new_guarded_async_client
         self._primary_origin: tuple[str, str, int | None] | None = None
         self._origin_lock = threading.Lock()
 
@@ -837,10 +873,11 @@ def guarded_clients(
         if reason is not None:
             raise _blocked_error(request.url.host, reason)
 
-    sync_client = _GuardedSyncClient(
+    sync_cls, async_cls = _guarded_client_classes()
+    sync_client = sync_cls(
         base_url=base_url, event_hooks={"request": [_sync_hook]},
     )
-    async_client = _GuardedAsyncClient(
+    async_client = async_cls(
         base_url=base_url, event_hooks={"request": [_async_hook]},
     )
     _pin_sync_transports(sync_client)

@@ -1552,6 +1552,7 @@ class SessionService:
         include_archived: bool = False,
         limit: int | None = None,
         offset: int = 0,
+        client_request_id: str | None = None,
     ) -> list[SessionSummaryStats]:
         """列出 session 摘要。
 
@@ -1560,6 +1561,14 @@ class SessionService:
         - **`workspace_id` 给出时**：只列该项目的会话，顺序 = **账本的手工序**
           （AC4——活动时间永不重排，否则用户手工拖过的顺序每次刷新就丢）；项目未注册
           → `WorkspaceNotFound`（404），**不**伪装成空列表。
+        - **`client_request_id` 给出时（#1333）**：只列 SessionMeta 索引里与该关联值
+          **精确匹配**的会话行（创建路径主动落行，见 `create_and_launch`）。这是
+          认领关联查询的读取面——20s 差分窗口内「别的客户端/上一轮迟到」的会话
+          结构上进不了候选。与 `workspace_id` 互斥由 HTTP 层强制（web 层 422）；
+          服务层自身若两者同传，cid 分支优先（当前唯一调用方是 web 层，已挡）；
+          多条命中原样全量返回（「不任意挑选」的 fail-closed 裁决在调用方）；
+          无命中返回 `[]`。归档/分页参数同一条共享管线（认领场景传
+          `include_archived=True`，新建会话不可能已归档）。
         - **`include_archived=False`（默认）**：#171 起**不返回**已归档会话；置 true 时
           照常返回（前端"显示已归档"开关用）。两条路径（默认列表 / 项目视图）用**同一
           规则**，避免"侧栏藏了、项目里还露着"。
@@ -1585,7 +1594,19 @@ class SessionService:
         store = self._store
         index = self._workspace_index
 
-        if workspace_id is not None:
+        if client_request_id is not None:
+            # #1333：关联查询——ids 来自 SessionMeta 索引（精确匹配，创建路径
+            # 主动落行保证可查），随后与列表路径共用同一条投影管线（归档 join、
+            # 摘要批量读、看板投影回填）。索引行先于可见 JSONL 存在的窗口由
+            # 落点顺序排除（行在 Session.start 之后、launch 之前落）。
+            metas = await self._session_meta_store.get_by_client_request_id(
+                client_request_id
+            )
+            ids: list[str] = [meta.session_id for meta in metas]
+            fixed_ref = None
+            # None = 交给下方共享的窗口化回填（与默认列表同一管线，workspace 不缺行）。
+            refs: dict[str, WorkspaceRef] | None = None
+        elif workspace_id is not None:
             # `index.get()` 经 `_view → _visible_ids → _filter_visible → _read_header`
             # 真读每个账本候选的 `events.jsonl` 头部——该读取有意**不缓存**
             # （见 `WorkspaceIndex._read_header` 的 AC6 理由）。与下面的
@@ -1912,6 +1933,11 @@ class SessionService:
         # 幂等恢复使用；请求入口不暴露此参数。复用已有 ID 必须先由调用方对账，
         # 这里再做 fail-closed 碰撞检查，避免把新规则接到旧会话上。
         session_id: str | None = None,
+        # #1333（2026-10-20 已批准方案）：创建请求的关联值（前端每次 POST 生成
+        # UUID v4）。非 None 时随创建**主动**落一行 SessionMeta（惰性行要等首次
+        # checkpoint / fork / lineage，认领查询等不了）——认领查询按它精确匹配
+        # 回本请求创建的会话。可选字段：旧客户端不带 = None，行为逐字不变。
+        client_request_id: str | None = None,
     ) -> LaunchResult:
         """创建新 Session 并启动 run（原 POST /api/sessions 的领域逻辑）。
 
@@ -2179,6 +2205,7 @@ class SessionService:
             fuse=fuse,
             launch_budget=launch_budget,
             remember_as_procedural_rule=remember_as_procedural_rule,
+            client_request_id=client_request_id,
         )
 
     async def _finish_initial_creation(
@@ -2199,6 +2226,7 @@ class SessionService:
         fuse: LocalFuse,
         launch_budget: LaunchRunBudget,
         remember_as_procedural_rule: bool,
+        client_request_id: str | None = None,
     ) -> LaunchResult:
         """Finish persisted creation under the same lock used by hard-delete."""
         session_id = session.session_id
@@ -2210,6 +2238,20 @@ class SessionService:
                 raise SessionNotFound(f"session '{session_id}' not found")
             if self._run_manager.get_active(session_id) is not None:
                 raise ActiveRunConflict("session has an active run")
+
+            # #1333：关联值随创建**主动**落 SessionMeta 索引行。落点在锁内、
+            # Session.start 之后（JSONL 已有 ⇒ 关联查询与普通列表的可见性
+            # 同时成立）、任何 launch 之前（run 的首次 checkpoint 走
+            # update_last_checkpoint_seq，行已存在，不会再触发惰性补建）。
+            # launch=False 的只建会话同样落——关联值属于创建请求，不属于 run。
+            if client_request_id is not None:
+                await self._session_meta_store.upsert(
+                    SessionMeta(
+                        session_id=session_id,
+                        created_at=_utc_now_iso(),
+                        client_request_id=client_request_id,
+                    )
+                )
 
             # #1193：初始工作流档在**任何 launch 之前**落盘——plan 档是 run
             # 的初始条件（工具门禁每次调用现派生 effective_workflow_mode）。
