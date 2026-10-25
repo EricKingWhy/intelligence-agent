@@ -678,6 +678,14 @@ class CreateSessionRequest(_AmendValueValidators):
     # 缺省 None ⇒ 既有调用方行为逐字不变。
     previous_session_id: str | None = None
 
+    # #1333（2026-10-20 已批准方案）：创建请求的关联值——前端每次 POST 生成
+    # UUID v4，后端随创建落 SessionMeta 索引行，供认领做精确关联查询。
+    # 可选：旧客户端不带 = None（行为逐字不变）。显式给了就必须成形（空串 /
+    # 超长 422，且发生在产生会话/run 副作用之前）——不承诺幂等/重放语义，
+    # 命名刻意避开 Idempotency-Key（票面「方案依据」已裁：只做关联）。
+    # 长度封顶 + 字符集（审查 P4 防御纵深）：值会持久化进 SQLite 索引，无界字符串不进信任边界；pattern 把 C0 控制字符/空白/DEL 挡在外面（值只经参数化 SQL 与索引，不进日志/事件）。
+    client_request_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x20\x7f]+$")
+
     @field_validator("autonomy")
     @classmethod
     def _validate_autonomy(cls, v: str | None) -> str | None:
@@ -3185,6 +3193,7 @@ def create_app(
         include_archived: bool = False,
         limit: int | None = Query(default=None, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
+        client_request_id: str | None = Query(default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x20\x7f]+$"),
     ) -> list[SessionSummary]:
         """列历史 session。
 
@@ -3208,6 +3217,13 @@ def create_app(
         翻页/刷新不再重扫未变化的文件。损坏行走 store 内全量回退，摘要
         语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
+        # #1333：关联查询与项目视图互斥——两者都是"缩小候选集"的过滤器，
+        # 交叉组合没有已定义语义，显式 422 优于静默取舍。
+        if client_request_id is not None and workspace_id is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="client_request_id 与 workspace_id 不能同时过滤",
+            )
         service = session_service(app.state.agent)
         try:
             summaries = await service.list_sessions(
@@ -3215,6 +3231,9 @@ def create_app(
                 include_archived=include_archived,
                 limit=limit,
                 offset=offset,
+                # #1333：非 None 时走 SessionMeta 索引精确匹配（见服务层 docstring）；
+                # 响应行不携带该字段（SessionSummary 无此键，票面"不暴露"）。
+                client_request_id=client_request_id,
             )
         except WorkspaceNotFound as e:
             raise http_error(e) from e
@@ -3449,6 +3468,8 @@ def create_app(
                 remember_as_procedural_rule=req.remember_as_procedural_rule,
                 # #363 / W-19：显式 sandbox 后端选择。
                 sandbox_backend=req.sandbox_backend,
+                # #1333：关联值随创建落 SessionMeta 索引（见 CreateSessionRequest 注释）。
+                client_request_id=req.client_request_id,
             )
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e
