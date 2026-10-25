@@ -203,9 +203,14 @@ def changed_lines(base: str, head: str = "HEAD") -> dict[str, set[int]]:
 
     用 `--no-renames`：重命名按「删旧 + 加新」计，于是"移动"是否豁免由 `renamed_paths()` 单独决定，
     两条判据不互相污染。`-U0` 保证每个 hunk 只有纯增块，`+c,0`（纯删）不产生行。
+
+    ⚠ 用 `--output-indicator-new='>'` 把**内容行**换成 `>` 前缀：patch 里文件头的 `+++ ` 与
+    "内容以 `++ ` 开头的新增行"一字不差，删行方向同理（内容 `-- x` ⇒ `--- x` 冒充文件头）。
+    靠行首前缀猜边界，任一方向都会把后续 hunk 吃掉 —— 少算分母就是假绿。
+    换掉内容行的前缀之后，`+++ ` 只可能出现在文件头，歧义从根上消失。
     """
     proc = git("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
-               "--no-renames", "--unified=0", f"{base}...{head}")
+               "--no-renames", "--unified=0", "--output-indicator-new=>", f"{base}...{head}")
     if proc.returncode != 0:
         # rc≠0 = diff 读不出来（最常见：两侧没有共同祖先，`fatal: no merge base`）。
         # **绝不能**当成"没有变更" —— 那会把一次读失败洗成 RATCHET EMPTY 的绿。
@@ -213,25 +218,19 @@ def changed_lines(base: str, head: str = "HEAD") -> dict[str, set[int]]:
             f"git diff {base}...{head} 读不出来（rc={proc.returncode}）：{proc.stderr.strip()}")
     out: dict[str, set[int]] = {}
     current: str | None = None
-    pending_header = False  # 只有紧跟 `--- ` 的 `+++ ` 才是文件头
     for raw in proc.stdout.splitlines():
         if raw.startswith("diff --git "):
-            current, pending_header = None, False
+            current = None
             continue
-        if pending_header:
-            pending_header = False
-            if raw.startswith("+++ "):
-                path = _unquote(raw[4:].strip()).removeprefix("b/")
-                # 只看扫描面内的 .py；面外的文件连 hunk 都不解析（否则 `@@` 会往不存在的键上写）。
-                current = path if (path.startswith(SCOPE_PREFIX)
-                                   and path.endswith(SCOPE_SUFFIX)) else None
-                if current:
-                    out.setdefault(path, set())
-            continue
-        if raw.startswith("--- "):
-            # 内容里以 `++ ` 开头的新增行在 patch 里长成 `+++ …`；不设这道状态机就会把它
-            # 误当文件头 ⇒ 该 hunk 剩余行**少算**分母（反向口子）。
-            pending_header = True
+        # 内容行现在是 `>…`（见 docstring），不会再冒充 `+++ ` 文件头；`--- ` / `+++ `
+        # 因此只可能是文件头，位置也无歧义。
+        if raw.startswith("+++ "):
+            path = _unquote(raw[4:].strip()).removeprefix("b/")
+            # 只看扫描面内的 .py；面外的文件连 hunk 都不解析（否则 `@@` 会往不存在的键上写）。
+            current = path if (path.startswith(SCOPE_PREFIX)
+                               and path.endswith(SCOPE_SUFFIX)) else None
+            if current:
+                out.setdefault(path, set())
             continue
         if raw.startswith("@@") and current:
             match = re.search(r"\+(\d+)(?:,(\d+))?", raw)

@@ -562,16 +562,16 @@ def test_non_python_file_under_src_is_not_a_denominator_and_not_undecidable(repo
 
 
 def test_added_line_beginning_with_two_pluses_is_not_a_file_header(repo: Path) -> None:
-    """内容形如 `++ x` 的新增行在 patch 里长成 `+++ x`；它不能被当成文件头。
+    """内容 `++ x` 的新增行在 patch 里长成 `+++ x`，与文件头一字不差 —— 不许吃掉后续 hunk。
 
-    形状必须**跨两个 hunk**：第一个 hunk 的内容行扮成文件头之后，第二个 hunk 的 `@@`
-    会落到 `current is None` 上 ⇒ 后面那些新增行整段不计入分母（少算 = 反向漏口）。
-    mutation: 去掉 `--- ` → `+++ ` 的状态机、退回裸 `startswith("+++ ")` ⇒ 只算出 1/…。
+    形状必须**跨两个 hunk**：假文件头出现在第一个 hunk 之后，第二个 hunk 的新增行才有机会被吃掉。
     """
     path = repo / "src" / "pkg" / "mod.py"
     lines = path.read_text(encoding="utf-8").splitlines()
-    lines[1] = "++ x = 2"  # 第 2 行改成以 `++ ` 开头 ⇒ patch 里成为 `+++ x = 2`
+    lines[1] = "++ x = 2"  # 第 2 行改成以 `++ ` 开头
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "plus content")
     _append_lines(repo, 3)  # 第二个 hunk：纯新增 3 行
     report = _write_report(repo, {"src/pkg/mod.py": _mod_lines(3, 0)})
     base = _baseline(repo, report)
@@ -579,8 +579,36 @@ def test_added_line_beginning_with_two_pluses_is_not_a_file_header(repo: Path) -
     proc = _ratchet(repo, report, base)
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    # 分母必须只含**新增的 3 行**（第 2 行是替换，不计新增）；丢掉第二个 hunk 会变成 0/0。
     assert "变更可执行行：0/3 = 0.00%" in proc.stdout
+
+
+def test_deleted_line_beginning_with_two_dashes_is_not_a_file_header(repo: Path) -> None:
+    """内容 `-- x` 的**删除**行在 patch 里长成 `--- x`，同样会冒充文件头。
+
+    这条是复核指出的**修后新引入**的假绿：删掉一行 `-- x` 之后，后续 hunk 的新增行全被吃掉
+    ⇒ 分母归零 ⇒ 输出 `RATCHET EMPTY` 退 0，而正确结论是 FAIL 退 1。
+    """
+    path = repo / "src" / "pkg" / "mod.py"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    lines[1] = "-- 这是内容，不是文件头"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "add sql-ish comment line")
+    _git(repo, "branch", "-f", "baseline", "HEAD")
+    # 再删掉那一行，并追加 2 行未覆盖代码
+    kept = [line for i, line in enumerate(lines) if i != 1]
+    path.write_text("\n".join(kept) + "\n" + "new1 = 1\nnew2 = 2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "delete dash line and add 2")
+    report = _write_report(repo, {"src/pkg/mod.py": _mod_lines(2, 0)})
+    base = _baseline(repo, report)
+
+    proc = _ratchet(repo, report, base)
+
+    # 关键不是具体计数，而是**新增的那个 hunk 没被吃掉**：分母非空、且结论是 FAIL 不是 EMPTY。
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "RATCHET EMPTY" not in proc.stdout
+    assert "变更可执行行：0/1 = 0.00%" in proc.stdout
 
 
 def test_path_with_a_quote_is_unquoted_correctly(repo: Path) -> None:
