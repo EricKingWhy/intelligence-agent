@@ -93,11 +93,18 @@ class Repo:
         return self.git("rev-parse", "HEAD")
 
     def receipt(self, tested_sha: str) -> dict[str, str]:
-        """被测树 sha 的合法收据：文件名=sha，tree 与 `rev-parse` 核得上，PASS 且 passed==total。"""
+        """被测树 sha 的合法收据：文件名=sha，tree 与 `rev-parse` 核得上，PASS 且 passed==total。
+
+        #1555 合并后收据验收要求 `lanes` 清单与被测树 `scripts/gate0.py` 的
+        `GATE0_LANE_IDS` 一致（车道清单固定）；夹具源不含绑定 marker ⇒ 走 legacy
+        兼容路径（无 review_ledger 也接受）。
+        """
         tree = self.git("rev-parse", f"{tested_sha}^{{tree}}")
+        lanes = [{"name": name, "status": "PASS", "rc": 0}
+                 for name in gate0.GATE0_LANE_IDS]
         body = {"schema": 1, "gate": "gate0", "sha": tested_sha, "tree": tree,
-                "lanes": [], "wall_seconds": 1.0, "tool_versions": {"pytest": "1"},
-                "result": "PASS", "passed": 7, "total": 7}
+                "lanes": lanes, "wall_seconds": 1.0, "tool_versions": {"pytest": "1"},
+                "result": "PASS", "passed": len(lanes), "total": len(lanes)}
         return {f"docs/gate/{tested_sha}.json": json.dumps(body)}
 
     def is_ancestor(self, a: str, b: str) -> bool:
@@ -110,7 +117,11 @@ class Repo:
 
 
 def _base_with_origin(repo: Repo) -> str:
-    base = repo.commit({"README.md": "base\n"}, "base")
+    # #1555 车道清单固定：被测树需要一份可解析 `GATE0_LANE_IDS` 且不含绑定 marker 的
+    # gate0.py，收据才走 legacy 兼容验收（真实仓库每棵树都有该文件，这里补夹具等价物）。
+    gate0_source = f"GATE0_LANE_IDS = {gate0.GATE0_LANE_IDS!r}\n"
+    base = repo.commit({"README.md": "base\n",
+                        "scripts/gate0.py": gate0_source}, "base")
     repo.git("update-ref", "refs/remotes/origin/main", base)
     return base
 
@@ -125,7 +136,10 @@ def _check(repo: Repo, base: str) -> tuple[bool, str, bool]:
     退出即逐字恢复。不改生产 `git()`：它继承环境在真实门禁里是对的，缺的是测试侧的隔离。
     """
     with _clean_env():
-        return gate0.receipt_present_check(repo_root=str(repo.root), bootstrap_sha=base)
+        result = gate0.receipt_present_check(repo_root=str(repo.root), bootstrap_sha=base)
+    # #1555 把返回值从 (ok, detail, warn_only) 三元组升级为 ReceiptCheckResult（多一个
+    # status 字段）；本文件的历史用例只消费前三项，这里按旧契约折回三元组，断言不变。
+    return result.ok, result.detail, result.warn_only
 
 
 @contextlib.contextmanager
@@ -468,31 +482,34 @@ def _fresh_code_branch(repo: Repo, base: str) -> None:
 
 
 def test_self_cover_keeps_guards_green_on_local_full_run(tmp_path, capsys):
-    """本地落盘型全量跑（self_cover=True）：缺收据不改写 guards 车道 + 响亮提示。
+    """本地落盘型全量跑（will_record_receipt=True + 全绿 7 车道）：attested 路径不改写
+    guards 车道 + 响亮提示收据须随代码提交。
 
-    判别力：把 `elif self_cover` 分支删掉（回到无条件改写）⇒ 本断言转红。
+    判别力：把 attested 分支删掉（回到无条件改写）⇒ 本断言转红。#1555 合并后 self_cover
+    以 attested 形式落地：要求**全绿全量**（7 车道齐且 rc=0）才自举，且新收据绑定树与台账。
     """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
     _fresh_code_branch(repo, base)
     with mock.patch.object(gate0, "REPO_ROOT", str(repo.root)), \
             mock.patch.object(gate0, "receipt_bootstrap_sha", lambda repo_root=None: base), _clean_env():
-        results = [(gate0.Lane("guards", "desc", [], str(repo.root)), 0, 0.0, "")]
-        gate0._apply_receipt_check(results, self_cover=True)
+        names = [lane.name for lane in gate0.build_lanes("")]
+        results = [(gate0.Lane(n, "desc", [], str(repo.root)), 0, 0.0, "") for n in names]
+        gate0._apply_receipt_check(results, will_record_receipt=True)
     out = capsys.readouterr().out
     assert results[0][1] == 0, out
-    assert "self-cover receipt-present (#1602)" in out
+    assert "self-cover receipt-present (#1602 attested" in out
     assert "必须随代码一起提交" in out
 
 
 def test_self_cover_off_rewrites_guards_in_ci(tmp_path, capsys):
-    """CI/局部跑（self_cover=False）：缺收据照旧把 guards 改写为失败（既有行为钉住）。"""
+    """CI/局部跑（will_record_receipt=False）：缺收据照旧把 guards 改写为失败（既有行为钉住）。"""
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
     _fresh_code_branch(repo, base)
     with mock.patch.object(gate0, "REPO_ROOT", str(repo.root)), \
             mock.patch.object(gate0, "receipt_bootstrap_sha", lambda repo_root=None: base), _clean_env():
         results = [(gate0.Lane("guards", "desc", [], str(repo.root)), 0, 0.0, "")]
-        gate0._apply_receipt_check(results, self_cover=False)
+        gate0._apply_receipt_check(results, will_record_receipt=False)
     assert results[0][1] == 1
     assert "missing receipt for" in results[0][3]
