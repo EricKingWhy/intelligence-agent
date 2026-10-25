@@ -1005,7 +1005,7 @@ async def build_runtime(
             "os": f"{platform.system()} {platform.release()}",
             # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
-            "date": date.today().isoformat(),  # noqa: DTZ011
+            "date": date.today().isoformat(),
         }).meta_user_text
         # #1048 AC8：与 build_runtime 的指令加载分支**同源**（`uses_sandbox_path_semantics`）：
         # 容器（Docker）工作区经 `load_for_sandbox_session` 用 sandbox 根（如 /workspace）缓存，
