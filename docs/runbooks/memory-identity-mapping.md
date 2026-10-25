@@ -31,12 +31,22 @@ ADR-0056 §3 点名的八类事实中的五张表：
 2. **不自动选赢家。** 两条不同正文是否在讲同一件事无法机械判定，所以正文冲突只能由人
    用 `--conflict m1,m2` 点名；裁决时 `--merge <memory_id>` 指名取哪一条。落选的不删，
    进档案项（`archive:entry_conflict:<id>`）并记进 `decision.archived_sources`。
-   不提供"最后写入胜出"。
+   不提供"最后写入胜出"。裁决出的正文若与某条**既有**映射逐字相同（同一事实在两个
+   身份下各写一遍、其中一份又被点名成冲突），结果是**并入**既有项、把来源取并集，
+   不新增同 id 的第二条（重复 id 会让 `approve` 永远打不中没批的那条，清单死锁）。
 3. **同文去重保全来源。** 归并键是 `(目标文件, 正文哈希)`；一个映射项的 `sources` 列出
    全部旧行（含各自 `tenant/user/project` 迁移来源标签、`row_hash`、`content_hash`、
    `version`、provenance）。去重只减少**落盘条目数**，不减少**来源登记数**。
 4. **不扩预算、不截断、不总结。** 放不下的映射项整体进 `budget:<target>` 冲突（列出
    `entries` 与 `excess`）；裁决只能把它们移进档案（`--archive <id>`），不能抬预算。
+   `--archive` 的 id 作用域**严格限定在该预算项列出的 `entries` 内**——异目标文件的
+   条目、未裁决的正文冲突都不能借这个 flag 归档（否则"未裁决不得切换"可被一个语义
+   无关的开关绕过）；越界 id 报 `MappingBlocked`。归档动作在条目上留
+   `decision.archived_by` / `archived_at`，人不至于分不清"裁决过"与"没碰过"。
+   `plan --memory-limit/--user-limit` 只能**压低**预算：高于部署配置（`Settings` 的
+   `memory_char_limit` / `user_char_limit`）的取值当场被拒。理由是同一条红线——`apply`
+   只按清单里的预算写盘，抬过部署上限就会写出运行时读不进来、且 `skipped=[]` 无声通过的
+   文件。清单里同时记 `deployment_limits` 供人核对。
 5. **批复 ≠ 批准记忆写入 ≠ 批准销毁。** 映射获批只授权"写进当前 Markdown"；`apply`
    不删改任何旧库行，receipt 里 `destruction` 恒为 `not_authorized`（裁决 6 只批加密
    备份至 2027-10-23，销毁另行裁决）。
@@ -101,7 +111,7 @@ C §3.2 的顺序是「源数据全保全 → 旧身份/项目分组 → 逐条�
 
 - 来源：`dpkg(1)`，Debian bookworm manpages
   <https://manpages.debian.org/bookworm/dpkg/dpkg.1.en.html>（2026-10-25 实读，
-  `--force-confdef` / `--force-confold` / `--force-confask` 段落）。
+  `confdef` / `confold` / `confask`（写作 `--force-confold` 等）段落）。
 - 机制摘要：包升级时若某个 conffile 被本地改过且包内版本也变了，dpkg **停下来问用户**；
   `--force-confold`/`--force-confnew` 是**显式**的非交互覆盖，`--force-confdef` 明写
   "If there is no default action it will stop to ask the user"。`--status-fd` 会把

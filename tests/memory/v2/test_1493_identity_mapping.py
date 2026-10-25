@@ -33,7 +33,12 @@ from agent_harness.memory.v2.identity_mapping import (
     resolve_conflict,
 )
 from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
-from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER, entry_digest
+from agent_harness.memory.v2.markdown_store import (
+    DEFAULT_MEMORY_CHAR_LIMIT,
+    DEFAULT_USER_CHAR_LIMIT,
+    ENTRY_DELIMITER,
+    entry_digest,
+)
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from tests.memory.v2._records import RAW_COLUMN_NAMES
 
@@ -679,3 +684,135 @@ async def test_empty_content_gets_its_own_reason_not_delimiter(tmp_path) -> None
     manifest2 = await _plan(workspace2, database2, explicit_conflicts=[["m6", "m7"]])
     assert [item["id"] for item in manifest2["items"]
             if item.get("reason") == "delimiter_rejected"]
+
+
+# --------------------------------------------------- 复核 F-2：预算归档的作用域
+
+
+async def test_budget_archive_only_accepts_its_own_entries(tmp_path) -> None:
+    """预算冲突的 `--archive` 只能移出**这个预算项列出的条目**。
+
+    复核 probe25/probe2 的形状：`--archive` 原先按"全清单 id"校验，于是可以用一个
+    语义无关的 flag 把**异目标文件**的条目、甚至**未裁决的正文冲突**改成 archive，
+    绕过"冲突未裁决不得切换"。越界 id 必须报错而不是静默改写。
+    """
+    workspace, database = await _seed(tmp_path)
+    manifest_path = workspace / MANIFEST_NAME
+    # 预算小到任何条目都放不下 ⇒ 必然产生 MEMORY.md 的预算冲突
+    manifest = await _plan(
+        workspace, database, explicit_conflicts=[["m6", "m7"]], memory_char_limit=10,
+    )
+    budget = _items(manifest, kind="budget_conflict", disposition="conflict")
+    assert budget, "夹具应当产生预算冲突"
+
+    # ① USER.md 的映射项不在 MEMORY 预算的 entries 里
+    user_item = next(item for item in manifest["items"]
+                     if item["kind"] == "entry" and item.get("target") == "user")
+    with pytest.raises(MappingBlocked) as blocked:
+        await resolve_conflict(manifest_path, budget[0]["id"],
+                               archive_items=[user_item["id"]], now=CLOCK)
+    assert "不属于" in " ".join(blocked.value.reasons)
+
+    # ② 未裁决的正文冲突也不能借预算 flag 归档
+    conflict = _items(manifest, kind="entry_conflict", disposition="conflict")[0]
+    with pytest.raises(MappingBlocked):
+        await resolve_conflict(manifest_path, budget[0]["id"],
+                               archive_items=[conflict["id"]], now=CLOCK)
+
+    # ③ 被拒的裁决不得改动清单
+    after = load_manifest(manifest_path)
+    assert _item(after, conflict["id"])["disposition"] == "conflict"
+    assert _item(after, user_item["id"])["disposition"] == "map"
+
+
+async def test_budget_archive_records_who_decided(tmp_path) -> None:
+    """被移进档案的条目必须留下裁决记录：`decision=None` 的"已归档"无法审计。"""
+    workspace, database = await _seed(tmp_path)
+    manifest_path = workspace / MANIFEST_NAME
+    manifest = await _plan(workspace, database, memory_char_limit=10)
+    budget = _items(manifest, kind="budget_conflict", disposition="conflict")
+    assert budget, "夹具应当产生预算冲突"
+    drop = budget[0]["entries"]
+    await resolve_conflict(manifest_path, budget[0]["id"], archive_items=drop, now=CLOCK)
+
+    after = load_manifest(manifest_path)
+    for item_id in drop:
+        archived = _item(after, item_id)
+        assert archived["disposition"] == "archive"
+        assert archived.get("decision"), f"{item_id} 归档后没有裁决记录"
+        assert archived["decision"]["archived_by"] == "budget:memory"
+
+
+# ------------------------------------------- 复核 F-3：裁决产出的 id 与既有项撞车
+
+
+async def test_resolving_into_an_existing_mapping_merges_instead_of_duplicating(
+    tmp_path,
+) -> None:
+    """裁决出的正文恰好等于某条既有映射时，只能并入它，不能新增同 id 的第二条。
+
+    复核 probe23 的自然顺序（先裁决、后批准）：`entry:{target}:{digest}` 重算后与既有项
+    同 id，`_find` 只命中第一条 ⇒ 第二条永远批不上，apply 永久 BLOCKED，re-plan 又被拒。
+    """
+    records = list(_DEFAULT_RECORDS)
+    # m7 与 m1/m2 同文：裁决取 m7 时算出的 id 必然撞上 m1/m2 那条映射。
+    records[_DEFAULT_RECORDS.index(next(r for r in _DEFAULT_RECORDS if r["memory_id"] == "m7"))] = (
+        _record_row(memory_id="m7", content=_SHARED_TEXT, identity=_IDENTITY_B))
+    workspace, database = await _seed(tmp_path, records=tuple(records))
+    manifest_path = workspace / MANIFEST_NAME
+    manifest = await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+
+    conflict = _items(manifest, kind="entry_conflict", disposition="conflict")[0]
+    winner = "m7"
+    resolved = await resolve_conflict(manifest_path, conflict["id"], merge_source=winner,
+                                      now=CLOCK)
+
+    merged_id = f"entry:memory:{entry_digest(_SHARED_TEXT)[:16]}"
+    same_id = [item for item in resolved["items"] if item["id"] == merged_id]
+    assert len(same_id) == 1, f"同 id 出现了 {len(same_id)} 条：{[i['disposition'] for i in same_id]}"
+    assert [item["disposition"] for item in same_id] == ["map"]
+    # 全部来源仍可核：m1/m2 两条旧行 + 裁决取用的 m7
+    source_ids = {source["id"] for source in same_id[0]["sources"]}
+    assert {"m1", "m2", "m7"} <= source_ids, source_ids
+    # 落选方不删：进档案并记进裁决
+    assert same_id[0]["decisions"][0]["archived_sources"]
+    archived = [item["id"] for item in resolved["items"]
+                if item["kind"] == "record_archive"]
+    assert "archive:entry_conflict:m6" in archived
+
+    # 之后逐项批准必须能走完（死锁不成立）
+    await _approve_every_map_item(manifest_path)
+    await _resolve_all_conflicts(manifest_path, load_manifest(manifest_path))
+    receipt = await apply_identity_mapping(manifest_path, now=CLOCK)
+    assert receipt["counts"]["skipped"] == []
+    body = _entries(workspace / "memories" / "MEMORY.md")
+    assert _SHARED_TEXT in body and _SHARED_TEXT not in _entries(
+        workspace / "memories" / "USER.md")
+
+
+# ------------------------------------------------- 复核 F-1：预算 flag 与部署配置
+
+
+async def test_plan_rejects_a_budget_flag_above_the_deployment_limit(tmp_path) -> None:
+    """`--memory-limit` 只能压低预算，不能抬过部署配置（复核 probe26 的形状）。
+
+    runbook 与票面都写着"不扩预算"；apply 又只按清单里的预算写盘 ⇒ 若 plan 收下
+    22000，apply 就会写出运行时读不进来的 MEMORY.md，且 `skipped=[]` 毫无提示。
+    """
+    workspace, database = await _seed(tmp_path)
+    with pytest.raises(MappingBlocked) as blocked:
+        await _plan(workspace, database,
+                    memory_char_limit=DEFAULT_MEMORY_CHAR_LIMIT * 10,
+                    deployment_memory_char_limit=DEFAULT_MEMORY_CHAR_LIMIT)
+    joined = " ".join(blocked.value.reasons)
+    assert str(DEFAULT_MEMORY_CHAR_LIMIT) in joined and "22000" in joined, joined
+
+
+async def test_plan_records_the_deployment_ceiling_for_audit(tmp_path) -> None:
+    """清单里记下盘点当时的部署上限：`limits` 只是计划值，人得能核对它没被抬过顶。"""
+    workspace, database = await _seed(tmp_path)
+    manifest = await _plan(workspace, database, memory_char_limit=900,
+                           deployment_memory_char_limit=DEFAULT_MEMORY_CHAR_LIMIT)
+    assert manifest["limits"]["memory"] == 900
+    assert manifest["deployment_limits"]["memory"] == DEFAULT_MEMORY_CHAR_LIMIT
+    assert manifest["deployment_limits"]["user"] == DEFAULT_USER_CHAR_LIMIT

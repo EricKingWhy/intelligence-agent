@@ -85,3 +85,35 @@ def test_cli_rejects_a_declared_conflict_without_a_merge_source(tmp_path, monkey
     assert "--merge" in out, out
     assert _items(load_manifest(workspace / MANIFEST_NAME), kind="entry_conflict")[0][
         "disposition"] == "conflict", "被拒的裁决不得改动清单"
+
+
+def test_cli_rejects_a_budget_flag_above_the_deployment_setting(tmp_path, monkeypatch, capsys) -> None:
+    """`--memory-limit` 高于 `Settings.memory_char_limit` 时退 2，且不落任何清单。
+
+    复核 probe26 的形状：Settings 默认 2200，flag 抬到 22000 后 apply 写出 3007 字的
+    MEMORY.md 且 `skipped=[]`——运行时读不进来的文件被静默产出。
+    """
+    workspace, _ = asyncio.run(_seed(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(workspace), model_api_key="sk-test")
+    assert settings.memory_char_limit == 2200, settings.memory_char_limit
+
+    code, out = _memory_cli(
+        monkeypatch, settings, ["identity", "plan", "--memory-limit", "22000"], capsys)
+    assert code == 2, out
+    assert "不得扩大预算" in out, out
+    assert not (workspace / MANIFEST_NAME).exists(), "被拒的 plan 不得留下清单"
+
+
+def test_cli_accepts_a_lower_budget_flag_and_records_the_deployment_ceiling(
+    tmp_path, monkeypatch, capsys,
+) -> None:
+    """压低预算合法；清单同时记下部署上限（apply 靠它封顶，挡住手改）。"""
+    workspace, _ = asyncio.run(_seed(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(workspace), model_api_key="sk-test")
+    code, out = _memory_cli(
+        monkeypatch, settings, ["identity", "plan", "--memory-limit", "900"], capsys)
+    assert code == 0, out
+    manifest = load_manifest(workspace / MANIFEST_NAME)
+    assert manifest["limits"]["memory"] == 900
+    assert manifest["deployment_limits"]["memory"] == settings.memory_char_limit
+    assert manifest["deployment_limits"]["user"] == settings.user_char_limit

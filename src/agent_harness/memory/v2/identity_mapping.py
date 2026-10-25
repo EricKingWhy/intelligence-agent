@@ -286,6 +286,8 @@ async def plan_identity_mapping(
     explicit_conflicts: list[list[str]] | None = None,
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
+    deployment_memory_char_limit: int | None = None,
+    deployment_user_char_limit: int | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """只读盘点，写清单，返回清单。
@@ -296,10 +298,33 @@ async def plan_identity_mapping(
 
     `*_char_limit` 与 `Settings` 同义（#1441 §1 的同源要求）；缺省取 store 构造默认值。
     当前文件的已有内容计入预算——迁移写在它后面，跳过它会写出运行时读不进来的文件。
+
+    `deployment_*_char_limit` 是**部署配置**（`Settings`）的当下取值。请求的上限只能
+    低于或等于它：清单预算最终决定 apply 写多少字，若允许抬过部署配置，就会写出运行时
+    读不进来的文件（"不扩预算"是票面红线）。所以**在 plan 阶段就拒绝**，两者都记进清单
+    供人核对（`deployment_limits` 只是审计读数，`apply` 用的是 `limits`）。
     """
     workspace = Path(workspace_dir)
     database = Path(database_path or workspace / MEMORY_V2_DATABASE_NAME)
     manifest_path = workspace / MANIFEST_NAME
+    deployment = {
+        "memory": (DEFAULT_MEMORY_CHAR_LIMIT if deployment_memory_char_limit is None
+                   else int(deployment_memory_char_limit)),
+        "user": (DEFAULT_USER_CHAR_LIMIT if deployment_user_char_limit is None
+                 else int(deployment_user_char_limit)),
+    }
+    requested = {
+        "memory": deployment["memory"] if memory_char_limit is None else int(memory_char_limit),
+        "user": deployment["user"] if user_char_limit is None else int(user_char_limit),
+    }
+    inflated = [
+        f"--{target}-limit={requested[target]} 高于部署配置 {deployment[target]}："
+        f"迁移不得扩大预算（apply 只按清单预算写盘，超过部署上限的文件运行时读不进来）"
+        for target in ("memory", "user")
+        if requested[target] > deployment[target]
+    ]
+    if inflated:
+        raise MappingBlocked(inflated)
     if manifest_path.exists():
         raise MappingBlocked([
             f"{MANIFEST_NAME} 已存在：先用 CLI 审完/作废它，再重新盘点（覆盖会丢已批的裁决）",
@@ -455,10 +480,11 @@ async def plan_identity_mapping(
         "database": str(database),
         "created_at": stamp(moment),
         "updated_at": stamp(moment),
-        "limits": {
-            "memory": DEFAULT_MEMORY_CHAR_LIMIT if memory_char_limit is None else memory_char_limit,
-            "user": DEFAULT_USER_CHAR_LIMIT if user_char_limit is None else user_char_limit,
-        },
+        "limits": requested,
+        # 部署配置的当下取值：只作审计读数供人核对（`apply` 用的是 `limits`）。
+        # 抬预算是**盘点时**就被拒掉的，不在 apply 复算——否则清单里的人手改动会让
+        # 两条拒绝通道并存，而测试证明后者不可达。
+        "deployment_limits": deployment,
         "applied_at": None,
         "items": items,
         "source_scan": {
@@ -647,14 +673,23 @@ async def resolve_conflict(
     kind = item["kind"]
     if kind == "budget_conflict":
         chosen = [str(value) for value in archive_items or ()]
-        ids = {other["id"] for other in manifest["items"]}
-        unknown = [value for value in chosen if value not in ids]
+        # 作用域 = **这个**预算项列出的条目。按全清单 id 校验会让一个语义无关的 flag
+        # 把异目标文件的条目、甚至未裁决的正文冲突改成 archive，绕过"未裁决不得切换"。
+        scope = list(item["entries"])
+        unknown = [value for value in chosen if value not in scope]
         if unknown:
-            raise MappingBlocked([f"预算冲突里没有这些条目：{unknown}"])
+            raise MappingBlocked([
+                f"这些条目不属于 {item['id']} 的预算超限集：{unknown}（可移出的只有 {scope}）",
+            ])
         for other in manifest["items"]:
             if other["id"] in chosen:
                 other["disposition"] = "archive"
                 other["reason"] = f"budget:{item['target']} 人工裁决移出当前文件"
+                # 归档也是人的决定：`decision=None` 的"已归档"无法与人没碰过的项区分。
+                other["decision"] = {
+                    "archived_by": item["id"],
+                    "archived_at": stamp(now),
+                }
         item["entries"] = [value for value in item["entries"] if value not in chosen]
         item["decision"] = {"archived": chosen, "decided_at": stamp(now)}
         if not item["entries"]:
@@ -697,31 +732,76 @@ async def resolve_conflict(
             raise MappingBlocked([f"{item_id} 没有 {merge_source} 这个变体"])
         chosen = winner[0]
         losers = [variant for variant in item["variants"] if variant["key"] != merge_source]
-        item["disposition"] = "map"
-        item["kind"] = "entry"
-        item["id"] = f"entry:{chosen['target']}:{chosen['content_hash'][:16]}"
-        item["target"] = chosen["target"]
-        item["content_hash"] = chosen["content_hash"]
-        item["content_length"] = chosen.get("content_length", 0)
-        item["sources"] = list(chosen["sources"])
-        item["decision"] = {
+        new_id = f"entry:{chosen['target']}:{chosen['content_hash'][:16]}"
+        decision = {
             "merge_source": merge_source,
             "archived_sources": [source["id"] for variant in losers for source in variant["sources"]],
             "decided_at": stamp(now),
         }
+        # 裁决出的正文可能与某条既有映射逐字相同（同一事实在两个身份下各写一遍，
+        # 其中一份又被点名成冲突——完全正常）。此时只能**并入**既有项：重复 id 会让
+        # `_find` 永远命中第一条，未批的那条再也批不上，apply 永久 BLOCKED 而 re-plan
+        # 又被"清单已存在"拒绝 ⇒ 清单死锁。
+        existing = [other for other in manifest["items"]
+                    if other["id"] == new_id and other is not item]
+        if existing:
+            target_item = existing[0]
+            _merge_conflict_into_mapping(target_item, item, decision, now)
+            _archive_losers(manifest, item, losers, reason_id=target_item["id"])
+            manifest["items"].remove(item)
+            _refresh_budget(manifest, Path(manifest["workspace"]))
+            return _save_manifest(path, manifest)
+        item["disposition"] = "map"
+        item["kind"] = "entry"
+        item["id"] = new_id
+        item["target"] = chosen["target"]
+        item["content_hash"] = chosen["content_hash"]
+        item["content_length"] = chosen.get("content_length", 0)
+        item["sources"] = list(chosen["sources"])
+        item["decision"] = decision
         _approved_by_decision(item, now)
-        for variant in losers:
-            manifest["items"].append({
-                "id": f"archive:entry_conflict:{variant['key']}",
-                "kind": "record_archive",
-                "disposition": "archive",
-                "reason": f"{item['id']} 裁决落选（保留为只读档案）",
-                "sources": list(variant["sources"]),
-            })
+        _archive_losers(manifest, item, losers, reason_id=item["id"])
         _refresh_budget(manifest, Path(manifest["workspace"]))
         return _save_manifest(path, manifest)
 
     raise MappingBlocked([f"{item_id} 的 kind={kind} 不支持裁决"])
+
+
+def _archive_losers(
+    manifest: dict[str, Any], conflict_item: dict[str, Any],
+    losers: list[dict[str, Any]], *, reason_id: str,
+) -> None:
+    """落选变体进只读档案（不删、不再进当前文件），并标出它们属于哪条冲突裁决。"""
+    known = {other["id"] for other in manifest["items"]
+             if other["kind"] == "record_archive"}
+    for variant in losers:
+        archive_id = f"archive:entry_conflict:{variant['key']}"
+        if archive_id in known:
+            continue
+        manifest["items"].append({
+            "id": archive_id,
+            "kind": "record_archive",
+            "disposition": "archive",
+            "reason": f"{reason_id} 裁决落选（保留为只读档案）",
+            "sources": list(variant["sources"]),
+        })
+
+
+def _merge_conflict_into_mapping(
+    target_item: dict[str, Any], conflict_item: dict[str, Any],
+    decision: dict[str, Any], now: datetime | None,
+) -> None:
+    """把裁决结果并入**既有**映射项：来源并集、裁决记录留档、批准沿用原状态。
+
+    既有项若已获批，说明"这条正文要进当前文件"这件事人已经点过头；裁决只补充
+    "另外那条旧行也属于它"。既有项若未获批，批准状态不因裁决而升级——裁决的对象
+    是冲突项，不是这条映射。`decisions` 是列表：同一条正文可能被裁决合并多次。
+    """
+    known = {source["id"] for source in target_item["sources"]}
+    target_item["sources"].extend(
+        source for source in conflict_item["sources"] if source["id"] not in known)
+    target_item.setdefault("decisions", []).append(decision)
+    target_item.setdefault("merged_conflicts", []).append(conflict_item["id"])
 
 
 def _approved_by_decision(item: dict[str, Any], now: datetime | None) -> None:

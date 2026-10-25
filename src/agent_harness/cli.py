@@ -3558,10 +3558,12 @@ def _main_memory(argv: list[str]) -> None:
     )
     identity.add_argument("--archive-all", action="store_true",
                           help="resolve 扫描/分隔符拒绝项：整组不导入（进只读档案）")
-    identity.add_argument("--memory-limit", type=int, default=None,
-                          help="plan：覆盖 MEMORY.md 预算（缺省用部署配置）")
-    identity.add_argument("--user-limit", type=int, default=None,
-                          help="plan：覆盖 USER.md 预算（缺省用部署配置）")
+    identity.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="plan：压低 MEMORY.md 预算（缺省用部署配置；高于部署配置会被拒绝）")
+    identity.add_argument(
+        "--user-limit", type=int, default=None,
+        help="plan：压低 USER.md 预算（缺省用部署配置；高于部署配置会被拒绝）")
     reproject = subcommands.add_parser(
         "reproject", help="把派生层与 memories/*.md 对账（收敛重复投影与积压账本）",
     )
@@ -3678,6 +3680,9 @@ async def _memory_command(
                     ],
                     memory_char_limit=args.memory_limit or settings.memory_char_limit,
                     user_char_limit=args.user_limit or settings.user_char_limit,
+                    # 部署配置的当下取值：flag 只能压低预算，不能抬过它（"不扩预算"红线）。
+                    deployment_memory_char_limit=settings.memory_char_limit,
+                    deployment_user_char_limit=settings.user_char_limit,
                 )
                 return _identity_summary(manifest, created=True), False
             if args.action == "apply":
