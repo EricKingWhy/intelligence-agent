@@ -27,7 +27,6 @@ import pytest
 from langchain_core.messages import AIMessage, SystemMessage
 
 from agent_harness.context.builder import (
-    _PLAN_BLOCK_HEADING,
     ContextBuilder,
     _render_plan_block,
 )
@@ -64,15 +63,6 @@ def _model_sections(section5: str) -> str:
         "## 失败方案\n(none)\n\n"
         f"## 当前进行中状态\n{section5}\n\n"
         "## Next Step\n等待当前请求继续。"
-    )
-
-
-def _plan_block(messages):
-    return next(
-        (m for m in messages
-         if isinstance(m, SystemMessage)
-         and m.content.startswith(_PLAN_BLOCK_HEADING)),
-        None,
     )
 
 
