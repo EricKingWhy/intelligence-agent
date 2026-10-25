@@ -63,16 +63,18 @@ def _gate_rc(node_version: str, tmp_path: Path) -> int:
     script = "\n".join(
         [
             match.group(0),
-            "node() { case \"$2\" in"
-            f" *'[0]'*) echo '{major}' ;;"
-            f" *'[1]'*) echo '{minor}' ;;"
-            " *) echo '' ;; esac; }",
+            (
+                "node() { case \"$2\" in"
+                f" *'[0]'*) echo '{major}' ;;"
+                f" *'[1]'*) echo '{minor}' ;;"
+                " *) echo '' ;; esac; }"
+            ),
             "tui_node_ok",
         ]
     )
     script_file = tmp_path / "gate.sh"
     script_file.write_text(script, encoding="utf-8", newline="\n")
-    proc = subprocess.run([BASH, _bash_path(script_file)], capture_output=True, text=True)
+    proc = subprocess.run([BASH, _bash_path(script_file)], capture_output=True, text=True, check=False)
     return proc.returncode
 
 
