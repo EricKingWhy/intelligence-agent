@@ -4,6 +4,19 @@
 **Date**: 2026-09-04  
 **Phase**: 6 (Memory Capability / Context Provider)
 
+## 当前适用关系（2026-10-22，Issue #1490 / ADR-0056）
+
+- **被取代（仅 Memory 路由部分）**：子决策 2 的 5 层 `MemoryScope` 枚举作为 Memory 读写路由、
+  子决策 3 的 Milvus partition key 作为 Memory 租户隔离手段，以及基于它们的
+  tenant/user/project 可见性过滤。依据：裁决 7（身份/scope 路由整体退役，禁换名 `owner_id`
+  复制三元路由）与 ADR-0056 §2。
+- **继续适用**：`IdentityContext` + contextvar 的可信身份注入机制本身；认证、Runtime permission、
+  审批、扫描、provenance 一律不动；RAG / Session 归档等**其他域**的身份残留不在退役范围
+  （`knowledge_sources.tenant_id`、Milvus partition/filter 由 RAG 数据映射另做）。
+- **旧键归宿**：tenant/user/project 降为迁移来源标签，只进只读档案与映射（#1493），
+  不再参与当前读写。
+- **后继规格**：ADR-0056 §3.7；施工落点 #1493（身份映射）、#1495（去路由）。
+
 ## Context
 
 用户在 Phase 6 grill 中引入了多租户安全维度，这是规格 06 §7（Memory Scope）的延伸但远超规格原定范围：

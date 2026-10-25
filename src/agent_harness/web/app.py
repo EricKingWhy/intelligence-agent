@@ -19,7 +19,7 @@ import sqlite3
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
@@ -93,11 +93,11 @@ from agent_harness.instance_lock import InstanceLock
 from agent_harness.logging import setup_logging
 from agent_harness.model.config import (
     ConfigError,
+    ModelClientConstructionError,
     ModelConfig,
     UnsupportedReasoningEffort,
     warn_unadopted_catalog_entries,
 )
-from agent_harness.model.provider import ModelClientConstructionError
 from agent_harness.model.provider_store import ProviderStore
 from agent_harness.observability import flush_process_sink
 from agent_harness.sandbox import (
@@ -181,6 +181,7 @@ from agent_harness.web.ask_user_timeout_driver import AskUserTimeoutDriver
 from agent_harness.web.board import BoardBroadcaster
 from agent_harness.web.context_usage import resolve_context_usage_payload
 from agent_harness.web.domain_errors import (
+    MEMORY_REASON_CODE_HEADER,
     http_error,
     model_http_error,
     sandbox_unavailable_http_error,
@@ -221,6 +222,8 @@ EXPOSED_CUSTOM_RESPONSE_HEADERS: frozenset[str] = frozenset(
     {
         "X-Local-Fuse-Source",
         "X-Local-Max-Agent-Turns",
+        # #1440 C 案：memory 内容拒绝的机读归因码（`memory_http_error` 下发）。
+        MEMORY_REASON_CODE_HEADER,
         "X-Permission-Mode",
         "X-Worktree-Path",
         "X-Worktree-Path-Encoded",
@@ -329,7 +332,7 @@ class RunBudgetRequest(BaseModel):
     max_total_tokens: int | None = Field(default=None, ge=1, le=INT64_MAX, strict=True)
     #: 成本 ceiling：非负十进制（`11 §6.1`）。wire 上字符串最稳、数也收——
     #: **二进制浮点相等不是契约**，所以这一维在事件与投影里一律是十进制字符串，
-    #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `_decimal_text`）。
+    #: 算术只在 `Decimal` 里做（见 `agent/run_budget.py` 的 `decimal_text`）。
     max_cost_usd: Decimal | None = Field(default=None, ge=0)
     #: 工具名 → 正整数绝对 ceiling（`#314` / `04 §9.1`；`#564`：两作用域口径统一）。
     #: 值用 `StrictInt`：pydantic 2.13 的 `Field(strict=True)` 只约束 dict 本身、
@@ -674,6 +677,14 @@ class CreateSessionRequest(_AmendValueValidators):
     # 只有 `/new` 携带；`/sessions` 切换、`/quit`、Web 空会话入口都不带。
     # 缺省 None ⇒ 既有调用方行为逐字不变。
     previous_session_id: str | None = None
+
+    # #1333（2026-10-20 已批准方案）：创建请求的关联值——前端每次 POST 生成
+    # UUID v4，后端随创建落 SessionMeta 索引行，供认领做精确关联查询。
+    # 可选：旧客户端不带 = None（行为逐字不变）。显式给了就必须成形（空串 /
+    # 超长 422，且发生在产生会话/run 副作用之前）——不承诺幂等/重放语义，
+    # 命名刻意避开 Idempotency-Key（票面「方案依据」已裁：只做关联）。
+    # 长度封顶 + 字符集（审查 P4 防御纵深）：值会持久化进 SQLite 索引，无界字符串不进信任边界；pattern 把 C0 控制字符/空白/DEL 挡在外面（值只经参数化 SQL 与索引，不进日志/事件）。
+    client_request_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x20\x7f]+$")
 
     @field_validator("autonomy")
     @classmethod
@@ -1628,6 +1639,10 @@ class AppState:
         把 wiring 交给一个已关停的 app。
         """
         self._closed = True
+        # 归档是派生索引；先摘掉 store 观察者并关闭它，避免后续关停步骤失败时
+        # 仍把 SessionArchive 的线程连接留在进程里。close() 自身会等待正在写入的
+        # 观察者操作结束，因此不会关闭仍被其他 owner 使用的连接。
+        self.session_archive_observer.close()
         # #1296：先停值班触发器，避免 shutdown 期间再派发新 session。
         await self.watchtower.stop()
         # #1320：再停超时 ticker。**不**直接 cancel：它可能正 await `on_expire`
@@ -2216,6 +2231,84 @@ def _negotiate_subprotocol(subprotocols: list[str]) -> str | None:
     return WS_BUSINESS_SUBPROTOCOL if WS_BUSINESS_SUBPROTOCOL in subprotocols else None
 
 
+class ControlPlaneBoundaryMiddleware:
+    """所有 HTTP / WebSocket 入口共用的本机 Host / Origin 边界（#1483）。
+
+    这层放在 CORS 外侧：预检也必须先经过 Host / Origin 判定，不能因为
+    ``CORSMiddleware`` 在认证层外短路，就让伪造 Host 的新路由绕过中央入口。
+    JWT 仍是配置部署的身份边界；本地信任模式则只信精确 loopback 来源与
+    显式配置项。无 Origin 只表示非浏览器形态，仍必须通过 Host 闸。
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        settings: Settings,
+        *,
+        allowed_hosts: Collection[str] | None = None,
+        allowed_origins: Collection[str] | None = None,
+        allow_testserver: bool = False,
+    ) -> None:
+        self.app = app
+        self._settings = settings
+        self._allow_testserver = allow_testserver
+        from agent_harness.web.projects import (
+            configured_control_plane_hosts,
+            configured_control_plane_origins,
+        )
+
+        self._allowed_hosts = frozenset(
+            configured_control_plane_hosts(settings.control_plane_allowed_hosts)
+            if allowed_hosts is None
+            else allowed_hosts
+        )
+        self._allowed_origins = frozenset(
+            configured_control_plane_origins(settings.control_plane_allowed_origins)
+            if allowed_origins is None
+            else allowed_origins
+        )
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] not in {"http", "websocket"}:
+            await self.app(scope, receive, send)
+            return
+
+        from agent_harness.web.projects import check_trusted_host, check_trusted_origin
+
+        host_reason = check_trusted_host(
+            scope,
+            allowed_hosts=self._allowed_hosts,
+            allow_testserver=self._allow_testserver,
+        )
+        origins = Headers(scope=scope).getlist("origin")
+        if len(origins) > 1:
+            origin_reason = "拒绝请求：Origin 不得重复出现。"
+        else:
+            origin_reason = check_trusted_origin(
+                origins[0] if origins else None,
+                jwt_secret_configured=bool(self._settings.jwt_secret),
+                allowed_origins=self._allowed_origins,
+            )
+        reason = host_reason or origin_reason
+        if reason is None:
+            await self.app(scope, receive, send)
+            return
+
+        if scope["type"] == "websocket":
+            logging.getLogger("agent_harness.web").warning(
+                "拒绝本机控制面 WebSocket 握手：%s", reason[:160],
+            )
+            await send({
+                "type": "websocket.close",
+                "code": 1008,
+                "reason": WS_ORIGIN_DENIED_REASON,
+            })
+            return
+
+        response = JSONResponse({"detail": reason}, status_code=403)
+        await response(scope, receive, send)
+
+
 class _IdentityRejected(Exception):
     """凭据判定失败（`AuthSeamMiddleware._resolve_identity` 的唯一失败出口）。
 
@@ -2246,10 +2339,19 @@ class AuthSeamMiddleware:
         app: Any,
         settings: Settings,
         host_service_token: str | None = None,
+        *,
+        allowed_origins: Collection[str] | None = None,
     ) -> None:
         self.app = app
         self._settings = settings
         self._host_service_token = host_service_token
+        from agent_harness.web.projects import configured_control_plane_origins
+
+        self._allowed_origins = frozenset(
+            configured_control_plane_origins(settings.control_plane_allowed_origins)
+            if allowed_origins is None
+            else allowed_origins
+        )
         self._host_skills_nonce_lock = threading.Lock()
         self._host_skills_used_nonces: dict[str, float] = {}
 
@@ -2324,7 +2426,7 @@ class AuthSeamMiddleware:
                         and isinstance(scopes, list)
                         and all(isinstance(item, str) for item in scopes)
                     )
-                except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+                except (jwt.InvalidTokenError, KeyError, RecursionError, TypeError, ValueError):
                     expected = ""
                     valid_identity = False
                     timestamp_is_fresh = False
@@ -2370,11 +2472,11 @@ class AuthSeamMiddleware:
           把它当边界是假边界；HTTP 面的 `require_trusted_origin` 在配了密钥时也是
           直接返回（认证层才是边界）。
         - **未配置 `jwt_secret`**：本地信任模式 + 来源闸。无 `Origin` ⇒ 非浏览器
-          发起（第三方网页**无法**构造不带 Origin 的浏览器握手）⇒ 放行；带 Origin
-          则只接受本机 hostname，其余拒绝。这一条封的是 **WS 通道**的 drive-by 形态：
+          发起（第三方网页**无法**构造不带 Origin 的浏览器握手），但仍先过中央 Host
+          闸；带 Origin 则只接受精确本机 HTTP(S) origin，其余拒绝。这一条封的是
+          **WS 通道**的 drive-by 形态：
           WS 握手不受 CORS 约束，服务端不判 Origin 就等于允许用户访问的任意网页连上来
-          读写会话。**范围仅限本路由**——跨源 HTTP 读写面（会话事件流 / 消息入口等）
-          仍无来源闸而 CORS 为 `*`，那是既有缺口、不在本票 Scope。判据与
+          读写会话。HTTP 与 WS 现在都先经过 `ControlPlaneBoundaryMiddleware`；判据与
           `projects.require_trusted_origin` 共用一份策略实现（出口文案与 close reason 各自一份）。
 
         拒 = `websocket.close`（未 accept）⇒ uvicorn 回 **403** 且不建连
@@ -2416,6 +2518,7 @@ class AuthSeamMiddleware:
         cross_origin = check_trusted_origin(
             headers.get("origin"),
             jwt_secret_configured=bool(self._settings.jwt_secret),
+            allowed_origins=self._allowed_origins,
         )
         if cross_origin is not None:
             # 文案里含客户端可控、无长度上界的 `Origin` ⇒ 按长度截断，别让它灌水。
@@ -2477,7 +2580,7 @@ class AuthSeamMiddleware:
                     or any(not isinstance(s, str) for s in scopes)):
                 raise ValueError("Invalid identity claims")
             return IdentityContext(tenant, user, scopes)
-        except (jwt.InvalidTokenError, ValueError) as invalid:
+        except (jwt.InvalidTokenError, RecursionError, ValueError) as invalid:
             raise _IdentityRejected("Invalid identity token") from invalid
 
 
@@ -2494,11 +2597,25 @@ def create_app(
     *,
     enable_cors: bool = True,
     host_service_token: str | None = None,
+    allow_testserver: bool = False,
 ) -> FastAPI:
-    """装配 FastAPI 应用。测试可注入 test settings；生产默认从 .env 读。"""
+    """装配 FastAPI 应用。
+
+    ``allow_testserver`` is an explicit in-process test injection. Production
+    callers use the default, which does not trust Starlette's ``testserver`` host.
+    """
     if settings is None:
         settings = Settings()
 
+    from agent_harness.web.projects import (
+        configured_control_plane_hosts,
+        configured_control_plane_origins,
+    )
+
+    allowed_hosts = configured_control_plane_hosts(settings.control_plane_allowed_hosts)
+    allowed_origins = configured_control_plane_origins(
+        settings.control_plane_allowed_origins
+    )
     state = AppState(settings)
 
     # lifespan 替代 on_event：进程退出时关闭 Memory 子系统，避免泄露外部连接。
@@ -2522,6 +2639,7 @@ def create_app(
         # **之后**：逃生门降级时那条 WARNING 才能落进 agent.jsonl，而不是只掉到
         # stderr（AC7 要求逃生门在日志里显著留痕）。
         instance_lock = InstanceLock(settings.workspace_dir).acquire()
+        shutdown_complete = False
         try:
             # Phase Multiturn T8（#138）：启动崩溃扫描——无终态 run 补记
             # run/interrupted + 强制 Ledger reconcile。失败不阻塞启动（单个坏会话
@@ -2594,9 +2712,17 @@ def create_app(
                 yield
             finally:
                 await state.shutdown()
+                shutdown_complete = True
                 # 旁路收尾（ADR-0018 D3）：服务停机前尽力发送剩余 Langfuse span
                 # （有超时上限，不阻塞退出）。
                 flush_process_sink()
+        except BaseException:
+            # 启动阶段也可能在 ensure_stores() 等步骤失败；这条路径尚未进入
+            # yield 周围的 finally，但 AppState 已经创建并可能物化归档连接。
+            if not shutdown_complete:
+                await state.shutdown()
+                flush_process_sink()
+            raise
         finally:
             # 放在 shutdown 之后：仍在关连接时不该让第二个进程进来接手。
             instance_lock.release()
@@ -2604,6 +2730,7 @@ def create_app(
     app = FastAPI(title="Agent Harness Inspector", version="0.1.0", lifespan=lifespan)
     app.state.agent = state  # 挂在 app.state 上，路由通过 request.app.state 取
     app.state.host_service_token = host_service_token
+    app.state.allowed_origins = allowed_origins
 
     # #517 BUG-06：未捕获异常的全局兜底。Starlette 默认给 text/plain 的
     # "Internal Server Error"（TestClient 则直接 re-raise），前端按 JSON 解析
@@ -2964,21 +3091,36 @@ def create_app(
         AuthSeamMiddleware,
         settings=settings,
         host_service_token=host_service_token,
+        allowed_origins=allowed_origins,
     )
 
     if enable_cors:
-        # V1 本地单用户：宽松 CORS 让 Vite dev server (5173) 能直连。
-        # 多用户时收紧到已知 origin（接缝点）。
-        # 必须最后添加 = 中间件栈最外层：浏览器预检（OPTIONS）天然不携带
-        # Bearer，认证层在内层时预检直接 401，配置 JWT_SECRET 后跨域 dev
-        # 模式整体失效。预检放行不削弱认证——数据请求仍逐个过认证层。
+        # #1483：本机开发仍支持 Vite 直连，但来源必须是精确 loopback hostname
+        # 或显式配置值；不再用 ``*``。方法 / 请求头也只列出当前 Web API 的实际
+        # 浏览器面，CORS 只是浏览器可读性边界，认证与动作授权仍在各自 seam。
+        from agent_harness.web.projects import LOCAL_CONTROL_PLANE_ORIGIN_REGEX
+
+        # 放在认证层外：浏览器预检（OPTIONS）天然不携带 Bearer，认证层在内层时
+        # 预检直接 401，配置 JWT_SECRET 后跨域 dev 模式整体失效。预检放行不削弱
+        # 认证——真实数据请求仍逐个过认证层；更外层的中央边界随后统一校验 Host。
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_origins=sorted(allowed_origins),
+            allow_origin_regex=LOCAL_CONTROL_PLANE_ORIGIN_REGEX,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Accept", "Authorization", "Content-Type"],
             expose_headers=sorted(EXPOSED_CUSTOM_RESPONSE_HEADERS),
         )
+
+    # 最后添加 = 最外层。即使 CORS 处理了预检，Host / Origin 仍先过中央边界；
+    # enable_cors=False 的本机脚本 / serve 路径也不能绕开该边界。
+    app.add_middleware(
+        ControlPlaneBoundaryMiddleware,
+        settings=settings,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+        allow_testserver=allow_testserver,
+    )
 
     # ── 路由 ──
 
@@ -3037,7 +3179,8 @@ def create_app(
         Prometheus 文本暴露格式（v0.0.4）；Diagnostic 层，Event≠Log，不进
         SessionEvent。读取零副作用（gc 扫描在 worker 线程），单项采集失败
         ⇒ 该指标整行缺席（缺席≠占位值），不影响任何业务路径（不变量 #21）。
-        默认无鉴权——与 /api/health 同一口径（AC5，不引入开关）。
+        本地信任模式下与 /api/health 同一口径；配置 JWT_SECRET 后由认证层接管，
+        未携带有效凭据返回 401。
         """
         return Response(
             content=await collect_process_metrics(),
@@ -3050,6 +3193,7 @@ def create_app(
         include_archived: bool = False,
         limit: int | None = Query(default=None, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
+        client_request_id: str | None = Query(default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x20\x7f]+$"),
     ) -> list[SessionSummary]:
         """列历史 session。
 
@@ -3073,6 +3217,13 @@ def create_app(
         翻页/刷新不再重扫未变化的文件。损坏行走 store 内全量回退，摘要
         语义与旧实现严格一致。同步磁盘 I/O 仍走 to_thread 卸载。
         """
+        # #1333：关联查询与项目视图互斥——两者都是"缩小候选集"的过滤器，
+        # 交叉组合没有已定义语义，显式 422 优于静默取舍。
+        if client_request_id is not None and workspace_id is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="client_request_id 与 workspace_id 不能同时过滤",
+            )
         service = session_service(app.state.agent)
         try:
             summaries = await service.list_sessions(
@@ -3080,6 +3231,9 @@ def create_app(
                 include_archived=include_archived,
                 limit=limit,
                 offset=offset,
+                # #1333：非 None 时走 SessionMeta 索引精确匹配（见服务层 docstring）；
+                # 响应行不携带该字段（SessionSummary 无此键，票面"不暴露"）。
+                client_request_id=client_request_id,
             )
         except WorkspaceNotFound as e:
             raise http_error(e) from e
@@ -3087,15 +3241,37 @@ def create_app(
         return session_rows(summaries)
 
     @app.get("/api/sessions/{session_id}/events")
-    async def get_session_events(session_id: str) -> list[dict]:
+    async def get_session_events(
+        session_id: str,
+        after_seq: int | None = Query(default=None, ge=-1),
+        limit: int | None = Query(default=None, ge=1, le=STREAM_REPLAY_MAX_EVENTS),
+    ) -> list[dict]:
         """读历史 SessionEvent——前端刷新后从此重建视图（不变量 #22）。
 
         session_id 先过安全校验（名字段，不是路径）；store 读是同步磁盘 I/O，
         走 to_thread 卸载（同 list_sessions）。
+
+        有界分页（#1526）：`?after_seq=N&limit=M`。`after_seq` 只返回 seq
+        **严格大于** N 的事件——ADR-0016 §2.3 重连游标（`stream?after_seq=`）
+        的同一语义挪到历史读取；Stripe `starting_after` 的「游标 = 对象身份」
+        同形，这里的对象身份就是 seq。`limit` 上限钉在
+        `STREAM_REPLAY_MAX_EVENTS`（**不新造窗口阈值**，与 WS/SSE backlog
+        截断同一常数）；只给 `limit` ⇒ 从头取首页；只给 `after_seq` ⇒ 默认
+        页大小 = `STREAM_REPLAY_MAX_EVENTS`。**两个参数都不给 ⇒ 既有全量
+        语义**（既有调用方零迁移）。响应仍是裸数组——续页判据 =「页长 ==
+        limit」（GitHub `per_page` 短页同款）：短页即完结，页长超 limit 只会
+        出现在不支持参数的旧后端（整包回退，客户端按完结处理）。seq 严格
+        递增且无重复由「过滤 > 游标 + 前缀切片」构造保证。窗口切空返回
+        `[]`（不是 404）：分页参数不改变会话存在性/损坏语义。
         """
         service = session_service(app.state.agent)
+        effective_limit = limit
+        if effective_limit is None and after_seq is not None:
+            effective_limit = STREAM_REPLAY_MAX_EVENTS
         try:
-            events = await service.get_events(session_id)
+            events = await service.get_events(
+                session_id, after_seq=after_seq, limit=effective_limit,
+            )
         except (InvalidSessionId, SessionNotFound, EventLogCorruptError) as e:
             raise http_error(e) from e
         return [e.to_dict() for e in events]
@@ -3292,6 +3468,8 @@ def create_app(
                 remember_as_procedural_rule=req.remember_as_procedural_rule,
                 # #363 / W-19：显式 sandbox 后端选择。
                 sandbox_backend=req.sandbox_backend,
+                # #1333：关联值随创建落 SessionMeta 索引（见 CreateSessionRequest 注释）。
+                client_request_id=req.client_request_id,
             )
         except (WorkspaceNameInvalid, InvalidDecision, BudgetRejection) as e:
             raise http_error(e) from e

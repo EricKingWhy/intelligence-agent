@@ -24,6 +24,21 @@ class UnsupportedReasoningEffort(ConfigError):
     """A requested reasoning level is not declared for the selected model."""
 
 
+# #1527：本类原先定义在 `model/provider`（SDK 重模块）。web 层的 except 子句在
+# 导入期就需要这个类型，留在 provider 会让 `import agent_harness.web.app` 连带
+# 加载整个 openai 栈。它归这里同族：构造失败是"配置/环境暂时不可用"的结构化
+# 错误（见 docstring）；provider 侧仍 re-export，公共导入面不变。
+class ModelClientConstructionError(RuntimeError):
+    """模型 client 构造失败（#517 BUG-05）。
+
+    `create_chat_model` 的构造是**纯本地操作**（字段校验 + SDK client 初始化），
+    此处的失败来自配置/环境而非网络调用——典型如 corporate/k8s 代理变量
+    （`NO_PROXY` 里的 `[::1]`）让 httpx 的代理映射解析在构造期抛 `InvalidURL`。
+    显式类型让 web 层按类型映射成结构化 503（环境/配置暂时不可用，可修好重试），
+    而不是把它当服务端 bug 打成裸 500。`__cause__` 保留原始异常。
+    """
+
+
 # 各厂商 OpenAI 兼容端点与默认模型。
 #
 # Phase 2（SDD 03 §16 ModelOption）：preset 可携带能力位元数据——
@@ -102,8 +117,12 @@ REASONING_EFFORT_WIRE_VALUES = frozenset(
 )
 
 
-def _pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
-    """从 source dict 抽取已知能力位（仅声明的键）。省略 = 不猜测。"""
+def pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
+    """从 source dict 抽取已知能力位（仅声明的键）。省略 = 不猜测。
+
+    #1539 转正公开：preset/自定义模型配置的能力视图抽取只有这一份，
+    Web catalog 与配置解析共用（此前 catalog import 私有名）。
+    """
     return {k: source[k] for k in _CAPABILITY_FIELDS if k in source}
 
 
@@ -436,6 +455,17 @@ def warn_unadopted_catalog_entries(settings: Settings) -> None:
         )
 
 
+def endpoint_allowlist(settings: "Settings") -> tuple[str, ...]:
+    """#1485 所有者登记的端点守卫例外（`MODEL_ENDPOINT_ALLOWLIST`，逗号分隔）。
+
+    归一化只此一处：运行期（本模块）与连接测试（`web/model_providers.py`）都调它，
+    两处若各写一遍，会出现"测试通过但实际被拦"。
+    """
+    from agent_harness.model.endpoint_guard import parse_allowlist
+
+    return tuple(sorted(parse_allowlist(settings.model_endpoint_allowlist)))
+
+
 class ModelConfig:
     def __init__(
         self,
@@ -447,6 +477,7 @@ class ModelConfig:
         temperature: float,
         fallback: "ModelConfig | None" = None,
         reasoning_effort: ReasoningEffortCapability | None = None,
+        endpoint_allowlist: tuple[str, ...] = (),
     ):
         # 运行期 SDK 要明文，但持有形态是 SecretStr：repr(config) / vars(config)
         # / pytest 失败局部变量等调试路径脱敏为 **********（与 Settings 层一致）。
@@ -459,6 +490,9 @@ class ModelConfig:
         self.base_url = base_url
         self.temperature = temperature
         self.reasoning_effort = reasoning_effort
+        # #1485 端点守卫例外（所有者登记，来自 Settings.model_endpoint_allowlist）。
+        # 配置对象自身携带，是因为连接测试等路径只拿得到 ModelConfig，拿不到 Settings。
+        self.endpoint_allowlist = endpoint_allowlist
         # Model Fallback 两级链（ADR-0014 决策 14）：瞬时故障切 fallback、
         # never 切回。V1 只消费第一级（Runtime 的 coordinator 持有两级结构）。
         self.fallback = fallback
@@ -491,6 +525,7 @@ class ModelConfig:
             base_url=settings.model_base_url,
             temperature=settings.temperature,
             key_env="MODEL_API_KEY",
+            allowlist=endpoint_allowlist(settings),
         )
         entry = find_catalog_entry(settings, config.provider, config.model_name)
         if entry is not None:
@@ -515,6 +550,7 @@ class ModelConfig:
             base_url=settings.fallback_model_base_url,
             temperature=settings.temperature,
             key_env="FALLBACK_MODEL_API_KEY",
+            allowlist=endpoint_allowlist(settings),
         )
         entry = find_catalog_entry(settings, config.provider, config.model_name)
         if entry is not None:
@@ -546,6 +582,7 @@ class ModelConfig:
             temperature=(entry.temperature if entry.temperature is not None
                          else settings.temperature),
             reasoning_effort=entry.reasoning_effort,
+            endpoint_allowlist=endpoint_allowlist(settings),
         )
         # fallback 链语义不动（ADR-0014）：catalog 选择只替换 primary。
         resolved.fallback = cls._fallback_from(settings)
@@ -580,6 +617,7 @@ class ModelConfig:
             api_key=api_key,
             base_url=target["base_url"],
             temperature=settings.temperature,
+            endpoint_allowlist=endpoint_allowlist(settings),
         )
         # fallback 链语义不动（ADR-0014）：自定义供应商只替换 primary。
         resolved.fallback = cls._fallback_from(settings)
@@ -637,6 +675,7 @@ class ModelConfig:
     def _single_from(
         cls, *, provider: str, model_name: str, api_key: str,
         base_url: str, temperature: float, key_env: str,
+        allowlist: tuple[str, ...] = (),
     ) -> "ModelConfig":
         """解析单个（primary 或 fallback）模型配置；未知 provider 在配置期就抛错。"""
         if provider not in PROVIDER_PRESETS:
@@ -665,4 +704,5 @@ class ModelConfig:
             base_url=base_url or preset["model_base_url"],
             api_key=api_key,
             temperature=temperature,
+            endpoint_allowlist=allowlist,
         )

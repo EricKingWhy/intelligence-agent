@@ -226,27 +226,79 @@ export async function getHealth(): Promise<{ status: string }> {
  *  于是可见性过滤落在**投影层**（`buildRailModel` 的 `includeArchived`）：一份载荷 +
  *  一个开关 = 一处真相（不变量 #22）。 */
 export async function listSessions(
-  options: { includeArchived?: boolean } = {},
+  options: { includeArchived?: boolean; clientRequestId?: string } = {},
 ): Promise<SessionSummary[]> {
   return (await listSessionsRaw(options)).json();
 }
 
 /** 会话列表的裸响应：给需要读响应头（`Date` → 服务端时钟锚点，#1333）的
- *  调用方。语义与 `listSessions` 逐字一致，只是把 `Response` 本体交出来。 */
+ *  调用方。语义与 `listSessions` 逐字一致，只是把 `Response` 本体交出来。
+ *
+ *  `clientRequestId`（#1333）：认领关联查询——服务端只返回**精确匹配**该
+ *  关联值的会话。不支持该参数的旧后端会忽略它并返回全量 ⇒ 认领层的候选
+ *  谓词（基线 + 创建时间过滤）仍然兜底，行为退化为既有差分认领。 */
 export async function listSessionsRaw(
-  options: { includeArchived?: boolean } = {},
+  options: { includeArchived?: boolean; clientRequestId?: string } = {},
 ): Promise<Response> {
-  const query = options.includeArchived ? '?include_archived=true' : '';
+  const parts: string[] = [];
+  if (options.includeArchived) parts.push('include_archived=true');
+  if (options.clientRequestId) {
+    parts.push(`client_request_id=${encodeURIComponent(options.clientRequestId)}`);
+  }
+  const query = parts.length > 0 ? `?${parts.join('&')}` : '';
   const res = await apiFetch(`/api/sessions${query}`);
   if (!res.ok) throw new Error(`list sessions ${res.status}`);
   return res;
 }
 
+/** REST /events 的单页上限（#1526）：镜像后端 `STREAM_REPLAY_MAX_EVENTS`
+ *  （1000，WS/SSE backlog 截断同一常数）。有界传输：一次完整重建 = 多次
+ *  ≤1000 帧的请求，单响应不再 MB 级整包（历史夹具读数 19800 事件/8.36MB，
+ *  部署交付层会整包攒到流结束才下发）。 */
+const EVENTS_PAGE_LIMIT = 1000;
+
 export async function getSessionEvents(sessionId: string): Promise<AgentEvent[]> {
-  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`);
-  if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
-  if (!res.ok) throw new Error(`get events ${res.status}`);
-  return res.json();
+  // #1526：循环取页直到短页。签名不变——所有重建点（首屏 / stream/truncated
+  // 重连 / 子会话）自动获得有界传输；对未知分页参数的旧后端返回整包（页长 >
+  // limit）时按完结处理，不发下一页。任何一页失败即抛：**不把不完整内容当
+  // 完整历史**（已累积的页随异常一起丢弃）。
+  const events: AgentEvent[] = [];
+  let afterSeq = -1;
+  for (;;) {
+    const res = await apiFetch(
+      `/api/sessions/${encodeURIComponent(sessionId)}/events` +
+        `?after_seq=${afterSeq}&limit=${EVENTS_PAGE_LIMIT}`,
+    );
+    if (res.status === 404) throw new NotFoundError(`会话不存在（${sessionId}）`);
+    if (!res.ok) throw new Error(`get events ${res.status}`);
+    const page: unknown = await res.json();
+    if (!Array.isArray(page)) throw new Error('get events: 响应不是数组');
+    // 跨页界同样校验：首页后每页首帧必须 > 上一页游标（页内校验只保证页内
+    // 严格递增，接缝处的重叠/回退要单独拦——后端把 after_seq 误读成 >= 之类
+    // 的窗口错切会在这里露出，而不是把重复帧静默拼进"完整历史"）。
+    if (page.length > 0 && afterSeq !== -1) {
+      const head = (page[0] as AgentEvent | null)?.seq;
+      if (typeof head !== 'number' || head <= afterSeq) {
+        throw new Error(`get events: 页接缝 seq 未越过游标（${head} ≤ ${afterSeq}）`);
+      }
+    }
+    let lastSeq: number | null = null;
+    for (const frame of page) {
+      const seq = (frame as AgentEvent | null)?.seq;
+      if (typeof seq !== 'number') {
+        throw new Error('get events: 页内帧缺 seq（拒绝把不完整内容当完整历史）');
+      }
+      if (lastSeq !== null && seq <= lastSeq) {
+        throw new Error(`get events: 页内 seq 非严格递增（${lastSeq} → ${seq}）`);
+      }
+      lastSeq = seq;
+    }
+    events.push(...(page as AgentEvent[]));
+    if (page.length !== EVENTS_PAGE_LIMIT) return events;
+    const next = lastSeq as number; // 满 page ⇒ lastSeq 必有值
+    if (next <= afterSeq) throw new Error('get events: 游标未前进（拒绝死循环）');
+    afterSeq = next;
+  }
 }
 
 /** #1256：某父会话的子智能体 roster 行（= 后端 `GET /delegations` 的响应元素）。
@@ -959,12 +1011,22 @@ const START_SESSION_FIELDS: BodyFields<StartSessionPayload> = {
  *  401 throws UnauthorizedError (after broadcasting) — fail fast, no empty stream.
  *
  *  「有值才带键」的**单一执行点**（与 sendMessage 同一契约，见 lib/amend.ts）：
- *  空值 / 空数组不发键 = 后端默认；调用方只做字段名映射，不判空。 */
-export async function startSession(payload: StartSessionPayload): Promise<Response> {
+ *  空值 / 空数组不发键 = 后端默认；调用方只做字段名映射，不判空。
+ *
+ *  `opts.clientRequestId`（#1333）：**不属于** `StartSessionPayload`——payload
+ *  会被重试通道原样复用（`SendFailure.onRetry` 重发同一对象），而关联值必须
+ *  每次 POST 重新生成（票面：请求值只用于关联，不提供幂等/重放）。由
+ *  `useSession.submitTask` 在提交点生成 UUID v4 后从这里带入。 */
+export async function startSession(
+  payload: StartSessionPayload,
+  opts: { clientRequestId?: string } = {},
+): Promise<Response> {
+  const body = buildBody(payload, START_SESSION_FIELDS);
+  if (opts.clientRequestId) body['client_request_id'] = opts.clientRequestId;
   return apiFetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildBody(payload, START_SESSION_FIELDS)),
+    body: JSON.stringify(body),
   });
 }
 

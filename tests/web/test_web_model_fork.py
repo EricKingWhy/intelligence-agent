@@ -70,7 +70,7 @@ def client(tmp_path):
         agent_models=_CATALOG_JSON,
         provider_store_path=str(tmp_path / "model-providers.json"),
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _seed(client, session_id: str = "sid-1") -> None:
@@ -294,7 +294,7 @@ class TestModelsEndpointShadowing:
             # 用户态，不密封会把宿主真配置泄进 catalog 断言。
             provider_store_path=str(tmp_path / "model-providers.json"),
         )
-        client = TestClient(create_app(settings, enable_cors=False))
+        client = TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
         ids = [m["id"] for m in client.get("/api/models").json()["models"]]
 

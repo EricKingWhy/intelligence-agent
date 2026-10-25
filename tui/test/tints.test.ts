@@ -30,7 +30,8 @@ test("用户轮与三种状态的工具卡都能装配（rgb() 字面量会在�
   );
   assert.equal(components.length, 1);
 
-  for (const status of ["running", "success", "error"] as const) {
+  // #1498 F7-2：stopped 是 DSH 四态的第四态（被中断，不等于失败），也必须能装配。
+  for (const status of ["running", "success", "error", "stopped"] as const) {
     const card: ToolCard = {
       toolCallId: "call_1",
       name: "bash",
@@ -55,6 +56,7 @@ test("CARD_TINTS 是可解析的 hex，且与原 rgb() 字面量逐位等值", (
     running: "#26282e",
     success: "#1e2821",
     error: "#2e1e21",
+    stopped: "#2c281e",
   });
   for (const [name, value] of Object.entries(CARD_TINTS)) {
     assert.equal(

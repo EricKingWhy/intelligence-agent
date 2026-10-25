@@ -1,6 +1,7 @@
 """请求身份在异步任务之间隔离。"""
 
 import asyncio
+import base64
 from dataclasses import FrozenInstanceError
 
 import jwt
@@ -58,7 +59,9 @@ def test_auth_seam_sets_contextvar(tmp_path):
     from datetime import UTC, datetime
 
     secret = "test-signing-secret-at-least-32-characters"
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
+    allow_testserver=True,
+    )
 
     @app.get("/identity-probe")
     async def probe():
@@ -80,7 +83,9 @@ def test_auth_seam_sets_contextvar(tmp_path):
 
 
 def test_no_secret_does_not_trust_bearer_identity(tmp_path):
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)),
+    allow_testserver=True,
+    )
 
     @app.get("/identity-probe")
     async def probe():
@@ -102,7 +107,9 @@ def test_auth_fail_closed_when_secret_configured(tmp_path):
     from datetime import UTC, datetime
 
     secret = "test-signing-secret-at-least-32-characters"
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
+    allow_testserver=True,
+    )
 
     @app.get("/identity-probe")
     async def probe():
@@ -126,7 +133,9 @@ def test_auth_unset_secret_warns_loudly(tmp_path, caplog):
     发出响亮的启动告警——静默 fail-open 是 R6-4 的核心危害。"""
     import logging
 
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path)),
+    allow_testserver=True,
+    )
 
     @app.get("/identity-probe")
     async def probe():
@@ -149,7 +158,9 @@ def test_cors_preflight_survives_auth_when_secret_configured(tmp_path):
     from datetime import UTC, datetime
 
     secret = "test-signing-secret-at-least-32-characters"
-    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret))
+    app = create_app(Settings(_env_file=None, workspace_dir=str(tmp_path), jwt_secret=secret),
+    allow_testserver=True,
+    )
     with TestClient(app) as client:
         preflight = client.options(
             "/api/health",
@@ -160,7 +171,7 @@ def test_cors_preflight_survives_auth_when_secret_configured(tmp_path):
             },
         )
         assert preflight.status_code == 200, "预检请求不得被认证层拦截"
-        assert preflight.headers["access-control-allow-origin"] == "*"
+        assert preflight.headers["access-control-allow-origin"] == "http://localhost:5173"
         # W-11：健康探针匿名 200，载荷含协议形状、不含秘密
         health = client.get("/api/health")
         assert health.status_code == 200
@@ -173,3 +184,37 @@ def test_cors_preflight_survives_auth_when_secret_configured(tmp_path):
                            "exp": int(datetime.now(UTC).timestamp()) + 600}, secret)
         assert client.get("/api/health",
                           headers={"Authorization": f"Bearer {live}"}).status_code == 200
+
+
+def test_deeply_nested_jwt_header_is_rejected_before_run_creation(tmp_path):
+    secret = "test-signing-secret-at-least-32-characters"
+    workspace = tmp_path / "workspace"
+    app = create_app(Settings(
+        _env_file=None,
+        workspace_dir=str(workspace),
+        jwt_secret=secret,
+    ), allow_testserver=True)
+    header_json = b'{"alg":"HS256","nested":' + b"[" * 10000 + b"0" + b"]" * 10000 + b"}"
+    header = base64.urlsafe_b64encode(header_json).rstrip(b"=").decode("ascii")
+    token = f"{header}.e30.invalid-signature"
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/sessions",
+            json={"task": "must not start"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401, (
+        f"expected a structured auth rejection; got {response.status_code} "
+        f"and {response.text!r}"
+    )
+    assert response.json() == {"detail": "Invalid identity token"}
+    assert token not in response.text
+    assert not list((workspace / "sessions").rglob("events.jsonl"))
+    log_path = tmp_path / "logs" / "agent.jsonl"
+    log_text = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    assert token not in log_text
+    assert "RecursionError" not in log_text
+    assert "Traceback (most recent call last)" not in log_text
+    assert "run/failed" not in log_text

@@ -389,6 +389,15 @@ export interface SessionClaimOptions {
    *  照认——#1321 的负载验收（`wsStream.claimLoad.test.ts`）走旧签名，
    *  其 20/20 读数是回归口径，不得因本票变红。 */
   submittedAtServerMs?: number;
+  /** #1333（2026-10-20 已批准方案）：本次 POST 的关联值。
+   *
+   *  传入后改走 `GET /api/sessions?client_request_id=<值>` **精确关联查询**：
+   *  候选集 = 服务端按 SessionMeta 索引匹配的行——「别的客户端/上一轮迟到」
+   *  的会话结构上进不了候选（时间过滤之外的第二道闸，票面 AC：`other-0`
+   *  先可见也不得认领）。基线与 `submittedAtServerMs` 谓词在关联行上继续
+   *  生效：旧后端忽略该参数返回全量时，行为退化为既有差分认领（不比现状差）。
+   *  同一关联值多条命中 → `SessionClaimAmbiguousError`（fail-closed）。 */
+  clientRequestId?: string;
 }
 
 /** 认领歧义：单轮里有多条候选都满足「基线外 + 本轮新建」，无法确认哪条是
@@ -482,11 +491,17 @@ export async function discoverNewSessionId(
   const maxDelayMs = opts.maxDelayMs ?? CLAIM_MAX_DELAY_MS;
   const random = opts.random ?? Math.random;
   const submittedAtServerMs = opts.submittedAtServerMs;
+  const clientRequestId = opts.clientRequestId;
   const deadline = Date.now() + timeoutMs;
   let lastErr: unknown = null;
   for (let attempt = 0; Date.now() < deadline; attempt += 1) {
     try {
-      const rows = await listSessions({ includeArchived: true });
+      // #1333：带关联值时改走精确关联查询（候选集由服务端索引给出）；
+      // 不带 = 既有全量差分（claimLoad 20/20 的回归口径，URL 形状逐字不变）。
+      const rows = await listSessions({
+        includeArchived: true,
+        ...(clientRequestId !== undefined ? { clientRequestId } : {}),
+      });
       // rows 通常已按时间倒序；仍全表扫以容忍排序变化
       const candidates = rows.filter((r) => isClaimCandidate(r, known, submittedAtServerMs));
       // #1333 fail-closed：单轮多个候选 = 无法确认哪条是本次提交创建的，

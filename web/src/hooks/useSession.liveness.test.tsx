@@ -16,6 +16,9 @@
  * 驱动的端点；useSession 本体、consumeSSE、投影、重连状态机全走真实代码路径。
  * 假时钟推进 RECONNECT_STALL_MS 的数倍：有活性喂入不得停摆；对照组（无心跳）
  * 证明本夹具对停摆**敏感**（不是怎么跑都绿的 vacuous 断言）。
+ *
+ * #1504 追加：openLiveStream 代际闸 describe——判别窗内被取代的接流必须谢绝
+ * （不再开第二条流、不改写 selectedId / 跨会话游标），同夹具复用。
  */
 
 import { act, useEffect } from 'react';
@@ -391,5 +394,64 @@ describe('#478 — durable pause 的干净收流不得触发重连链', () => {
     expect(captured.hook!.reconnecting).toBe(false);
     expect(captured.hook!.conversation?.run_paused).not.toBeNull();
     expect(captured.hook!.conversation?.run_paused?.reason).toBe('budget_exhausted');
+  });
+});
+
+describe('#1504 — openLiveStream 代际闸：判别窗内被取代的接流必须谢绝', () => {
+  /** 判别窗内用户另起一摊：selectSession 切到 s-2（代际 +1、收掉旧流引用），
+   *  再在 s-2 上排队一条消息（ack ⇒ 接上 s-2 自己的 WS 流）。此后原调用
+   *  （resumePausedRun / flushQueue）的窗外分支到达时，代际已不是它起跑时
+   *  捕获的那个——openLiveStream 必须谢绝：不再开第二条流、不把 selectedId
+   *  拽回旧会话、不改写跨会话游标槽位。旧代码会把一条过期流硬挂上来，
+   *  覆盖新流的 sseRef/coalescerRef/stallCheck 槽位并把 UI 拽回无流的
+   *  live（#1504 审查 P3）——这两条用例在旧代码下红。 */
+  async function startElsewhere(): Promise<void> {
+    vi.mocked(sendMessage).mockResolvedValue(ackResponse());
+    await act(async () => {
+      captured.hook!.selectSession('s-2');
+      await captured.hook!.sendMessage('s-2', '别的事');
+    });
+  }
+
+  it('resumePausedRun：窗外落定时代际已换代 ⇒ 不再开第二条流、s-2 的直播原样在场', async () => {
+    vi.mocked(resumeSession).mockImplementation(() => new Promise<Response>(() => {}));
+    await mount();
+    let pendingRun: Promise<void> | undefined;
+    await act(async () => {
+      pendingRun = captured.hook!.resumePausedRun(SID, { runId: 'r-1', expectedVersion: 1, kind: 'tool', tool: 'bash', value: 10 });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS - 200);
+    });
+    await startElsewhere();
+    expect(wsMock.calls).toHaveLength(1);
+    expect(wsMock.calls[0].sessionId).toBe('s-2');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS); });
+    await act(async () => { await pendingRun; });
+
+    expect(wsMock.calls).toHaveLength(1); // 谢绝：过期 resume 不得加开第二条流
+    expect(wsMock.calls[0].sessionId).toBe('s-2');
+    expect(captured.hook!.selectedId).toBe('s-2'); // 不被拽回 s-1
+    expect(captured.hook!.streaming).toBe(true); // s-2 的直播原样在场
+  });
+
+  it('flushQueue：窗外落定时代际已换代 ⇒ 不再开第二条流、selectedId 不被拽回旧会话', async () => {
+    vi.mocked(flushSessionQueue).mockImplementation(() => new Promise<Response>(() => {}));
+    await mount();
+    let pendingFlush: Promise<void> | undefined;
+    await act(async () => {
+      pendingFlush = captured.hook!.flushQueue(SID);
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS - 200);
+    });
+    await startElsewhere();
+    expect(wsMock.calls).toHaveLength(1);
+    expect(wsMock.calls[0].sessionId).toBe('s-2');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS); });
+    await act(async () => { await pendingFlush; });
+
+    expect(wsMock.calls).toHaveLength(1); // 谢绝：过期 flush 不得加开第二条流
+    // 窗外分支的 setMode(live, 旧sid) 必须被闸住：selectedId 停留在 s-2。
+    expect(captured.hook!.selectedId).toBe('s-2');
+    expect(captured.hook!.streaming).toBe(true);
   });
 });

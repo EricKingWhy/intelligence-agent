@@ -90,7 +90,7 @@ GATE0_BUDGET = 60.0
 #: 逐条的判据 / 证据 / 实测读数见 `docs/agents/verification.md` §2 ⑦（此处只写「守什么」，
 #: 不复述机制 —— `AGENTS.md` §16.1）：
 #:   ① 生成物同步：`src/.../event.py`（词汇唯一真值）↔ `web/src/generated/event-types.ts`
-#:      ↔ `docs/EVENT_VOCABULARY.md`。
+#:      ↔ `tui/src/generated/event-types.ts`（#1498：TUI 产物落在 tui 包内）↔ `docs/EVENT_VOCABULARY.md`。
 #:   ② 验证映射：`docs/agents/verification.map.tsv` 必须覆盖**全部被跟踪文件**、车道 id 合法、
 #:      focused 路径存在，且**每一行都承重**（删掉任一行都会有文件的受影响集合变化）⇒ map
 #:      不能悄悄腐烂。
@@ -599,11 +599,45 @@ def transfer_diff_docs_only(repo_root, p: str, c: str) -> bool:
     return all(len(r) >= 2 and r[0] in ("A", "M") and _doc_pattern().match(r[1]) for r in rows)
 
 
+def tail_is_docs_or_receipts(repo_root, t: str) -> bool:
+    """形状④条件③：`t..HEAD` 里**每一笔**提交要么纯 docs、要么纯收据落盘（fail-closed）。
+
+    逐笔判（不是对 `t..head` 整体取一次 diff）：整体 diff 会把「先加代码、后删代码」洗成
+    空改动面；逐笔判则任一笔不满足 ⇒ ④ 对该 t 不成立。取不到提交列表 ⇒ False。
+    空提交（`changes == []`，`--allow-empty`）也不算纯 docs / 纯收据 ⇒ ④ 对该 t 不成立；
+    后果是**该 t 的 ④ 整体失效**（不是"多跑一次全量"），与票面「每一笔提交都是纯 docs 或
+    纯收据落盘」字面一致。
+
+    按 `(repo_root, t, HEAD)` 记忆化（r3 P3）：④ 对每笔 c 都遍历候选 t，同一 t 会被重算
+    一遍 `rev-list` + 逐笔 `diff-tree`；#1553 的副本实测 tail 被调 3125 次。HEAD 进 key 是
+    **正确性**要求而非性能：只按 (repo_root, t) 缓存时，同一进程里 HEAD 前进后再问会命中
+    旧答案 ⇒ fail-open（tail 里新进的代码提交看不见）。
+    """
+    head = _git_at(repo_root, "rev-parse", "HEAD").stdout.strip()
+    return _tail_is_docs_or_receipts_cached(repo_root, t, head)
+
+
+@functools.cache
+def _tail_is_docs_or_receipts_cached(repo_root, t: str, head: str) -> bool:
+    """`tail_is_docs_or_receipts` 的记忆化体；`head` 只用于让缓存随 HEAD 失效。"""
+    rev = _git_at(repo_root, "rev-list", f"{t}..HEAD")
+    if rev.returncode != 0:
+        return False
+    for c in (x for x in rev.stdout.split("\n") if x.strip()):
+        changes = commit_file_changes(repo_root, c)
+        # 第二个析取项是第一个的严格子集（`docs/gate/<sha>.json` 也命中 docs 判据、`A` ⊂ `A/M`）；
+        # 照票面「复用既有两判据」的口径保留，不是互斥分支。
+        if not (is_pure_docs_commit(changes) or is_pure_receipt_landing(changes)):
+            return False
+    return True
+
+
 def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
-    """收据在场检查（#1338 改动 3）⇒ (ok, detail, warn_only)。
+    """收据在场检查（#1338 改动 3 / #1553 形状④）⇒ (ok, detail, warn_only)。
 
     对 `merge-base(origin/main, HEAD)..HEAD` 里每笔**非纯 docs、非纯收据落盘**、且晚于 bootstrap
-    B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受三种形状：
+    B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受四种形状
+    （①②③ 见下，④ 另起一段）：
     ① t = c 自身；②（§8.1 传递）t = 第一父 p 且 p..c 的差异是 docs-only；③ t != c、t 在本区间内、
     c 是 t 的祖先、**且 c 与 t 同一冻结树**（`c^{tree} == t^{tree}`）——即批次冻结在树 F 后整批
     只跑一次全量，每笔 c 的 t 都是后代 F。
@@ -612,6 +646,18 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
     "t = c 或父"会要求**每笔代码提交各跑一次门禁**，与改动标题"每棵冻结树只跑一次全量"及
     PR #1336 的既有实践（7 笔代码提交、1 枚冻结 tip 读数）冲突。merge commit 不需特判：同步合并
     的树真被测过就有后代读数，没测过的新树照旧红（SDD §8.1 的 fail-closed 语义）。找不到 = 违规。
+
+    ④（#1553，用户 2026-10-23 亲裁 A 案）补的正是上面这条的**多提交分支**形态：③ 要求 c 与 t
+    是同一棵树，而多笔代码提交逐笔改树 ⇒ ③ 覆盖不到。t 在区间内、c 是 t 的祖先、且 t..HEAD 逐笔
+    纯 docs / 纯收据落盘 ⇒ c 由 t 的收据覆盖（条件③）。它的**后果**是"不必为每笔中间提交各跑一次
+    全量"，与 PR #1336（7 笔代码提交、1 枚冻结 tip 读数）、此后各波集成实践及 SDD §8.1 读数传递
+    规则同源。
+    ⚠ ④ 认的是**提交图关系**（c 是 t 的祖先 + tail 安静），**不**验"c 的改动仍留在 t 的树里"：
+    c 的改动若在 tail 之前被回滚掉，其净效果不在被测树内 —— 这属可接受的语义（回滚掉的代码本就不
+    进最终树），但别把 ④ 读成内容包含证明。
+    ⚠ 条件②（c 是 t 的祖先）由 ①+③ 蕴含，删掉不改判定（短路优化）：满足 ① 而不满足 ② 的 t，
+    必有 c ∈ `t..HEAD`，而 c ∈ scope 非纯 docs ⇒ ③ 已经 False。用例
+    `test_shape4_condition2_is_implied_by_conditions_1_and_3` 把这条链子钉住。
     """
     repo_root = repo_root or REPO_ROOT
     mb = _git_at(repo_root, "merge-base", "origin/main", "HEAD")
@@ -666,6 +712,19 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
                     acceptable = True
                     break
         if not acceptable:
+            # ④ 分支冻结 tip 覆盖（#1553）：t 在区间内、c 是 t 的祖先、且 t..HEAD 逐笔纯 docs /
+            # 纯收据落盘 ⇒ c 的代码已被 tip 那棵被测树包含。条件不成立 ⇒ 不认（fail-closed）。
+            # 注意形状③与④**不可互推**：③ 只要求同一棵树、不看 tail，④ 只看 tail、不要求同树
+            # ⇒ 上面 ③ 的循环不能因为有了 ④ 就删。
+            for t in receipts:
+                if t == c or t not in range_set or not receipts[t].get("valid", False):
+                    continue
+                if _git_at(repo_root, "merge-base", "--is-ancestor", c, t).returncode != 0:
+                    continue
+                if tail_is_docs_or_receipts(repo_root, t):
+                    acceptable = True
+                    break
+        if not acceptable:
             subject = _git_at(repo_root, "log", "-1", "--format=%s", c).stdout.strip()
             violations.append((c, subject))
 
@@ -678,14 +737,14 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
     except ValueError:
         warn_only = False
 
-    detail = [f"receipt-present（#1338 改动 3）：base={base[:12]} bootstrap={bootstrap[:12]} "
+    detail = [f"receipt-present（#1338 改动 3 / #1553 形状④）：base={base[:12]} bootstrap={bootstrap[:12]} "
               f"范围 {len(commits)} 笔 / 被查 {len(scope)} 笔 / 违规 {len(violations)} 笔"
               + ("（首周 warn-only）" if warn_only else "")]
     for sha, subject in violations:
         detail.append(f"missing receipt for {sha[:12]} {subject}")
     if violations and not warn_only:
-        detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，"
-                      "或从第一父提交传递读数（仅限 docs-only 改动）")
+        detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，或从第一父提交传递"
+                      "读数（仅限 docs-only 改动），或在分支冻结 tip 上跑一次全量（其后仅 docs / 收据提交）")
     return len(violations) == 0, "\n".join(detail), warn_only
 
 
