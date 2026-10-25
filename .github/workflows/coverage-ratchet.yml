@@ -38,7 +38,9 @@ on:
     # （见下方 env），默认的 opened/synchronize/reopened 不会在打标签时重跑。
     types: [opened, synchronize, reopened, labeled, unlabeled]
     # 棘轮的分母是 `src/**` 的新增可执行行；`tests/**` 本身的改动分母恒为空，但**必须触发** ——
-    # 本票自陈的收益之一是"没人能悄悄删测试"，只删测试的 PR 若被 paths 过滤掉就没人守。
+    # 给出的是**可见性**（这种 PR 会真的跑一轮、报告真的生成），不是阻断：其结论必然是
+    # `RATCHET EMPTY`。"悄悄删测试"的**守卫**不在本票范围（需另一条"测试数量/断言行数只增不减"
+    # 的棘轮），见 `docs/agents/1499-coverage-ratchet.md` §6 第 6 条。
     # `docs/**` 仍然不触发（纯文档改动确实无从守起）。
     paths:
       - 'src/**'

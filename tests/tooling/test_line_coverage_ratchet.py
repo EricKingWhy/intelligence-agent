@@ -6,7 +6,8 @@
 
 覆盖票面 AC 的六条关键语义。带 `mutation:` 说明的用例是"删掉对应守卫就必然变红"的那几条
 （变异矩阵的读数与失败集合落在 `docs/agents/verification.md` §2 ⑯ 与
-`docs/phase_status/2026-10.md` 的 #1499 节，本文件不复制数字）：
+`docs/phase_status/2026-10.md` 的 #1499 节，本文件不复制数字。⚠ 那两处的 #1499 段随本票的
+docs 提交一起落地——若你读到的树早于该提交，读到的是指向将来的指针，不是空指针）：
 
 1. 变更可执行行**恰 60% 通过**、**59% 失败**（整数比较，不经浮点）；
 2. **未改行不进分母**（基线里早就未覆盖的行不影响判定）；
@@ -713,9 +714,10 @@ def test_malformed_baseline_fields_are_undecidable_not_a_traceback(repo: Path) -
 
 
 def test_malformed_report_shapes_are_undecidable_not_a_traceback(repo: Path) -> None:
-    """报告形状坏掉（非 XML / `<line>` 缺 number）⇒ 退 2，不是崩栈退 1。
+    """报告形状坏掉（非 XML / `<line>` 缺 number / 总数非整数）⇒ 退 2，不是崩栈退 1。
 
-    mutation: 去掉 `ET.ParseError` / `number is None` 护栏 ⇒ 本用例拿到 rc=1 + Traceback。
+    mutation: 去掉 `ET.ParseError` / `number is None` / totals 的 `except ValueError` 任一护栏
+    ⇒ 本用例拿到 rc=1 + Traceback。
     """
     _append_lines(repo, 5)
     report = repo / "artifacts" / "coverage.xml"
@@ -732,7 +734,10 @@ def test_malformed_report_shapes_are_undecidable_not_a_traceback(repo: Path) -> 
                  "<sources><source>" + (repo / "src").as_posix() + "</source></sources>"
                  '<packages><package name="."><classes>'
                  '<class name="mod.py" filename="pkg/mod.py"><line hits="1"/></class>'
-                 "</classes></package></packages></coverage>"):  # <line> 缺 number
+                 "</classes></package></packages></coverage>",  # <line> 缺 number
+                 # 总数不是整数：与 <line> 同族，`int()` 失败也必须退 2（复审实测此处曾崩栈退 1）。
+                 '<coverage lines-valid="abc" lines-covered="1"></coverage>',
+                 '<coverage lines-valid="1" lines-covered="x"></coverage>'):
         report.write_text(body, encoding="utf-8")
         baseline.write_text(json.dumps({
             "schema": "coverage-baseline/1", "sha": _git(repo, "rev-parse", "HEAD"),

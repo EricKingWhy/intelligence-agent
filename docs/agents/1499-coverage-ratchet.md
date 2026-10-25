@@ -1,6 +1,6 @@
 # #1499 实现说明：覆盖率基线留痕与变更行棘轮（A 案）
 
-> 状态：**已实现**（代码面 tip 见 PR；本文件随代码一起交付）。
+> 状态：**已实现**（代码面在分支 `claude/1499-coverage-baseline-ratchet`；本文件随代码一起交付）。
 > 依据：Issue #1499 全文（含已裁结论 11 = A 案）与票面「卡内事实与边界摘录」。
 > 遵循：`AGENTS.md` §6.1 方案先行调研 + §9.5 懒惰阶梯 + `docs/SDD_WORKFLOW_PROTOCOL.md` §1.3。
 
@@ -21,7 +21,7 @@
 | --- | --- | --- | --- |
 | **Lighthouse CI** `docs/configuration.md`（`GoogleChrome/lighthouse-ci` main） | `off` / `warn` / `error` 三级；`warn` 原文 *"the audit result will be checked, and the result will be printed to stderr, but failure will not result in a non-zero exit code"*；`error` 才 *"failure will result in a non-zero exit code"*；未列出的审计默认 `off` | 判定分**可观测**与**阻断**两档，门槛可按审计项逐条配置 | **ADAPT**：全仓总率走 `warn` 语义（打印 + 入基线，不判定），只有**变更行**这一条走 `error` 语义（< 60% 非零退出）。不引入新框架 |
 | **pa11y-ci** `README.md`（`pa11y/pa11y-ci` main） | `--threshold <number>` 原文 *"permit this number of errors, warnings, or notices, otherwise fail with exit code 2"*；且 *"You can also set `threshold` in your configuration's `defaults` or individual URL options. These thresholds apply per page"* | 门限是**分范围**的、可谈判的，不是全仓一个硬数 | **ADAPT**：判定面按"变更行"切分；盲区按**精确文件**登记（见 §4），不做"整域排除" |
-| **diff-cover** `README.rst` + `diff_cover_tool.py`（main） | `--fail-under` 原文 *"To have `diff-cover` and `diff-quality` return a non zero status code if the report quality/coverage percentage is below a certain threshold"*；实现 `if percent_covered >= fail_under … return 0`（`>=` 语义；`total_percent_covered()` 默认 `return int(total_percent)` **整数截断**，只有传 `--total-percent-float` 才 `round(total_percent, 2)`）；`--exclude` 走 `fnmatch`；`--expand-coverage-report` 一节自陈 *"diff reports list all lines that changed, coverage reports usually list code statements. As a result, a change in a multi-line statement may not be analyzed"* | 它就是"变更行覆盖率"的原产工具 | **不采用（BUILD 侧保留）**：① 未在本仓依赖里（`pyproject.toml` / `uv.lock` 均无），引入 = 新增依赖，与 §9.5 第 5 级相悖；② 它的默认判定是**截断后的整数**（`int()` 向下取整）⇒ 57.9% 会显示/比较成 57、59.9% 成 59，显示值与判定值同源却都不等于真实比率；本票要的是**不截断**的精确比较 `covered*100 >= total*60`，两种实现都会在边界上给出不同结论；③ 它**不**提供"报告是否属于这棵树"的对账（sha256 + tree），而那正是 AC1 的核心；④ 白名单要"精确文件 + 理由 + 平台"的解析期护栏（AC3），`--exclude` 的 `fnmatch` 反而允许通配 |
+| **diff-cover** `README.rst` + `diff_cover_tool.py`（main） | `--fail-under` 原文 *"To have `diff-cover` and `diff-quality` return a non zero status code if the report quality/coverage percentage is below a certain threshold"*；实现 `if percent_covered >= fail_under … return 0`（`>=` 语义；`total_percent_covered()` 默认 `return int(total_percent)` **整数截断**，只有传 `--total-percent-float` 才 `round(total_percent, 2)`）；`--exclude` 走 `fnmatch`；`--expand-coverage-report` 一节自陈 *"diff reports list all lines that changed, coverage reports usually list code statements. As a result, a change in a multi-line statement may not be analyzed"* | 它就是"变更行覆盖率"的原产工具 | **不采用（BUILD 侧保留）**：① 未在本仓依赖里（`pyproject.toml` / `uv.lock` 均无），引入 = 新增依赖，与 §9.5 第 5 级相悖；② 它的默认判定是**截断后的整数**（`int()` 向下取整）⇒ 显示面失真：`Coverage: {{ total_percent_covered }}%` 会把 59.9% 打印成 59%。⚠ 截断**不**改变判定结论——阈值是整数 60 时 `floor(y) >= 60` 与 `y >= 60` 恒等价（2026-10-25 复审枚举 `total<400` 的全部 `(covered,total)`，实测 0 处不一致），所以这只是**显示**精度问题、不是判定分歧；本票仍用 `covered*100 >= total*60`（分子分母可直接比对、不引入浮点）；③ 它**不**提供"报告是否属于这棵树"的对账（sha256 + tree），而那正是 AC1 的核心；④ 白名单要"精确文件 + 理由 + 平台"的解析期护栏（AC3），`--exclude` 的 `fnmatch` 反而允许通配 |
 | **coverage.py** `config.html` `[report] fail_under`（B 案对照） | *"A target coverage percentage. If the total coverage measurement is under this value, then exit with a status code of 2."*；*"If you specify a non-integral value, you must also set `[report] precision` properly to make use of the decimal places."*；*"A setting of 100 will fail any value under 100, regardless of the number of decimal places of precision."* | 全仓单一硬阈值，**对精度/取整敏感** | **不采用**（DECIDE：B 案 = 票面否决项）。A 案用整数比较 `covered*100 >= total*60` 绕开取整面；且全仓总率只记录 |
 
 > 表中只有**前两行是 ADAPT**（Lighthouse CI / pa11y-ci 的分级与分范围机制）；第 3 行 diff-cover
@@ -37,21 +37,11 @@
 | `.github/workflows/gate1.yml` / `gate-nightly.yml` | 各**追加一个 `baseline` 步骤**（覆盖率命令逐字未改） | 「基线留痕」的载体；`main` 每次推进、每晚各留一条可复查记录 |
 | `docs/agents/coverage-ratchet.whitelist.json` | 盲区白名单（精确路径 + reason + platform） | 与 `verification.map.tsv` 同族：都是**流程输入**，不是产品代码 |
 
-**判定口径**（全部机械）：
-
-1. 分母 = `git diff -U0 --no-renames <base>...HEAD` 里 `src/` 下 **`.py`** 的**新增行号** ∩
-   报告里该文件的**可执行行**；分子 = 其中报告命中数 > 0 的行。非 `.py`（快照 / 数据文件）
-   没有可执行行，既不进分母、也不该把判定打成不可判。
-2. `covered * 100 >= total * 60` ⇒ 通过（**恰好 60% 通过**，`>` 会把它判失败）。
-3. 白名单命中文件的变更行**不进分母**；白名单解析期拒绝通配 / 目录前缀 / 非规范化路径 / 空字段。
-   **白名单判定先于「未测量」判定** —— 它要救的正是"报告里根本没有这个文件"的盲区（容器内代码、
-   平台专有实现）；顺序颠倒会让这份白名单永远救不了它该救的文件。
-4. `--move-only-note <说明>` **且** `git -M` 判为 **`R100`（逐字相同的纯移动）** 才跳过；
-   `R<100`（移动 + 修改）与缺说明都照常计入 —— `-M` 的默认相似度阈值是 50%，那是"改过"不是"纯移动"。
-5. 全部不可判情形（缺报告、缺基线、报告 sha256 与基线不符、基线不是当前树、`git diff` 读不出
-   ——含两侧无共同祖先、改了 `src/` 但报告里没有该文件、`--base` 解不出、白名单不合法）
-   ⇒ **退出 2**，绝不退化成绿。git 读失败被当成"没有变更"会把一次读失败洗成 `RATCHET EMPTY`。
-6. 分母为空 ⇒ 打印 `RATCHET EMPTY` 并退出 0（理由见下）。
+**判定口径**：六条机械规则（分母/分子、`covered*100 >= total*60`、白名单先于「未测量」、
+`R100` 纯移动、不可判 ⇒ 退 2、空分母 ⇒ `RATCHET EMPTY` 退 0）的正文**只在**
+`scripts/check_line_coverage_ratchet.py` 的模块 docstring 写全（唯一事实源）；工作流头部与
+`coverage-ratchet.whitelist.json` 同样只留指针。本文件不重复那六条，只保留**本文特有的取舍理由**
+（§3.1 / §3.2）与边界登记（§6）。
 
 ### 3.1 零可执行变更为什么选"显式通过"
 
@@ -100,7 +90,18 @@
    这是刻意保守的方向（宁可多算分母，不可少算）。
 3. **只覆盖 `src/**.py` 的新增行**：`web/**`（TS）、`tui/**`、`scripts/**` 的变更行不在本棘轮分母内
    —— 它们各有多测/类型检查车道，且 coverage.py 不覆盖 TS。`src/` 下的非 `.py`（快照/数据）
-   没有可执行行，同样不进分母。把这条写进 PR 描述与本文，避免"棘轮绿 = 全仓都测了"的误读。
+   没有可执行行，同样不进分母。这条定义在本文 §6，PR 描述只作副本 —— 避免"棘轮绿 = 全仓都测了"的误读。
 4. **本工作流的等待代价**：与 gate1 backend 作业同形同命令（`uv sync` + 全量 pytest + 覆盖率），
    单人 PR 每碰一次 `src/**`（本票起还含 `tests/**`）就多等这一轮。**实测分钟数与机器负载的唯一
    落点是** `docs/agents/verification.md` §2 ⑯（本文件只留指针，不复制数字以免两处漂移）。
+5. **CI 里 sha256 / tree 两道护栏恒真（AC1 的"防旧报告假绿"只在跨树时生效）**：`coverage-ratchet`
+   作业在同一次运行里、同一棵树上先产 `baseline` 再跑 `ratchet` ⇒ 报告与基线必然同源，两道前置
+   在 CI 上**从不失败**。它们真正咬人的场景是本地/跨机手动跑（拿旧报告或别的 checkout 的报告冒充）。
+   `gate1.yml` / `gate-nightly.yml` 产的 `coverage-baseline.json` 目前**只写不读**（随
+   `backend-reports` artifact 上传，供人复查"某次 main 的测量跑在哪棵树上"），**机制上不参与任何
+   判定**。把它接成"PR 作业取 main 最近的 baseline artifact 对账"需要跨 workflow 取 artifact，
+   超出本票"最小可用"的范围 —— 如实登记为边界，不假装已接线。
+6. **`tests/**` 触发但分母恒为空**：本票把 `tests/**` 加进工作流 `paths`，是为了让"只删测试的 PR"
+   也跑一轮（否则这条收益没人守）。但棘轮的分母只算 `src/**.py` 的新增行 ⇒ 这类 PR 的结论必然是
+   `RATCHET EMPTY`（exit 0）。它给出的是**可见性**（这次 CI 确实跑了、报告确实生成了），不是阻断。
+   真正的"悄悄删测试"守卫不在本票范围（需要另一条"测试数量/断言行数只增不减"的棘轮）。

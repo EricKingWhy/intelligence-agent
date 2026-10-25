@@ -398,8 +398,8 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   `docs/agents/1499-coverage-ratchet.md`。
 - **判定**：分母 = 本次变更的**可执行行**（`src/` 下 `.py` 新增行 ∩ 报告里的可执行行），
   阈值 60% 用整数比较 ⇒ **恰好 60% 通过**；未改行 / 白名单行 / 纯移动行不进分母。
-  六条口径的正文与取舍、以及**为什么不用全仓 `fail_under`（B 案被否的理由）只在**
-  `docs/agents/1499-coverage-ratchet.md` §2–§3 写全（此处不复制）。
+  六条机械口径的正文**只在** `scripts/check_line_coverage_ratchet.py` 的模块 docstring 写全
+  （唯一事实源）；**B 案被否的理由**只在 `docs/agents/1499-coverage-ratchet.md` §2。此处都只留指针。
 - **期望证据 / 退出码**：`RATCHET PASS` + `RATCHET FAIL` + `RATCHET EMPTY` 三态；
   `0` 通过 / `1` 未达标 / **`2` 不可判**（缺报告、缺基线、报告 sha256 与基线不符、基线树 ≠ 当前树、
   git diff 读不出、改了 `src/` 但报告里没该文件、`--base` 解不出、白名单不合法）。**`2` 不是绿**。
@@ -407,9 +407,26 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   工作流自身）——不是 `e2e-smoke.yml` 的 `paths-ignore` 机制。带 paths 过滤的检查**不能**挂成
   必需状态检查（被跳过的必需检查会永久 pending，见 `e2e-smoke.yml` 文件头）；它是**非必需**检查，
   但红就是真信号，不是"可忽略"。
-- **本票实测读数**（`2026-10-25`，Linux / Python 3.12.3 本机 `.venv`）：聚焦守卫与变异矩阵的
-  逐条读数见 PR 描述（本行不复制数字，避免同一事实两处写全后互相漂移）；工作流**未**在 GitHub
-  上跑过（开 PR 后才有第一次 CI 读数），本地不以任何方式冒充 CI 读数。
+- **本票实测读数**（`2026-10-25`，Linux / Python 3.12.3 本机 `.venv`，`nproc=2`）：
+  - 聚焦守卫 `tests/tooling/test_line_coverage_ratchet.py` + `tests/test_verification_map.py`
+    = **67 passed / 墙钟 16s**（`loadavg` 1.0–1.3）。
+  - 全量（沙箱 `shell/ia-test`，4 vCPU，HEAD `1dc34195` / tree `4bdbc27c0`，分块串行、
+    每块独立 basetemp 于 clone 之外）：**9372 passed / 2 failed / 156 skipped / 43 deselected**，
+    墙钟 **783s（13.1 分钟）**，31 个 `tests/<dir>` 块 + 仓根块共 32 次 `CHUNK_RC`、零收集期中断。
+    两条红均已定性：① `tests/memory/test_writeback.py::test_late_writeback_append_cannot_resurrect_a_deleted_session`
+    = **既有 flake**（基线树 `f49223ff4` 同频复现：整文件 6 轮 2 红、单测 3 轮 3 绿）；
+    ② `tests/tooling/test_review_coverage_immutable_ref.py::test_real_ledger_passes_after_the_431_fix`
+    = 本票 code tip 的**台账行尚未落**（协议 §8.2 第 4 条的预期形状，落行后同树复跑即绿）。
+  - 变异矩阵（N2–N8，七条）：**全部变红且失败集合互不相同**。另有一条**候选**护栏 N1
+    （给删除行加 `--output-indicator-old`）经复审判定**不成立**：解析器只以 `+++ ` 定界、`--- `
+    从不参与判断，该旗不承重 ⇒ 加它就是假守卫，故按源码事实把注释收窄，不留钉不住的断言。
+    （不记成"变异存活"：候选护栏本不存在，"去掉它"的变更量为零，跑出来的绿是恒真结果。）
+  - **等待代价**（AC3 末项，本行的存在理由）：本作业 = `uv sync --locked --all-extras` +
+    `docker pull python:3-slim` + 全量 pytest + 覆盖率，与 `gate1.yml` 的 backend 作业同形。
+    单人 PR 每碰一次 `src/**` 或 `tests/**` 就多等**一轮全量**：上表实测的 **783s（≈13 分钟，
+    4 vCPU / 空载 `loadavg` 0.4–0.9）** 就是这轮的等待代价量级；同机有别的 agent 并发时实测被拖到
+    **22 分钟**并因根盘写满（ENOSPC）失败重跑过一次。引用时连同来源与负载一起给，别只抄数字。
+  - 工作流**未**在 GitHub 上跑过（开 PR 后才有第一次 CI 读数），本地不以任何方式冒充 CI 读数。
 
 ---
 

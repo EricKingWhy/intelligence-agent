@@ -56,6 +56,9 @@ code 2"*，且支持**按页面**单独设阈值 —— 即"可观测但不阻�
   所以没有 coverage.py `fail_under` 那条「对 precision / 取整敏感」的随机红。
 - **白名单**（`docs/agents/coverage-ratchet.whitelist.json`）按**精确文件路径**逐条给
   `reason` + `platform`；**不许通配、不许目录前缀、不许整域排除**（解析期 fail-closed）。
+  解析期 fail-closed 拒绝的形状（即"不许整域排除"的机械口径）：含通配符 `* ? [`、以 `/` 结尾的
+  目录前缀、含 `..` 的上跳、以 `./` 或 `/` 开头的非规范化形式、首尾带空白、同一路径重复登记，
+  以及 `reason` / `platform` 缺失或为空白串。
   命中白名单的文件，其变更行**不进分母**，并在输出里逐条打印理由。
   ⚠ 白名单判定**先于**「报告里没有这个文件」的不可判判定：盲区的主用途正是"报告里根本没有它"
   （容器内代码 / 平台专有实现），顺序颠倒会让白名单永远救不了它该救的文件。
@@ -145,11 +148,13 @@ def parse_coverage_xml(path: str, repo_root: str = REPO_ROOT) -> tuple[dict, dic
                 hits[int(number)] = int(line.get("hits") or 0)
             except ValueError as exc:
                 raise Undecidable(f"覆盖率报告 {path} 的行号/命中数不是整数：{exc}") from exc
-    totals = {
-        "lines_valid": int(root.get("lines-valid") or 0),
-        "lines_covered": int(root.get("lines-covered") or 0),
-        "files_outside_repo": outside,
-    }
+    # 总数只用于打印，但**坏值不能崩栈**：与 <line> 那条同族，`int()` 失败一律判不可判（退 2）。
+    totals = {"files_outside_repo": outside}
+    for key, attr in (("lines_valid", "lines-valid"), ("lines_covered", "lines-covered")):
+        try:
+            totals[key] = int(root.get(attr) or 0)
+        except ValueError as exc:
+            raise Undecidable(f"覆盖率报告 {path} 的 {attr} 不是整数：{exc}") from exc
     return files, totals
 
 
