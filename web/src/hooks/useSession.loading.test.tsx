@@ -277,7 +277,7 @@ describe('loadingHistory — 初值、复位与派生骨架', () => {
     expect(captured.hook!.historySkeleton).toBe(false);
   });
 
-  it('A 落地后切到 B、B 读取失败：清掉 A 的投影（空态 + 错误横幅）', async () => {
+  it('A 落地后切到 B、B 读取失败：清掉 A 的投影，失败进 historyLoadError 专槽（#1521：失败面替代「空态+横幅」矛盾组合）', async () => {
     const A = 's-a';
     const B = 's-b';
     await mount();
@@ -294,10 +294,16 @@ describe('loadingHistory — 初值、复位与派生骨架', () => {
     });
 
     // 骨架退场（失败不能一直"正在加载"），但投影必须清空——否则 B 的标题下
-    // 会显示 A 的正文，错误横幅与内容自相矛盾。
+    // 会显示 A 的正文。#1521：首开/换会话的失败不再进单槽 `error` 横幅（旧形状
+    // 是「暂无对话」空态+横幅矛盾同现），改写 `historyLoadError` 专槽，由
+    // Conversation 渲染失败面板（含就地重试）。
     expect(captured.hook!.historySkeleton).toBe(false);
     expect(captured.hook!.conversation).toBeNull();
-    expect(captured.hook!.error).toContain('get events 500');
+    expect(captured.hook!.error).toBeNull();
+    expect(captured.hook!.historyLoadError).toEqual({
+      sid: B,
+      message: expect.stringContaining('get events 500'),
+    });
   });
 });
 

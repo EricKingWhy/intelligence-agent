@@ -127,7 +127,10 @@ test('子会话 id 与普通会话同一持久化/恢复路径：非首行真实
     ],
   });
   // 后注册的路由优先：按请求的 session id 返回**各自**的事件，内容一致性才有鉴别力
-  await page.route('**/api/sessions/*/events', (route) => {
+  // （glob 尾随 `*`：#1526 起 /events 带 `?after_seq&limit` 查询串，Playwright 的
+  // glob 锚定整条 URL——不带通配的 `.../events` 从此匹配不上，覆盖路由静默失效，
+  // 请求落回 routeApi 的空 fixtures，两个用例的前提（各自事件 / 404）双双消失。）
+  await page.route('**/api/sessions/*/events*', (route) => {
     const id = new URL(route.request().url()).pathname.split('/')[3];
     return route.fulfill({
       status: 200,
@@ -228,7 +231,9 @@ test('BUG-006 兜底：接流零帧空流（run 已在刷新窗口内收口）�
 test('BUG-005 自愈：记住的会话已不存在（404）→ 清键 + 静默回空态，不弹错误', async ({ page }) => {
   await routeApi(page, { sessions: [], events: [] });
   // Playwright 后注册的路由优先匹配：这条把上面 fixtures 的 /events 200 覆盖成 404
-  await page.route('**/api/sessions/*/events', (route) =>
+  // （尾随 `*` 容忍 `?after_seq&limit` 查询串——#1526 起裸 glob 匹配不上整条 URL，
+  // 覆盖静默失效，本用例会退化成「空历史成功加载」而假红，见上一用例的注解。）
+  await page.route('**/api/sessions/*/events*', (route) =>
     route.fulfill({ status: 404, body: '{"detail":"session not found"}', contentType: 'application/json' }),
   );
   await page.addInitScript(([k, v]) => localStorage.setItem(k, v), [KEY, 'deleted-session']);
