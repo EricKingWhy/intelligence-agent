@@ -11,8 +11,8 @@
  *  除了"提示不压档位行"，这里还锁**动作簇与档位行不相交**（比只锁提示更强）：
  *  簇比按钮宽，窄工作区下档位行会顶到右端钻到提示底下（放宽 Inspector 到上限
  *  时实测复现）。修复靠 `.composer-dock:has(.composer-esc-hint) .composer-controls`
- *  的右预留 + flex 换行；把这条断言留在这里，是为了让"以后加档位控件"时有人
- *  立刻看到账。
+ *  的右预留 + flex 换行（#1608 起 base 档另有 compact 预留，流式 180px 仍是更宽的
+ *  覆盖档）；把这条断言留在这里，是为了让"以后加档位控件"时有人立刻看到账。
  *
  *  没锁什么（如实划界）：不断言换行与否（窄工作区下换行是**允许**的诚实结果，
  *  只断言不相交）；不断言像素坐标（字号/字体度量会动，矩形关系不会）。
@@ -125,7 +125,8 @@ test('#194：非流式不渲染提示；发送按钮仍在（提示只属于流�
   await expect(page.locator('.composer-esc-hint')).toHaveCount(0);
   await expect(page.locator('.composer-stop')).toHaveCount(0);
   await expect(page.locator('.composer-send')).toBeVisible();
-  // 非流式下档位行不该有那段右预留（预留只属于提示在场时）
+  // 非流式同样有右预留（#1608：compact 档 80px；流式才是 180px 宽档）——
+  // 这里锁的布局事实不变：提示不渲染，动作簇不压任何档位控件。
   expect(await overlaps(page)).toEqual({ hintVsControls: [], actionsVsControls: [] });
 });
 

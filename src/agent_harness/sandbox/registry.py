@@ -26,6 +26,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 from uuid import uuid4
 
 from agent_harness.sandbox.base import Sandbox
@@ -87,7 +88,7 @@ def _reject_escaping_symlinks(source: Path) -> None:
 class WorkspaceRegistry:
     """Session ↔ Sandbox 映射表的持久化管理器。"""
 
-    _workspace_locks = weakref.WeakValueDictionary()
+    _workspace_locks: ClassVar[weakref.WeakValueDictionary[tuple[str, str], threading.RLock]] = weakref.WeakValueDictionary()
     _workspace_locks_guard = threading.Lock()
 
     def __init__(self, root: Path, backend: str = "local") -> None:

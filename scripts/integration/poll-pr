@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# poll-pr — 轮询一张 PR 的 gate0 结论与 mergeState（#1597；移植 2026-10-25 集成会话的 /tmp 件）。
+# 用于 strict 分支保护下「等 gate0 绿再 merge」的等待段，替代人工反复 gh pr view。
+#
+# 用法：poll-pr <PR 号> [最大分钟数] [--repo <目录>] [--interval <秒>]
+#   --repo      工作 clone 根目录（默认当前目录）；gh 从中推断仓库。
+#   --interval  轮询间隔秒数（默认 20）。
+#   最大分钟数  超时上限（默认 25）。
+# 退出码：0 = gate0 结论 SUCCESS；2 = gate0 结论 FAILURE；1 = 超时；9 = 环境错。
+# 注意：只读 gh pr view，不做任何合并/push 动作；merge 仍须单独批准（AGENTS §14.4）。
+set -u
+PR=""; MAX="25"; REPO_DIR="."; INTERVAL="20"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) REPO_DIR="${2:?--repo 需要值}"; shift 2 ;;
+    --interval) INTERVAL="${2:?--interval 需要值}"; shift 2 ;;
+    -h|--help) awk 'NR>1 && /^set -u$/{exit} NR>1 {sub(/^# ?/, ""); print}' "$0"; exit 0 ;;
+    -*) echo "未知参数：$1（--help 看用法）" >&2; exit 9 ;;
+    *) if [ -z "$PR" ]; then PR="$1"; elif [ "$MAX" = "25" ]; then MAX="$1";
+       else echo "多余参数：$1" >&2; exit 9; fi; shift ;;
+  esac
+done
+[ -n "$PR" ] || { echo "用法：poll-pr <PR 号> [最大分钟数] [--repo <目录>] [--interval <秒>]（--help 看全文）" >&2; exit 9; }
+command -v gh >/dev/null 2>&1 || { echo "gh 不可用" >&2; exit 9; }
+cd "$REPO_DIR" 2>/dev/null || { echo "REPO 不存在：$REPO_DIR" >&2; exit 9; }
+
+JQ='.mergeStateStatus + " " + ([.statusCheckRollup[] | select(.name=="gate0") | (.conclusion // .status)] | join(","))'
+END=$((SECONDS + MAX * 60))
+i=0
+while [ "$SECONDS" -lt "$END" ]; do
+  i=$((i + 1))
+  s=$(gh pr view "$PR" --json statusCheckRollup,mergeStateStatus --jq "$JQ" 2>/dev/null || true)
+  echo "poll$i: mergeState/gate0 = ${s:-<查询失败>}"
+  case "$s" in
+    *SUCCESS*) echo "gate0 SUCCESS（PR #$PR）"; exit 0 ;;
+    *FAILURE*) echo "gate0 FAILURE（PR #$PR）"; exit 2 ;;
+  esac
+  sleep "$INTERVAL"
+done
+echo "TIMEOUT：${MAX} 分钟内 gate0 未出结论"
+exit 1

@@ -826,18 +826,28 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
     }
 
 
-#: receipt-present 检查的引入提交（#1338 改动 3 那笔）。钉死为常量：豁免边界是历史事实，
-#: 不随 "receipt-present" 字面量的增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
-_RECEIPT_BOOTSTRAP_SHA = "1a28072df74955f8091297bb5b9a096c8c18c4cf"
+#: receipt-present 检查的采用窗锚点。钉死为常量：豁免边界不随 "receipt-present" 字面量的
+#: 增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
+#:
+#: 2026-10-25 用户裁决第二次锚定：首锚 1a28072df749（#1338 改动 3）的 7 天 warn-only 窗在
+#: 2026-10-25T09:21:24Z 到期转硬后，实测出现**收据出生死锁**——strict up-to-date 迫使在途
+#: PR 落 sync merge，而 `commit_file_changes` 对 merge 提交按第一父取 diff（含 main 带入的
+#: 代码）⇒ 形状④尾判被破坏；且「冻结 tip 裸跑全量」自身会被 receipt-present 判红（6/7），
+#: 落下的是无效 FAIL 收据 ⇒ 硬口径下第一张 PASS 收据无法出生（实测复现：PR #1596 gate0
+#: run 40181451067，6 违规；#1595 run 40179483969 于 09:10 warn-only 放行）。锚点前移 =
+#: 重开一轮采用窗：锚点之前的提交（含全部在途 PR）机械豁免，锚点日期起重新计 7 天宽限。
+#: 设计缺陷本体（新分支收据自举）由 follow-up 票处理，本常量不承担该修复。
+_RECEIPT_BOOTSTRAP_SHA = "69befba3da742a1ee8ad3466e4bdc788ca4e1b24"
 # A receipt requires a ledger binding when its tested Gate-0 source contains this marker.
 _LEDGER_BINDING_MARKER = "review-ledger-binding-v1"
 
 
 def receipt_bootstrap_sha(repo_root=None) -> str | None:
-    """引入本检查的第一笔提交（钉死的常量，见 `_RECEIPT_BOOTSTRAP_SHA`）。
+    """receipt-present 的采用窗锚点（钉死的常量，见 `_RECEIPT_BOOTSTRAP_SHA`）。
 
-    Bootstrap 规则（#1338 改动 3）：规则存在**之前**写的提交、以及引入规则的那笔提交自身都在
-    检查范围外——这也是在途 PR（提交早于本规则）被豁免的机械形式。
+    Bootstrap 规则（#1338 改动 3）：锚点**之前**的提交、以及锚点自身都在检查范围外——
+    这也是在途 PR（提交早于当前锚点）被豁免的机械形式。锚点日期同时决定 7 天 warn-only
+    宽限窗的起点；历次锚定理由见常量处注释。
     """
     return _RECEIPT_BOOTSTRAP_SHA
 
@@ -1127,15 +1137,66 @@ def _receipt_matches_first_landing(repo_root, tested_sha: str) -> bool:
     )
 
 
+def tail_is_docs_or_receipts(repo_root, t: str) -> bool:
+    """形状④条件③：`t..HEAD` 里**每一笔**提交要么纯 docs、要么纯收据落盘（fail-closed）。
+
+    逐笔判（不是对 `t..head` 整体取一次 diff）：整体 diff 会把「先加代码、后删代码」洗成
+    空改动面；逐笔判则任一笔不满足 ⇒ ④ 对该 t 不成立。取不到提交列表 ⇒ False。
+    空提交（`changes == []`，`--allow-empty`）也不算纯 docs / 纯收据 ⇒ ④ 对该 t 不成立；
+    后果是**该 t 的 ④ 整体失效**（不是"多跑一次全量"），与票面「每一笔提交都是纯 docs 或
+    纯收据落盘」字面一致。
+
+    按 `(repo_root, t, HEAD)` 记忆化（r3 P3）：④ 对每笔 c 都遍历候选 t，同一 t 会被重算
+    一遍 `rev-list` + 逐笔 `diff-tree`；#1553 的副本实测 tail 被调 3125 次。HEAD 进 key 是
+    **正确性**要求而非性能：只按 (repo_root, t) 缓存时，同一进程里 HEAD 前进后再问会命中
+    旧答案 ⇒ fail-open（tail 里新进的代码提交看不见）。
+    """
+    head = _git_at(repo_root, "rev-parse", "HEAD").stdout.strip()
+    return _tail_is_docs_or_receipts_cached(repo_root, t, head)
+
+
+@functools.cache
+def _tail_is_docs_or_receipts_cached(repo_root, t: str, head: str) -> bool:
+    """`tail_is_docs_or_receipts` 的记忆化体；`head` 只用于让缓存随 HEAD 失效。"""
+    rev = _git_at(repo_root, "rev-list", f"{t}..HEAD")
+    if rev.returncode != 0:
+        return False
+    for c in (x for x in rev.stdout.split("\n") if x.strip()):
+        changes = commit_file_changes(repo_root, c)
+        # 第二个析取项是第一个的严格子集（`docs/gate/<sha>.json` 也命中 docs 判据、`A` ⊂ `A/M`）；
+        # 照票面「复用既有两判据」的口径保留，不是互斥分支。
+        if not (is_pure_docs_commit(changes) or is_pure_receipt_landing(changes)):
+            return False
+    return True
+
+
 def receipt_present_check(repo_root=None, bootstrap_sha=None,
                           *, _allow_current_full_run_receipt: bool = False) -> ReceiptCheckResult:
-    """收据在场检查（#1338 改动 3），返回结构化状态与可读详情。
+    """收据在场检查（#1338 改动 3 / #1553 形状④ / #1555 台账绑定），返回结构化状态与可读详情。
 
     对 `merge-base(origin/main, HEAD)..HEAD` 里每笔**非纯 docs、非纯收据落盘**、且晚于 bootstrap
-    B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受三种形状：
+    B 的提交 c：HEAD 树里必须有可用的 `docs/gate/<t>.json`，t 是 c 的**被测树**，接受四种形状
+    （①②③ 见下，④ 另起一段）：
     ① t = c 自身；②（§8.1 传递）t = 第一父 p 且 p..c 的差异是 docs-only；③ t != c、t 在本区间内、
-    c 是 t 的祖先，且 c..t 的最终差异仅为 docs-only（含同一冻结树）。这允许完整重跑后以新收据
-    重新认证代码树，同时禁止未重跑的账本漂移继续引用旧指纹。
+    c 是 t 的祖先，且 c..t 的最终差异仅为 docs-only（含同一冻结树 `c^{tree} == t^{tree}`）。这允许
+    完整重跑后以新收据重新认证代码树，同时禁止未重跑的账本漂移继续引用旧指纹（#1555 绑定口径）。
+
+    ③ 落地票面对 t 的定义（"t 是 c 的被测树"，t = c 与 t = 父+传递只是实例）：字面只认
+    "t = c 或父"会要求**每笔代码提交各跑一次门禁**，与改动标题"每棵冻结树只跑一次全量"及
+    PR #1336 的既有实践（7 笔代码提交、1 枚冻结 tip 读数）冲突。merge commit 不需特判：同步合并
+    的树真被测过就有后代读数，没测过的新树照旧红（SDD §8.1 的 fail-closed 语义）。找不到 = 违规。
+
+    ④（#1553，用户 2026-10-23 亲裁 A 案）补的正是上面这条的**多提交分支**形态：③ 要求 c 与 t
+    是同一棵树，而多笔代码提交逐笔改树 ⇒ ③ 覆盖不到。t 在区间内、c 是 t 的祖先、且 t..HEAD 逐笔
+    纯 docs / 纯收据落盘 ⇒ c 由 t 的收据覆盖（条件③）。它的**后果**是"不必为每笔中间提交各跑一次
+    全量"，与 PR #1336（7 笔代码提交、1 枚冻结 tip 读数）、此后各波集成实践及 SDD §8.1 读数传递
+    规则同源。
+    ⚠ ④ 认的是**提交图关系**（c 是 t 的祖先 + tail 安静），**不**验"c 的改动仍留在 t 的树里"：
+    c 的改动若在 tail 之前被回滚掉，其净效果不在被测树内 —— 这属可接受的语义（回滚掉的代码本就不
+    进最终树），但别把 ④ 读成内容包含证明。
+    ⚠ 条件②（c 是 t 的祖先）由 ①+③ 蕴含，删掉不改判定（短路优化）：满足 ① 而不满足 ② 的 t，
+    必有 c ∈ `t..HEAD`，而 c ∈ scope 非纯 docs ⇒ ③ 已经 False。用例
+    `test_shape4_condition2_is_implied_by_conditions_1_and_3` 把这条链子钉住。
     """
     repo_root = repo_root or REPO_ROOT
     mb = _git_at(repo_root, "merge-base", "origin/main", "HEAD")
@@ -1219,6 +1280,19 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         )
         stale_only = bool(candidates) and not matching_ledger
         if not acceptable:
+            # ④ 分支冻结 tip 覆盖（#1553）：t 在区间内、c 是 t 的祖先、且 t..HEAD 逐笔纯 docs /
+            # 纯收据落盘 ⇒ c 的代码已被 tip 那棵被测树包含。条件不成立 ⇒ 不认（fail-closed）。
+            # 注意形状③与④**不可互推**：③ 只要求同一棵树、不看 tail，④ 只看 tail、不要求同树
+            # ⇒ 上面 ③ 的循环不能因为有了 ④ 就删。
+            for t in receipts:
+                if t == c or t not in range_set or not receipts[t].get("valid", False):
+                    continue
+                if _git_at(repo_root, "merge-base", "--is-ancestor", c, t).returncode != 0:
+                    continue
+                if tail_is_docs_or_receipts(repo_root, t):
+                    acceptable = True
+                    break
+        if not acceptable:
             subject = _git_at(repo_root, "log", "-1", "--format=%s", c).stdout.strip()
             violations.append((c, subject))
             if stale_only:
@@ -1235,16 +1309,20 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
     except ValueError:
         warn_only = False
 
-    detail = [f"receipt-present（#1338 改动 3）：base={base[:12]} bootstrap={bootstrap[:12]} "
+    detail = [f"receipt-present（#1338 改动 3 / #1553 形状④）：base={base[:12]} bootstrap={bootstrap[:12]} "
               f"范围 {len(commits)} 笔 / 被查 {len(scope)} 笔 / 违规 {len(violations)} 笔"
               + ("（首周 warn-only）" if warn_only else "")]
+    # #1598：warn-only 期违规行加行内前缀，单行自证不计数（#1578 诊断实录：无前缀时与
+    # coverage 车道的同形行混在一份日志里，grep "missing receipt" 会把不计数行当阻断项）。
+    # 转硬口径（宽限结束）后前缀自然消失。
+    prefix = "warn-only " if warn_only else ""
     for sha, subject in violations:
         if (sha, subject) in stale_ledger_violations:
-            detail.append(f"stale ledger fingerprint for {sha[:12]} {subject}")
+            detail.append(f"{prefix}stale ledger fingerprint for {sha[:12]} {subject}")
         elif (sha, subject) in modified_receipt_violations:
-            detail.append(f"receipt changed after first landing for {sha[:12]} {subject}")
+            detail.append(f"{prefix}receipt changed after first landing for {sha[:12]} {subject}")
         else:
-            detail.append(f"missing receipt for {sha[:12]} {subject}")
+            detail.append(f"{prefix}missing receipt for {sha[:12]} {subject}")
     head = _git_at(repo_root, "rev-parse", "--verify", "HEAD^{commit}")
     if (violations and _allow_current_full_run_receipt
             and head.returncode == 0 and head.stdout.strip()):
@@ -1262,8 +1340,8 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
             detail.append("处置：本次完整 Gate-0 会复核当前 HEAD，并记录绑定该树与台账的新收据")
             return ReceiptCheckResult(True, "\n".join(detail), warn_only, "attested")
     if violations and not warn_only:
-        detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，"
-                      "或从第一父提交传递读数（仅限 docs-only 改动）")
+        detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，或从第一父提交传递"
+                      "读数（仅限 docs-only 改动），或在分支冻结 tip 上跑一次全量（其后仅 docs / 收据提交）")
     return ReceiptCheckResult(
         not violations, "\n".join(detail), warn_only,
         "violations" if violations else "clear",
@@ -1770,6 +1848,24 @@ def usage() -> int:
     return 0
 
 
+def receipt_self_cover(record: bool, partial: bool, ci_env: str | None) -> bool:
+    """#1602：本地**落盘型全量**跑允许 receipt-present 自举（self-cover）。
+
+    背景（死锁实证，issue #1602）：硬口径下「冻结 tip 裸跑全量」自身会被 receipt-present
+    判红（6/7）⇒ 只能落无效 FAIL 收据 ⇒ 第一张 PASS 收据永远无法出生。而违规集合按构造
+    ⊆ `merge-base..HEAD`，全是 HEAD 的祖先、尾判 `HEAD..HEAD` 为空 ⇒ **本次跑即将落盘的
+    PASS 收据（键=HEAD）恰覆盖全部违规**（形状④）。因此在满足全部条件时不把 guards 车道
+    改写为失败，收据按真实车道读数落 PASS； enforcement 移交 CI：
+
+    · `record`（`--no-record` 不落盘 ⇒ 不能自举——没有收据会落地）；
+    · 非 `partial`（`--since/--only/--affected` 是局部跑、不落盘 ⇒ 同上）；
+    · 非 CI（GitHub Actions 恒设 `CI=true`）：CI 侧仍按已提交收据硬口径执法——本地忘了
+      把收据随代码提交 ⇒ CI 的 receipt-present 照红。威胁模型是防手滑不是防对抗（同
+      gate0.yml 头注），环境变量这层判定与全仓既有口径一致。
+    """
+    return record and not partial and not ci_env
+
+
 def _apply_receipt_check(results: list[tuple[Lane, int, float, str]],
                          *, will_record_receipt: bool = False) -> None:
     """receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 7 条）。
@@ -1777,6 +1873,11 @@ def _apply_receipt_check(results: list[tuple[Lane, int, float, str]],
     只在 guards 本身全绿时跑；收据缺失且不在首周 warn-only 内 ⇒ 把该车道改写成失败。
     一次完整、全绿且确实会落盘的运行可自举当前 HEAD 的首张收据。
     就地改写 `results`（与原来 main() 里的内联逻辑逐行等价）。
+
+    例外（#1602/#1555）：`will_record_receipt=True` 且本次为全绿全量跑时，走
+    `receipt_present_check(_allow_current_full_run_receipt=True)` 的 attested 路径——
+    本次跑落盘的 PASS 收据（键=HEAD）绑定该树与台账指纹后覆盖全部违规；CI 侧
+    `will_record_receipt=False`，仍按已提交收据硬口径执法。
     """
     for i, (lane, rc, secs, out) in enumerate(results):
         if lane.name == "guards":
@@ -1805,8 +1906,13 @@ def _apply_receipt_check(results: list[tuple[Lane, int, float, str]],
                     else:
                         results[i] = (lane, 1, secs, out + "\n" + check.detail)
                 elif full_pass and check.status == "attested":
+                    print("self-cover receipt-present (#1602 attested, #1555 bound): 本次本地全量跑"
+                          "落盘的 PASS 收据（键=HEAD，绑定该树与台账指纹）覆盖以上全部违规"
+                          " ⇒ 不改写 guards 车道。")
                     print("⚠ receipt-present: this successful full run will record a fresh HEAD receipt")
                     print(check.detail)
+                    print("⚠ 该收据文件（docs/gate/<本 tip>.json）必须随代码一起提交；"
+                          "漏提交时 CI 侧 receipt-present 仍按硬口径红。")
             break
 
 
@@ -1929,7 +2035,12 @@ def main(argv: list[str]) -> int:
         print(f"[{idx}/{len(lanes)}] {lane.name:11s} {'PASS' if rc == 0 else 'FAIL'}  {secs:6.2f}s")
         results.append((lane, rc, secs, out))
 
-    record_here = record and not only and not affected_rev and not since
+    # CI 侧不自举（#1602 边界）：GitHub Actions 恒设 CI=true，receipt-present 按
+    # 已提交收据硬口径执法；本地落盘型全量跑才允许 attested 自举。
+    record_here = (
+        record and not only and not affected_rev and not since
+        and not os.environ.get("CI")
+    )
     _apply_receipt_check(results, will_record_receipt=record_here)
 
     wall = time.time() - started

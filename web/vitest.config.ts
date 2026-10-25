@@ -9,5 +9,9 @@ export default defineConfig({
   plugins: [react()],
   test: {
     exclude: [...configDefaults.exclude, '**/*.perf.test.ts', 'e2e/**', 'e2e-live/**'],
+    // #1518：把本地测试时区钉到 UTC，与 CI（GitHub Actions 默认 UTC）一致——
+    // 否则渲染墙钟时刻的用例（如 StepDetail.artifacts 的 '10:23'）在 UTC+8
+    // 开发机上假红。env 在 worker 初始化时注入，早于测试文件的模块执行。
+    env: { TZ: 'UTC' },
   },
 })

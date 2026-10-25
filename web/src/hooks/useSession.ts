@@ -196,8 +196,9 @@ export function shouldShowHistoryLoading(
  *
  *  `settledSessionId` 是**本次选中**已落地（成功或失败）的目标会话：读取失败时
  *  `conversation` 仍是 null，若只看「投影不一致」会让骨架永不退场、把失败说成
- * 「还在加载」。失败时骨架必须让位给空态 + 错误横幅（同样的道理也适用于
- * 已删除会话——那条路径直接回 idle，不经过这里）。
+ * 「还在加载」。失败时骨架必须让位给失败面板（#1521：首开 / 换会话失败写
+ * `historyLoadError`，面板含就地重试；同会话后台重读失败走 `error` 横幅）。
+ * 已删除会话那条路径直接回 idle，不经过这里。
  *
  *  它的有效域是**一次选中**：`selectSession` 入口同步复位（见该处注释），所以
  *  「落地过 → 回 idle → 再点同一会话」的第一次渲染不会命中这条短路，而是按
@@ -632,6 +633,22 @@ function cursorOf(conv: ConversationState | null, sessionId: string): number {
  * 标签页整段不轮询（tick 里看 visibilityState，spec 03 §18.3 同款纪律）。 */
 export const EXTERNAL_RUN_POLL_INTERVAL_MS = 5000;
 
+/** #1333 审查 P2：提交关联 ID 的唯一生成入口。`crypto.randomUUID` 是
+ *  secure-context-only API（HTTPS / localhost 才暴露；受支持部署面——
+ *  host_service fail-closed 只绑 loopback、远程面走 HTTPS 网关——都在安全
+ *  上下文内），但裸 HTTP 绑定非 loopback 地址这一不受支持形态下它是
+ *  undefined：直接调用会让**全部提交**在 POST 发出前抛 TypeError。回退用
+ *  `getRandomValues` 手拼同形 v4——调用点只把它当不透明关联串用，不依赖
+ *  密码学强度，形状一致是为了让两路生成可被同一断言钉住。 */
+export function newClientRequestId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   /** 首屏即从 localStorage 恢复上次选中的会话（BUG-005）。
@@ -654,7 +671,42 @@ export function useSession() {
    *  避免 effect 落地前先画一帧「暂无对话」空态。effect 仍按 `switchingSession`
    *  接管后续迁移（同会话对账不闪骨架）。 */
   const [loadingHistory, setLoadingHistory] = useState(() => mode.kind !== 'idle');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorRaw] = useState<string | null>(null);
+  /* #1509：通用错误槽的**实例序号**——每次写入非 null 文案自增，`setError(null)`
+   *  不增。App 侧横幅按"实例"关闭（#1520：关闭只影响同错误身份；同一文案再次
+   *  发生 = 新实例，必须重新出现——关闭不是把这类错误永久静音）。同槽全部
+   *  写入点零改动地拿到身份，不另造错误框架。 */
+  const [errorSeq, setErrorSeq] = useState(0);
+  const setError = useCallback((message: string | null) => {
+    if (message !== null) setErrorSeq((seq) => seq + 1);
+    setErrorRaw(message);
+  }, []);
+  /* #1509（INT-1）：动作错误按身份归属的两个专用槽。
+   *  - `queueCancelError`：取消排队失败 → 队列区（触发按钮所在的动作位）；
+   *  - `answerFailure`：`user_input` 恢复支（问答卡 / 计划卡 / 约束模态共用的
+   *    作答通道）失败 → 各自的卡/模态 alert 位（会话 + 请求身份）。
+   *  两者都不写通用 `error` 槽——原缺陷正是"错误打到了远离触发动作的顶部横幅"
+   *  与"同一条失败既进卡片又进横幅的双播报"。 */
+  const [queueCancelError, setQueueCancelError] = useState<{ sessionId: string; message: string } | null>(null);
+  const [answerFailure, setAnswerFailure] = useState<{ sessionId: string; requestId: string; message: string } | null>(null);
+  /** 取消尝试的代际计数：旧尝试的迟到失败不得覆盖新尝试的结果。 */
+  const queueCancelGenRef = useRef(0);
+  /** #1521 FE-05：**首次加载**历史失败的专用面（区别于单槽 `error` 横幅）。
+   *
+   *  旧形状是「conversation=null 空态 + error 横幅」矛盾同现：「暂无对话」在
+   *  一次没成功的加载下误述事实，且无就地重试。现在首次加载失败写这里，
+   *  Conversation 据此渲染失败面板（含重试），不再渲染空态；`error` 横幅
+   *  留给后台重读失败（对话还在，横幅是唯一该变的东西）。
+   *  带 sid：换会话时由装载 effect 的 switchingSession 块清空（不跨会话存活）。 */
+  const [historyLoadError, setHistoryLoadError] = useState<{ sid: string; message: string } | null>(null);
+  /** #1521 FE-06：显式点行命中 404 的温和提示（可关闭；不称「数据丢失」）。
+   *  启动恢复过期 id 的 404 走安静复位（既有有意设计，不循环报错），不写这里
+   *  ——判据是 `explicitSelectRef` 是否到过该 id。 */
+  const [missingSessionNotice, setMissingSessionNotice] = useState<string | null>(null);
+  /** #1521 FE-06：最近一次**用户显式选择**的会话 id（`selectSession` 写入；
+   *  `reloadConversation` 同样经过它 = 用户可感知的显式动作）。启动恢复的初始
+   *  mode 不经 `selectSession` ⇒ 保持 null，404 时安静复位。 */
+  const explicitSelectRef = useRef<string | null>(null);
   /** #1367（P0-3）：**本次提交/续聊**的失败回执（断网类由此走对话区内联条）。
    *
    *  为什么不直接复用上面的 `error`：它是**单槽**，后面任何一条无关错误
@@ -919,6 +971,10 @@ export function useSession() {
     if (switchingSession) {
       setError(null);
       setSendFailure(null);
+      // #1521：失败面与温和提示同属「不跨会话存活」的一组，判据也是同一句
+      // `switchingSession`（与上面的横幅通道同批）——换会话即清，不跨会话存活。
+      setHistoryLoadError(null);
+      setMissingSessionNotice(null);
     }
     // #1193：plan-stuck 横幅**不需要**在这里清——它是 `conversation.events` 的
     // 投影，切会话即随新会话的事件重建（旧会话的记录不跨会话存活；切回来时
@@ -960,14 +1016,32 @@ export function useSession() {
         if (e instanceof NotFoundError) {
           writeStoredSessionId(null);
           setMode({ kind: 'idle' });
+          // #1521 FE-06：上面的安静复位只该覆盖**启动恢复**（不经用户动作，刷新
+          // 循环弹错是用户处理不了的）；用户**显式点行 / 显式重读**命中 404 是
+          // 另一回事——刚做了可感知的动作，需要一句温和说明 + 列表刷新（行消失）。
+          // 判据是 `explicitSelectRef` 是否到过该 sid：启动恢复的初始 mode 不经
+          // `selectSession` ⇒ ref 为 null，不进这条支，安静复位语义不变。
+          if (explicitSelectRef.current === sid) {
+            // 「正在刷新」而非「已刷新」（审查 F4）：refreshSessions 是 void 异步，
+            // 失败另有 sessionsError 通道——提示先于事实会说出假话。
+            setMissingSessionNotice('这个会话已不存在——可能已被删除。列表正在刷新。');
+            void refreshSessions();
+          }
           return;
         }
-        // #1371：切会话（或首开）失败时，`conversation` 还是**上一会话**的投影：
-        // 收骨架（`finally` 记 settled）之后它会被当成目标会话的正文画在新标题下，
-        // 与「失败退到空态 + 错误横幅」的契约相悖。同会话后台重读失败不清——
-        // 那份投影本来就属于这个会话，错误横幅是唯一该变的东西。
-        if (switchingSession) setConversation(null);
-        setError(`加载历史事件失败：${(e as Error).message}`);
+        // #1521 FE-05：两条失败通道按「用户看到什么」分流——
+        //  - switchingSession（首开 / 换会话）：`conversation` 已被清成 null，
+        //    若走单槽 `error` 横幅，就是旧的「空态『暂无对话』+ 横幅」矛盾同现：
+        //    一次没成功的加载被说成「暂无对话」，且没有就地重试。改为把失败写进
+        //    `historyLoadError`，Conversation 据此渲染失败面板（含重试），空态不画。
+        //  - 同会话后台重读失败（#1371 语义保留）：那份投影本来就属于这个会话，
+        //    保持不动；`error` 横幅是唯一该变的东西。
+        if (switchingSession) {
+          setConversation(null);
+          setHistoryLoadError({ sid, message: (e as Error).message });
+        } else {
+          setError(`加载历史事件失败：${(e as Error).message}`);
+        }
       })
       .finally(() => {
         if (!cancelled) {
@@ -979,7 +1053,7 @@ export function useSession() {
     return () => {
       cancelled = true;
     };
-  }, [mode]);
+  }, [mode, setError]);
 
   // #1030（缺陷②）：待裁决清单的**主动**读面（`GET /api/sessions/{id}/recovery`，只读）。
   //
@@ -1413,7 +1487,7 @@ export function useSession() {
 
         sseRef.current = consumeSSE(res, onEvent, onStreamEnd, onStreamError);
     },
-    [refreshSessions, openWsStream],
+    [refreshSessions, openWsStream, setError],
   );
 
   /** #1504 C4：业务侧的**唯一开流入口**——代际闸（开流前后各一次：迟到的旧流
@@ -1478,6 +1552,12 @@ export function useSession() {
     ): Promise<string | null> => {
       setError(null);
       setSendFailure(null);
+      // #1521（审查 A-F2）：提交新任务 = 上一轮装载失败面与温和提示一并退场
+      // ——它们挂在旧会话的装载动作上，用户已明确向前走。historyLoadError 的
+      // App 侧门（sid 匹配 + conversation===null）本就让残留不可见，这里清掉
+      // 是把「不跨会话存活」从渲染门兜底升级为状态事实。
+      setHistoryLoadError(null);
+      setMissingSessionNotice(null);
       setConversation(null);
       liveSidRef.current = null;
       setReconnecting(false);
@@ -1505,7 +1585,12 @@ export function useSession() {
         // WebSocket 接流（同一交付链路上实测逐帧到达，见 lib/wsStream.ts）。
         const baselineDetailed = await sessionIdBaselineDetailed();
         const clientBaselineAtMs = Date.now();
-        const started = startSession(payload);
+        // #1333（2026-10-20 已批准方案）：每次 POST 生成新的关联 UUID——
+        // 在**提交点**生成（不放进 payload：重试通道复用同一 payload 对象，
+        // 关联值必须逐次独立）；随创建请求落 SessionMeta 索引，认领改走
+        // 精确关联查询，20s 差分窗口内的「别的客户端/迟到会话」不再可被误认。
+        const clientRequestId = newClientRequestId();
+        const started = startSession(payload, { clientRequestId });
         // #1333：锚点必须钉在「本次 POST 发起时刻（服务端时钟）」，在这里
         // 一次算好、下面认领时复用。⚠ 若挪到 `raceEarlyResponse`（1200ms 早
         // 窗）之后才算（= 认领开始时刻），锚点会落到自己会话的创建时间之后，
@@ -1570,9 +1655,12 @@ export function useSession() {
         });
         let sid: string;
         try {
-          // #1333：把上面在 POST 发起时刻钉死的锚点交给认领，启用
-          // first_event_time 过滤 + 多候选 fail-closed。
-          sid = await discoverNewSessionId(baseline, { submittedAtServerMs });
+          // #1333：锚点（POST 发起时刻，服务端时钟）与关联 UUID 一并交给认领
+          // ——时间过滤 + 多候选 fail-closed 之外，候选集先由关联查询收窄。
+          sid = await discoverNewSessionId(baseline, {
+            submittedAtServerMs,
+            clientRequestId,
+          });
         } catch (e) {
           // POST 的迟到失败原因优先于「认领超时」/「认领歧义」：迟到失败
           // （如 401 / 5xx / 断网）是比认领结论更硬的事实（#1148 既有设计，
@@ -1643,7 +1731,7 @@ export function useSession() {
         return message;
       }
     },
-    [refreshSessions, attachLiveStream, openLiveStream, reportDetachedFailure],
+    [refreshSessions, attachLiveStream, openLiveStream, reportDetachedFailure, setError],
   );
 
   /** 刷新后接回**仍在服务端运行的** run（BUG-006）。
@@ -1706,7 +1794,7 @@ export function useSession() {
         setError(`继续接收失败：${(e as Error).message}`);
       }
     },
-    [openLiveStream],
+    [openLiveStream, setError],
   );
   useEffect(() => {
     resumeLiveStreamRef.current = resumeLiveStream;
@@ -2108,7 +2196,7 @@ export function useSession() {
         return false; // 任一失败路径：文本必须留在 composer（11 §6.1 第 164 行）
       }
     },
-    [attachLiveStream, openLiveStream, reportDetachedFailure],
+    [attachLiveStream, openLiveStream, reportDetachedFailure, setError],
   );
 
   /** Explicit stop (Esc / Composer 停止按钮，T5 #98)：按 decideCancel 分派——
@@ -2149,6 +2237,10 @@ export function useSession() {
     // 用户显式切到某个会话 = 明确要看它：忘掉自动接流的去重记账，让「切走
     // 再切回来」照常再接一次（自动重入的死循环不经过这里，断点仍在）。
     if (id) resumeAttemptedRef.current = forgetResumeAttempt(resumeAttemptedRef.current, id);
+    // #1521 FE-06：记录「用户显式要看这个会话」。装载 404 据此区分「显式动作落空」
+    // （温和提示 + 刷列表）与「启动恢复过期 id」（安静复位）。`reloadConversation`
+    // 也经过这里 = 显式重读同样成立；`selectSession(null)`（新建会话）清回 null。
+    explicitSelectRef.current = id;
     // #1371：`historySettledId` 只对**这一次选中**有效。不在这里同步复位的话，
     // 「A 已落地 → 新建会话 → 再点 A」的第一次渲染会命中 `settled === A` 的短路：
     // 此时 `conversation` 已被 idle 分支清空、`loadingHistory` 也被复位 ⇒ 先画一帧
@@ -2189,6 +2281,10 @@ export function useSession() {
     },
     [selectSession],
   );
+
+  /** #1521 FE-06：关闭「会话已不存在」温和提示。下一次显式切换时该状态已由装载
+   *  effect 的 switchingSession 块清空；这里是用户手动关闭的出口（通知条 × 按钮）。 */
+  const dismissMissingSessionNotice = useCallback(() => setMissingSessionNotice(null), []);
 
   /** 用户显式硬删会话（#172 / ADR-0029）——**不可恢复**：无墓碑、无回收站、无撤销。
    *
@@ -2409,6 +2505,8 @@ export function useSession() {
           },
     ): Promise<void> => {
       setError(null);
+      // 上一次的作答失败到此作废（#1509）：重试就是新的失败身份，槽里只留最新一次。
+      setAnswerFailure(null);
       // 与 sendFollowUp 入口同一套代际/流状态重置：这是一次新的在途执行。
       liveSidRef.current = sessionId;
       setReconnecting(false);
@@ -2422,10 +2520,17 @@ export function useSession() {
       /** 失败收尾：作废本代际（挂上的流与重连定时器一起失效）→ 回到 viewing
        *  同一会话（触发历史重读，把本地投影拉回服务器真值）→ 显示原因。
        *  用 `selectSession` 而不是 `setMode`：多出的那几步（取消订阅、清 stream
-       *  引用、忘掉接流去重记账）正是"这条流已经作废"该做的事。 */
+       *  引用、忘掉接流去重记账）正是"这条流已经作废"该做的事。
+       *  #1509（INT-1）：`user_input` 支的失败归**作答动作位**——问答卡 / 计划卡 /
+       *  约束模态都有自己的 `role="alert"` 错误位，写通用槽会让同一条失败在顶部
+       *  横幅再播报一次。预算恢复等无内联位的支保持走通用横幅。 */
       const fail = (message: string) => {
         if (streamGenRef.current !== gen) return;
         selectSession(sessionId);
+        if (request.kind === 'user_input') {
+          setAnswerFailure({ sessionId, requestId: request.inputRequest.request_id, message });
+          return;
+        }
         setError(message);
       };
 
@@ -2490,7 +2595,7 @@ export function useSession() {
         fail(`恢复失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, openLiveStream, selectSession],
+    [attachLiveStream, openLiveStream, selectSession, setError],
   );
 
   /** T7 #137：切换会话当前模型（POST /api/sessions/{id}/model）。
@@ -2676,23 +2781,33 @@ export function useSession() {
         setError(`投递失败：${(e as Error).message}`);
       }
     },
-    [attachLiveStream, openLiveStream],
+    [attachLiveStream, openLiveStream, setError],
   );
 
   /** ADR-0030 D11：取消一条尚未消费的排队/引导项。后端写 `queue/cancelled`
    *  事件 → 经实时流（或下次 viewing 装载）投影摘除；这里不本地摘——事件流
    *  是唯一事实（不变量 #22），避免双份摘除路径。404 = 已消费/已取消（幂等
-   *  失败语义），静默。 */
+   *  失败语义），静默。
+   *  #1509（INT-1）：非 404 失败归**队列区动作位**（`queueCancelError`，带会话
+   *  身份），不再写通用横幅槽——错误要出现在触发它的取消按钮旁边，而不是
+   *  顶部。代际守卫：旧尝试的迟到失败不得覆盖新尝试的结果；成功（含 404 幂等
+   *  落定）清掉未处理的失败。 */
   const cancelItem = useCallback(
     async (sessionId: string, itemId: string) => {
+      const gen = ++queueCancelGenRef.current;
       try {
         await cancelQueueItem(sessionId, itemId);
+        if (queueCancelGenRef.current === gen) setQueueCancelError(null);
       } catch (e) {
         // 404 = 已取消/已消费（幂等失败语义）：静默，界面由事件流对账。
         // 其余失败（网络/服务端）必须上浮——静默会让用户以为已取消、
         // 请求根本没到服务器（审查 P3）。
-        if (e instanceof NotFoundError) return;
-        setError(`取消排队消息失败：${(e as Error).message}`);
+        if (e instanceof NotFoundError) {
+          if (queueCancelGenRef.current === gen) setQueueCancelError(null);
+          return;
+        }
+        if (queueCancelGenRef.current !== gen) return;
+        setQueueCancelError({ sessionId, message: `取消排队消息失败：${(e as Error).message}` });
       }
     },
     [],
@@ -2723,7 +2838,16 @@ export function useSession() {
     streaming,
     reconnecting,
     error,
+    /** #1509：`error` 的实例序号（横幅按实例关闭/重现的身份依据）。 */
+    errorSeq,
+    /** #1509（INT-1）：作答（user_input 恢复支）失败的动作位槽。 */
+    answerFailure,
+    /** #1509（INT-1）：取消排队失败的动作位槽（会话身份）。 */
+    queueCancelError,
     sendFailure,
+    historyLoadError,
+    missingSessionNotice,
+    dismissMissingSessionNotice,
     runFailedBeforePlan,
     sessionsError,
     titlesById,

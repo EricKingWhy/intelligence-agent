@@ -1285,7 +1285,9 @@ async def run(
         store = JsonlSessionStore(root=workspace_root / "sessions")
         # #1389：会话全文存档（派生检索索引）。CLI `run` 不经 RunManager，
         # store 级观察者是本路径唯一覆盖点。
-        install_session_archive(store, workspace_root / "sessions" / "state.db")
+        archive_observer = install_session_archive(
+            store, workspace_root / "sessions" / "state.db",
+        )
         _, wiring = await assemble_wiring(settings, sessions=store)
         # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
         # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
@@ -1405,6 +1407,7 @@ async def run(
                     pause_data = event.data
         finally:
             memory_session_var.reset(session_token)
+            archive_observer.close()
         if pause_data is not None:
             # 恢复指令要给出**本会话 id**——暂停摘要是事件的纯函数（不含会话上下文），
             # 而 CLI 的一次性命令此前从不打印 session_id。提示读的是 durable 事件的
@@ -1506,7 +1509,7 @@ def _main_serve(argv: list[str]) -> None:
     loopback，个人桌面服务不暴露 LAN）。控制面默认仅本机；非回环部署必须显式
     配置 `CONTROL_PLANE_ALLOWED_HOSTS`，才能通过 Host 闸。
     """
-    from agent_harness.host_service import HostServiceError, _loopback_url, serve_once
+    from agent_harness.host_service import HostServiceError, loopback_url, serve_once
 
     parser = argparse.ArgumentParser(
         prog="agent-harness serve",
@@ -1533,7 +1536,7 @@ def _main_serve(argv: list[str]) -> None:
         return
     if not outcome.served and outcome.endpoint is not None:
         print(
-            f"已有本机服务在运行：{_loopback_url(outcome.endpoint.host, outcome.endpoint.port, '')}"
+            f"已有本机服务在运行：{loopback_url(outcome.endpoint.host, outcome.endpoint.port, '')}"
             "（已附着，本进程退出）"
         )
 
@@ -3532,6 +3535,35 @@ def _main_memory(argv: list[str]) -> None:
     subcommands.add_parser(
         "migrate", help="把 SQLite 里的 active 记忆一次性导出到 memories/*.md（幂等）",
     )
+    identity = subcommands.add_parser(
+        "identity",
+        help="盘点旧身份/版本并逐项批准映射（#1493：不自动选赢家，未裁决不写文件）",
+    )
+    identity.add_argument(
+        "action", choices=("plan", "list", "show", "approve", "resolve", "apply"),
+        help="plan=只读盘点；list/show=读清单；approve/resolve=人工裁决；apply=过闸写当前文件",
+    )
+    identity.add_argument("item", nargs="?", default=None, metavar="ID",
+                          help="approve/resolve 的条目 ID（list 里可查）")
+    identity.add_argument(
+        "--conflict", action="append", default=None, metavar="M1,M2",
+        help="显式声明正文冲突的旧 memory_id 组（可重复；不支持自动判定）",
+    )
+    identity.add_argument(
+        "--merge", default=None, metavar="SOURCE",
+        help="resolve：取哪一条正文（memory_id）或哪个旧 key 的设置（tenant/user）",
+    )
+    identity.add_argument("--archive", action="append", default=None, metavar="ID",
+                          help="resolve 预算冲突：哪几条不进当前文件（进只读档案，可重复）",
+    )
+    identity.add_argument("--archive-all", action="store_true",
+                          help="resolve 扫描/分隔符拒绝项：整组不导入（进只读档案）")
+    identity.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="plan：压低 MEMORY.md 预算（缺省用部署配置；高于部署配置会被拒绝）")
+    identity.add_argument(
+        "--user-limit", type=int, default=None,
+        help="plan：压低 USER.md 预算（缺省用部署配置；高于部署配置会被拒绝）")
     reproject = subcommands.add_parser(
         "reproject", help="把派生层与 memories/*.md 对账（收敛重复投影与积压账本）",
     )
@@ -3549,6 +3581,77 @@ def _main_memory(argv: list[str]) -> None:
         raise SystemExit(2)
 
 
+def _identity_summary(manifest: dict, *, created: bool) -> str:
+    """一行分区计数 + 还差什么（未批/未裁/活 lease），让人知道下一步做什么。"""
+    partition = manifest["partition"]
+    pending_approvals = [
+        item["id"] for item in manifest["items"]
+        if item["disposition"] == "map" and not item.get("approved_at")
+    ]
+    conflicts = [item["id"] for item in manifest["items"] if item["disposition"] == "conflict"]
+    leases = [item["id"] for item in manifest["items"] if item.get("lease_live")]
+    lines = [
+        (
+            f"映射清单{'已生成' if created else '已更新'}："
+            f"条目 {partition['items']} 项 / 源行 {partition['rows_total']}"
+            f"（映射 {partition['rows_mapped']}、档案 {partition['rows_archived']}、"
+            f"冲突 {partition['rows_conflicted']}）"
+        ),
+        f"待逐项批准：{len(pending_approvals)} 项",
+        f"待人工裁决的冲突：{len(conflicts)} 项" + (
+            f"（{'、'.join(conflicts)}）" if conflicts else ""),
+    ]
+    if leases:
+        lines.append(f"仍有活 lease（先等结终态或过期）：{'、'.join(leases)}")
+    if not pending_approvals and not conflicts and not leases:
+        lines.append("全部获批且无未决冲突：可以执行 memory identity apply")
+    return "\n".join(lines)
+
+
+def _identity_listing(manifest: dict) -> str:
+    if not manifest["items"]:
+        return "（清单为空：没有任何旧数据需要映射）"
+    lines = ["ID	状态	目标/原因	来源数"]
+    for item in manifest["items"]:
+        state = item["disposition"]
+        if state == "map":
+            state += "（已批）" if item.get("approved_at") else "（待批）"
+        note = item.get("target") or item.get("reason") or item.get("status") or ""
+        if item.get("lease_live"):
+            note = f"{note} [活 lease]".strip()
+        lines.append(f"{item['id']}\t{state}\t{note}\t{len(item.get('sources') or ())}")
+    return "\n".join(lines)
+
+
+def _identity_detail(manifest: dict, item_id: str) -> str:
+    for item in manifest["items"]:
+        if item["id"] != item_id:
+            continue
+        lines = [f"{item_id}：{item['kind']} / {item['disposition']}"]
+        for key in ("target", "content_hash", "content_length", "reason", "status",
+                    "idempotency_key", "outcome", "expires_at", "origin", "payload_hash"):
+            if item.get(key) is not None:
+                lines.append(f"  {key} = {item[key]}")
+        if item.get("decision"):
+            lines.append(f"  裁决 = {item['decision']}")
+        if item.get("entries"):
+            lines.append(f"  超限条目 = {'、'.join(item['entries'])}")
+        for variant in item.get("variants") or ():
+            lines.append(
+                f"  变体 {variant['key']}：hash={variant.get('content_hash') or variant.get('values')}"
+                f"（{variant.get('values_source') or 'explicit'}）"
+            )
+        for source in item.get("sources") or ():
+            lines.append(
+                f"  来源 {source['table']}/{source['id']} row_hash={source['row_hash'][:16]} "
+                f"identity={source.get('identity')}"
+            )
+        # 正文只在库里：要读原文时按来源 ID 回库，清单里不留副本。
+        lines.append("  正文不在清单里：按上面的 memory_id 回库查看，确认后再裁决")
+        return "\n".join(lines)
+    return f"清单里没有 {item_id}"
+
+
 async def _memory_command(
     settings: Settings, args: argparse.Namespace,
 ) -> tuple[str, bool]:
@@ -3559,6 +3662,71 @@ async def _memory_command(
         build_memory_v2_service,
     )
     from agent_harness.memory.v2.commands import trusted_identity_for_session
+
+    if args.command == "identity":
+        # #1493：旧身份/版本映射。与 migrate 同法**不**装配服务——盘点/写文件都只碰
+        # `memory-v2.db` 与 `memories/*.md`，装服务会顺手 purge 墓碑、起后台循环。
+        from agent_harness.memory.v2 import identity_mapping as mapping
+
+        manifest_path = Path(settings.workspace_dir) / mapping.MANIFEST_NAME
+        try:
+            if args.action == "plan":
+                manifest = await mapping.plan_identity_mapping(
+                    settings.workspace_dir,
+                    database_path=Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME,
+                    explicit_conflicts=[
+                        [value.strip() for value in group.split(",") if value.strip()]
+                        for group in (args.conflict or ())
+                    ],
+                    memory_char_limit=args.memory_limit or settings.memory_char_limit,
+                    user_char_limit=args.user_limit or settings.user_char_limit,
+                    # 部署配置的当下取值：flag 只能压低预算，不能抬过它（"不扩预算"红线）。
+                    deployment_memory_char_limit=settings.memory_char_limit,
+                    deployment_user_char_limit=settings.user_char_limit,
+                )
+                return _identity_summary(manifest, created=True), False
+            if args.action == "apply":
+                receipt = await mapping.apply_identity_mapping(manifest_path)
+                counts = receipt["counts"]
+                lines = [
+                    (
+                        f"映射完成：active={counts['active']} 导出={counts['exported']} "
+                        f"去重={counts['deduplicated']}"
+                        f"（MEMORY.md {counts['memory']} / USER.md {counts['user']}）"
+                    ),
+                    f"kind 缺失默认归入 MEMORY.md：{counts['kind_defaulted']} 条（tier≠profile）",
+                    f"设置四项映射：{receipt['settings']} 条",
+                    (
+                        "只读档案：records={records} staged={staged} jobs={jobs} "
+                        "tombstones={tombstones}".format(**receipt["archive"])
+                    ),
+                    f"旧数据销毁：{receipt['destruction']}（批复不等于批准销毁）",
+                ]
+                if counts["skipped"]:
+                    lines.append(f"未写入 {len(counts['skipped'])} 条：")
+                    lines.extend(f"  {item_id}: {error}"
+                                 for item_id, error in counts["skipped"])
+                return "\n".join(lines), bool(counts["skipped"])
+            manifest = mapping.load_manifest(manifest_path)
+            if args.action == "list":
+                return _identity_listing(manifest), False
+            if args.action == "show":
+                if not args.item:
+                    return "show 需要条目 ID（先用 memory identity list 查看）", True
+                return _identity_detail(manifest, args.item), False
+            if not args.item:
+                return f"{args.action} 需要条目 ID（先用 memory identity list 查看）", True
+            if args.action == "approve":
+                manifest = await mapping.approve_item(manifest_path, args.item)
+            else:
+                manifest = await mapping.resolve_conflict(
+                    manifest_path, args.item, merge_source=args.merge,
+                    archive_items=args.archive, archive_all=args.archive_all,
+                )
+            return _identity_summary(manifest, created=False), False
+        except mapping.MappingBlocked as blocked:
+            # 业务阻断不是崩溃：逐条说清"为什么还不能写"，退码 2 让脚本能看出来。
+            return "\n".join(["映射被阻断：", *(f"  - {reason}" for reason in blocked.reasons)]), True
 
     if args.command == "migrate":
         # #1353 §4：一次性导出。不需要建服务（迁移只读 records 表、写 markdown 文件），

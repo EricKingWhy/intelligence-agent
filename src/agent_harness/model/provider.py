@@ -16,6 +16,7 @@ from agent_harness.model.config import (
 )
 from agent_harness.model.config import (
     ConfigError,
+    ModelClientConstructionError,
     ModelConfig,
 )
 from agent_harness.model.endpoint_guard import guarded_clients
@@ -55,17 +56,6 @@ class ReasoningChatOpenAI(ChatOpenAI):
                     **message.additional_kwargs, "reasoning_content": reasoning,
                 }
         return generation_chunk
-
-
-class ModelClientConstructionError(RuntimeError):
-    """模型 client 构造失败（#517 BUG-05）。
-
-    `create_chat_model` 的构造是**纯本地操作**（字段校验 + SDK client 初始化），
-    此处的失败来自配置/环境而非网络调用——典型如 corporate/k8s 代理变量
-    （`NO_PROXY` 里的 `[::1]`）让 httpx 的代理映射解析在构造期抛 `InvalidURL`。
-    显式类型让 web 层按类型映射成结构化 503（环境/配置暂时不可用，可修好重试），
-    而不是把它当服务端 bug 打成裸 500。`__cause__` 保留原始异常。
-    """
 
 
 def _close_quietly(client: Any) -> None:

@@ -1879,3 +1879,38 @@ describe('getAttachmentLimits — 附件上限下发形状防御（#937 M-08 / P
     await expect(getAttachmentLimits()).rejects.toThrow('allowed_media_types 不是字符串数组');
   });
 });
+
+describe('#1333 client_request_id —— 创建载荷与关联查询的传输编码', () => {
+  const CID = '01234567-89ab-4cde-8f01-23456789abcd';
+
+  it('startSession 带 clientRequestId → body 带 client_request_id；不带 → 不发键', async () => {
+    const cap = captureFetch();
+    await startSession({ task: '干活' }, { clientRequestId: CID });
+    expect(cap.calls[0].body).toEqual({ task: '干活', client_request_id: CID });
+
+    await startSession({ task: '旧客户端路径' });
+    expect(cap.calls[1].body).not.toHaveProperty('client_request_id');
+  });
+
+  it('listSessions 关联查询 → URL 带 client_request_id（精确匹配语义）', async () => {
+    const capCorrelated = captureFetch(200, []);
+    await listSessions({ includeArchived: true, clientRequestId: CID });
+    expect(capCorrelated.calls[0].url).toBe(
+      `/api/sessions?include_archived=true&client_request_id=${CID}`,
+    );
+
+    const capEncoded = captureFetch(200, []);
+    await listSessions({ clientRequestId: 'a b/c?' });
+    expect(capEncoded.calls[0].url).toBe(
+      `/api/sessions?client_request_id=${encodeURIComponent('a b/c?')}`,
+    );
+
+    // 既有调用方零迁移：不传关联值时 URL 形状逐字不变
+    const capArchived = captureFetch(200, []);
+    await listSessions({ includeArchived: true });
+    expect(capArchived.calls[0].url).toBe('/api/sessions?include_archived=true');
+    const capPlain = captureFetch(200, []);
+    await listSessions();
+    expect(capPlain.calls[0].url).toBe('/api/sessions');
+  });
+});

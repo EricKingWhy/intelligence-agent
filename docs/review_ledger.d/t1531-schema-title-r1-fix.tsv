@@ -1,0 +1,1 @@
+2026-10-25	#1531 repair review: Correctness PASS; Standards P3—custom __get_pydantic_json_schema__ can synthesize the class-name title; fixed with hook guard and regression in 3eedaecb.	151d985f134e1653b73fbca0a693d7cf4433461f..79c3d0d8603d660f205a171134da57165b908bb6

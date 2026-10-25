@@ -62,3 +62,36 @@ describe('#1401 空状态', () => {
     expect(onPresetTask.mock.calls[0][0]).toBe(chips[1].textContent);
   });
 });
+
+describe('#1521 FE-05 历史加载失败面板', () => {
+  it('historyLoadFailure 在场 ⇒ 失败面板替代空态（role=alert + 原文 + 重试），不画「暂无对话」', () => {
+    const onRetry = vi.fn();
+    render(
+      <Conversation
+        conversation={null}
+        loadingHistory={false}
+        density="balanced"
+        historyLoadFailure={{ message: '模拟服务端 500', onRetry }}
+      />,
+    );
+
+    const panel = container!.querySelector('.empty-state');
+    expect(panel).not.toBeNull();
+    expect(panel!.getAttribute('role')).toBe('alert');
+    expect(container!.querySelector('.empty-hero')?.textContent).toBe('历史加载失败');
+    expect(container!.querySelector('.empty-sub')?.textContent).toBe('模拟服务端 500');
+    // 「暂无对话」在一次没成功的加载下是错误陈述——必须退场
+    expect(container!.textContent).not.toContain('暂无对话');
+
+    const retry = container!.querySelector<HTMLElement>('.example-chip');
+    expect(retry?.textContent).toBe('重试');
+    act(() => retry!.click());
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('historyLoadFailure 缺省（null）⇒ 真实空态照旧（「暂无对话」不被迫害）', () => {
+    render(<Conversation conversation={null} loadingHistory={false} density="balanced" />);
+    expect(container!.querySelector('.empty-hero')?.textContent).toBe('暂无对话');
+    expect(container!.textContent).not.toContain('历史加载失败');
+  });
+});
