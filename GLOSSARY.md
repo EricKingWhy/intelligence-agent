@@ -411,12 +411,12 @@ _Avoid_: sync selection, cross-panel highlight, click-through
 ## Web Search / Reliability 层（Phase 12）
 
 **Web Search**:
-模型可自主调用的互联网检索能力，与 Knowledge 平行的检索域。背后是 `WebSearchProvider`（默认 Tavily），实现统一 `RetrievalProvider` 协议。`web_search` 是独立工具（spec §8 硬约束：Web MUST 独立于 retrieve_knowledge），citation 格式 `web:<url>`。不暴露 `read_web_source` 二次读取工具（网页二次抓取成本/法律风险 vs KB 本地切片）。
+模型可自主调用的互联网检索能力，与 Knowledge 平行的检索域。背后是 `WebSearchProvider`（默认 Tavily），返回 `list[WebHit]`。`web_search` 是独立工具（spec §8 硬约束：Web MUST 独立于 retrieve_knowledge），citation 格式 `web:<url>`。不暴露 `read_web_source` 二次读取工具（网页二次抓取成本/法律风险 vs KB 本地切片）。
 _Avoid_: internet search tool, browser tool, scraper
 
-**RetrievalProvider**:
-Knowledge 和 Web 共享的窄检索协议：`search(query, *, k, gl, hl, freshness) -> list[RetrievalHit]`。两个域各自实现（KB 额外保留 chunk 生命周期方法）；替换 provider = 替换策略类，调用方不感知底层。这是「加搜索方式只要加策略类」的接缝点。
-_Avoid_: search engine interface, retrieval facade
+**RetrievalHit**:
+KB 与 Web 共享的**数据形状**（不是协议）：`{citation, content, score, metadata}`——citation 可追溯，content 是模型可见摘要，metadata 域特定（KB: `source_id`/`chunk_index`；Web: `url`/`title`/`raw_content`）。两个域**各自返回自己的类型**（`KnowledgeHit` / `WebHit`），`WebHit.to_retrieval_hit()` 是 Web → 共享形状的单向转换。曾经的跨域 `RetrievalProvider` 窄协议零消费者，已于 #1507 删除（ADR-0014 决策 7 同步 supersede）。
+_Avoid_: search engine interface, retrieval facade, RetrievalProvider
 
 **Retrieval Fallback Policy**:
 当 `retrieve_knowledge` 返回 `is_sufficient=false` 时，tool result 附带 contextual 提示（"知识库证据不足，可调用 web_search 工具"）。决策仍由模型做出（agentic）；该提示是 tool 侧 affordance，不是 Agent Loop 特判（不违反「Knowledge/Web 是 Capability/Tool，不写进 Loop」不变量）。这是 spec §8 的「轻量 Retrieval Fallback Policy」实现，显式区别于学术 CRAG 的 Runtime 自动编排。
