@@ -3557,7 +3557,7 @@ def _main_memory(argv: list[str]) -> None:
                           help="resolve 预算冲突：哪几条不进当前文件（进只读档案，可重复）",
     )
     identity.add_argument("--archive-all", action="store_true",
-                          help="resolve 扫描/分隔符拒绝项：整组不导入（进只读档案）")
+                          help="resolve 空正文/扫描/分隔符拒绝项：整组不导入（进只读档案）")
     identity.add_argument(
         "--memory-limit", type=int, default=None,
         help="plan：压低 MEMORY.md 预算（缺省用部署配置；高于部署配置会被拒绝）")
@@ -3678,8 +3678,10 @@ async def _memory_command(
                         [value.strip() for value in group.split(",") if value.strip()]
                         for group in (args.conflict or ())
                     ],
-                    memory_char_limit=args.memory_limit or settings.memory_char_limit,
-                    user_char_limit=args.user_limit or settings.user_char_limit,
+                    memory_char_limit=(args.memory_limit if args.memory_limit is not None
+                                       else settings.memory_char_limit),
+                    user_char_limit=(args.user_limit if args.user_limit is not None
+                                     else settings.user_char_limit),
                     # 部署配置的当下取值：flag 只能压低预算，不能抬过它（"不扩预算"红线）。
                     deployment_memory_char_limit=settings.memory_char_limit,
                     deployment_user_char_limit=settings.user_char_limit,
@@ -3724,6 +3726,8 @@ async def _memory_command(
                     archive_items=args.archive, archive_all=args.archive_all,
                 )
             return _identity_summary(manifest, created=False), False
+        except FileNotFoundError:
+            return "映射清单不存在：先运行 memory identity plan", True
         except mapping.MappingBlocked as blocked:
             # 业务阻断不是崩溃：逐条说清"为什么还不能写"，退码 2 让脚本能看出来。
             return "\n".join(["映射被阻断：", *(f"  - {reason}" for reason in blocked.reasons)]), True

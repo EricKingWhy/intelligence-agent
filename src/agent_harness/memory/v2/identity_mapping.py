@@ -116,6 +116,14 @@ def _row_hash(row: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical(row).encode("utf-8")).hexdigest()
 
 
+def _source_row_hash(row: dict[str, Any], table: str) -> str:
+    """Hash source state while excluding job lease bookkeeping that changes during renewal."""
+    if table == "memory_v2_jobs":
+        row = {key: value for key, value in row.items()
+               if key not in {"lease_owner", "lease_expires_at", "updated_at"}}
+    return _row_hash(row)
+
+
 def _identity(row: dict[str, Any]) -> dict[str, Any]:
     """旧 tenant/user/project：只作**迁移来源标签**，不是运行路由（ADR-0056 §3.7）。"""
     return {
@@ -140,12 +148,17 @@ def _settings_values(settings: MemorySettingsV2) -> dict[str, bool]:
 def _budget_limit_violations(
     requested: dict[str, int], deployment: dict[str, int],
 ) -> list[str]:
-    return [
+    invalid = [
+        f"--{target}-limit={requested[target]} 必须大于 0"
+        for target in ("memory", "user") if requested[target] <= 0
+    ]
+    inflated = [
         f"--{target}-limit={requested[target]} 高于部署配置 {deployment[target]}："
         f"迁移不得扩大预算（apply 只按清单预算写盘，超过部署上限的文件运行时读不进来）"
         for target in ("memory", "user")
         if requested[target] > deployment[target]
     ]
+    return invalid + inflated
 
 
 def _parse_moment(value: str | None) -> datetime | None:
@@ -259,13 +272,14 @@ def _disk_state(workspace: Path, target: str) -> tuple[int, int]:
 
 def _source_row(row: dict[str, Any], table: str) -> dict[str, Any]:
     """一个旧行的登记项：哈希 + 旧 ID + 身份 + 版本/来源。正文不进清单。"""
+    identity = _identity_of_staged(row) if table == "memory_v2_staged" else row
     source: dict[str, Any] = {
         "table": table,
         # settings 的主键是 (tenant_id, user_id)，没有单独的 id 列——旧 key 就是它的 ID。
         "id": (str(row.get(_SOURCE_ID_COLUMN[table]))
                if table in _SOURCE_ID_COLUMN else _settings_key(row)),
-        "row_hash": _row_hash(row),
-        "identity": _identity(row),
+        "row_hash": _source_row_hash(row, table),
+        "identity": _identity(identity),
     }
     if row.get("content") is not None:
         source["content_hash"] = entry_digest(normalize_entry(str(row["content"])))
@@ -553,9 +567,9 @@ def _settings_item(
         if table == "memory_v2_settings":
             continue
         for row in rows[table]:
-            if row.get("tenant_id") is None:
-                continue
             source = _identity_of_staged(row) if table == "memory_v2_staged" else row
+            if source.get("tenant_id") is None:
+                continue
             candidates.add(f"{source.get('tenant_id')}/{source.get('user_id')}")
 
     variants = []
@@ -681,7 +695,7 @@ async def resolve_conflict(
     - `merge_source`：正文冲突取哪一条的正文 / 设置冲突取哪个旧 key 的四开关；
       落选的不删，进档案（`archive`）与冲突裁决记录一起留档。
     - `archive_items`：预算冲突里哪几条不进当前文件（进档案）。
-    - `archive_all`：扫描/分隔符拒绝的项整组进档案（明确决定"不导入"）。
+    - `archive_all`：空正文/扫描/分隔符拒绝的项整组进档案（明确决定"不导入"）。
     """
     path = Path(manifest_path)
     manifest = load_manifest(path)
@@ -716,7 +730,7 @@ async def resolve_conflict(
         _refresh_budget(manifest, Path(manifest["workspace"]))
         return _save_manifest(path, manifest)
 
-    if kind in {"scan_rejected", "delimiter_rejected"}:
+    if kind in {"empty_rejected", "scan_rejected", "delimiter_rejected"}:
         if not archive_all:
             raise MappingBlocked([
                 f"{item_id} 只能整组进档案（--archive-all）：{kind} 的正文不得进当前文件",
@@ -869,18 +883,22 @@ async def apply_identity_mapping(
     workspace = Path(manifest["workspace"])
     moment = now if now is not None else datetime.now().astimezone()
 
-    reasons: list[str] = []
-    for item in manifest["items"]:
-        if item["disposition"] == "conflict":
-            reasons.append(f"{item['id']} 未裁决（{item['kind']}）")
-        elif item["disposition"] == "map" and not item.get("approved_at"):
-            reasons.append(f"{item['id']} 未获批")
-        elif item.get("lease_live"):
-            reasons.append(f"{item['id']} 仍有活 lease：先等它结终态或过期再切")
+    reasons = [
+        f"{item['id']} 未裁决（{item['kind']}）"
+        for item in manifest["items"] if item["disposition"] == "conflict"
+    ]
+    reasons.extend(
+        f"{item['id']} 未获批"
+        for item in manifest["items"]
+        if item["disposition"] == "map" and not item.get("approved_at")
+    )
     if reasons:
         raise MappingBlocked(reasons)
 
-    contents = await _verified_contents(manifest)
+    contents, lease_reasons = await _verified_contents(manifest, now=moment)
+    if lease_reasons:
+        _save_manifest(path, manifest)
+        raise MappingBlocked(lease_reasons)
 
     store = MarkdownMemoryStore(
         workspace / MEMORIES_DIRECTORY_NAME,
@@ -918,9 +936,11 @@ async def apply_identity_mapping(
         "counts": counts,
         "settings": settings_mapped,
         "archive": {
-            "records": sum(1 for item in manifest["items"]
-                           if item["disposition"] == "archive"
-                           and item["kind"] == "record_archive"),
+            "records": sum(
+                1 for item in manifest["items"] if item["disposition"] == "archive"
+                for source in item.get("sources", [])
+                if source["table"] == "memory_v2_records"
+            ),
             "staged": sum(1 for item in manifest["items"]
                           if item["kind"] == "staged_archive"),
             "jobs": sum(1 for item in manifest["items"] if item["kind"] == "job_archive"),
@@ -937,30 +957,70 @@ async def apply_identity_mapping(
     return receipt
 
 
-async def _verified_contents(manifest: dict[str, Any]) -> dict[str, str]:
-    """回库取每条映射的正文，同时 fail-closed 校验源数据没漂移。"""
+async def _verified_contents(
+    manifest: dict[str, Any], *, now: datetime,
+) -> tuple[dict[str, str], list[str]]:
+    """Verify every retained source, refresh writer leases, and return entry content."""
     database = Path(manifest["database"])
     contents: dict[str, str] = {}
+    lease_reasons: list[str] = []
+    lease_tables = {"memory_v2_jobs": _lease_live, "memory_v2_staged": _approval_live}
     async with connect(database) as connection:
+        rows_by_table = {table: await _read_rows(connection, table) for table in lease_tables}
+        rows_by_id = {
+            table: {str(row[_SOURCE_ID_COLUMN[table]]): row for row in rows}
+            for table, rows in rows_by_table.items()
+        }
+        item_by_source = {
+            (source["table"], str(source["id"])): item
+            for item in manifest["items"]
+            if item["disposition"] in {"map", "archive"}
+            for source in item.get("sources", [])
+        }
+
+        for table, is_live in lease_tables.items():
+            for row in rows_by_table[table]:
+                source_id = str(row[_SOURCE_ID_COLUMN[table]])
+                item = item_by_source.get((table, source_id))
+                live = is_live(row, now)
+                if item is not None:
+                    item["lease_live"] = live
+                if live:
+                    item_id = item["id"] if item is not None else f"{table}/{source_id}"
+                    lease_reasons.append(
+                        f"{item_id} 仍有活 lease：先等它结终态或过期再切")
+
+        drift_reasons: list[str] = []
         for item in manifest["items"]:
-            if item["disposition"] != "map" or item["kind"] != "entry":
+            if item["disposition"] not in {"map", "archive"}:
                 continue
             content: str | None = None
-            for source in item["sources"]:
-                row = await _source_in(connection, source)
-                if row is None or _row_hash(row) != source["row_hash"]:
-                    raise MappingBlocked([(
-                        f"{item['id']} 的源行 {source['table']}/{source['id']} 在盘点后变化了；"
-                        "重新盘点（源数据必须冻结）"
-                    )])
-                if row.get("content") is not None and content is None:
+            entry_source_changed = False
+            for source in item.get("sources", []):
+                table, source_id = source["table"], str(source["id"])
+                row = rows_by_id.get(table, {}).get(source_id)
+                if row is None:
+                    row = await _source_in(connection, source)
+                if row is None or _source_row_hash(row, table) != source["row_hash"]:
+                    drift_reasons.append(
+                        f"{item['id']} 的源行 {table}/{source_id} 在盘点后变化了；"
+                        "重新盘点（源数据必须冻结）")
+                    entry_source_changed = True
+                    continue
+                if (item["disposition"] == "map" and item["kind"] == "entry"
+                        and row.get("content") is not None and content is None):
                     content = normalize_entry(str(row["content"]))
-            if content is None:
-                raise MappingBlocked([f"{item['id']} 找不到可写正文"])
-            if entry_digest(content) != item["content_hash"]:
-                raise MappingBlocked([f"{item['id']} 的正文与清单哈希不一致；重新盘点"])
-            contents[item["id"]] = content
-    return contents
+            if (item["disposition"] == "map" and item["kind"] == "entry"
+                    and not entry_source_changed):
+                if content is None:
+                    drift_reasons.append(f"{item['id']} 找不到可写正文")
+                elif entry_digest(content) != item["content_hash"]:
+                    drift_reasons.append(f"{item['id']} 的正文与清单哈希不一致；重新盘点")
+                else:
+                    contents[item["id"]] = content
+        if drift_reasons:
+            raise MappingBlocked(drift_reasons)
+    return contents, lease_reasons
 
 
 async def _source_in(
