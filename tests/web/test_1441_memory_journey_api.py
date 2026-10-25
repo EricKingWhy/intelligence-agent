@@ -44,7 +44,7 @@ def app_client(tmp_path, monkeypatch):
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
     )
-    with TestClient(create_app(settings, enable_cors=False)) as client:
+    with TestClient(create_app(settings, enable_cors=False, allow_testserver=True)) as client:
         yield client
 
 

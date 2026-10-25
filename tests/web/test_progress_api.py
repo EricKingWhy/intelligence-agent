@@ -42,7 +42,7 @@ def _client(tmp_path: Path) -> TestClient:
         workspace_dir=str(tmp_path),
         model_api_key="sk-test",
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     client = TestClient(app)
     # 供测试显式驱动重读点：生产里 run 收口回调会刷新文件；TestClient 拆
     # portal 时该回调可能被 cancel（时序竞态），测试里走同一重读点保证确定性。

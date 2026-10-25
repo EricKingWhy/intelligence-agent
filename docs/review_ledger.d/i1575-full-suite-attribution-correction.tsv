@@ -1,0 +1,1 @@
+2026-10-24	#1575 证据更正（append-only）：原审查行将 408 failures 概括为 Docker 环境受阻，超出证据。仅 4 个 Docker sandbox setup error 与 3 个抽样 API/session/MultiAgent 用例已复现为 Engine pipe 不可用；4 个金集失败源于 #1571 的旧拒绝文案匹配，已由 PR #1574 修复但不在此固定基线；剩余全量失败未逐项归因。审查范围与两轴结论不变。详见 docs/phase_status/2026-10.md #1575。	3594e741b80b560f390b5daa4ac0ed653bfccfbc..0fb0a46ff393f94485a8263220e23a4e23ca2c12

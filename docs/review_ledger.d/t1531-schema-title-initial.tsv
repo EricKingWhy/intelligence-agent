@@ -1,0 +1,1 @@
+2026-10-25	#1531 initial independent review: Correctness P3—custom model_title_generator can intentionally return the class name; fixed with Config guard and regression in 79c3d0d8. Standards PASS.	fe3d9bd8c5015b941a75203041517d81eb90f2ee..151d985f134e1653b73fbca0a693d7cf4433461f

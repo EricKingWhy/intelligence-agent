@@ -24,6 +24,21 @@ class UnsupportedReasoningEffort(ConfigError):
     """A requested reasoning level is not declared for the selected model."""
 
 
+# #1527：本类原先定义在 `model/provider`（SDK 重模块）。web 层的 except 子句在
+# 导入期就需要这个类型，留在 provider 会让 `import agent_harness.web.app` 连带
+# 加载整个 openai 栈。它归这里同族：构造失败是"配置/环境暂时不可用"的结构化
+# 错误（见 docstring）；provider 侧仍 re-export，公共导入面不变。
+class ModelClientConstructionError(RuntimeError):
+    """模型 client 构造失败（#517 BUG-05）。
+
+    `create_chat_model` 的构造是**纯本地操作**（字段校验 + SDK client 初始化），
+    此处的失败来自配置/环境而非网络调用——典型如 corporate/k8s 代理变量
+    （`NO_PROXY` 里的 `[::1]`）让 httpx 的代理映射解析在构造期抛 `InvalidURL`。
+    显式类型让 web 层按类型映射成结构化 503（环境/配置暂时不可用，可修好重试），
+    而不是把它当服务端 bug 打成裸 500。`__cause__` 保留原始异常。
+    """
+
+
 # 各厂商 OpenAI 兼容端点与默认模型。
 #
 # Phase 2（SDD 03 §16 ModelOption）：preset 可携带能力位元数据——
@@ -102,8 +117,12 @@ REASONING_EFFORT_WIRE_VALUES = frozenset(
 )
 
 
-def _pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
-    """从 source dict 抽取已知能力位（仅声明的键）。省略 = 不猜测。"""
+def pick_capabilities(source: dict[str, Any]) -> dict[str, Any]:
+    """从 source dict 抽取已知能力位（仅声明的键）。省略 = 不猜测。
+
+    #1539 转正公开：preset/自定义模型配置的能力视图抽取只有这一份，
+    Web catalog 与配置解析共用（此前 catalog import 私有名）。
+    """
     return {k: source[k] for k in _CAPABILITY_FIELDS if k in source}
 
 

@@ -1,0 +1,1 @@
+2026-10-23	#1483 修复轮处置复核：P2/P3/P4 findings 全部闭环；Host/Origin 缓存、显式 testserver seam、IPv6 attach URL、文档与回归测试；P0/P1/P2/P3/P4=0/0/0/0/0	c4532ca2412fded77f5f978f5bfeeeaf1920f15c..a6c5ffc8

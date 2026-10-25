@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Brain, ChevronDown, ChevronUp, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { describeMemoryError, listProjects, MemoryError } from '../lib/api';
+import { resolveFocusReturnTarget, restoreFocusTarget } from './focusReturn';
 import {
   bulkDeleteMemoryRecords,
   countMemoryRoots,
@@ -34,6 +35,7 @@ import '../styles/memory-v2.css';
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  focusReturnTargetRef?: { current: HTMLElement | null };
 }
 
 const KIND_LABELS: Record<MemoryKind, string> = {
@@ -47,33 +49,25 @@ const SCOPE_LABELS: Record<MemoryScopeV2, string> = {
 };
 const CONTENT_CLAMP_THRESHOLD = 180;
 
-/** #1477：关闭时把焦点还给谁。经「更多工具」菜单打开时 `activeElement` 是菜单项，
- *  菜单关闭即卸载 ⇒ `isConnected === false` ⇒ 不归还、焦点掉回 `<body>`。
- *  按 Radix 的菜单契约在**记录时**上溯到常驻触发器：菜单内容挂
- *  `aria-labelledby=<触发器 id>`（DropdownMenu 的 Content 固定注入），触发器本身
- *  常驻。不是菜单项就原样返回——从常驻按钮打开的旧行为不变。 */
-function focusReturnTarget(active: Element | null): HTMLElement | null {
-  if (!(active instanceof HTMLElement)) return null;
-  const menu = active.closest('[role="menu"]');
-  if (!menu) return active;
-  const triggerId = menu.getAttribute('aria-labelledby')?.split(' ')[0];
-  const trigger = triggerId ? document.getElementById(triggerId) : null;
-  return trigger instanceof HTMLElement ? trigger : null;
-}
-
-export function MemoryPanel({ open, onOpenChange }: Props) {
+export function MemoryPanel({ open, onOpenChange, focusReturnTargetRef }: Props) {
   const openerRef = useRef<HTMLElement | null>(null);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="palette-overlay" />
-        {open && <MemoryPanelBody openerRef={openerRef} />}
+        {open && <MemoryPanelBody openerRef={openerRef} focusReturnTargetRef={focusReturnTargetRef} />}
       </Dialog.Portal>
     </Dialog.Root>
   );
 }
 
-function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | null } }) {
+function MemoryPanelBody({
+  openerRef,
+  focusReturnTargetRef,
+}: {
+  openerRef: { current: HTMLElement | null };
+  focusReturnTargetRef?: { current: HTMLElement | null };
+}) {
   const [queryDraft, setQueryDraft] = useState('');
   const [filters, setFilters] = useState<MemoryFilters>({});
   const memories = useMemories(filters);
@@ -200,12 +194,14 @@ function MemoryPanelBody({ openerRef }: { openerRef: { current: HTMLElement | nu
     <Dialog.Content
       className="memory-panel memory-v2-panel"
       onOpenAutoFocus={() => {
-        openerRef.current = focusReturnTarget(document.activeElement);
+        const requestedTarget = focusReturnTargetRef?.current ?? null;
+        if (focusReturnTargetRef) focusReturnTargetRef.current = null;
+        openerRef.current = resolveFocusReturnTarget(requestedTarget ?? document.activeElement);
       }}
       onCloseAutoFocus={(event) => {
-        if (openerRef.current?.isConnected) {
+        if (openerRef.current) {
           event.preventDefault();
-          openerRef.current.focus();
+          restoreFocusTarget(openerRef.current);
         }
       }}
     >

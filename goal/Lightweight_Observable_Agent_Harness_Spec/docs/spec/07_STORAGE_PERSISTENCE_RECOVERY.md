@@ -28,6 +28,12 @@ Vector:
   future providers
 ```
 
+**Memory 文档不在上述五层之内**：长期记忆的当前内容与 revision 是 Markdown 文件事实
+（`MEMORY.md` / `USER.md`），由统一提交 seam 写入，不归 SessionEvent / Operation Ledger /
+Artifact / Metadata / Vector 任何一层所有，也不因为它们各自有 owner 就变成多主。
+Session/Run/Checkpoint/Operation 的既有边界不因记忆转向改变；本条只补「哪种事实由谁拥有」
+（ADR-0056 §2–§3）。
+
 ## 2. Session / Run / Checkpoint / Operation
 
 必须区分：
@@ -110,6 +116,12 @@ bash("migration")
 
 ### RUNNING / UNKNOWN
 进入 Tool-specific reconcile。
+
+### Memory 内容提交
+Memory 内容写入走自己的提交 seam，不复用 Operation Ledger 的副作用语义：写入方拿到
+operation id 与每目标 previous/new digest 的提交回执；重启后按回执判定「未发布 / 已发布 /
+冲突」，不确定即 NEED_RECONCILE，不盲重跑、不把部分成功报成成功（ADR-0056 §3.6）。
+这条是 Memory 域的独立恢复入口，不改变上面 Tool 的 reconcile 规则。
 
 ## 7. Tool-specific Recovery
 

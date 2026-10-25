@@ -108,7 +108,7 @@ def memory_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         jwt_secret=_SECRET,
         capabilities='{"memory": {"provider": "langmem"}}',
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     with TestClient(app) as client:
         yield client, []
 
@@ -121,7 +121,7 @@ async def test_v2_governance_api_works_without_session_store_and_closes_in_its_l
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=_SECRET, capabilities='{"memory": {"provider": "langmem"}}',
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     owner_loop = asyncio.get_running_loop()
     start_loops = []
     close_loops = []
@@ -348,7 +348,7 @@ async def test_memory_capability_disabled_is_503(tmp_path: Path):
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test", jwt_secret=_SECRET,
     )
-    with TestClient(create_app(settings, enable_cors=False)) as client:
+    with TestClient(create_app(settings, enable_cors=False, allow_testserver=True)) as client:
         list_resp = client.get("/api/memories", headers=_auth(_ALICE))
         assert list_resp.status_code == 503
         assert client.delete("/api/memories/x", headers=_auth(_ALICE)).status_code == 503
@@ -382,7 +382,7 @@ async def test_memory_init_failure_503_says_fault_not_config_state(tmp_path: Pat
         jwt_secret=_SECRET,
         capabilities='{"memory": {"provider": "langmem"}}',
     )
-    with TestClient(create_app(settings, enable_cors=False)) as client:
+    with TestClient(create_app(settings, enable_cors=False, allow_testserver=True)) as client:
         resp = client.get("/api/memories", headers=_auth(_ALICE))
 
     assert resp.status_code == 503
@@ -446,7 +446,7 @@ def test_origin_gate_is_wired_on_memory_routes(tmp_path: Path, monkeypatch: pyte
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         capabilities='{"memory": {"provider": "langmem"}}',
     )
-    with TestClient(create_app(settings, enable_cors=False)) as client:
+    with TestClient(create_app(settings, enable_cors=False, allow_testserver=True)) as client:
         cross_origin = client.get("/api/memories", headers={"Origin": "http://evil.example"})
         assert cross_origin.status_code == 403, cross_origin.text
         # 非浏览器发起（无 Origin）放行——本地信任模式的既定口径。

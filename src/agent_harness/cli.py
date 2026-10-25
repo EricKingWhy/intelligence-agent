@@ -732,7 +732,7 @@ def _deadline_dimension_lines(data: dict) -> list[str]:
     判据与 `_extra_dimension_lines` 同源：**键在不在**。键缺席（`#315` 之前的老事件）
     ⇒ 零行（不拿一片 unavailable 当信息）；`None` ⇒ `unlimited`（这一维没配，与同块
     `limit unlimited` 同一个词）；形状认不出（数 / 空串 / 带首尾空白）⇒ `unavailable`
-    ——`agent/run_budget._deadline_or_none` 对同一份事件读作"没配"（它不 strip），
+    ——`agent/run_budget.deadline_or_none` 对同一份事件读作"没配"（它不 strip），
     这里跟着它读：不印那个形状，也不编一个时刻。
     """
     limits = ((data.get("limits") or {}).get("run") or {})
@@ -1285,7 +1285,9 @@ async def run(
         store = JsonlSessionStore(root=workspace_root / "sessions")
         # #1389：会话全文存档（派生检索索引）。CLI `run` 不经 RunManager，
         # store 级观察者是本路径唯一覆盖点。
-        install_session_archive(store, workspace_root / "sessions" / "state.db")
+        archive_observer = install_session_archive(
+            store, workspace_root / "sessions" / "state.db",
+        )
         _, wiring = await assemble_wiring(settings, sessions=store)
         # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
         # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
@@ -1405,6 +1407,7 @@ async def run(
                     pause_data = event.data
         finally:
             memory_session_var.reset(session_token)
+            archive_observer.close()
         if pause_data is not None:
             # 恢复指令要给出**本会话 id**——暂停摘要是事件的纯函数（不含会话上下文），
             # 而 CLI 的一次性命令此前从不打印 session_id。提示读的是 durable 事件的
@@ -1502,11 +1505,11 @@ def main() -> None:
 def _main_serve(argv: list[str]) -> None:
     """W-11（#355）：单机服务冷启动闭环（附着 → 否则竞争启动 → 二次检查）。
 
-    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 127.0.0.1 /
-    localhost，个人桌面服务不暴露 LAN）；远程/LAN 部署保持既有显式配置入口
-    （`create_prod_app` + 显式 jwt_secret），不经本命令。
+    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 IPv4/IPv6
+    loopback，个人桌面服务不暴露 LAN）。控制面默认仅本机；非回环部署必须显式
+    配置 `CONTROL_PLANE_ALLOWED_HOSTS`，才能通过 Host 闸。
     """
-    from agent_harness.host_service import HostServiceError, serve_once
+    from agent_harness.host_service import HostServiceError, loopback_url, serve_once
 
     parser = argparse.ArgumentParser(
         prog="agent-harness serve",
@@ -1515,8 +1518,8 @@ def _main_serve(argv: list[str]) -> None:
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        choices=["127.0.0.1", "localhost"],
-        help="绑定地址；只允许 loopback（W-11：个人服务不暴露 LAN，远程部署走显式配置入口）",
+        choices=["127.0.0.1", "localhost", "::1"],
+        help="绑定地址；本命令只允许 IPv4/IPv6 loopback；非回环部署须显式配置 CONTROL_PLANE_ALLOWED_HOSTS",
     )
     args = parser.parse_args(argv)
     settings = Settings()
@@ -1533,7 +1536,7 @@ def _main_serve(argv: list[str]) -> None:
         return
     if not outcome.served and outcome.endpoint is not None:
         print(
-            f"已有本机服务在运行：http://127.0.0.1:{outcome.endpoint.port}"
+            f"已有本机服务在运行：{loopback_url(outcome.endpoint.host, outcome.endpoint.port, '')}"
             "（已附着，本进程退出）"
         )
 
@@ -3504,13 +3507,16 @@ def _main_memory(argv: list[str]) -> None:
     - `memory reject <id>`：明确丢弃；
     - `memory blocked` / `promote <id>` / `discard <id>`（#1461）：后台 formation 被审批门
       拦下的写入的两段式处置——列表、放行重放、丢弃。
+    - `memory reproject [--target memory|user]`（#1482）：派生层与 markdown 权威面对账，
+      即 `store.py` 降级 warning 里那句运维指令的真实入口。
 
     与 web 的 `/api/memory-pending*` 是**同一条**领域路径（`StagedWriteStore`），CLI 只
     做渲染。身份取本进程的 `get_identity_context()`（单用户部署下即 local/local），与
     web 的 `_trusted_v2()` 同源。
 
     退出码：approve/reject 被拒（pin 失效、id 不存在）是**业务结果**不是进程失败，
-    照常打印原因并退 0；只有命令自报失败（迁移有未导出条目）才退 2。
+    照常打印原因并退 0；命令自报失败才退 2 —— 迁移有未导出条目，或 `reproject` 未收敛
+    （markdown 未装配 / 有文件读不出来 / 账本仍有该 target 的积压行 / 仍有待投影项）。
     """
     parser = argparse.ArgumentParser(prog="agent-harness memory")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -3528,6 +3534,13 @@ def _main_memory(argv: list[str]) -> None:
     journey.add_argument("--limit", type=int, default=50)
     subcommands.add_parser(
         "migrate", help="把 SQLite 里的 active 记忆一次性导出到 memories/*.md（幂等）",
+    )
+    reproject = subcommands.add_parser(
+        "reproject", help="把派生层与 memories/*.md 对账（收敛重复投影与积压账本）",
+    )
+    reproject.add_argument(
+        "--target", choices=("memory", "user"), default=None,
+        help="只对账一个文件；缺省两个都跑",
     )
     args = parser.parse_args(argv)
     settings = Settings()
@@ -3582,6 +3595,45 @@ async def _memory_command(
     service = await build_memory_v2_service(settings)
     staged = service.staged
     trusted = trusted_identity_for_session("", None)
+    if args.command == "reproject":
+        # #1482 Finding 二甲案：给降级 warning 指的那句运维指令接一个真实入口。
+        # 与 migrate 分支不同——reproject 必须读活账本与派生层，所以走 `build_memory_v2_service`
+        # 装配（与 pending/approve 同形）。
+        if service.markdown is None:
+            # 没有权威面就没有可对账的东西：全零摘要会装作成功，直接报错。
+            return "reproject 失败：本部署未装配 markdown 权威面（memories/*.md）。", True
+        lines = ["记忆投影对账："]
+        failed_targets: list[str] = []
+        for target in ([args.target] if args.target else ["memory", "user"]):
+            summary = await service.reproject(trusted, target)
+            lines.append(
+                f"  {target}: created={summary['created']} deleted={summary['deleted']} "
+                f"pending={summary['pending']} desired={summary['desired']}"
+            )
+            if summary["unreadable"]:
+                # `unreadable` 列的是**真正读不出来**的文件，不一定就是本轮的对账对象：
+                # 另一侧读不出来时把本 target 说成不可读，会让运维去修错文件（#1482 F2）。
+                unreadable = "、".join(summary["unreadable"])
+                if target in summary["unreadable"]:
+                    lines.append(f"    {target}: 文件读不出来，本轮未对账（修好文件后重跑）")
+                    failed_targets.append(f"{target} 不可读")
+                else:
+                    lines.append(
+                        f"    {unreadable} 读不出来，本轮无法判定 {target}"
+                        "（修好文件后重跑）"
+                    )
+                    failed_targets.append(f"{target} 未对账（{unreadable} 不可读）")
+            if summary["remaining"]:
+                lines.append(f"    账本仍有 {summary['remaining']} 行待收敛")
+                failed_targets.append(f"{target} 账本积压 {summary['remaining']} 行")
+            if summary["pending"]:
+                failed_targets.append(f"{target} 仍有待投影项")
+                for skipped_target, _digest, reason in summary["skipped"]:
+                    lines.append(f"    跳过（{skipped_target}）：{reason}")
+        if failed_targets:
+            lines.append("未收敛：" + "；".join(dict.fromkeys(failed_targets)))
+            return "\n".join(lines), True
+        return "\n".join(lines), False
     if args.command == "journey":
         # #1353 M10：与 GET /api/memory-journey 同一条领域路径（版本链 → 卡片）。
         from agent_harness.memory.v2.journey import build_journey
