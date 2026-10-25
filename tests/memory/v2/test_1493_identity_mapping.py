@@ -816,3 +816,41 @@ async def test_plan_records_the_deployment_ceiling_for_audit(tmp_path) -> None:
     assert manifest["limits"]["memory"] == 900
     assert manifest["deployment_limits"]["memory"] == DEFAULT_MEMORY_CHAR_LIMIT
     assert manifest["deployment_limits"]["user"] == DEFAULT_USER_CHAR_LIMIT
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [
+        [["m6", "m7"], ["m6", "m3"]],
+        [["m3", "m7"], ["m6", "m7"]],
+        [["m6", "m6"]],
+    ],
+)
+async def test_conflict_groups_reject_reused_source_ids_before_writing_manifest(
+    tmp_path, groups,
+) -> None:
+    workspace, database = await _seed(tmp_path)
+    repeated = next(
+        memory_id for group in groups for memory_id in group
+        if sum(memory_id in other for other in groups) > 1
+        or group.count(memory_id) > 1
+    )
+
+    with pytest.raises(MappingBlocked) as blocked:
+        await _plan(workspace, database, explicit_conflicts=groups)
+
+    assert repeated in " ".join(blocked.value.reasons)
+    assert not (workspace / MANIFEST_NAME).exists()
+
+
+async def test_distinct_explicit_conflict_groups_partition_each_source_once(tmp_path) -> None:
+    workspace, database = await _seed(tmp_path)
+    manifest = await _plan(
+        workspace, database, explicit_conflicts=[["m6", "m7"], ["m1", "m2"]],
+    )
+
+    conflicts = _items(manifest, kind="entry_conflict")
+    sources = [source["id"] for item in conflicts for source in item["sources"]]
+    assert len(conflicts) == 2
+    assert sorted(sources) == ["m1", "m2", "m6", "m7"]
+    assert len(sources) == len(set(sources))

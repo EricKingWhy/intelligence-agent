@@ -342,10 +342,23 @@ async def plan_identity_mapping(
     conflicts_of: dict[str, list[str]] = {}
     active_ids = {str(row["memory_id"]) for row in rows["memory_v2_records"]
                   if row.get("status") == "active"}
-    for group in explicit_conflicts or ():
+    for group_index, group in enumerate(explicit_conflicts or (), start=1):
         ids = [str(source) for source in group if str(source).strip()]
         if len(ids) < 2:
             raise MappingBlocked([f"--conflict 至少给两条 memory_id（收到 {ids}）"])
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for memory_id in ids:
+            if memory_id in seen and memory_id not in duplicates:
+                duplicates.append(memory_id)
+            seen.add(memory_id)
+        if duplicates:
+            raise MappingBlocked([f"--conflict 重复点名 memory_id：{duplicates}"])
+        overlap = [memory_id for memory_id in ids if memory_id in conflicts_of]
+        if overlap:
+            raise MappingBlocked([
+                f"--conflict 不能让同一 memory_id 出现在多个组：{overlap}（第 {group_index} 组）",
+            ])
         # 点名了不存在/非 active 的行 ⇒ 人写错了 ID。静默忽略会让"我明明裁过它"变成假话。
         unknown = [memory_id for memory_id in ids if memory_id not in active_ids]
         if unknown:
