@@ -13,7 +13,14 @@
 - 合法内部链接（相对/绝对/中间目录）照常读写穿（宿主语义：解析后操作）；
 - 新文件、缺失父目录、路径规范化（`..`/`./`/绝对相对）行为明确；
 - `path_kind` 的"不跟随末级链接"探测（#1167）与 `list_files` 的
-  `find -type f`（不枚举链接）不回归。
+  `find -type f`（不枚举链接）不回归；
+- 链接环行为明确（`realpath -m` 对环静默返回词法路径；拒绝在执行侧——
+  read 的 daemon APIError 映射为裸 `OSError`，web 侧落既有 422 分类）；
+- `path_kind` 的**中间目录**链接同样过容器围栏（不泄出界目标类型）。
+
+AC③ 的工具层配对（PermissionError → `PERMISSION_DENIED` ToolResult）
+由 `tests/tools/test_coding_tools.py` 既有用例（fake 沙箱断言映射）与
+本文件的沙箱层 PermissionError 断言**合并覆盖**（两轴审查一致判定）。
 
 需要真实 Docker Engine（python:3-slim + coreutils realpath）。Engine
 不可用时用例**真实失败**（不静默跳过）——票面 AC 明确要求实际容器用例
@@ -224,6 +231,59 @@ def test_path_kind_symlink_detection_not_regressed(fenced_sandbox: object) -> No
     assert sandbox.path_kind("pk-missing") is None
     # 词法越界仍拒绝探测。
     assert sandbox.path_kind("../../etc/passwd") is None
+    # workspace 根本身。
+    assert sandbox.path_kind(".") == "directory"
+
+
+def test_path_kind_intermediate_dir_link_fenced(fenced_sandbox: object) -> None:
+    """Standards 轴 S1：中间目录链接不再泄出界目标的类型/存在性。
+
+    修复前 `path_kind("dir-link/x")` 的 `test` 会跟随中间链接，报出
+    workspace 外目标的类型；修复后父目录过容器围栏，出界即拒绝探测
+    （与宿主后端对越界路径恒 None 对齐）。内部中间目录链接照常工作。
+    """
+    sandbox = fenced_sandbox
+    sandbox.exec(
+        "mkdir -p /etc/harness-fence-kind && "
+        "printf 'x' > /etc/harness-fence-kind/secret.txt && "
+        "ln -sfn /etc/harness-fence-kind /workspace/pk-dl"
+    )
+    assert sandbox.path_kind("pk-dl/secret.txt") is None
+
+    sandbox.exec(
+        "mkdir -p /workspace/pk-sub && "
+        "printf 'x' > /workspace/pk-sub/f.txt && "
+        "ln -sfn /workspace/pk-sub /workspace/pk-sl"
+    )
+    assert sandbox.path_kind("pk-sl/f.txt") == "file"
+    # 末级链接探测不回归（#1167）：中间目录合法时，末级仍是链接本体。
+    sandbox.exec("ln -sfn f.txt /workspace/pk-sl/tail-link")
+    assert sandbox.path_kind("pk-sl/tail-link") == "symlink"
+
+
+def test_symlink_loop_behavior_is_defined(fenced_sandbox: object) -> None:
+    """链接环行为明确（Correctness 轴 F2 复核后的实测语义）。
+
+    实测事实：`realpath -m` 对不可解析组件（环）静默返回词法路径
+    （exit 0），环不会被围栏拦截；拒绝发生在执行侧——
+    - read：daemon `get_archive` 以 `evalSymlinksInScope: too many links`
+      500 拒绝（APIError），read_text 将其映射为裸 `OSError`（web 侧落
+      既有 422"路径不合法"档，不产生未分类 500）；
+    - write：`cat >` 在 shell 侧 ELOOP 失败 → RuntimeError"无法写入"。
+    环在界内，不是越界（PermissionError）；fail-closed、无出界。
+    """
+    sandbox = fenced_sandbox
+    sandbox.exec(
+        "ln -sfn loop-b /workspace/loop-a && ln -sfn loop-a /workspace/loop-b"
+    )
+
+    with pytest.raises(OSError) as excinfo:
+        sandbox.read_text("loop-a")
+    assert not isinstance(excinfo.value, PermissionError)
+    assert not isinstance(excinfo.value, FileNotFoundError)
+
+    with pytest.raises(RuntimeError, match="无法写入"):
+        sandbox.write_text("loop-a", "x")
 
 
 def test_list_files_does_not_enumerate_symlinks(fenced_sandbox: object) -> None:
