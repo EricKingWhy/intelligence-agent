@@ -38,6 +38,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 | `web/**` 的交互 / 渲染 | ⑪ playwright e2e（+ 必要时 ⑫ 真机验收） | 人工 |
 | 任何"要进 main"的批次 | ①–⑪ + 两轴独立审查 | 人工，冻结树 |
 | `evaluation/live_gate/**` 或票面要求"真模型 + 生产工具"的证据 | ⑮ Live Gate（**需真凭证**；`validate` 复核入库证据） | 人工，冻结树（不进推送前 60s 快车道） |
+| `src/**` 的变更行（PR 面） | ⑯ 变更行覆盖率棘轮（60%；基线留痕随 gate1 / nightly） | CI（`coverage-ratchet` 工作流，**非必需检查**） |
 | 只想重跑失败的那一条 | `python scripts/gate0.py --only <lane>` | 人工 |
 | 一次改动只重跑受影响的那些 | `python scripts/gate0.py --affected <rev>`（见 §2 ⑭；<rev> 亦可为 `A..B`；**只内联 pytest 子集**） | 人工 |
 
@@ -381,6 +382,39 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   ② 不得用替身或 Fake 结果充当 Live Gate 读数（`#305` 明文）——机制用例的替身只落 `tmp_path`、只测判定语义；
   ③ 它**不替代**集成前完整门禁（§4）：本车道回答"真模型 + 生产工具这条链真的通"，不回答 lint / 类型 / 前端 / e2e；
   ④ 后续场景（#319 的五类）只需 `register_scenario` 注册，runner 与 validator 直接复用。
+
+### ⑯ 覆盖率基线留痕与变更行棘轮（`#1499`）
+
+- **命令**：
+  - 基线留痕（只记录、不判定）：`python scripts/check_line_coverage_ratchet.py baseline
+    --report artifacts/coverage.xml --out artifacts/coverage-baseline.json --scope "<测量范围>"`
+  - 变更行棘轮：`python scripts/check_line_coverage_ratchet.py ratchet
+    --report artifacts/coverage.xml --baseline artifacts/coverage-baseline.json --base origin/main
+    [--move-only-note "<纯移动说明>"]`
+- **落点**：`scripts/check_line_coverage_ratchet.py`（判据唯一实现）、
+  `.github/workflows/coverage-ratchet.yml`（PR 侧执行）、`gate1.yml` / `gate-nightly.yml`
+  各追加一个 `baseline` 步骤（**覆盖率命令逐字未改**）、
+  `docs/agents/coverage-ratchet.whitelist.json`（盲区白名单）。设计与取舍：
+  `docs/agents/1499-coverage-ratchet.md`。
+- **判定**：分母 = `git diff -U0 --no-renames <base>...HEAD` 里 `src/` 下**新增行号** ∩ 该文件的
+  **可执行行**；`covered*100 >= total*60` 通过（**恰好 60% 通过**，整数比较，不经浮点）；
+  未改行一律不进分母；白名单文件的变更行不进分母（解析期拒绝通配 / 目录前缀 / 空字段）；
+  纯移动需 `--move-only-note` **且** `git -M` 判 rename 两条同时成立，缺一照常计入；
+  零可执行变更 ⇒ 打印 `RATCHET EMPTY` 并退 0（空集合语义，理由见脚本 docstring）。
+- **期望证据 / 退出码**：`RATCHET PASS` + `RATCHET FAIL` + `RATCHET EMPTY` 三态；
+  `0` 通过 / `1` 未达标 / **`2` 不可判**（缺报告、缺基线、报告 sha256 与基线不符、基线树 ≠ 当前树、
+  改了 `src/` 但报告里没该文件、`--base` 解不出、白名单不合法）。**`2` 不是绿**。
+- **为什么不全仓 `fail_under`**（B 案否决理由）：coverage.py 官方文档原文 *"If the total coverage
+  measurement is under this value, then exit with a status code of 2."*，且明写非整数值要另配
+  `[report] precision`、`100` 会判任何小于 100 的值失败 ⇒ 全仓单一硬阈值对精度/取整敏感、
+  平台盲区直接假红、且与历史欠账耦合。分级形态的一手旁证：Lighthouse CI 的 `warn` 级
+  *"failure will not result in a non-zero exit code"*、pa11y-ci 的 `--threshold` 可按页面设。
+- **执行面**：`coverage-ratchet` 工作流带 `paths` 过滤（只在 `src/**` / `tests/**` / 棘轮自身变动时跑）
+  ⇒ **不能**挂成必需状态检查（被 paths 跳过的必需检查会永久 pending，见 `e2e-smoke.yml` 文件头）。
+  它是**非必需**检查；把红看成真信号、不看成"可忽略"。
+- **本票实测读数**（`2026-10-25`，Linux / Python 3.12.3 本机 `.venv`）：聚焦守卫 23 例
+  9 个变异体全被鉴别（每个变异体的失败集合见 `docs/phase_status/2026-10.md` 的 #1499 段）；
+  工作流未在 GitHub 上跑过（开 PR 后才有第一次 CI 读数），**本地不以任何方式冒充 CI 读数**。
 
 ---
 

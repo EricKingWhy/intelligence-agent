@@ -1,0 +1,109 @@
+# .github/workflows/coverage-ratchet.yml —— 变更可执行行覆盖率棘轮（Issue #1499）
+#
+# 为什么存在
+#
+# 本仓的行覆盖率此前**只打印、不判定**（gate1 / gate-nightly 的 `--cov-report=term/xml` 命令逐字
+# 未改，本工作流也不改它）。Issue #1499 的已裁结论 11（A 案）不设全局硬门限，只做两件事：
+#   ① **基线留痕**：gate1 / gate-nightly 每次跑完覆盖率后落一份 `artifacts/coverage-baseline.json`
+#      （SHA、tree、平台、测量范围、排除项、原始报告 sha256）——**那是"记录"，不是"门"**；
+#   ② **变更行棘轮**：**这个工作流**。PR 的变更可执行行（`git diff origin/main...HEAD` ∩ 覆盖率报告）
+#      低于 60% ⇒ 退出 1；未改行 / 白名单行不进分母；全仓总率只打印不判定。
+#
+# 为什么不在 gate0 里
+#
+# gate0 是**推送前 ≤60s 的机械车道**、且是 main 的**必需状态检查**。棘轮要一份真覆盖率报告 ⇒
+# 必须跑全量 pytest（分钟级）⇒ 它是重车道，不是机械车道。gate0 的 7 条车道一条都不改。
+#
+# 为什么**不是**必需状态检查（与 e2e-smoke 同一条教训，见该文件头部）
+#
+# 本工作流带 `paths-ignore`（只在 `src/**` 变动时跑）。把被 paths 过滤掉的检查挂成必需检查 ⇒
+# 不碰 src 的 PR 会永久停在 "Expected — waiting for status to be reported"、且重跑绕不开。
+# 所以它和 `e2e-smoke` 一样是**非必需**检查；要把它变成硬门，得先改分支保护（另需用户授权，
+# 不在本票范围内）。⚠ 这不等于"可以不看":PR 上它红 = 本次改动引入的可执行行覆盖不足。
+#
+# 等待代价（票面 AC3 要求留证）：本作业 = `uv sync` + 全量 pytest + 覆盖率，与 gate1 的 backend
+# 作业同形同命令；单人 PR 每碰一次 `src/**` 就多等这一轮。实测读数记在
+# `docs/agents/verification.md` §2 ⑯（引用时连同来源与负载一起给，别只抄数字）。
+#
+# 白名单（盲区）与纯移动跳过的口径：`docs/agents/coverage-ratchet.whitelist.json` 的逐条理由
+# + `scripts/check_line_coverage_ratchet.py` 的 `--move-only-note`。两者都不接受"整域排除"。
+
+name: coverage-ratchet
+
+on:
+  pull_request:
+    branches: [main]
+    # 只在**分母可能非空**的面上跑：棘轮的分母是 `src/**` 的新增可执行行，`tests/**` / `docs/**`
+    # 单独的改动恒为空集合（`RATCHET EMPTY`）⇒ 让它们触发一轮全量 pytest 是纯等待代价。
+    paths:
+      - 'src/**'
+      - 'scripts/check_line_coverage_ratchet.py'
+      - 'docs/agents/coverage-ratchet.whitelist.json'
+      - '.github/workflows/coverage-ratchet.yml'
+
+# 只读仓库 + 上传 artifact。棘轮不改任何东西。
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: coverage-ratchet-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  ratchet:
+    name: changed-lines >= 60%
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: 检出（PR 头提交；全量历史用于 merge-base 与 diff）
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（Dependabot 维护 SHA pin）
+        with:
+          # 与 gate0.yml 同理：默认检出的是合成的 merge 提交，棘轮要算的是 PR 自己那棵树。
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: 装 Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: 装 uv 0.10.9（缓存 ~/.cache/uv）
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.10.9'
+          cache-dependency-glob: uv.lock
+      - name: 装后端依赖
+        run: uv sync --locked --all-extras
+      # 与 gate1 同一条镜像：workspace 隔离用例刻意"Engine 不可用即真失败、不静默跳过"。
+      - name: 准备 workspace 隔离测试所需的 Docker 镜像
+        run: docker pull python:3-slim
+      - name: 全量后端测试 + 覆盖率（与 gate1 逐字同命令）
+        # `continue-on-error` **只在断言层面**：测试红是 gate1 / pytest 的判定面（本作业不重复裁定），
+        # 棘轮的输入是覆盖率报告本身。若测试红到连报告都没产出，下一步的 baseline 会因为
+        # "找不到报告"退 2 —— 那是**不可判**，不是绿。
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          uv run pytest tests \
+            --junitxml=artifacts/pytest.xml \
+            --cov=src/agent_harness \
+            --cov-report=term \
+            --cov-report=xml:artifacts/coverage.xml
+      - name: 基线留痕（这份报告是哪棵树、哪个平台、什么范围测出来的）
+        run: |
+          uv run python scripts/check_line_coverage_ratchet.py baseline \
+            --report artifacts/coverage.xml \
+            --out artifacts/coverage-baseline.json \
+            --scope "pytest tests + --cov=src/agent_harness（ubuntu-latest / py3.13）"
+      - name: 变更行棘轮（< 60% 退出 1；无变更可执行行 ⇒ 显式 RATCHET EMPTY）
+        run: |
+          uv run python scripts/check_line_coverage_ratchet.py ratchet \
+            --report artifacts/coverage.xml \
+            --baseline artifacts/coverage-baseline.json \
+            --base origin/${{ github.base_ref }}
+      - name: 上传报告（失败也传）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-ratchet-reports
+          path: artifacts/
+          retention-days: 30

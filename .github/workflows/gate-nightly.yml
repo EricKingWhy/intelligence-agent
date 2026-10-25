@@ -68,6 +68,17 @@ jobs:
             --cov=src/agent_harness \
             --cov-report=term \
             --cov-report=xml:artifacts/coverage.xml
+      # #1499：覆盖率**基线留痕**（只记录，不判定）。写的是"这份报告跑在哪棵树上、哪个平台、
+      # 什么测量范围、排除了什么、原始报告 sha256" —— 判定面在 `coverage-ratchet` 工作流
+      # （变更行棘轮），本作业不设任何 fail_under。
+      - name: 覆盖率基线留痕（只记录，不判定）
+        # 测试红也留痕：报告只要产出了，就该有"它跑在哪棵树上"的记录（与下一行的 upload 同理）。
+        if: always()
+        run: |
+          uv run python scripts/check_line_coverage_ratchet.py baseline \
+            --report artifacts/coverage.xml \
+            --out artifacts/coverage-baseline.json \
+            --scope "pytest tests + --cov=src/agent_harness（ubuntu-latest / py3.13）"
       - name: 上传测试报告（失败也传）
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
