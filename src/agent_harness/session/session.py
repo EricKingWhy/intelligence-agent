@@ -12,7 +12,10 @@ SessionStore 负责 IO（薄层），Session 负责业务状态（seq 分配、d
 
 from __future__ import annotations
 
+import asyncio
+import bisect
 import logging
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
@@ -72,6 +75,15 @@ from agent_harness.session.store import JsonlSessionStore
 
 logger = logging.getLogger("agent_harness.session")
 
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    """当前线程的运行中 loop（无则 None）——闸门投递归属判定的共用读法。"""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
 #: 看板投影触发集：只有这些事件会改变投影字段（产品态 / 注意力 / 最后消息）。
 #: 触发集外的事件只推进 sidecar 水位（见 BoardProjectionStore.update_from_events）。
 #:
@@ -81,21 +93,24 @@ logger = logging.getLogger("agent_harness.session")
 #: T1 的「单 run 约 4–8 次重放」上限被抬高到模型回合频率（消息新鲜度优先）。
 #: 升级路径见 `board_projection.py` 的「已知上限」段（增量 fold / 尾部 O(1) 扫描），
 #: 不是另写一份投影语义。
-_BOARD_PROJECTION_TRIGGER_TYPES = frozenset(
-    {
-        TASK_DEFINED,
-        TASK_ACCEPTANCE_REVISED,
-        VERIFICATION_UPDATED,
-        TASK_ACCEPTED,
-        TASK_ACCEPTANCE_RELEASED,
-        RUN_STARTED,
-        USER_MESSAGE,
-        MODEL_COMPLETED,
-        USER_INPUT_REQUESTED,
-        TOOL_APPROVAL_REQUESTED,
-        PERMISSION_RESOLVED,
-    }
-) | RUN_TERMINAL_TYPES
+_BOARD_PROJECTION_TRIGGER_TYPES = (
+    frozenset(
+        {
+            TASK_DEFINED,
+            TASK_ACCEPTANCE_REVISED,
+            VERIFICATION_UPDATED,
+            TASK_ACCEPTED,
+            TASK_ACCEPTANCE_RELEASED,
+            RUN_STARTED,
+            USER_MESSAGE,
+            MODEL_COMPLETED,
+            USER_INPUT_REQUESTED,
+            TOOL_APPROVAL_REQUESTED,
+            PERMISSION_RESOLVED,
+        }
+    )
+    | RUN_TERMINAL_TYPES
+)
 
 
 def _board_projection_needs_recompute(event: SessionEvent) -> bool:
@@ -172,6 +187,9 @@ class Session:
         # 增量 seq 计数器：构造时一次性从已加载事件重算（max+1），append 时 O(1) 分配，
         # 避免每次 append 对全量事件做 O(n) max 扫描（长会话累计 O(n²)）
         self._next_seq: int = max((e.seq for e in self._events), default=-1) + 1
+        # 取消/关闭打断过一次在途异步写 ⇒ 计数器可能落后盘面（UNKNOWN）。置位后
+        # 下一次构造事件前先向 store 要盘面事实（#1489）。
+        self._seq_uncertain: bool = False
         # 本聚合是否已被**交付点**交给在途 runtime（#1055）。默认关：撞号原样抛出，
         # 把结构性冲突交给调用方的有界重试与失败归因（BUG-011）。交付点显式调
         # `deliver_to_runtime()` 打开它——**不从构造参数推断**：服务层 `load()` /
@@ -182,6 +200,54 @@ class Session:
         # 广播 durable 事实（含工具执行期间追加的 output_delta）。回调异常被
         # 吞掉（落日志）：listener 是观察者，绝不能破坏 append 的持久化契约。
         self._listeners: list[Callable[[SessionEvent], None]] = []
+        # ── 有序投递闸门（#1547）──
+        # #1489 把 fsync 等待移出事件循环后，写者的**完成顺序**不再等于 seq 顺序
+        # （`_GroupFlush` cohort 的唤醒顺序 ≠ 取号顺序）。若内存投影与 listener
+        # 通知跟随各自写者的完成时刻，`RunManager.enqueue_session_event` 的 seq
+        # 幂等门会把迟到帧**永久丢弃**（live SSE 与 after_seq 重放双路都丢）。
+        # 闸门把「内存投影 + listener 通知」收口成**按 seq 单调**的投递：
+        #   * seq 未定的在途写者（`_gate_inflight` 值为 None）关住游标——它可能
+        #     占到更小的号；定号后才放行（等待的是**真实在途的写**，不是定时窗口）；
+        #   * 已知 seq 但尚未走到投递点的写者（`_gate_undelivered`）同样挡住
+        #     更高 seq 的放行；
+        #   * 写失败/等待者取消的 seq 不通知、也不挡路（`_gate_skipped` 透明跳过）。
+        # `threading.Lock`：同步 `append` 的调用线程可能与事件循环并发触碰闸门。
+        self._gate_guard = threading.Lock()
+        self._gate_inflight: dict[int, int | None] = {}
+        self._gate_next_token = 0
+        self._gate_undelivered: set[int] = set()
+        self._gate_ready: dict[int, SessionEvent] = {}
+        # skipped 保留事件对象（审查 F1）：取消写者的内存补插必须推迟到 drain
+        # 消费该 seq 的时刻（前置 ①③ 保证那时没有更低的在途/未登记 seq）——
+        # 在取消臂/完成回调当场 insort 会越过仍在途的更低 seq，把 `_events`
+        # 倒插成 [0,2,1]。
+        self._gate_skipped: dict[int, SessionEvent] = {}
+        self._gate_draining = False
+        # 已消费（投递或透明跳过）的最大 seq：投递严格按 seq 单调推进，水位用于
+        # 让 `_deliver_ordered` 幂等（同一事件可能已被其它等待者的 drain 放行）。
+        self._gate_delivered_through = -1
+        # ready 中每个 seq 的**投递归属 loop**（#1547 审查 P0）：异步写者的事件
+        # 必须回到它自己的事件循环上通知 listener（#1489 冻结的线程亲和——
+        # `web.AskUserTimeoutDriver` 依赖「append_async 的回调发生在 loop 内」）；
+        # 同步写者登记 None（本就是任意线程契约，就近投递）。drain 在别的线程上
+        # 遇到 loop 亲和事件时只做转发，不在本地通知。
+        self._gate_ready_loops: dict[int, asyncio.AbstractEventLoop | None] = {}
+        # 已走到投递点、但看板投影还欠一次 sidecar 更新的 seq（同步路径投递后由
+        # drain 补看板；异步路径自己经 to_thread 更新，不登记在此）。
+        self._gate_board_pending: set[int] = set()
+        # 投递水位等待者（#1547）：`(seq, loop, future)`。drain 每次推进水位后
+        # 按 seq 序经 `call_soon_threadsafe` 唤醒——drain 可能跑在工作线程，
+        # 跨线程 set future 不安全。等待者唤醒序 = seq 序，镜像方（`append_async`
+        # 返回 → run_stream yield）因此保持单调。
+        self._gate_waiters: list[
+            tuple[int, asyncio.AbstractEventLoop, asyncio.Future]
+        ] = []
+        # 闸门清空等待者（#1547 审查 P1）：`(loop, future)`。`mark()/since()` 的
+        # 长度游标以内存投影为界，而同步写者的投递可能被在途写者推迟到返回之后
+        # ——快照消费者（runtime 的工具 delta 记账）等闸门清空再取 since()。
+        self._gate_settled_waiters: list[
+            tuple[asyncio.AbstractEventLoop, asyncio.Future]
+        ] = []
 
     @property
     def sandbox(self) -> Sandbox | None:
@@ -311,8 +377,11 @@ class Session:
         validate_event_seq(session_id, events)
         session = cls(session_id, store, events)
         return session.append(
-            event_type, dict(data),
-            run_id=run_id, agent_id=agent_id, step_id=step_id,
+            event_type,
+            dict(data),
+            run_id=run_id,
+            agent_id=agent_id,
+            step_id=step_id,
         )
 
     def deliver_to_runtime(self) -> None:
@@ -433,44 +502,22 @@ class Session:
         block_id 是流式块标识（ADR-0016 §3.2，reasoning 块等），透传给 SessionEvent。
         事件类型必须在 EVENT_TYPES 词汇表内；STREAM_ONLY_TYPES（流式专属信号）
         拒绝持久化（invariant #4：Event ≠ Diagnostic Log）。
+
+        #1547：返回即「已落盘」不变；若有更低 seq 的在途写者，内存投影与 listener
+        通知经闸门**按 seq 保序**放行（可能晚于本调用返回，但必然发生且不乱序）。
+
+        异步调用链（会阻塞事件循环的路径）走 :meth:`append_async`：#1489 起
+        durable 刷盘的等待可以从事件循环移出，写入与确认语义完全不变。
         """
-        # 词汇表校验：先拒绝再写盘，杜绝未知/流式事件悄悄污染 durable log
-        if event_type in STREAM_ONLY_TYPES:
-            raise ValueError(
-                f"流式专属事件 '{event_type}' 不得通过 Session.append 持久化"
-                "（仅作为 run_stream() 的 AgentEvent 输出）"
-            )
-        if event_type not in EVENT_TYPES:
-            raise ValueError(f"未知事件类型 '{event_type}'：不在 EVENT_TYPES 词汇表中")
-        if event_type == USER_MESSAGE:
-            refs = validate_user_fact_links(
-                self._events, data, session_id=self.session_id
-            )
-            if refs:
-                if source_event_ids is not None and source_event_ids != refs:
-                    raise ValueError("user fact links do not match source_event_ids")
-                source_event_ids = refs
-        elif event_type == TASK_PROTECTED_FACT:
-            validate_protected_fact_data(self._events, data, session_id=self.session_id)
-            refs = [data["source_event_id"]]
-            if data.get("evidence_event_id") is not None:
-                refs.append(data["evidence_event_id"])
-            if source_event_ids is not None and source_event_ids != refs:
-                raise ValueError(
-                    "protected fact event references do not match its payload"
-                )
-            source_event_ids = refs
-        seq = self._next_seq
-        event = SessionEvent(
-            seq=seq,
-            type=event_type,
-            session_id=self.session_id,
+        event = self._build_event(
+            event_type,
+            data,
             run_id=run_id,
             agent_id=agent_id,
             step_id=step_id,
             block_id=block_id,
-            data={**data, "dangling": True} if _mark_dangling else data,
             source_event_ids=source_event_ids,
+            mark_dangling=_mark_dangling,
         )
         # 返回**实际落盘的那一枚**：已交付 runtime 的聚合撞号会在 store 锁内改号
         # （#1062），调用方（`end_run` 的返回值、流式镜像、测试断言）必须拿到与事件流
@@ -513,7 +560,11 @@ class Session:
         return self.append(TASK_PROTECTED_FACT, data)
 
     def _persist_event(
-        self, event: SessionEvent, *, notify: bool, terminal: bool = False,
+        self,
+        event: SessionEvent,
+        *,
+        notify: bool,
+        terminal: bool = False,
     ) -> SessionEvent:
         """提交一条已构造事件，并在需要时通知实时观察者；返回**已落盘的那一枚**。
 
@@ -543,56 +594,524 @@ class Session:
         ``end_run``）即使未交付也改号——它没有「下次 append」可用，放它不落等于 run 在
         盘上永远悬空（#1061 的保底通道，A 是它的推广而非替换）。
         """
-        persisted = self._store.append_event(
-            self.session_id, event,
-            # `allocate`：撞号时在 store 锁内改号再落盘。已交付聚合 + 终态写者都吃
-            # 这条路径；未交付的非终态写者仍 fail-closed（快照门，BUG-011）。
-            allocate=self._delivered_to_runtime or terminal,
-        )
-        # store 返回**实际落盘的那一枚**：锁内分配会改号，不接住它就会「内存/返回值是
-        # 旧号、盘上是新号」——`_events`、`_next_seq` 与调用方（`end_run` 的返回值、
-        # 流式镜像）三处一起分叉。**不回落到本地事件**：`append_event` 的契约是
-        # `SessionEvent`（docstring 的「:returns: 实际落盘的那一枚」），全仓替换件
-        # （含测试替身）都返回它；`None` 只可能来自契约外的实现，那种情况下回落到
-        # 旧号反而会静默分叉（#1102 删掉了这条例外分支——它已无调用方可走）。
-        event = persisted
-        self._events.append(event)
-        # 写盘成功后才推进计数器——失败不消耗 seq。必须按**实际写入的号**前进：锁内分配
-        # 会改号，写成 `+= 1` 会留下过期缓存，把下一次 append 直接送进冲突分支
-        # （#1024 实测：改 `+= 1` 后终态缺失率立刻非零）。
-        self._next_seq = event.seq + 1
+        persisted: SessionEvent
+        # 闸门登记（#1547）：同步写者与异步写者走同一道闸——`_GroupFlush` cohort
+        # 的唤醒顺序同样可能让两个同步写者的完成顺序颠倒（取号 6 先于取号 5 返回），
+        # 只有「先占位、完成后再投递」能同时覆盖同步/异步两条入口。adopt_history
+        # （notify=False）是离线 seed，无并发在途写者，不经闸门——保持「直接落
+        # 内存」的批量语义（fork N 条历史时的 O(N) 而非 O(N) 次闸门往返）。
+        token: int | None = None
         if notify:
-            self._update_board_projection(event)
+            with self._gate_guard:
+                token = self._gate_next_token
+                self._gate_next_token += 1
+                self._gate_inflight[token] = None
+        try:
+            persisted = self._store.append_event(
+                self.session_id,
+                event,
+                # `allocate`：撞号时在 store 锁内改号再落盘。已交付聚合 + 终态写者
+                # 都吃这条路径；未交付的非终态写者仍 fail-closed（快照门，BUG-011）。
+                allocate=self._delivered_to_runtime or terminal,
+            )
+        except BaseException:
+            # 写失败透明：不占闸位、不投递、不挡路（同异步入口的失败分支）。
+            if token is not None:
+                with self._gate_guard:
+                    self._gate_inflight.pop(token, None)
+                self._drain_ordered()
+            raise
+        return self._commit_persisted(persisted, notify=notify, token=token)
+
+    async def append_async(
+        self,
+        event_type: str,
+        data: dict,
+        *,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        step_id: int | None = None,
+        block_id: str | None = None,
+        source_event_ids: list[str] | None = None,
+        _mark_dangling: bool = False,
+        terminal: bool = False,
+    ) -> SessionEvent:
+        """:meth:`append` 的异步入口（#1489）：durable 落盘的等待不占事件循环。
+
+        语义与 :meth:`append` **逐字相同**（同样的词汇表校验、同样的 seq 分配、
+        同样的 ``allocate`` 门、同样的内存投影/监听器顺序），差别只有一处：
+
+        * 临界区内的 write+flush 仍在本线程同步完成（微秒级）；
+        * 本轮 ``os.fsync`` 的等待交到工作线程，且与同时到达的写者**共享**一次
+          刷盘。
+
+        于是「事件循环在等磁盘」这条阻塞被移除，而「返回即耐久」「不可吞写失败」
+        「不确认未耐久事件」三条底线都不动。
+
+        ⚠ **本协程写入的事件，其 listener 通知必然回到调用方的事件循环上**
+        （#1547 闸门按 `_gate_ready_loops` 归属转发，别的线程只投递自己的
+        同步事件）：``web`` 的 ``AskUserTimeoutDriver`` 显式依赖「append 的
+        后续回调发生在 loop 内」，本方法保住这条假设（见该模块 docstring
+        的告警）。
+        """
+        event = self._build_event(
+            event_type,
+            data,
+            run_id=run_id,
+            agent_id=agent_id,
+            step_id=step_id,
+            block_id=block_id,
+            source_event_ids=source_event_ids,
+            mark_dangling=_mark_dangling,
+        )
+        # 闸门登记（#1547）：这个写者从此刻起占一个「seq 未定」的闸位——它的
+        # 完成回调定号前，任何更高 seq 的事件都不得先行投递（可能被它压号）。
+        with self._gate_guard:
+            token = self._gate_next_token
+            self._gate_next_token += 1
+            self._gate_inflight[token] = None
+        task = asyncio.ensure_future(
+            self._store.append_event_async(
+                self.session_id,
+                event,
+                allocate=self._delivered_to_runtime or terminal,
+            )
+        )
+        # 等待者状态（#1547）：回调与取消臂共享。`seq` 在写完成时由回调回填；
+        # `cancelled` 在等待者放弃时置位——两者谁先到都能正确收口。
+        waiter: dict[str, int | bool] = {}
+
+        def _commit_memory(done: asyncio.Future) -> None:
+            """写完成时把计数器对齐到**实际写入的那一枚**（#1489），并给闸门定号。
+
+            取消/关闭打断的是「等待」，线程里那行可能已在文件里、只有「是否耐久」
+            是 UNKNOWN。不对齐的话 `_next_seq` 落后盘面，紧接着的终态写（取消臂的
+            `run/failed`）会以同号重投撞 `SeqConflict` —— 那条 run 在盘上就永远
+            悬空（#550/#1061 要堵的正是这个）。#1547 起，内存投影不再在这里做，
+            而是随闸门按 seq 有序投递；**等待者已放弃**的 seq 登记进 `_gate_skipped`
+            （保留事件对象），内存补插由 drain 消费到该 seq 时保序完成（审查 F1：
+            当场插入会越过仍在途的更低 seq），通知按 #1489 语义不补发。
+            """
+            if done.cancelled() or done.exception() is not None:
+                with self._gate_guard:
+                    self._gate_inflight.pop(token, None)
+                self._drain_ordered()
+                return
+            persisted = done.result()
+            with self._gate_guard:
+                # `max`：取消后的对齐可能已经把计数器推到更前面，回调晚到时不许倒退。
+                self._next_seq = max(self._next_seq, persisted.seq + 1)
+                waiter["seq"] = persisted.seq
+                if waiter.get("cancelled"):
+                    # 等待者已放弃：写本身成功，seq 已定——登记为透明跳过并当场
+                    # 撤出闸位（通知按 #1489 语义不补发）。内存补插不在此刻做：
+                    # 更低 seq 可能仍在途，drain 消费到该 seq 时再保序插入（F1）。
+                    self._gate_inflight.pop(token, None)
+                    self._gate_skipped[persisted.seq] = persisted
+                else:
+                    self._gate_inflight[token] = persisted.seq
+                    self._gate_undelivered.add(persisted.seq)
+            self._drain_ordered()
+
+        task.add_done_callback(_commit_memory)
+        # `shield`：取消只放弃**等待**，不撤销已在跑的那次写；`_commit_memory` 在
+        # 本协程被唤醒之前执行（Future 的 done 回调按登记顺序派发，它早于 shield
+        # 自己的转发回调），因此下面醒来时计数器对齐一定已经完成。
+        try:
+            persisted = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # 那次写还在跑：本条是否落盘属 UNKNOWN，取号也可能已被它占掉。不猜、
+            # 也不在取消路径上等磁盘——只记下「计数器可能落后」，下一次 append 前
+            # 向 store 要盘面事实（`last_written_seq` 取写锁读，与在途写者串行）。
+            skipped = False
+            with self._gate_guard:
+                waiter["cancelled"] = True
+                late_seq = waiter.get("seq")
+                if not isinstance(late_seq, int):
+                    late_seq = None  # 回调未到：留给 _commit_memory 的取消分支收口
+                elif late_seq <= self._gate_delivered_through:
+                    late_seq = None  # 已被其它等待者的 drain 按序投递，无需补插
+                elif late_seq in self._gate_undelivered:
+                    # 完成回调先到、等待者随后被取消：写已成功只是没等它——透明
+                    # 跳过（事件对象随 `_gate_skipped` 保留，内存补插由 drain
+                    # 消费到该 seq 时保序完成，审查 F1：当场插入会越过仍在途的
+                    # 更低 seq 把 `_events` 倒插成 [0,2,1]）。
+                    self._gate_undelivered.discard(late_seq)
+                    self._gate_inflight.pop(token, None)
+                    if (
+                        task.done()
+                        and not task.cancelled()
+                        and task.exception() is None
+                    ):
+                        self._gate_skipped[late_seq] = task.result()
+                        skipped = True
+                    else:
+                        late_seq = None  # 防御：undelivered 只由完成回调登记
+                else:
+                    late_seq = None  # 防御：不在 undelivered 也不该由本臂处理
+            if skipped:
+                self._drain_ordered()
+            self._seq_uncertain = True
+            raise
+        # 投递（内存投影 + listener）按 seq 有序放行（#1547）。恢复点到投递点之间
+        # 没有 await——不可能在这里被取消而在闸门里留下永久占位。
+        self._deliver_ordered(persisted, token)
+        # 等本条**真正投递**再返回（#1547）：run_stream 依据本返回值 yield durable
+        # 镜像（带 seq），镜像先于更低 seq 入队会被 RunManager 的幂等门当重复丢弃。
+        # 本条投递 ⟹ 全部更低 seq 已投递（闸门保证），镜像因此永不跳号。若此刻
+        # 被取消：写已耐久、事件已在闸内 ready，后续 drain 照常按序投递——等待者
+        # 放弃的只是「拿返回值」，不产生需要收口的 UNKNOWN。
+        await self.wait_delivered(persisted.seq)
+        # 看板投影同样是**逐事件一次 sidecar 重写 + fsync**（`_write_sidecar`），
+        # 留在循环上就等于把 #1489 要消除的那次等待原样搬了个位置——它也是派生索引
+        # （best-effort、绝不回灌事件流），所以一并移出。放在投递之后：此刻
+        # `_events` 必然已含自身与全部更低 seq（闸门保证），快照是前缀完备的。
+        # `_events` 快照在**循环线程**上取（与
+        # `runmanager._strict_progress_write_for_exit` 同款纪律：跨线程迭代
+        # 活列表不安全）。
+        await asyncio.to_thread(
+            self._update_board_projection,
+            persisted,
+            list(self._events),
+        )
+        return persisted
+
+    def _build_event(
+        self,
+        event_type: str,
+        data: dict,
+        *,
+        run_id: str | None,
+        agent_id: str | None,
+        step_id: int | None,
+        block_id: str | None,
+        source_event_ids: list[str] | None,
+        mark_dangling: bool,
+    ) -> SessionEvent:
+        """`append` 的构造段（校验 + 信封 + 取号），同步与异步入口共用的唯一一份。"""
+        if self._seq_uncertain:
+            # 上一次异步写在取消/关闭中成了 UNKNOWN：那条行可能已在盘上并占掉一个号。
+            # 不猜——向 store 要盘面事实再取号。`max` 保证只前进不倒退（在途写者
+            # 晚到的 `_commit_memory` 也可能已经把计数器推得更远）。
+            self._next_seq = max(
+                self._next_seq,
+                self._store.last_written_seq(self.session_id) + 1,
+            )
+            self._seq_uncertain = False
+        # 词汇表校验：先拒绝再写盘，杜绝未知/流式事件悄悄污染 durable log
+        if event_type in STREAM_ONLY_TYPES:
+            raise ValueError(
+                f"流式专属事件 '{event_type}' 不得通过 Session.append 持久化"
+                "（仅作为 run_stream() 的 AgentEvent 输出）"
+            )
+        if event_type not in EVENT_TYPES:
+            raise ValueError(f"未知事件类型 '{event_type}'：不在 EVENT_TYPES 词汇表中")
+        if event_type == USER_MESSAGE:
+            refs = validate_user_fact_links(
+                self._events, data, session_id=self.session_id
+            )
+            if refs:
+                if source_event_ids is not None and source_event_ids != refs:
+                    raise ValueError("user fact links do not match source_event_ids")
+                source_event_ids = refs
+        elif event_type == TASK_PROTECTED_FACT:
+            validate_protected_fact_data(self._events, data, session_id=self.session_id)
+            refs = [data["source_event_id"]]
+            if data.get("evidence_event_id") is not None:
+                refs.append(data["evidence_event_id"])
+            if source_event_ids is not None and source_event_ids != refs:
+                raise ValueError(
+                    "protected fact event references do not match its payload"
+                )
+            source_event_ids = refs
+        return SessionEvent(
+            seq=self._next_seq,
+            type=event_type,
+            session_id=self.session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            step_id=step_id,
+            block_id=block_id,
+            data={**data, "dangling": True} if mark_dangling else data,
+            source_event_ids=source_event_ids,
+        )
+
+    def _commit_persisted(
+        self,
+        persisted: SessionEvent,
+        *,
+        notify: bool,
+        token: int | None = None,
+    ) -> SessionEvent:
+        """同步入口的收口（#1547：经闸门按 seq 保序投递；离线 seed 直接落内存）。
+
+        store 返回**实际落盘的那一枚**：锁内分配会改号，不接住它就会「内存/返回值是
+        旧号、盘上是新号」——`_events`、`_next_seq` 与调用方（`end_run` 的返回值、
+        流式镜像）三处一起分叉。**不回落到本地事件**：`append_event` 的契约是
+        `SessionEvent`（docstring 的「:returns: 实际落盘的那一枚」），全仓替换件
+        （含测试替身）都返回它；`None` 只可能来自契约外的实现，那种情况下回落到
+        旧号反而会静默分叉（#1102 删掉了这条例外分支——它已无调用方可走）。
+        """
+        event = persisted
         if not notify:
+            self._events.append(event)
+            # 写盘成功后才推进计数器——失败不消耗 seq。必须按**实际写入的号**前进：
+            # 锁内分配会改号，写成 `+= 1` 会留下过期缓存，把下一次 append 直接送进
+            # 冲突分支（#1024 实测：改 `+= 1` 后终态缺失率立刻非零）。`max`：离线
+            # seed 与既有计数器只前进不倒退。
+            self._next_seq = max(self._next_seq, event.seq + 1)
             return event
-        # 监听器在持久化成功后回调（观察者，异常不破坏 append 契约）
+        # notify=True：撤出闸位、登记投递点，交给闸门按 seq 放行（#1547）。本条
+        # 可能因更低 seq 仍在途而**暂存未投**——此刻不能在调用线程上等它（那个
+        # 更低 seq 的投递点可能在事件循环上，等 = 死锁）；调用方拿返回值继续即可，
+        # 投递由闸门保证最终发生（每个状态迁移的线程都会尝试 drain）。
+        with self._gate_guard:
+            if token is not None:
+                self._gate_inflight.pop(token, None)
+            self._next_seq = max(self._next_seq, event.seq + 1)
+            self._gate_ready.setdefault(event.seq, event)
+            self._gate_board_pending.add(event.seq)
+        self._drain_ordered()
+        return event
+
+    # ── 有序投递闸门（#1547）──
+
+    def _deliver_ordered(self, persisted: SessionEvent, token: int) -> None:
+        """异步写者的投递点：撤闸位、登记事件（含归属 loop），尝试放行投递。
+
+        本方法只在写者自己的协程里执行 ⇒ `get_running_loop()` 即投递归属 loop
+        （#1489 冻结的 listener 线程亲和，见 `_gate_ready_loops`）。
+        """
+        loop = asyncio.get_running_loop()
+        with self._gate_guard:
+            self._gate_inflight.pop(token, None)
+            delivered_early = persisted.seq <= self._gate_delivered_through
+            if not delivered_early:
+                self._gate_undelivered.discard(persisted.seq)
+                self._gate_ready.setdefault(persisted.seq, persisted)
+                self._gate_ready_loops.setdefault(persisted.seq, loop)
+        # 已被其它等待者的 drain 按序投递（投递唯一一次的保证）时不重复登记，
+        # 但撤闸位本身也是状态迁移——照常尝试一次 drain（审查 F6：若在此早退，
+        # 闸内又无其它活跃写者，settle 等待者会失去唯一一次唤醒机会）。
+        self._drain_ordered()
+
+    def _drain_ordered(self) -> None:
+        """闸门放行循环：按 seq 单调地做「内存投影 + 看板 + listener」投递。
+
+        四个前置有一个不满足即返回，等下一个状态迁移再试：
+        ① 存在 seq 未定的在途写者（它可能压号，放行更高 seq 会造成倒序）；
+        ② 没有任何可消费的 seq（ready/skipped 皆空）；
+        ③ 最小可消费 seq 之下还有「已写完、未走到投递点」的 seq——先等它登记；
+        ④ 最小可消费 seq 归属**别的 loop**——本地线程不得代投（#1489 冻结的
+          listener 线程亲和，`web.AskUserTimeoutDriver` 依赖之），转发一次
+          `call_soon_threadsafe` 到归属 loop 再返回；循环侧 drain 会以同一
+          前置集合重扫，转发不改变放行顺序（只推迟、绝不禁绕过）。
+
+        `_gate_draining` 防两层重入：listener 同步再 append（同线程递归，外层
+        while 重扫即可覆盖）与跨线程并发 drain（串行化，防止两个线程交错投递
+        造成通知乱序）。投递动作（append/看板/listener）在锁外执行——看板
+        sidecar 写含 fsync，绝不能进临界区；跑在 loop 上时看板欠账转交执行器
+        （#1489 的循环不等待磁盘目标），快照在转交前于当前线程取好。
+        """
+        with self._gate_guard:
+            if self._gate_draining:
+                return
+            self._gate_draining = True
+        try:
+            while True:
+                with self._gate_guard:
+                    if any(seq is None for seq in self._gate_inflight.values()):
+                        return
+                    if not self._gate_ready and not self._gate_skipped:
+                        return
+                    seq = min(self._gate_ready.keys() | self._gate_skipped)
+                    if any(s < seq for s in self._gate_undelivered):
+                        return
+                    owner_loop = self._gate_ready_loops.get(seq)
+                    if (
+                        owner_loop is not None
+                        and owner_loop is not _running_loop()
+                        and not owner_loop.is_closed()
+                    ):
+                        owner_loop.call_soon_threadsafe(self._drain_ordered)
+                        return  # 归属 loop 关闭（进程收尾）才会在本地代投
+                    skipped_event = self._gate_skipped.pop(seq, None)
+                    event = self._gate_ready.pop(seq, None)
+                    self._gate_ready_loops.pop(seq, None)
+                    self._gate_delivered_through = seq
+                if event is None:
+                    if skipped_event is not None:
+                        # 透明跳过的内存补插点（审查 F1）：前置 ①③ 已保证没有比它
+                        # 更低的在途/未登记 seq，此刻 insort 位置必然正确。
+                        self._insert_memory_ordered(skipped_event)
+                    continue  # 跳过：推进水位 + 保序补插内存，不投递、不通知
+                self._events.append(event)
+                if seq in self._gate_board_pending:
+                    self._gate_board_pending.discard(seq)
+                    self._defer_board_projection(event)
+                self._notify_listeners(event)
+        finally:
+            with self._gate_guard:
+                self._gate_draining = False
+                resolved = [
+                    w
+                    for w in self._gate_waiters
+                    if w[0] <= self._gate_delivered_through
+                ]
+                if resolved:
+                    resolved.sort(key=lambda w: w[0])  # 唤醒序 = seq 序（镜像序）
+                    self._gate_waiters = [
+                        w
+                        for w in self._gate_waiters
+                        if w[0] > self._gate_delivered_through
+                    ]
+                settled: list[tuple[asyncio.AbstractEventLoop, asyncio.Future]] = []
+                if self._gate_is_idle_locked():
+                    settled = self._gate_settled_waiters
+                    self._gate_settled_waiters = []
+            for _seq, loop, fut in resolved:
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(self._resolve_waiter, fut)
+            for loop, fut in settled:
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(self._resolve_waiter, fut)
+
+    def _gate_is_idle_locked(self) -> bool:
+        """闸门是否已清空（在 `_gate_guard` 内调用；看板欠账不算——它是缓存）。"""
+        return not (
+            self._gate_inflight
+            or self._gate_undelivered
+            or self._gate_ready
+            or self._gate_skipped
+        )
+
+    def _defer_board_projection(self, event: SessionEvent) -> None:
+        """补一次看板欠账：跑在 loop 上就转交执行器，工作线程就地写（#1489）。"""
+        snapshot = list(self._events)  # 跨线程纪律：在当前线程取快照
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._update_board_projection(event, snapshot)
+            return
+        try:
+            loop.run_in_executor(
+                None,
+                self._update_board_projection,
+                event,
+                snapshot,
+            )
+        except RuntimeError:
+            # loop 在转交间隙关闭（进程收尾）：看板是 best-effort 派生索引，就地
+            # 补一次，异常由 `_update_board_projection` 自己的观察者纪律兜底
+            # （审查 F5：绝不让它逃出 drain 破坏 append 契约）。
+            self._update_board_projection(event, snapshot)
+
+    def _insert_memory_ordered(self, event: SessionEvent) -> None:
+        """把「写成功但等待者已放弃」的事件保序补进内存投影（不通知）。
+
+        只在 drain 的 skip 消费点调用（审查 F1）：前置 ①③ 已保证没有比该 seq
+        更低的在途/未登记 seq，bisect 插入位置因此必然正确。**不得**在取消臂/
+        完成回调里当场调用——更低 seq 仍可能在途，当场插入会把 `_events` 倒插
+        （[0,2,1]，审查 F1 的复现形状）。
+        """
+        bisect.insort(self._events, event, key=lambda e: e.seq)
+
+    @staticmethod
+    def _resolve_waiter(fut: asyncio.Future) -> None:
+        """drain（可能在任意线程）经 call_soon_threadsafe 回到 waiter 的 loop。"""
+        if not fut.done():
+            fut.set_result(None)
+
+    async def wait_delivered(self, seq: int) -> None:
+        """等待 seq 已被有序闸门投递（幂等：已投递立即返回）。#1547。
+
+        镜像通道的序化锚点：`run_stream` 的 durable 镜像带 seq 进入
+        `RunManager.enqueue_agent_event`，与 listener 通道共用同一把 seq 幂等门；
+        镜像先于闸门投递入队会把仍在闸内的更低 seq 判成「重复」永久丢弃
+        （本票的 live 丢帧形状）。调用方在入队镜像前等本方法返回，即保证
+        「seq 入队 ⟹ 全部更低 seq 已入队」。
+        """
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        waiter = (seq, loop, fut)
+        with self._gate_guard:
+            if seq <= self._gate_delivered_through:
+                return
+            self._gate_waiters.append(waiter)
+        try:
+            await fut
+        except asyncio.CancelledError:
+            # 删除必须在 `_gate_guard` 内：drain 的 finally 会在锁内重建等待者
+            # 列表，无锁 remove 与之交错可能把**幸存**等待者一起丢掉（审查 P1）。
+            with self._gate_guard, suppress(ValueError):
+                self._gate_waiters.remove(waiter)
+            raise
+
+    async def wait_gate_settled(self) -> None:
+        """等待闸门清空：无在途写者、无待投递/跳过 seq（#1547 审查 P1）。
+
+        `mark()`/`since()` 的长度游标以内存投影为界；同步写者的投递可能被更低
+        seq 的在途写者推迟到 `append` 返回**之后**。一次性快照消费者（如 runtime
+        的 `_record_session_tool_deltas` 工具预算记账，没有 listener 通道补偿）
+        先等本方法再取 `since()`，才不会漏掉刚写入但尚未放行的事件。
+
+        已知残余（审查 F4，登记不扩张）：等待无超时——活性由在途写者的落盘
+        收口保证（写失败/取消都即时撤闸，不留永久占位）；本方法只覆盖调用点
+        之后的窗口，其它 `mark()/since()` 快照消费者（记忆形成等）仍可能读到
+        晚到事件——它们没有预算记账那类「丢一条即账不平」的语义，按需各自接入。
+        """
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        waiter = (loop, fut)
+        with self._gate_guard:
+            if self._gate_is_idle_locked():
+                return
+            self._gate_settled_waiters.append(waiter)
+        try:
+            await fut
+        except asyncio.CancelledError:
+            with self._gate_guard, suppress(ValueError):
+                self._gate_settled_waiters.remove(waiter)
+            raise
+
+    def _notify_listeners(self, event: SessionEvent) -> SessionEvent:
+        """逐条回调会话监听器（观察者，异常不破坏 append 契约）。"""
         for listener in self._listeners:
             try:
                 listener(event)
             except Exception:
                 logger.exception(
                     "session listener 回调失败（session=%s, event=%s）",
-                    self.session_id, event.type,
+                    self.session_id,
+                    event.type,
                 )
         return event
 
-    def _update_board_projection(self, event: SessionEvent) -> None:
+    def _update_board_projection(
+        self,
+        event: SessionEvent,
+        events: list[SessionEvent],
+    ) -> None:
         """best-effort 更新看板投影（#1303 §3.2）。
 
         观察者纪律与 listener 相同：任何异常只记日志，绝不破坏 append 契约。
         ``adopt_history`` 走 ``notify=False`` 不逐条触发，完成后一次全量重放
         （避免 fork N 条历史时的 O(N²)）。
+
+        ``events`` 是调用方**在循环线程上取的快照**（#1489）：本方法可能跑在工作
+        线程（异步入口把这次 sidecar 重写+fsync 移出了循环），跨线程迭代活列表不安全。
         """
         try:
             get_board_projection_store(self._store).update_from_events(
                 self.session_id,
-                self._events,
+                events,
                 recompute=_board_projection_needs_recompute(event),
             )
         except Exception:
             logger.exception(
                 "看板投影钩子失败（session=%s, event=%s）",
-                self.session_id, event.type,
+                self.session_id,
+                event.type,
             )
 
     def adopt_history(
@@ -620,7 +1139,9 @@ class Session:
                     f"流式专属事件 '{event.type}' 不得移植进 durable log（invariant #4）"
                 )
             if event.type not in EVENT_TYPES:
-                raise ValueError(f"未知事件类型 '{event.type}'：不在 EVENT_TYPES 词汇表中")
+                raise ValueError(
+                    f"未知事件类型 '{event.type}'：不在 EVENT_TYPES 词汇表中"
+                )
             moved_data = event.data
             if event.type in {
                 USER_MESSAGE,
@@ -657,7 +1178,10 @@ class Session:
                             continue
                         copied_annotation = dict(annotation)
                         supersedes_id = annotation.get("supersedes_fact_id")
-                        if isinstance(supersedes_id, str) and supersedes_id in fact_remap:
+                        if (
+                            isinstance(supersedes_id, str)
+                            and supersedes_id in fact_remap
+                        ):
                             remapped_supersedes_id = fact_remap[supersedes_id]
                             if remapped_supersedes_id is None:
                                 copied_annotation.pop("supersedes_fact_id", None)
@@ -675,7 +1199,10 @@ class Session:
                     source_id = event_remap.get(source_id, source_id)
                 if isinstance(evidence_id, str):
                     evidence_id = event_remap.get(evidence_id, evidence_id)
-                if source_id is None or (moved_data.get("evidence_event_id") is not None and evidence_id is None):
+                if source_id is None or (
+                    moved_data.get("evidence_event_id") is not None
+                    and evidence_id is None
+                ):
                     # A source event removed at the fork boundary cannot back a child fact.
                     continue
                 if isinstance(supersedes_id, str) and supersedes_id in fact_remap:
@@ -780,11 +1307,14 @@ class Session:
         # 避免 fork N 条历史时的 O(N²)（#1303 已知上限的例外）。
         try:
             get_board_projection_store(self._store).update_from_events(
-                self.session_id, self._events, recompute=True,
+                self.session_id,
+                self._events,
+                recompute=True,
             )
         except Exception:
             logger.exception(
-                "adopt_history 后的看板投影重放失败（session=%s）", self.session_id,
+                "adopt_history 后的看板投影重放失败（session=%s）",
+                self.session_id,
             )
         return adopted
 
@@ -804,7 +1334,8 @@ class Session:
         首轮 turn）。计算与消费见 `AgentRuntime._drive` 的 `step_base`。
         """
         return max(
-            (e.step_id for e in self._events if e.step_id is not None), default=0,
+            (e.step_id for e in self._events if e.step_id is not None),
+            default=0,
         )
 
     @property
@@ -815,17 +1346,22 @@ class Session:
         它带 step_id 落在当前轮内，不新开 turn。
         """
         return sum(
-            1 for e in self._events
+            1
+            for e in self._events
             if e.type == USER_MESSAGE and not e.data.get("injected_by")
         )
 
     # ── Run 生命周期 ──
 
-    def begin_run(self, *, agent_id: str = "default",
-                  agent_profile: str = "main",
-                  model: str | None = None,
-                  reasoning_effort: str | None = None,
-                  budget: dict[str, Any] | None = None) -> tuple[str, int]:
+    def begin_run(
+        self,
+        *,
+        agent_id: str = "default",
+        agent_profile: str = "main",
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        budget: dict[str, Any] | None = None,
+    ) -> tuple[str, int]:
         """生成 run_id、append run/started、返回 ``(run_id, turn_index)``。
 
         ``turn_index`` = 该 session 里第几个 run（1-based），供 Langfuse
@@ -858,7 +1394,10 @@ class Session:
         """
         run_id = str(uuid4())
         turn_index = sum(1 for e in self._events if e.type == RUN_STARTED) + 1
-        data: dict[str, Any] = {"turn_index": turn_index, "agent_profile": agent_profile}
+        data: dict[str, Any] = {
+            "turn_index": turn_index,
+            "agent_profile": agent_profile,
+        }
         if model is not None:
             data["model"] = model
         if reasoning_effort is not None:
@@ -928,22 +1467,35 @@ class Session:
         # `run/resumed` 的 `expected_version` 比对的是**从事件流重放的**
         # `PausedRun.version`（`run_budget.py` 的 `validate_resume`），
         # 本 CAS 读的却是本实例的**内存投影** `self._events`——而 `end_run`
-        # 的 CAS 与写盘之间不持任何锁，投影更新（`_persist_event` 的
-        # `self._events.append`）在 store 写锁**之外** ⇒ 只覆盖「同实例内、
-        # CAS 与写盘之间无交错」的形状；同实例多线程并发、或另一实例
-        # （各自 `_events` 都没有终态）仍可各落一条——本条注释即其登记处；
+        # 的 CAS 与写盘之间不持任何锁，投影更新（#1547 起在 `_drain_ordered`）
+        # 在 store 写锁**之外** ⇒ 只覆盖「同实例内、CAS 与写盘之间无交错」的
+        # 形状；#1547 起扫描面已含闸内 `_gate_ready` 暂存与 `_gate_skipped`
+        # （取消等待者，事件对象随跳过登记保留，审查 F1）的终态；同实例多线程并发、或另一
+        # 实例（各自 `_events` 都没有终态）仍可各落一条——本条注释即其登记处；
         # 根治要把判据移进 store 写锁，不属本票范围。
         # 生产侧 `AgentRuntime._terminal_written` 只护住
         # 它自己的调用链，不是 Session 层的契约——真相层的守卫要落在真相层。
         # 返回既存而非抛错：同一 run 重复收口是**幂等**语义，不是调用方犯错。
-        existing = next(
-            (
-                e
-                for e in self._events
-                if e.run_id == run_id and e.type in RUN_TERMINAL_TYPES
-            ),
-            None,
-        )
+        # #1547：投递闸门会把刚写的终态暂存在 `_gate_ready`（更低 seq 在途时
+        # 晚于 `append` 返回才进 `_events`）或 `_gate_skipped`（取消等待者）里，
+        # CAS 的扫描面必须把这部分也算上，否则背靠背的两次 `end_run` 会在第一
+        # 次尚未投递时各落一条终态。
+        with self._gate_guard:
+            existing = next(
+                (
+                    e
+                    for e in self._events
+                    if e.run_id == run_id and e.type in RUN_TERMINAL_TYPES
+                ),
+                None,
+            ) or next(
+                (
+                    e
+                    for e in (*self._gate_ready.values(), *self._gate_skipped.values())
+                    if e.run_id == run_id and e.type in RUN_TERMINAL_TYPES
+                ),
+                None,
+            )
         if existing is not None:
             return existing
         event_type = RUN_COMPLETED if status == "completed" else RUN_FAILED

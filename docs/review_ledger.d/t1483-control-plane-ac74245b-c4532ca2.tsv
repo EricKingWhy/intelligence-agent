@@ -1,0 +1,1 @@
+2026-10-23	#1483 收尾代码复审（Spec / Standards / Security）：显式 Origin 的 HTTP/WS 判据统一；IPv4/IPv6 loopback 探针、URL、Host 与 deadline 闭环；无新增旁路或依赖；P0/P1/P2/P3/P4=0/0/0/0/0	ac74245b8daa52957bc1fd6ee976ca2a9eca7c72..c4532ca2412fded77f5f978f5bfeeeaf1920f15c

@@ -480,3 +480,69 @@ describe('#1333 findings 修复——认领接线', () => {
     expect(captured.hook!.sendFailure?.retryable).toBe(false);
   });
 });
+
+describe('#1333 client_request_id 接线：每次 POST 新 UUID，随创建请求与认领下发', () => {
+  it('submitTask 生成 UUID v4 传给 startSession 与 discoverNewSessionId（两次提交不同值）', async () => {
+    vi.mocked(sessionIdBaselineDetailed).mockResolvedValue({
+      ids: new Set<string>(),
+      serverNowMs: null,
+    });
+    vi.mocked(startSession).mockReturnValue(new Promise<Response>(() => {}) as never);
+    vi.mocked(discoverNewSessionId).mockRejectedValue(new SessionClaimTimeoutError());
+
+    await mount();
+    const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    await act(async () => {
+      const p = captured.hook!.submitTask({ task: '第一次提交' });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      await p;
+    });
+    const firstStart = vi.mocked(startSession).mock.calls[0];
+    const firstClaim = vi.mocked(discoverNewSessionId).mock.calls[0]?.[1] as
+      | { clientRequestId?: string }
+      | undefined;
+    expect(firstStart?.[1]?.clientRequestId).toMatch(uuidV4);
+    expect(firstClaim?.clientRequestId).toBe(firstStart?.[1]?.clientRequestId);
+
+    await act(async () => {
+      const p = captured.hook!.submitTask({ task: '第二次提交' });
+      await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+      await p;
+    });
+    const secondStart = vi.mocked(startSession).mock.calls[1];
+    const secondClaim = vi.mocked(discoverNewSessionId).mock.calls[1]?.[1] as
+      | { clientRequestId?: string }
+      | undefined;
+    expect(secondStart?.[1]?.clientRequestId).toMatch(uuidV4);
+    expect(secondStart?.[1]?.clientRequestId).not.toBe(firstStart?.[1]?.clientRequestId);
+    expect(secondClaim?.clientRequestId).toBe(secondStart?.[1]?.clientRequestId);
+  });
+
+  it('非安全上下文（crypto.randomUUID 缺失）→ getRandomValues 回退仍产出 v4，提交不被 TypeError 打断', async () => {
+    // 裸 HTTP 绑定非 loopback 地址（不受支持部署形态）下 randomUUID 为
+    // undefined——审查 P2：回退必须保证 submitTask 照常发出 POST。
+    const realGetRandomValues = crypto.getRandomValues.bind(crypto);
+    vi.stubGlobal('crypto', { getRandomValues: realGetRandomValues });
+    try {
+      vi.mocked(sessionIdBaselineDetailed).mockResolvedValue({
+        ids: new Set<string>(),
+        serverNowMs: null,
+      });
+      vi.mocked(startSession).mockReturnValue(new Promise<Response>(() => {}) as never);
+      vi.mocked(discoverNewSessionId).mockRejectedValue(new SessionClaimTimeoutError());
+
+      await mount();
+      await act(async () => {
+        const p = captured.hook!.submitTask({ task: '无 randomUUID 环境' });
+        await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
+        await p;
+      });
+      const started = vi.mocked(startSession).mock.calls[0];
+      expect(started?.[1]?.clientRequestId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

@@ -1,0 +1,1 @@
+2026-10-23	#1488 双轴审查：Standards PASS；Spec PASS；P0=0/P1=0/P2=0/P3=0/P4=0。检查 SessionArchive owner registry/operation lease、observer owned/borrowed close、AppState/lifespan/CLI 收尾及真实句柄回归；无 scope 外改动。证据：4f89e01b focused 23 passed + storage 147 passed，真实 Windows handle curve 与 failure/cancel lifecycle tests。	c451eafe3b35328cb37fcf9cb2101f7cd7c27a7b..4f89e01bace5

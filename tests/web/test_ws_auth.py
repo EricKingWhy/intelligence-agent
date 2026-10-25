@@ -93,7 +93,9 @@ def _app(tmp_path: Path, *, jwt_secret: str | None = None):
     return create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
         jwt_secret=jwt_secret, enable_cors=False,
-    ))
+    ),
+    allow_testserver=True,
+    )
 
 
 def _ping_pong(ws) -> str:

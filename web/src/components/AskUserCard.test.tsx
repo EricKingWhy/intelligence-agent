@@ -264,3 +264,45 @@ describe('AskUserCard', () => {
     expect(el('[role="alert"]').textContent).toContain('恢复被拒绝');
   });
 });
+
+describe('#1523 最终提交后的焦点落点', () => {
+  // App 的既有焦点惯例（App.tsx `document.getElementById('composer-input')?.focus()`）：
+  // 测试里挂一个同 id 的占位输入框代表真实 Composer；jsdom 的 click 不做默认聚焦，
+  // activeElement 的任何变化都只能来自组件自身的焦点处理。
+  const mountComposer = (): HTMLInputElement => {
+    const composer = document.createElement('input');
+    composer.id = 'composer-input';
+    document.body.appendChild(composer);
+    return composer;
+  };
+
+  it('提交后焦点落到明确可操作位置（composer 输入框），不是悬空 body', () => {
+    const composer = mountComposer();
+    const onSubmit = vi.fn();
+    render(<AskUserCard request={request()} onSubmit={onSubmit} />);
+
+    click('.ask-user-submit');
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it('整卡跳过同样落焦 composer', () => {
+    const composer = mountComposer();
+    render(<AskUserCard request={request()} onSubmit={vi.fn()} />);
+
+    click('.ask-user-skip');
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it('恢复失败（卡仍在）时焦点回到触发提交的那个按钮，失败重试可继续', () => {
+    const composer = mountComposer();
+    render(<AskUserCard request={request()} onSubmit={vi.fn()} />);
+    click('.ask-user-skip');
+    expect(document.activeElement).toBe(composer);
+
+    // App 的失败路径：resuming 结束、卡片仍挂载并带错误原文。
+    render(<AskUserCard request={request()} errorMessage="恢复失败：网络中断" onSubmit={vi.fn()} />);
+    const active = document.activeElement as HTMLElement | null;
+    expect(active?.classList.contains('ask-user-skip')).toBe(true);
+  });
+});

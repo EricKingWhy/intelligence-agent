@@ -55,16 +55,6 @@ export function turnComponents(turn: Turn, theme: IaTheme): Component[] {
   return components;
 }
 
-/** 全量重建（进会话 / truncated 重建）：事件状态 -> 组件列表。 */
-export function conversationComponents(state: ConversationState, theme: IaTheme): Component[] {
-  const out: Component[] = [];
-  for (const turn of state.turns) {
-    if (out.length > 0) out.push(new Spacer()); // 轮次之间空一行
-    out.push(...turnComponents(turn, theme));
-  }
-  return out;
-}
-
 /** 空状态：居中短文案 + 可用命令提示（不堆装饰框）。 */
 export function emptyStateComponent(theme: IaTheme): Component {
   return new Text(

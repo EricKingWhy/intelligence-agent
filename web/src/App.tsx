@@ -158,6 +158,12 @@ export default function App() {
     // （显式报警），也不让整条内联错误通道静默消失。测试替身由各 `App.*.test.tsx`
     // 的 mock 显式补全这两个键。
     sendFailure,
+    // #1521：这三个键带显式缺省（与 sendFailure 的「不设缺省」立场不同——那是
+    // 故障通道，静默消失即 bug；这三个是纯 UI 态，缺省 = 无失败/无提示，且
+    // useSession 侧测试已钉死返回形状）。缺省让既有 App 测试替身不必逐一补键。
+    historyLoadError = null,
+    missingSessionNotice = null,
+    dismissMissingSessionNotice = () => {},
     runFailedBeforePlan,
     sessionsError,
     titlesById,
@@ -1081,6 +1087,24 @@ export default function App() {
   const bannerHiddenByInlineFailure =
     submitFailure !== null && sendFailure !== null && error === sendFailure.message;
 
+  /** #1521 FE-05：首开 / 换会话历史加载失败的专属面板数据。仅当失败属于**当前
+   *  选中**会话且该会话尚无投影时交给 Conversation——旧形状是空态「暂无对话」+
+   *  错误横幅矛盾同现；同会话后台重读失败时 conversation 在场 ⇒ 不派生，横幅
+   *  语义不变。重试 = `reloadConversation(selectedId)`（既有「就地对账」通路，
+   *  不新增 API，也不自建第二套刷新语义）。
+   *  useMemo 是 Conversation 侧 memo 契约的要求（ADR-0037 D5.3）：prop 身份稳定，
+   *  失败在场时也不让 `memo` 恒 miss。 */
+  const historyLoadFailure = useMemo(
+    () =>
+      historyLoadError !== null &&
+      selectedId !== null &&
+      historyLoadError.sid === selectedId &&
+      conversation === null
+        ? { message: historyLoadError.message, onRetry: () => reloadConversation(selectedId) }
+        : null,
+    [historyLoadError, selectedId, conversation, reloadConversation],
+  );
+
   /** 「在此项目中新建任务」（#367 [W-23] 选项 A；#1177 §A.3 改名，现名「新建任务…」）：统一创建入口——
    *  `TaskCreationDialog` 组装好的 `StartSessionPayload`（prompt 唯一必填 +
    *  三档自主度 + 模型 + 运行位置），走 `submitTask` 的既有 SSE 接线创建并启动。
@@ -1526,6 +1550,9 @@ export default function App() {
 
   // ── Command Palette（PRD §15，ADR-0014）：Ctrl/Cmd+K 开关 + 命令集组装 ──
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteOpenerRef = useRef<HTMLElement | null>(null);
+  const memoryPanelFocusReturnTargetRef = useRef<HTMLElement | null>(null);
+  const approvePolicyFocusReturnTargetRef = useRef<HTMLElement | null>(null);
   /** 面板**关闭后**要执行的一次性动作（见命令 `focus-composer` 与 CommandPalette 的
    *  `onAfterClose` 注释：命令执行时浮层还开着，直接 focus 会被关闭时的焦点恢复打断）。 */
   const paletteAfterClose = useRef<(() => void) | null>(null);
@@ -1585,6 +1612,17 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isPaletteShortcut(e)) {
         e.preventDefault();
+        const active = document.activeElement;
+        const composer = document.querySelector<HTMLTextAreaElement>('#composer-input');
+        const composerCanReceiveFocus = composer !== null
+          && !composer.disabled
+          && composer.getClientRects().length > 0
+          && getComputedStyle(composer).visibility !== 'hidden';
+        paletteOpenerRef.current = active instanceof HTMLElement && active !== document.body
+          ? active
+          : composerCanReceiveFocus
+            ? composer
+            : document.querySelector<HTMLElement>('.appbar-more-trigger');
         setPaletteOpen((v) => !v);
       }
     };
@@ -1724,7 +1762,12 @@ export default function App() {
         keywords: 'memory memories forget delete 记忆 遗忘 删除 忘记',
         meta: '记忆库',
         group: 'actions',
-        run: () => setMemoriesOpen(true),
+        run: () => {
+          if (!memoriesOpen) {
+            memoryPanelFocusReturnTargetRef.current = paletteOpenerRef.current;
+            setMemoriesOpen(true);
+          }
+        },
       },
       {
         id: 'manage-approve-policy',
@@ -1732,7 +1775,12 @@ export default function App() {
         keywords: 'approval approve policy always allow persistent 审批 授权 持久 规则 撤销',
         meta: '持久授权',
         group: 'actions',
-        run: () => setApprovePolicyOpen(true),
+        run: () => {
+          if (!approvePolicyOpen) {
+            approvePolicyFocusReturnTargetRef.current = paletteOpenerRef.current;
+            setApprovePolicyOpen(true);
+          }
+        },
       },
     ];
     // trace_id 缺则 Copy Trace ID 不出现；trace_url 缺则 Open Trace 不出现
@@ -1785,7 +1833,22 @@ export default function App() {
       });
     }
     return items;
-  }, [paletteOpen, conversation, density, theme, toggleTheme, copyText, jumpToStream, focusEvent, inspectorOpen, panel.expanded, onPanelAction, handleNew]);
+  }, [
+    paletteOpen,
+    conversation,
+    density,
+    theme,
+    toggleTheme,
+    copyText,
+    jumpToStream,
+    focusEvent,
+    inspectorOpen,
+    panel.expanded,
+    onPanelAction,
+    handleNew,
+    memoriesOpen,
+    approvePolicyOpen,
+  ]);
 
   // UI-01 / APR-01：待决审批 > 0 → composer 锁定；失效审批不算（与 Composer 同一
   // projection 状态，无第二真相源）。`lockReasonOf` 与 Composer 共用同一优先级，
@@ -1990,6 +2053,20 @@ export default function App() {
               </button>
             </div>
           )}
+          {/* #1521 FE-06：显式点行命中 404 的温和提示（信息级，可关闭）。启动恢复
+              过期 id 的安静复位不经这条通道——刷新循环弹错是用户处理不了的错误。 */}
+          {missingSessionNotice && (
+            <div className="app-notice" role="status">
+              <span>{missingSessionNotice}</span>
+              <button
+                className="auth-banner-close"
+                onClick={() => dismissMissingSessionNotice()}
+                aria-label="关闭提示"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
           {/* 分叉失败提示带上它属于哪个会话：只属于发起它的那个会话，切走自然
               不再渲染（不用 effect 清空——那会多一次渲染，也会留下「清空」与
               「切会话」两份状态需要同步）。 */}
@@ -2175,6 +2252,7 @@ export default function App() {
                   <Conversation
                     conversation={conversation}
                     loadingHistory={historySkeleton}
+                    historyLoadFailure={historyLoadFailure}
                     density={density}
                     disclosure={disclosure}
                     reasoningDisclosure={reasoningDisclosure}
@@ -2359,7 +2437,11 @@ export default function App() {
           return true;
         }}
       />
-      <MemoryPanel open={memoriesOpen} onOpenChange={setMemoriesOpen} />
+      <MemoryPanel
+        open={memoriesOpen}
+        onOpenChange={setMemoriesOpen}
+        focusReturnTargetRef={memoryPanelFocusReturnTargetRef}
+      />
       {/* #1200：插件管理窗口（侧栏「插件」入口；左列表 + 右详情）。 */}
       <PluginPanel open={pluginsOpen} onOpenChange={setPluginsOpen} />
       {/* #357 W-13：恢复列表浮层（顶栏 历史 入口）。只读列表；「继续」= 打开该会话，
@@ -2376,6 +2458,7 @@ export default function App() {
       <ApprovePolicyPanel
         open={approvePolicyOpen}
         onOpenChange={setApprovePolicyOpen}
+        focusReturnTargetRef={approvePolicyFocusReturnTargetRef}
       />
       {/* #1304：Agent 看板（TopBar Columns 入口）。数据源走 WS 板级快照（T3 / #1305）；
           #1306 起点卡写 ack 并打开会话（ack 写序在 KanbanPanel 内，先 ack 再导航）。 */}

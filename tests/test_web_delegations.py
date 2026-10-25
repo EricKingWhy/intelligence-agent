@@ -30,7 +30,9 @@ from agent_harness.web.app import create_app
 
 def _client(tmp_path) -> TestClient:
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     return TestClient(app)
 
 
@@ -50,7 +52,9 @@ def _seed(
     无则 None——用例据此拿**真实** time 断言 completed_at（不手编时间戳）。
     """
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     async def _run() -> SessionEvent | None:
@@ -86,7 +90,9 @@ def _one(body: list[dict]) -> dict:
 
 def test_delegations_empty_when_no_delegation(tmp_path) -> None:
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     async def _run() -> None:
@@ -155,7 +161,9 @@ def _seed_pause_resume_finish(tmp_path) -> SessionEvent:
     """父 run 暂停（→ 在途委派会被判 stopped）后**又**回填 finished：finished 必须
     覆盖 stopped 判定（终态条目不得被 stop 清扫误翻）。"""
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     async def _run() -> SessionEvent:
@@ -186,7 +194,9 @@ def test_delegations_stop_trigger_before_start_does_not_stop(tmp_path) -> None:
     """停止触发落在 delegation-started **之前** ⇒ 不得把之后的在途委派翻 stopped
     （判据是「start 之后的第一条触发」，不是任意触发）。"""
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     async def _run() -> None:
@@ -205,7 +215,9 @@ def test_delegations_stop_trigger_before_start_does_not_stop(tmp_path) -> None:
 def test_delegations_multiple_stop_triggers_freezes_first(tmp_path) -> None:
     """多条停止触发 ⇒ completed_at 冻结在 start 之后**第一条**（不是最后一条）。"""
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     async def _run() -> SessionEvent:
@@ -264,7 +276,9 @@ def _seed_parallel(tmp_path) -> None:
     """父会话 'p' 并行委派 c1/c2/c3：started/finished 交错、乱序 finish
     （c2 的 finish 先于 c1 落盘）、c1 的 started 重复一次（幂等），c3 保持在途。"""
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     async def _run() -> None:
@@ -339,7 +353,9 @@ def test_delegations_prefers_live_builder_snapshot_over_events(tmp_path, monkeyp
     估算（AC2 口径一致）。"""
     _seed(tmp_path, child_usage={"prompt_tokens": 12842, "total_tokens": 13000})
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
 
     snapshot = {"messages": 4000, "system_prompt": 1000, "skills": 200, "other": 100}
 
@@ -371,7 +387,9 @@ def test_delegations_falls_back_to_context_snapshots(tmp_path) -> None:
     （→ state ok 精确值），与 context-usage 端点同源；不被事件流降级成 usage_only。"""
     _seed(tmp_path, child_usage={"prompt_tokens": 12842, "total_tokens": 13000})
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     # create_app 后 run_manager.get_active 天然为 None ⇒ 走缓存回退分支。
     app.state.agent.context_snapshots["c1"] = (
         {"messages": 3000, "system_prompt": 500, "skills": 0, "other": 0},
@@ -401,7 +419,9 @@ def test_delegations_child_id_traversal_is_neutralized(tmp_path) -> None:
     )
 
     settings = Settings(workspace_dir=str(tmp_path), model_api_key="sk-test")
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False,
+    allow_testserver=True,
+    )
     store = app.state.agent.store
 
     async def _run() -> None:

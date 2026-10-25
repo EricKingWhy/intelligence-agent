@@ -37,7 +37,7 @@ def client(tmp_path):
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test"
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _snapshot(state, session_id: str):
@@ -227,7 +227,9 @@ async def _seed_running_call(state, session: Session, call_id: str) -> None:
 
 async def _get_pending(app, session_id: str) -> list[dict]:
     transport = httpx2.ASGITransport(app=app)
-    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as http:
+    async with httpx2.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8000"
+    ) as http:
         resp = await http.get(f"/api/sessions/{session_id}/recovery")
     assert resp.status_code == 200, resp.text
     return resp.json()["pending_decisions"]

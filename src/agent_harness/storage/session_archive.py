@@ -38,13 +38,48 @@ import re
 import sqlite3
 import threading
 import time
+import weakref
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _close_quietly(conn: sqlite3.Connection) -> None:
+    """finalizer 目标：线程 / 解释器收尾阶段关连接，失败不外溢。"""
+    try:
+        conn.close()
+    except (sqlite3.Error, ValueError):  # 解释器退出阶段 sqlite 模块可能已拆
+        pass
+
+
+class _ThreadConnection:
+    """一个线程的 owned 连接载荷；只由该线程的 `threading.local` 持有。
+
+    `sqlite3.Connection` 不支持弱引用，所以登记表存**这个载荷**而不是连接。
+    载荷在线程退出时被回收 ⇒ finalizer 关掉连接、`WeakSet` 自动摘除条目。
+    finalizer **不**引用 `SessionArchive`（否则会把归档对象钉在
+    `weakref.finalize` 的全局注册表里，直到创建它的线程退出）。
+    """
+
+    __slots__ = ("__weakref__", "conn")
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        weakref.finalize(self, _close_quietly, conn)
+
+
+def _archive_operation(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._operation():
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 #: tool 结果常是数 MB 的机器载荷：基础 FTS 只索引每行的前 N 字符，
 #: 存储（`messages.content`）仍是全文。来源: Hermes `hermes_state_common.py:315`。
@@ -632,12 +667,64 @@ class SessionArchive:
             else Path(os.environ.get("OWLET_FTS5_CJK_SO", str(self.db_path.parent / "libfts5_cjk.so")))
         )
         self._local = threading.local()
+        self._lifecycle = threading.Condition()
+        # 只是"当前活着的 owned 连接"的弱登记表，**不能**以 Thread 为键：键会
+        # 长期持有已退出线程的连接（线程池换血时长驻进程 fd 单调增长）。载荷
+        # 只由线程局部持有，线程退出即被回收，见 `_ThreadConnection`。
+        self._connections: weakref.WeakSet[_ThreadConnection] = weakref.WeakSet()
+        self._active_by_thread: dict[threading.Thread, int] = {}
+        self._active_operations = 0
+        self._closing = False
+        self._closed = False
         self._cjk_available = False
+
+    @contextmanager
+    def _operation(self):
+        """Hold an operation lease while a method may use its thread connection."""
+        owner = threading.current_thread()
+        with self._lifecycle:
+            if self._closed or (self._closing and owner not in self._active_by_thread):
+                raise RuntimeError("SessionArchive is closed")
+            self._active_operations += 1
+            self._active_by_thread[owner] = self._active_by_thread.get(owner, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                active = self._active_by_thread[owner] - 1
+                if active:
+                    self._active_by_thread[owner] = active
+                else:
+                    del self._active_by_thread[owner]
+                if self._closing and self._active_operations == 0:
+                    self._finish_close_locked()
+                self._lifecycle.notify_all()
+
+    def _finish_close_locked(self) -> None:
+        """Close every owned connection; caller holds ``_lifecycle``."""
+        states = tuple(self._connections)
+        self._connections.clear()
+        self._closed = True
+        self._closing = False
+        for state in states:
+            try:
+                state.conn.close()
+            except sqlite3.Error:
+                logger.debug("SessionArchive connection close failed", exc_info=True)
+        self._local.state = None
 
     # -- connection --------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=_BUSY_TIMEOUT_MS / 1000)
+        # The archive owns a connection registry and closes all registered
+        # connections from its lifecycle owner.  sqlite3's default
+        # ``check_same_thread`` would deadlock a foreign-thread close even when
+        # no operation is in flight; operation leases still ensure a connection
+        # is never used concurrently by two threads.
+        conn = sqlite3.connect(
+            self.db_path, timeout=_BUSY_TIMEOUT_MS / 1000, check_same_thread=False,
+        )
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA journal_mode=WAL")
@@ -657,11 +744,16 @@ class SessionArchive:
 
     @property
     def _conn(self) -> sqlite3.Connection:
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = self._connect()
-            self._local.conn = conn
-        return conn
+        owner = threading.current_thread()
+        with self._lifecycle:
+            if self._closed or (self._closing and owner not in self._active_by_thread):
+                raise RuntimeError("SessionArchive is closed")
+            state = getattr(self._local, "state", None)
+            if state is None:
+                state = _ThreadConnection(self._connect())
+                self._local.state = state
+                self._connections.add(state)
+            return state.conn
 
     @contextmanager
     def _cursor(self):
@@ -674,13 +766,21 @@ class SessionArchive:
             raise
 
     def close(self) -> None:
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.close()
-            self._local.conn = None
+        owner = threading.current_thread()
+        with self._lifecycle:
+            if self._closed or self._closing:
+                return
+            self._closing = True
+            if self._active_operations:
+                if owner in self._active_by_thread:
+                    return
+                while self._active_operations:
+                    self._lifecycle.wait()
+            self._finish_close_locked()
 
     # -- schema ------------------------------------------------------------
 
+    @_archive_operation
     def initialize(self) -> None:
         """建表 + 三套 FTS + 触发器（幂等）。"""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -690,6 +790,7 @@ class SessionArchive:
             conn.executescript(_TRIGRAM_FTS_SQL)
         self._initialize_cjk()
 
+    @_archive_operation
     def _initialize_cjk(self) -> None:
         """CJK 表与**它的**触发器分开建：索引不完整时触发器必须保持缺席。
 
@@ -833,6 +934,7 @@ class SessionArchive:
         )
         self._cjk_available = True
 
+    @_archive_operation
     def _load_cjk_extension(self) -> bool:
         """探测本连接上 `cjk_unicode61` 是否可用（扩展在 `_connect` 已加载）。"""
         if not self.cjk_so_path.exists():
@@ -856,6 +958,7 @@ class SessionArchive:
 
     # -- writes ------------------------------------------------------------
 
+    @_archive_operation
     def ensure_session(
         self,
         session_id: str,
@@ -881,6 +984,7 @@ class SessionArchive:
                  parent_session_id, model, title),
             )
 
+    @_archive_operation
     def end_session(self, session_id: str, end_reason: str) -> None:
         """关闭会话行（**首写获胜**：已有 `ended_at` 的行不再改写）。
 
@@ -901,6 +1005,7 @@ class SessionArchive:
             if cur.rowcount <= 0:
                 logger.debug("end_session 未命中（不存在或已关闭）: %s", session_id)
 
+    @_archive_operation
     def append_message(
         self,
         session_id: str,
@@ -942,6 +1047,7 @@ class SessionArchive:
 
     # -- reads -------------------------------------------------------------
 
+    @_archive_operation
     def get_messages(self, session_id: str) -> list[dict[str, Any]]:
         """按 `messages.id` 自增序返回全文（READ 形态的真相读取）。"""
         rows = self._conn.execute(
@@ -949,10 +1055,12 @@ class SessionArchive:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_archive_operation
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         row = self._conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return dict(row) if row is not None else None
 
+    @_archive_operation
     def lineage_root(self, session_id: str) -> str:
         """沿 `parent_session_id` 走到根（lineage 去重的键）。"""
         visited: set[str] = set()
@@ -970,6 +1078,7 @@ class SessionArchive:
         """来源: Hermes `tools/session_search_tool.py:201-203`。"""
         return bool(a and b and self.lineage_root(a) == self.lineage_root(b))
 
+    @_archive_operation
     def _session_left_live_context(self, session_id: str) -> bool:
         """transcript 是否已离开所有人的 live context。
 
@@ -981,6 +1090,7 @@ class SessionArchive:
         end_reason = (meta or {}).get("end_reason")
         return end_reason == "compression" or end_reason in _FRESH_RESET_END_REASONS
 
+    @_archive_operation
     def _is_compacted_message(self, message_id: int | None) -> bool:
         """compaction 归档行（`active=0, compacted=1`）已不在 live context。
 
@@ -994,6 +1104,7 @@ class SessionArchive:
         ).fetchone()
         return row is not None and row["active"] == 0 and row["compacted"] == 1
 
+    @_archive_operation
     def resolve_session_by_title(self, title: str) -> str | None:
         """标题 → session id，优先最新的 `"<title> #N"` 续篇。
 
@@ -1011,6 +1122,7 @@ class SessionArchive:
             return numbered["id"]
         return exact["id"] if exact is not None else None
 
+    @_archive_operation
     def search_messages(
         self,
         query: str,
@@ -1088,6 +1200,7 @@ class SessionArchive:
             )
         return rows
 
+    @_archive_operation
     def _search_cjk(
         self, sanitized: str, *, limit: int, offset: int, role_filter: Iterable[str] | None,
         source_filter: Iterable[str] | None, exclude_sources: Iterable[str] | None,
@@ -1156,6 +1269,7 @@ class SessionArchive:
             params.append(before_ts)
         return " AND ".join(clauses), params
 
+    @_archive_operation
     def _match_rows(
         self, table: str, match: str, *, order: str, limit: int, offset: int,
         raw_query: str | None = None, **filters: Any,
@@ -1190,6 +1304,7 @@ class SessionArchive:
             )
         return [dict(row) for row in rows]
 
+    @_archive_operation
     def _like_rows(
         self, raw: str, *, order: str, limit: int, offset: int, **filters: Any,
     ) -> list[dict[str, Any]]:
@@ -1231,6 +1346,7 @@ class SessionArchive:
 
     # -- session_search（四形态） ------------------------------------------
 
+    @_archive_operation
     def session_search(
         self,
         *,
@@ -1259,6 +1375,7 @@ class SessionArchive:
             current_session_id=current_session_id,
         )
 
+    @_archive_operation
     def _browse(self, limit: int, current_session_id: str | None) -> dict[str, Any]:
         placeholders = ",".join("?" for _ in HIDDEN_SESSION_SOURCES)
         rows = self._conn.execute(
@@ -1285,6 +1402,7 @@ class SessionArchive:
         ]
         return {"mode": "browse", "results": results, "count": len(results)}
 
+    @_archive_operation
     def _read(self, session_id: str, head: int = 20, tail: int = 10) -> dict[str, Any]:
         meta = self.get_session(session_id)
         if meta is None:
@@ -1301,6 +1419,7 @@ class SessionArchive:
             "messages": shaped[:head] + shaped[-tail:] if truncated else shaped,
         }
 
+    @_archive_operation
     def _scroll(
         self, session_id: str, around_message_id: int, window: int, current_session_id: str | None,
     ) -> dict[str, Any]:
@@ -1377,6 +1496,7 @@ class SessionArchive:
         })
         return out
 
+    @_archive_operation
     def _anchor_in_live_context(
         self, anchor_row: sqlite3.Row, owning: str, current_session_id: str,
     ) -> bool:
@@ -1392,6 +1512,7 @@ class SessionArchive:
             return False
         return anchor_row["active"] == 0 or not self._session_left_live_context(owning)
 
+    @_archive_operation
     def _discover(
         self, query: str, *, limit: int, sort: str | None, after_ts: float | None,
         before_ts: float | None, current_session_id: str | None,
@@ -1461,6 +1582,7 @@ class SessionArchive:
             )
         return out
 
+    @_archive_operation
     def _title_match(
         self, query: str, current_root: str | None,
         after_ts: float | None, before_ts: float | None,
@@ -1504,6 +1626,7 @@ class SessionArchive:
         entry["_lineage_root"] = root
         return entry
 
+    @_archive_operation
     def _hydrate(self, lineage_root: str, match: dict[str, Any], *, full: bool) -> dict[str, Any] | None:
         meta = self.get_session(lineage_root) or self.get_session(match["session_id"]) or {}
         message_id = match.get("id")
@@ -1562,10 +1685,12 @@ class SessionArchive:
 
     # -- 自动维护（auto-prune / stale-open sweep / VACUUM） -----------------
 
+    @_archive_operation
     def _get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM state_meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row is not None else None
 
+    @_archive_operation
     def _set_meta(self, key: str, value: str) -> None:
         with self._cursor() as conn:
             conn.execute(
@@ -1574,6 +1699,7 @@ class SessionArchive:
                 (key, value),
             )
 
+    @_archive_operation
     def _prune_sessions(self, cutoff: float) -> int:
         """删除 `ended_at` 已写、未 pinned、activity < cutoff 的会话。
 
@@ -1608,6 +1734,7 @@ class SessionArchive:
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", chunk)
         return len(ids)
 
+    @_archive_operation
     def _sweep_orphaned_sessions(self, cutoff: float, now: float) -> list[str]:
         """把进程死亡遗留的 open 自动化会话**关闭**（不删）。
 
@@ -1643,6 +1770,7 @@ class SessionArchive:
             )
         return victims
 
+    @_archive_operation
     def _freelist_ratio(self) -> float | None:
         """可回收页占比；None = 读不到（退回时间节流，照抄 Hermes 原语义）。
         来源: Hermes `hermes_state_maintenance.py:353`
@@ -1654,6 +1782,7 @@ class SessionArchive:
             return None
         return free / pages if pages > 0 else 0.0
 
+    @_archive_operation
     def maybe_auto_prune_and_vacuum(
         self,
         *,
@@ -1803,37 +1932,59 @@ class SessionArchiveObserver:
         # 多进程 / 重启后由 `ensure_session` 的 INSERT..ON CONFLICT 兜底。
         self._known: set[str] = set()
         self._lock = threading.Lock()
+        self._store: Any | None = None
+        self._owns_archive = self._archive is None
+        self._closed = False
 
     @property
     def archive(self) -> SessionArchive:
         # 首建走双重检查锁定：并发首访（观察者事件线程 + web 请求线程）只建
         # 一个实例，避免重复 initialize/维护与孤儿连接。`initialize()` 与
         # `maybe_auto_prune_and_vacuum()` 都不回调用本对象的 `_lock`，持锁安全。
-        if self._archive is None:
-            with self._lock:
-                if self._archive is None:
-                    arc = SessionArchive(
-                        self._archive_path, cjk_so_path=self._cjk_so_path,
-                    )
-                    arc.initialize()
-                    self._archive = arc
-        if not self._maintained:
-            with self._lock:
-                run_maintenance = not self._maintained
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("SessionArchiveObserver is closed")
+            if self._archive is None:
+                assert self._archive_path is not None
+                arc = SessionArchive(
+                    self._archive_path, cjk_so_path=self._cjk_so_path,
+                )
+                arc.initialize()
+                self._archive = arc
+            archive = self._archive
+            assert archive is not None
+            if not self._maintained:
                 self._maintained = True
-            if run_maintenance:
                 # 惰性触发点：建库完成即跑一次自动维护（写入路径上，永不抛）。
-                self._archive.maybe_auto_prune_and_vacuum(
+                archive.maybe_auto_prune_and_vacuum(
                     auto_prune=self._auto_prune,
                     retention_days=self._retention_days,
                     min_interval_hours=self._min_interval_hours,
                 )
-        return self._archive
+            return archive
+
+    def close(self) -> None:
+        """Detach from the store and close only an archive owned by this observer."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            store = self._store
+            self._store = None
+            archive = self._archive if self._owns_archive else None
+            if store is not None and getattr(store, "_event_observer", None) is self:
+                store.set_event_observer(None)
+        if archive is not None:
+            archive.close()
 
     # -- 接线 --------------------------------------------------------------
 
     def attach(self, store: Any) -> None:
-        store.set_event_observer(self)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("SessionArchiveObserver is closed")
+            store.set_event_observer(self)
+            self._store = store
 
     # -- 观察者入口 --------------------------------------------------------
 

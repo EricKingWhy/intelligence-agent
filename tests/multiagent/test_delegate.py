@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from pydantic import BaseModel, Field
 
 from agent_harness.agent.factory import AgentFactory
@@ -367,11 +367,21 @@ class TestBlockingParallelDelegation:
 
     @pytest.mark.asyncio
     async def test_child_failure_isolated_from_batch(self, tmp_path):
-        child_model = ScriptedModel([
-            AIMessage(content="ok1"), AIMessage(content=""),
-            AIMessage(content="ok3"),
-        ])
-        tool, _, _, provider = _activated_tool(tmp_path, child_model=child_model)
+        # 按任务文本选响应，**不按调用顺序**：#1489 起 durable append 会 await，
+        # 三个并发 child 谁先被模型调用由调度器决定（实测任务1/任务2 会互换），
+        # 而本用例要考的是「某个 child 失败不影响同批其他 child」——用顺序绑定的
+        # 剧本会让断言在等价实现上随机变红。
+        class _TaskKeyedModel(ScriptedModel):
+            async def astream(self, messages, **kwargs):
+                task = next(
+                    (m.content for m in reversed(messages)
+                     if isinstance(m, HumanMessage)),
+                    "",
+                )
+                content = "" if "任务1" in task else f"ok-{task}"
+                yield AIMessageChunk(content=content)
+
+        tool, _, _, provider = _activated_tool(tmp_path, child_model=_TaskKeyedModel([]))
         tool = DelegateTool(provider, max_delegations=99)
 
         results = await asyncio.gather(*[
