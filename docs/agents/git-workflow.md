@@ -86,6 +86,11 @@ git -C <repo> diff --name-status <可见SHA-A>..<可见SHA-B>
 11. fetch origin，显式分析并将本地 main 同步到新的 origin/main；非快进或冲突不能强制对齐。
 12. 通知另一条施工线或用户回补；另一条线下次开工前按 §2 获取新基准。
 
+第 2、5、9 步的机械段（同步合并、docs 三件套并集、push 前强制覆盖检查、等 gate0）有仓库内脚本
+（#1597）：`scripts/integration/update-pr`（失败形态带显式提示：MANUAL-CONFLICT / CODE-IN-CC /
+COVERAGE-RED+机械归属行）与 `scripts/integration/poll-pr`（轮询 gate0 结论）。用法见各自
+`--help`；冒烟测试 `tests/tooling/test_integration_scripts.py`（临时 fixture 仓，不依赖真实 PR）。
+
 完成条件：每一步对应当前授权；集成树有可核对验证证据，发布有 CI 和批准，其他线已获回补通知。
 
 ### 3.2 已验证树与集成树
