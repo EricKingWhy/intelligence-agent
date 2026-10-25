@@ -854,3 +854,39 @@ async def test_distinct_explicit_conflict_groups_partition_each_source_once(tmp_
     assert len(conflicts) == 2
     assert sorted(sources) == ["m1", "m2", "m6", "m7"]
     assert len(sources) == len(set(sources))
+
+
+async def test_apply_rechecks_tampered_deployment_budget_before_writing(tmp_path) -> None:
+    records = (
+        *_DEFAULT_RECORDS,
+        *(
+            _record_row(memory_id=f"large-{index}", content=f"记录{index}-" + "x" * 890)
+            for index in range(4)
+        ),
+    )
+    workspace, database = await _seed(tmp_path, records=records)
+    manifest_path = workspace / MANIFEST_NAME
+    planned = await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+    assert _items(planned, kind="budget_conflict"), "夹具须先触发部署预算冲突"
+
+    tampered = load_manifest(manifest_path)
+    tampered["limits"]["memory"] = DEFAULT_MEMORY_CHAR_LIMIT * 10
+    tampered["items"] = [
+        item for item in tampered["items"] if item["kind"] != "budget_conflict"
+    ]
+    manifest_path.write_text(
+        json.dumps(tampered, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    await _resolve_all_conflicts(manifest_path, load_manifest(manifest_path))
+    await _approve_every_map_item(manifest_path)
+    before_manifest = manifest_path.read_bytes()
+    before_database = _table_counts(database)
+
+    with pytest.raises(MappingBlocked) as blocked:
+        await apply_identity_mapping(manifest_path, now=CLOCK)
+
+    message = " ".join(blocked.value.reasons)
+    assert "不得扩大预算" in message and str(DEFAULT_MEMORY_CHAR_LIMIT) in message
+    assert _table_counts(database) == before_database
+    assert manifest_path.read_bytes() == before_manifest
+    assert not (workspace / "memories").exists()

@@ -137,6 +137,17 @@ def _settings_values(settings: MemorySettingsV2) -> dict[str, bool]:
     }
 
 
+def _budget_limit_violations(
+    requested: dict[str, int], deployment: dict[str, int],
+) -> list[str]:
+    return [
+        f"--{target}-limit={requested[target]} 高于部署配置 {deployment[target]}："
+        f"迁移不得扩大预算（apply 只按清单预算写盘，超过部署上限的文件运行时读不进来）"
+        for target in ("memory", "user")
+        if requested[target] > deployment[target]
+    ]
+
+
 def _parse_moment(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -317,12 +328,7 @@ async def plan_identity_mapping(
         "memory": deployment["memory"] if memory_char_limit is None else int(memory_char_limit),
         "user": deployment["user"] if user_char_limit is None else int(user_char_limit),
     }
-    inflated = [
-        f"--{target}-limit={requested[target]} 高于部署配置 {deployment[target]}："
-        f"迁移不得扩大预算（apply 只按清单预算写盘，超过部署上限的文件运行时读不进来）"
-        for target in ("memory", "user")
-        if requested[target] > deployment[target]
-    ]
+    inflated = _budget_limit_violations(requested, deployment)
     if inflated:
         raise MappingBlocked(inflated)
     if manifest_path.exists():
@@ -857,6 +863,9 @@ async def apply_identity_mapping(
     """
     path = Path(manifest_path)
     manifest = load_manifest(path)
+    inflated = _budget_limit_violations(manifest["limits"], manifest["deployment_limits"])
+    if inflated:
+        raise MappingBlocked(inflated)
     workspace = Path(manifest["workspace"])
     moment = now if now is not None else datetime.now().astimezone()
 
