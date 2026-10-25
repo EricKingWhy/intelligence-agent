@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# update-pr — 集成线「先回后正」更新一张 PR 分支（#1597；移植 2026-10-25 集成会话的 /tmp 件，
+# 补齐三处实录缺口：空 --cc 形态预检提示、push 前强制本地覆盖闸门、脚本不再随会话丢）。
+#
+# 流程（每步独立判码，不靠 && 链——#1593 实录：&& 链上前序失败会静默吃掉后置检查）：
+#   1. fetch origin main + 分支，切到 int/<分支>（自 origin/<分支> 重建）；
+#   2. merge origin/main；docs 进度三件套（PHASE_STATUS.md / SDD_TICKET_TRACKER.md /
+#      phase_status/<任意月份>.md）冲突自动 `git merge-file --union` 保留两侧条目；
+#      其余文件冲突 ⇒ exit 3（MANUAL-CONFLICT），停在冲突现场并列出文件；
+#   3. 合并提交后打印 --cc 表；代码文件出现在 --cc 表 ⇒ exit 5（人工解冲突形态，
+#      push 前须落 sync-merge 台账行）；
+#   4. 强制本地跑 scripts/check_review_coverage.py，exit≠0 ⇒ exit 4（COVERAGE-RED）
+#      停在 push 前；「空 --cc 且 tree≠父」形态给出「先落机械归属行」显式提示
+#      （#1584 / #1578 / #1591 三例均为该形态各白付一轮 CI 往返）；
+#   5. 全绿才 push（--no-push 只做前四步）。
+#
+# 用法：update-pr <PR 号> <分支名> [--repo <目录>] [--coverage-cmd <命令>] [--no-push]
+#   --repo         工作 clone 根目录（默认当前目录）；须有指向 origin 的 remote。
+#   --coverage-cmd 覆盖闸门命令（默认：仓库 venv 的 python 跑 scripts/check_review_coverage.py，
+#                  PYTHONUTF8=1）。命令整串经 eval 执行，exit 码即判据。
+#   --no-push      不推送（供 dry-run / 人工复核）。
+# 退出码：0=全绿（默认含 push）；3=MANUAL-CONFLICT；4=COVERAGE-RED；5=CODE-IN-CC；9=环境错。
+set -u
+PR=""; BR=""; REPO_DIR="."; COVERAGE_CMD=""; PUSH=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) REPO_DIR="${2:?--repo 需要值}"; shift 2 ;;
+    --coverage-cmd) COVERAGE_CMD="${2:?--coverage-cmd 需要值}"; shift 2 ;;
+    --no-push) PUSH=0; shift ;;
+    -h|--help) awk 'NR>1 && /^set -u$/{exit} NR>1 {sub(/^# ?/, ""); print}' "$0"; exit 0 ;;
+    -*) echo "未知参数：$1（--help 看用法）" >&2; exit 9 ;;
+    *) if [ -z "$PR" ]; then PR="$1"; elif [ -z "$BR" ]; then BR="$1";
+       else echo "多余参数：$1" >&2; exit 9; fi; shift ;;
+  esac
+done
+if [ -z "$PR" ] || [ -z "$BR" ]; then
+  echo "用法：update-pr <PR 号> <分支名> [--repo <目录>] [--coverage-cmd <命令>] [--no-push]（--help 看全文）" >&2
+  exit 9
+fi
+
+cd "$REPO_DIR" 2>/dev/null || { echo "REPO 不存在：$REPO_DIR" >&2; exit 9; }
+git fetch -q origin main "$BR" || { echo "fetch 失败（origin/main 或 $BR）" >&2; exit 9; }
+git switch -q -C "int/$BR" "origin/$BR" || { echo "switch int/$BR 失败" >&2; exit 9; }
+
+union_resolve() {
+  f="$1"
+  git show :1:"$f" > .update-pr.mb 2>/dev/null || : > .update-pr.mb
+  git show :2:"$f" > .update-pr.ours
+  git show :3:"$f" > .update-pr.theirs
+  cp .update-pr.ours .update-pr.mo
+  git merge-file -L ours -L base -L theirs --union .update-pr.mo .update-pr.mb .update-pr.theirs
+  cp .update-pr.mo "$f" && git add "$f" && rm -f .update-pr.mb .update-pr.ours .update-pr.theirs .update-pr.mo
+  echo "UNION-RESOLVED: $f（两侧条目机械并集，事后须人工核对一行不缺）"
+}
+
+git merge --no-edit origin/main >/dev/null 2>&1
+if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+  for f in docs/PHASE_STATUS.md docs/SDD_TICKET_TRACKER.md \
+           $(git diff --name-only --diff-filter=U -- docs/phase_status); do
+    [ -n "$(git diff --name-only --diff-filter=U -- "$f")" ] && union_resolve "$f"
+  done
+fi
+if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+  echo "MANUAL-CONFLICT（非 docs 进度文件，按 §14.7 九项报告人工解决后重跑）："
+  git diff --name-only --diff-filter=U | sed 's/^/    /'
+  exit 3
+fi
+git commit --no-edit -q
+MERGE=$(git rev-parse HEAD) || exit 9
+MB=$(git merge-base "$MERGE" origin/main)
+echo "PR #$PR 分支 $BR: $(git rev-parse "origin/$BR" | cut -c1-8) -> ${MERGE:0:8}（merge-base ${MB:0:8}）"
+
+CC=$(git show --cc --name-only --format= "$MERGE" | sort -u)
+echo "--cc 表："
+[ -n "$CC" ] && echo "$CC" | sed 's/^/    /' || echo "    （空）"
+CODE=$(echo "$CC" | grep -vE '^(docs/|$)' || true)
+if [ -n "$CODE" ]; then
+  echo "CODE-IN-CC（两侧都改了代码 ⇒ 人工解冲突形态，push 前须落 sync-merge 台账行）："
+  echo "$CODE" | sed 's/^/    /'
+  echo "STOPPED-BEFORE-PUSH"
+  exit 5
+fi
+
+TREE=$(git rev-parse "$MERGE^{tree}")
+P1TREE=$(git rev-parse "$MERGE^1^{tree}")
+
+if [ -z "$COVERAGE_CMD" ]; then
+  if [ -x ".venv/Scripts/python.exe" ]; then PY=".venv/Scripts/python.exe";
+  elif [ -x ".venv/bin/python" ]; then PY=".venv/bin/python";
+  else PY="python3"; fi
+  COVERAGE_CMD="PYTHONUTF8=1 $PY scripts/check_review_coverage.py"
+fi
+# 子 shell 包裹：命令内的 exit/builtin 只作用于本次检查，不短路宿主脚本
+eval "( $COVERAGE_CMD )" > .update-pr.cov.out 2>&1
+CRC=$?
+if [ "$CRC" -ne 0 ]; then
+  echo "COVERAGE-RED（本地覆盖闸门 exit=$CRC，已停在 push 前）。输出尾部："
+  tail -6 .update-pr.cov.out | sed 's/^/    /'
+  if [ -z "$CC" ] && [ "$TREE" != "$P1TREE" ]; then
+    echo "形态判别：空 --cc 且 tree≠父 ⇒ 覆盖闸门按设计 fail-closed（非笼统失败）。"
+    echo "处置：先落机械归属行 docs/review_ledger.d/t<描述>-${MB:0:8}-${MERGE:0:8}.tsv，"
+    echo "一行制式：日期<TAB>机械归属（非内容审查主张）：#<票> 分支与 origin/main 的 sync merge"
+    " ${MERGE:0:9}（父一 ${MERGE:0:9}…/父二 ${MB:0:9}…）<TAB>${MB}..${MERGE}。"
+    echo "台账行 SHA 一律先 rev-parse 取全值（勿手补零）；commit 后重跑本脚本再 push。"
+  fi
+  rm -f .update-pr.cov.out
+  exit 4
+fi
+rm -f .update-pr.cov.out
+echo "coverage: exit=0"
+
+if [ "$PUSH" -eq 1 ]; then
+  git push -q origin "HEAD:$BR" && echo "pushed: HEAD:$BR（int/$BR @ ${MERGE:0:8}）" \
+    || { echo "push 失败" >&2; exit 9; }
+else
+  echo "--no-push：合并与检查完成，未推送（int/$BR @ ${MERGE:0:8}）"
+fi
