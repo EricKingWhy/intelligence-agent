@@ -240,12 +240,9 @@ class _AccountedSnapshot:
 
     @property
     def total(self) -> int:
-        return (
-            self.messages + self.protected_facts + self.runtime_context
-            + self.system_prompt + self.plan + self.modified_paths
-            + self.progress + self.plan_mode + self.pressure_warning
-            + sum(self.providers.values())
-        )
+        # 分项枚举只维护在 breakdown() 一处（Standards 审查 P3-2：平行枚举
+        # 两处会在新增组成时静默漂移）。
+        return sum(self.breakdown().values())
 
     def breakdown(self) -> dict[str, int]:
         """分项账本（拒绝时随异常携带；provider 聚合为单项，按名明细见
@@ -760,7 +757,8 @@ class ContextBuilder:
         self._last_plan_mode_tokens: int = 0
         # W-04 (#348)：最近一次 build 实际注入的接近硬护栏 warning 文本成本
         # （同清单锚块的记账口径：非持久化注入、独立记账口——warning 文本的
-        # token 成本先计入 provider_estimate 再注入，usage_snapshot 折进 "other"）。
+        # token 成本先计入账本（#1497 `ledger.pressure_warning`）再注入，
+        # usage_snapshot 折进 "other"）。
         self._last_pressure_warning_tokens: int = 0
         # 清单兜底重注入周期（PRD §4.6 Cline Focus Chain 默认值 6，配置可调）。
         self.plan_reinject_every_messages = plan_reinject_every_messages
