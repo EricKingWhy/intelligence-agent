@@ -474,16 +474,26 @@ def _git_at(repo_root, *args: str) -> subprocess.CompletedProcess:
     return git("-C", str(repo_root), *args)
 
 
-#: receipt-present 检查的引入提交（#1338 改动 3 那笔）。钉死为常量：豁免边界是历史事实，
-#: 不随 "receipt-present" 字面量的增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
-_RECEIPT_BOOTSTRAP_SHA = "1a28072df74955f8091297bb5b9a096c8c18c4cf"
+#: receipt-present 检查的采用窗锚点。钉死为常量：豁免边界不随 "receipt-present" 字面量的
+#: 增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
+#:
+#: 2026-10-25 用户裁决第二次锚定：首锚 1a28072df749（#1338 改动 3）的 7 天 warn-only 窗在
+#: 2026-10-25T09:21:24Z 到期转硬后，实测出现**收据出生死锁**——strict up-to-date 迫使在途
+#: PR 落 sync merge，而 `commit_file_changes` 对 merge 提交按第一父取 diff（含 main 带入的
+#: 代码）⇒ 形状④尾判被破坏；且「冻结 tip 裸跑全量」自身会被 receipt-present 判红（6/7），
+#: 落下的是无效 FAIL 收据 ⇒ 硬口径下第一张 PASS 收据无法出生（实测复现：PR #1596 gate0
+#: run 40181451067，6 违规；#1595 run 40179483969 于 09:10 warn-only 放行）。锚点前移 =
+#: 重开一轮采用窗：锚点之前的提交（含全部在途 PR）机械豁免，锚点日期起重新计 7 天宽限。
+#: 设计缺陷本体（新分支收据自举）由 follow-up 票处理，本常量不承担该修复。
+_RECEIPT_BOOTSTRAP_SHA = "69befba3da742a1ee8ad3466e4bdc788ca4e1b24"
 
 
 def receipt_bootstrap_sha(repo_root=None) -> str | None:
-    """引入本检查的第一笔提交（钉死的常量，见 `_RECEIPT_BOOTSTRAP_SHA`）。
+    """receipt-present 的采用窗锚点（钉死的常量，见 `_RECEIPT_BOOTSTRAP_SHA`）。
 
-    Bootstrap 规则（#1338 改动 3）：规则存在**之前**写的提交、以及引入规则的那笔提交自身都在
-    检查范围外——这也是在途 PR（提交早于本规则）被豁免的机械形式。
+    Bootstrap 规则（#1338 改动 3）：锚点**之前**的提交、以及锚点自身都在检查范围外——
+    这也是在途 PR（提交早于当前锚点）被豁免的机械形式。锚点日期同时决定 7 天 warn-only
+    宽限窗的起点；历次锚定理由见常量处注释。
     """
     return _RECEIPT_BOOTSTRAP_SHA
 
