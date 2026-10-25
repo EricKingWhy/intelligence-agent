@@ -113,14 +113,22 @@ def default_control_root() -> Path:
     （控制目录放指定卷）都走它。与 ``Settings.provider_store_path`` 同根
     （``<home>/.agent-harness/``），形态对标 ``~/.claude/projects``。
 
-    空串是部署脚本变量展开失败的常见产物：**忽略并回落默认**（钉根被丢弃必须
-    留 warning，不能静默）；``~`` 前缀会 ``expanduser`` 展开（env 值不经过 shell）。
+    非法覆盖值（空串 / 纯空白 / **相对路径**）一律**忽略并回落默认 + warning**
+    （B 轴审查 P3-1）：相对根会随 cwd 解析，等于把控制文件静默放回 agent 领地
+    （cwd 即项目根）——与构造参数 ``control_root`` 空值的 fail-fast 同一口径，
+    env 侧因属部署误配面取「忽略 + 留痕」而非崩构造。``~`` 前缀会 ``expanduser``
+    展开（env 值不经过 shell）。
     """
     override = os.environ.get(_CONTROL_ENV)
-    if override:
-        return Path(override).expanduser()
     if override is not None:
-        logger.warning("%s 设为空串，忽略该覆盖并回落默认控制目录", _CONTROL_ENV)
+        expanded = Path(override).expanduser()
+        if str(override).strip() and expanded.is_absolute():
+            return expanded
+        logger.warning(
+            "%s 非法（空串或相对路径：%r）——相对根随 cwd 解析，可能把控制文件放回"
+            " agent 领地；忽略该覆盖并回落默认控制目录",
+            _CONTROL_ENV, override,
+        )
     return Path.home() / _POLICY_DIRNAME / _CONTROL_DIRNAME
 
 
@@ -311,6 +319,29 @@ class ApprovePolicyStore:
             except (KeyError, TypeError, ValueError):
                 logger.warning("审批规则条目不可解析，跳过：%r", entry)
         return rules
+
+    def preview_legacy(self) -> LegacyImportResult:
+        """预演 ``import_legacy`` 的结果（**不落盘**）：CLI 迁移二次确认的展示面。
+
+        与 ``import_legacy`` 同一套严格解析与 id 去重口径；不取锁、不写文件。
+        用户核对将导入清单后带 ``--yes`` 重跑，真导入在锁内重算——预览到执行
+        之间规则集可能变化，差异只可能让实际导入**更少**（新出现的重复 id 被
+        去重），不会更多，预览即上界。
+        """
+        entries = self._read_legacy_strict()
+        if not entries:
+            return LegacyImportResult(imported=[], skipped=0)
+        known_ids = {rule.id for rule in self.load()}
+        imported: list[ApprovePolicyRule] = []
+        skipped = 0
+        for entry in entries:
+            rule = _parse_legacy_rule(entry)
+            if rule is None or rule.id in known_ids:
+                skipped += 1
+                continue
+            imported.append(rule)
+            known_ids.add(rule.id)
+        return LegacyImportResult(imported=imported, skipped=skipped)
 
     def import_legacy(self) -> LegacyImportResult:
         """把旧工作区规则文件**显式**迁移进控制目录（#1487）——严格校验 + 按 id 去重。

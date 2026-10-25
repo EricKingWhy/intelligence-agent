@@ -201,7 +201,9 @@ def _seed_legacy(tmp_path: Path, *rules: ApprovePolicyRule) -> Path:
 def test_import_legacy_moves_rules_into_control_file(tmp_path: Path) -> None:
     legacy = _seed_legacy(tmp_path, _rule("r1"), _rule("r2"))
     before = legacy.read_bytes()
-    output, failed = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    output, failed = cli.approvals_policy_import_legacy_command(
+        project_root=tmp_path, yes=True,
+    )
     assert failed is False
     assert "导入 2 条" in output
     assert "跳过 0 条" in output
@@ -217,14 +219,61 @@ def test_import_legacy_without_legacy_file_is_noop(tmp_path: Path) -> None:
     assert not ApprovePolicyStore(tmp_path).path.exists()
 
 
+def test_import_legacy_without_yes_is_preview_only(tmp_path: Path) -> None:
+    """B 轴 P3-2：默认二次确认——只打印将导入清单，零改动 + exit 2。"""
+    _seed_legacy(tmp_path, _rule("r1"))
+    output, confirm_required = cli.approvals_policy_import_legacy_command(
+        project_root=tmp_path,
+    )
+    assert confirm_required is True
+    assert "将从" in output
+    assert "r1" in output
+    assert "无法证明来自 Runtime" in output
+    assert "加 --yes 执行导入" in output
+    assert _ids(tmp_path) == []
+    assert not ApprovePolicyStore(tmp_path).path.exists()
+
+
+def test_import_legacy_preview_exposes_forged_rules(tmp_path: Path) -> None:
+    """预埋可见性：agent 伪造的全字段合规规则会**逐条出现在确认清单里**。"""
+    _seed_legacy(tmp_path, _rule("forged", key="rm -rf /tmp/x"))
+    output, confirm_required = cli.approvals_policy_import_legacy_command(
+        project_root=tmp_path,
+    )
+    assert confirm_required is True
+    assert "forged" in output
+    assert "rm -rf /tmp/x" in output
+    assert _ids(tmp_path) == []
+
+
 def test_import_legacy_is_idempotent(tmp_path: Path) -> None:
     _seed_legacy(tmp_path, _rule("r1"))
-    cli.approvals_policy_import_legacy_command(project_root=tmp_path)
-    second, failed = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    cli.approvals_policy_import_legacy_command(project_root=tmp_path, yes=True)
+    second, failed = cli.approvals_policy_import_legacy_command(
+        project_root=tmp_path, yes=True,
+    )
     assert failed is False
     assert "导入 0 条" in second
     assert "跳过 1 条" in second
     assert _ids(tmp_path) == ["r1"]
+
+
+def test_import_legacy_deletion_advice_conditional_on_skipped(
+    tmp_path: Path,
+) -> None:
+    """B 轴 P4-3：有跳过条目时收回「可手动删除」建议（未导入内容可能仍可恢复）。"""
+    _seed_legacy(tmp_path, _rule("r1"))
+    legacy = tmp_path / _LEGACY_FILE
+    entries = json.loads(legacy.read_text(encoding="utf-8"))["rules"]
+    entries.append({"id": "broken"})  # 缺字段 → 不合规 → 跳过
+    legacy.write_text(json.dumps({"rules": entries}), encoding="utf-8")
+    output, failed = cli.approvals_policy_import_legacy_command(
+        project_root=tmp_path, yes=True,
+    )
+    assert failed is False
+    assert "跳过 1 条" in output
+    assert "可手动删除" not in output
+    assert "人工核对" in output
 
 
 def test_import_legacy_corrupt_file_fails_honestly(
@@ -256,7 +305,9 @@ def test_list_hints_legacy_presence(tmp_path: Path) -> None:
 def test_import_legacy_via_dispatch(tmp_path: Path, monkeypatch, capsys) -> None:
     _seed_legacy(tmp_path, _rule("r1"))
     try:
-        _run_cli(monkeypatch, tmp_path, ["approvals", "policy", "import-legacy"])
+        _run_cli(
+            monkeypatch, tmp_path, ["approvals", "policy", "import-legacy", "--yes"]
+        )
     except SystemExit as exc:
         assert exc.code in (0, None), f"迁移不该被拒绝：exit={exc.code}"
     captured = capsys.readouterr()

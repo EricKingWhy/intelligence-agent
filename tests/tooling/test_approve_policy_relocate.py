@@ -46,7 +46,7 @@ from agent_harness.tooling.approve_policy import (
     project_key,
 )
 from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
-from agent_harness.tools import BashTool, WriteTool
+from agent_harness.tools import BashTool, EditTool, WriteTool
 
 _ENV_OVERRIDE = "AGENT_HARNESS_APPROVE_POLICY_ROOT"
 _LEGACY_REL = Path(".agent-harness") / "approve-policy.json"
@@ -153,6 +153,15 @@ def test_default_control_root_env_override_and_home_default(
     # P4-1：空串（部署变量展开失败产物）不当作覆盖——回落默认并留痕，不静默丢钉根。
     monkeypatch.setenv(_ENV_OVERRIDE, "")
     assert default_control_root() == Path.home() / ".agent-harness" / "approve-policy"
+    # B 轴 P3-1：纯空白 / 相对路径同样拒绝——相对根随 cwd 解析会把控制文件放回
+    # agent 领地（cwd 即项目根），与构造参数空值同口径（忽略 + 回落默认）。
+    monkeypatch.setenv(_ENV_OVERRIDE, "   ")
+    assert default_control_root() == Path.home() / ".agent-harness" / "approve-policy"
+    monkeypatch.setenv(_ENV_OVERRIDE, "relative-control-dir")
+    assert default_control_root() == Path.home() / ".agent-harness" / "approve-policy"
+    # `~` 前缀展开（env 值不经过 shell）。
+    monkeypatch.setenv(_ENV_OVERRIDE, "~/.z1487-pinned-control")
+    assert default_control_root() == Path.home() / ".z1487-pinned-control"
 
 
 def test_explicit_control_root_param_wins(tmp_path: Path) -> None:
@@ -397,6 +406,19 @@ async def test_write_tool_cannot_reach_via_workspace_symlink(fenced) -> None:
     tool = WriteTool(sandbox)
     result = await tool.execute(
         tool.args_schema(path=str(link), content='{"rules": []}'),
+    )
+    assert result.ok is False
+    assert result.error_code is not None and "PERMISSION" in str(result.error_code)
+    assert store.path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_edit_tool_cannot_reach_control_file(fenced) -> None:
+    """B 轴 P4-4：edit 与 write 走同一 Sandbox 写时围栏，票面 AC 点名两者。"""
+    sandbox, store, before = fenced
+    tool = EditTool(sandbox)
+    result = await tool.execute(
+        tool.args_schema(path=str(store.path), old_string="rules", new_string="evil"),
     )
     assert result.ok is False
     assert result.error_code is not None and "PERMISSION" in str(result.error_code)

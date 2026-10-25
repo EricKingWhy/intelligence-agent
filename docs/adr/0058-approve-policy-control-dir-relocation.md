@@ -49,12 +49,16 @@ import-legacy`（用户手势，F21 在迁移面的落点）；`import_legacy()`
 旧文件**在场但整体读不动 / 坏 JSON / 形态不对** ⇒ `LegacyImportError`（CLI
 如实报错 + exit 2 + 不给删除建议）——「读不动」与「没有规则」必须区分，
 否则用户会按「迁移完成可删除」的提示删掉可能含可恢复规则的坏文件。
+迁移默认**二次确认**（对齐 `remove`）：无 `--yes` 只打印将导入清单
+（`preview_legacy`，零改动）并 exit 2；`--yes` 才写入——旧位格式公开，
+agent 可预埋全字段合规的规则，逐条核对清单把 F21 手势从文件粒度下沉到
+规则粒度。有跳过条目时收回「可手动删除」建议（未导入内容可能仍可恢复）。
 
 **D4 — 逐引擎可写性矩阵（验收口径）。**
 
 | 引擎 | 控制文件可达性 | 证据 |
 | --- | --- | --- |
-| write / edit（全引擎） | **不可达**：Sandbox 路径围栏 resolve 后必须在 workspace 内；workspace 内 symlink 指向控制文件同样被拒（#1510 fence 语义） | `test_write_tool_cannot_reach_control_file` / `..._via_workspace_symlink` |
+| write / edit（全引擎） | **不可达**：Sandbox 路径围栏 resolve 后必须在 workspace 内；workspace 内 symlink 指向控制文件同样被拒（#1510 fence 语义） | `test_write_tool_cannot_reach_control_file` / `test_edit_tool_cannot_reach_control_file` / `..._via_workspace_symlink` |
 | bash @ docker | **不可达**：容器只挂 workspace 具名卷（`docker.py` volumes 构造），host home 不进容器 | `test_docker_agent_cannot_reach_control_dir`（canary 全盘 grep 为空；无 daemon 主机 skip） |
 | bash @ local | **已知残余**：与 harness 同进程同权，无 OS 隔离层的引擎无法靠目录位置防同权写。如实登记，不声称 | ADR 本行；无测试（不可测——它是定义上的同权） |
 
@@ -96,6 +100,11 @@ hermeticity 反而变好（旧测试全靠 tmp 项目根隔离，新测试 env �
 
 **未闭合（解除条件）**：
 
+- **迁移甄别不了「格式合规的伪造旧位文件」**（B 轴审查 P3-2）：无签名
+  （裁决 24-A 不做）就不可能自动证明旧位内容来自 Runtime；缓解 = 默认二次
+  确认（逐条清单可见）+ 命令输出的来源警示行。票面 AC#2「agent 自建文件
+  不被导入为授权」的准确口径 = **不被静默导入**（必须经用户逐条核对后的
+  显式手势）。**解除条件** = 出现规则签名 / Runtime 产物登记链的独立需求。
 - docker 引擎的可写性证据在有 daemon 环境补跑（本机无 daemon，测试 skip
   且挂载面构造已核）：**解除条件** = CI 或开发者主机提供 daemon 后该用例
   实跑一次并在 Tracker 回填读数。

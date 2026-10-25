@@ -3897,10 +3897,11 @@ def _main_approvals(argv: list[str]) -> None:
     - `approvals policy remove <id> [--yes]`：默认二次确认——无 `--yes` 且规则存在时，
       只打印将删规则并 `SystemExit(2)` 拒绝执行（**零改动**）；`--yes` 真删；id 不存在
       幂等成功（不报错）；
-    - `approvals policy import-legacy`（#1487）：把旧工作区
+    - `approvals policy import-legacy [--yes]`（#1487）：把旧工作区
       `.agent-harness/approve-policy.json` **显式**迁移进控制目录（严格校验 + 按 id
       去重 + 幂等）——Runtime 永不自动信任旧位（旧位在 agent 可达空间，静默导入
-      = 信任 agent 自建文件），迁移必须是用户手势。
+      = 信任 agent 自建文件），迁移必须是用户手势；默认只打印将导入清单并拒绝
+      执行（零改动），`--yes` 才写入。
 
     规则内容由 Runtime 在审批流里精确派生、只读展示，CLI **不提供创建入口**：唯一安装
     路径是用户在审批卡上主动选「以后都允许」（F21：显式授权，禁止静默创建）。项目根 =
@@ -3918,9 +3919,13 @@ def _main_approvals(argv: list[str]) -> None:
         "--yes", action="store_true",
         help="显式确认删除；缺省且规则存在时只打印将删规则并拒绝执行（零改动）",
     )
-    policy_sub.add_parser(
+    import_legacy = policy_sub.add_parser(
         "import-legacy",
         help="把旧工作区 .agent-harness/approve-policy.json 显式迁移进控制目录（#1487）",
+    )
+    import_legacy.add_argument(
+        "--yes", action="store_true",
+        help="确认导入预览清单；缺省只打印将导入的规则并拒绝执行（零改动）",
     )
     args = parser.parse_args(argv)
     settings = Settings()
@@ -3929,9 +3934,11 @@ def _main_approvals(argv: list[str]) -> None:
         print(approvals_policy_list_command())
         return
     if args.policy_command == "import-legacy":
-        output, failed = approvals_policy_import_legacy_command()
+        output, confirm_required = approvals_policy_import_legacy_command(
+            yes=args.yes,
+        )
         print(output)
-        if failed:
+        if confirm_required:
             raise SystemExit(2)
         return
     output, confirm_required = approvals_policy_remove_command(
@@ -3982,24 +3989,29 @@ def approvals_policy_list_command(*, project_root: Path | str | None = None) -> 
 
 
 def approvals_policy_import_legacy_command(
-    *, project_root: Path | str | None = None,
+    *, project_root: Path | str | None = None, yes: bool = False,
 ) -> tuple[str, bool]:
-    """`approvals policy import-legacy` 的可测核心：返回 `(文本, 是否失败)`（#1487）。
+    """`approvals policy import-legacy` 的可测核心：返回 `(文本, 是否需确认/失败)`。
 
     为什么必须显式（不能 Runtime 自动导）：旧位在 agent 可达空间，自动信任它 =
     信任 agent 自建文件——F21「显式授权」在迁移面上的落点。语义全部来自
-    `ApprovePolicyStore.import_legacy`：严格校验（created_at 可解析、command 档
-    无换行）、按 id 去重（控制侧已有同 id 时控制侧胜）、幂等。
+    `ApprovePolicyStore.import_legacy` / `preview_legacy`：严格校验（created_at
+    可解析、command 档无换行）、按 id 去重（控制侧已有同 id 时控制侧胜）、幂等。
 
-    `failed=True` 时调用方 `SystemExit(2)`（对齐 remove 的确认拒结名额）：旧文件
-    **在场但读不动**（`LegacyImportError`，A 轴审查 P3-1）必须与「迁移完成」区分
-    ——如实报错、不给删除建议，防止用户按提示删掉可能含可恢复规则的坏文件。
+    **默认二次确认**（对齐 remove，B 轴审查 P3-2）：无 `--yes` 只打印将导入清单
+    （preview，零改动）并 exit 2；`--yes` 才写入。旧位内容**无法证明来自 Runtime**
+    （格式公开，agent 可预埋全字段合规的规则），逐条核对清单就是把确认手势从
+    文件粒度下沉到规则粒度。
+
+    `confirm_required=True` 时调用方 `SystemExit(2)`（含两种形态：待确认、失败）。
+    旧文件**在场但读不动**（`LegacyImportError`，A 轴审查 P3-1）如实报错、
+    不给删除建议——防止用户按「迁移完成可删除」的提示删掉可能含可恢复规则的坏文件。
     """
     store = _approve_policy_store(project_root)
     if not store.legacy_present:
         return ("（未发现旧工作区规则文件，无需迁移）", False)
     try:
-        result = store.import_legacy()
+        result = store.import_legacy() if yes else store.preview_legacy()
     except LegacyImportError as e:
         return (
             (
@@ -4008,9 +4020,10 @@ def approvals_policy_import_legacy_command(
             ),
             True,
         )
+    action = "已从" if yes else "将从"
     lines = [
         (
-            f"已从 {store.legacy_path} 导入 {len(result.imported)} 条规则"
+            f"{action} {store.legacy_path} 导入 {len(result.imported)} 条规则"
             f"（跳过 {result.skipped} 条：不合规或 id 重复），控制文件：{store.path}"
         )
     ]
@@ -4019,7 +4032,20 @@ def approvals_policy_import_legacy_command(
         f"granularity={rule.granularity.value}  created_at={rule.created_at}"
         for rule in result.imported
     )
-    lines.append("旧文件迁移完成后不再被任何代码读取，可手动删除。")
+    if not yes:
+        lines.append(
+            "旧位内容无法证明来自 Runtime 产物（格式公开，可能被预埋）——"
+            "请逐条核对上方清单。"
+        )
+        lines.append("加 --yes 执行导入（未确认，未改动）。")
+        return ("\n".join(lines), True)
+    if result.skipped:
+        lines.append(
+            f"注意：{result.skipped} 条未导入（不合规或 id 重复）——"
+            "建议人工核对旧文件后再决定是否删除。"
+        )
+    else:
+        lines.append("旧文件迁移完成后不再被任何代码读取，可手动删除。")
     return ("\n".join(lines), False)
 
 
