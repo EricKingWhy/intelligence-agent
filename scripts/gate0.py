@@ -750,8 +750,12 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
     detail = [f"receipt-present（#1338 改动 3 / #1553 形状④）：base={base[:12]} bootstrap={bootstrap[:12]} "
               f"范围 {len(commits)} 笔 / 被查 {len(scope)} 笔 / 违规 {len(violations)} 笔"
               + ("（首周 warn-only）" if warn_only else "")]
+    # #1598：warn-only 期违规行加行内前缀，单行自证不计数（#1578 诊断实录：无前缀时与
+    # coverage 车道的同形行混在一份日志里，grep "missing receipt" 会把不计数行当阻断项）。
+    # 转硬口径（宽限结束）后前缀自然消失。
+    prefix = "warn-only " if warn_only else ""
     for sha, subject in violations:
-        detail.append(f"missing receipt for {sha[:12]} {subject}")
+        detail.append(f"{prefix}missing receipt for {sha[:12]} {subject}")
     if violations and not warn_only:
         detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，或从第一父提交传递"
                       "读数（仅限 docs-only 改动），或在分支冻结 tip 上跑一次全量（其后仅 docs / 收据提交）")

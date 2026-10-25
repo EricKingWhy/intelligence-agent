@@ -166,9 +166,10 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
        的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
 - **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
   `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
-  读失败日志**别只 grep `missing receipt`**：该子检查的违规行（warn-only、不计数）与 ⑧ 覆盖判定的
-  失败行**同文案**；判别看它头上一行是否为 `warn-only receipt-present … alert only, not counted`，
-  真正阻断的是文末 `失败车道：coverage` 汇总与 `❌ 未审查且未声明` 行（2026-10-25 #1578 诊断实录）。
+  读失败日志**别只 grep `missing receipt`**：warn-only（首周宽限）期该子检查的违规行带
+  行内前缀 **`warn-only missing receipt for …`**（#1598），单行自证不计数；无前缀的
+  `missing receipt for` 即硬口径阻断项，另有文末 `失败车道：coverage`/`guards` 汇总与
+  `❌ 未审查且未声明` 行可交叉确认（2026-10-25 #1578 诊断实录）。
   被测树 `t` 接受的形状见 `scripts/gate0.py::receipt_present_check` 的 docstring（**④ = 分支冻结
   tip 覆盖**，#1553 用户 2026-10-23 亲裁 A 案）：多笔代码提交的分支**不必逐笔各跑一次全量**——
   tip 树跑过一次全量、其后至 HEAD 每笔都是纯 docs / 纯收据落盘，则中间各笔按 ④ 视为被那棵被测树
