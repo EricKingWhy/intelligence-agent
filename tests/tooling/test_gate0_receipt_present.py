@@ -406,3 +406,93 @@ def test_shape3_same_tree_descendant_receipt(tmp_path):
     assert f"missing receipt for {c[:12]}" not in detail, detail
     assert f"missing receipt for {doomed[:12]}" in detail, detail
     assert ok is False, detail  # 那笔 D 提交自身没有收据
+
+
+# ── #1598：warn-only 违规行行内前缀（单行自证不计数） ──
+
+
+def _commit_recent(repo: Repo, files: dict[str, str], msg: str) -> str:
+    """日期不钉旧的提交：让 bootstrap 落进 7 天 warn-only 窗内（#1598 两臂之 warn 臂）。"""
+    for rel, content in files.items():
+        p = repo.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    proc = subprocess.run(["git", "add", "-A"], cwd=repo.root, env=_env(),
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    proc = subprocess.run(["git", "commit", "-q", "-m", msg], cwd=repo.root, env=_env(),
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    return repo.git("rev-parse", "HEAD")
+
+
+def test_warnonly_lines_carry_inline_prefix(tmp_path):
+    """#1598：warn-only 窗内违规行带 `warn-only ` 行内前缀；转硬口径后前缀消失。
+
+    判别力：去掉前缀拼接（或硬口径误带前缀）⇒ 两臂任一转红。
+    """
+    repo = Repo(tmp_path / "warn")
+    base = _commit_recent(repo, {"README.md": "base\n"}, "base")
+    repo.git("update-ref", "refs/remotes/origin/main", base)
+    _fresh_code_branch(repo, base)
+
+    ok, detail, warn = _check(repo, base)
+    assert warn is True, detail
+    assert ok is False, detail
+    assert "warn-only missing receipt for" in detail, detail
+
+    hard = Repo(tmp_path / "hard")
+    hbase = _base_with_origin(hard)  # 日期钉旧 ⇒ 转硬口径
+    _fresh_code_branch(hard, hbase)
+    _, hdetail, hwarn = _check(hard, hbase)
+    assert hwarn is False, hdetail
+    assert "warn-only missing receipt for" not in hdetail, hdetail
+    assert "missing receipt for" in hdetail, hdetail
+
+
+# ── #1602：self-cover 自举（本地落盘型全量跑不因缺收据自红；CI/局部跑照旧硬口径） ──
+
+
+def test_receipt_self_cover_truth_table():
+    """`receipt_self_cover`：record 且非局部且非 CI 才允许自举（#1602）。"""
+    assert gate0.receipt_self_cover(record=True, partial=False, ci_env=None) is True
+    assert gate0.receipt_self_cover(record=True, partial=False, ci_env="true") is False
+    assert gate0.receipt_self_cover(record=True, partial=True, ci_env=None) is False
+    assert gate0.receipt_self_cover(record=False, partial=False, ci_env=None) is False
+
+
+def _fresh_code_branch(repo: Repo, base: str) -> None:
+    """无收据的代码分支：receipt-present 必 not ok 且非 warn（转硬口径）。"""
+    repo.commit({"docs/n.md": "n\n"}, "docs 1")
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+
+
+def test_self_cover_keeps_guards_green_on_local_full_run(tmp_path, capsys):
+    """本地落盘型全量跑（self_cover=True）：缺收据不改写 guards 车道 + 响亮提示。
+
+    判别力：把 `elif self_cover` 分支删掉（回到无条件改写）⇒ 本断言转红。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    _fresh_code_branch(repo, base)
+    with mock.patch.object(gate0, "REPO_ROOT", str(repo.root)), \
+            mock.patch.object(gate0, "receipt_bootstrap_sha", lambda repo_root=None: base), _clean_env():
+        results = [(gate0.Lane("guards", "desc", [], str(repo.root)), 0, 0.0, "")]
+        gate0._apply_receipt_check(results, self_cover=True)
+    out = capsys.readouterr().out
+    assert results[0][1] == 0, out
+    assert "self-cover receipt-present (#1602)" in out
+    assert "必须随代码一起提交" in out
+
+
+def test_self_cover_off_rewrites_guards_in_ci(tmp_path, capsys):
+    """CI/局部跑（self_cover=False）：缺收据照旧把 guards 改写为失败（既有行为钉住）。"""
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    _fresh_code_branch(repo, base)
+    with mock.patch.object(gate0, "REPO_ROOT", str(repo.root)), \
+            mock.patch.object(gate0, "receipt_bootstrap_sha", lambda repo_root=None: base), _clean_env():
+        results = [(gate0.Lane("guards", "desc", [], str(repo.root)), 0, 0.0, "")]
+        gate0._apply_receipt_check(results, self_cover=False)
+    assert results[0][1] == 1
+    assert "missing receipt for" in results[0][3]

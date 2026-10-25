@@ -474,16 +474,26 @@ def _git_at(repo_root, *args: str) -> subprocess.CompletedProcess:
     return git("-C", str(repo_root), *args)
 
 
-#: receipt-present 检查的引入提交（#1338 改动 3 那笔）。钉死为常量：豁免边界是历史事实，
-#: 不随 "receipt-present" 字面量的增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
-_RECEIPT_BOOTSTRAP_SHA = "1a28072df74955f8091297bb5b9a096c8c18c4cf"
+#: receipt-present 检查的采用窗锚点。钉死为常量：豁免边界不随 "receipt-present" 字面量的
+#: 增删漂移（动态 `git log -S` 探测会在字面量被删改后静默后移）。
+#:
+#: 2026-10-25 用户裁决第二次锚定：首锚 1a28072df749（#1338 改动 3）的 7 天 warn-only 窗在
+#: 2026-10-25T09:21:24Z 到期转硬后，实测出现**收据出生死锁**——strict up-to-date 迫使在途
+#: PR 落 sync merge，而 `commit_file_changes` 对 merge 提交按第一父取 diff（含 main 带入的
+#: 代码）⇒ 形状④尾判被破坏；且「冻结 tip 裸跑全量」自身会被 receipt-present 判红（6/7），
+#: 落下的是无效 FAIL 收据 ⇒ 硬口径下第一张 PASS 收据无法出生（实测复现：PR #1596 gate0
+#: run 40181451067，6 违规；#1595 run 40179483969 于 09:10 warn-only 放行）。锚点前移 =
+#: 重开一轮采用窗：锚点之前的提交（含全部在途 PR）机械豁免，锚点日期起重新计 7 天宽限。
+#: 设计缺陷本体（新分支收据自举）由 follow-up 票处理，本常量不承担该修复。
+_RECEIPT_BOOTSTRAP_SHA = "69befba3da742a1ee8ad3466e4bdc788ca4e1b24"
 
 
 def receipt_bootstrap_sha(repo_root=None) -> str | None:
-    """引入本检查的第一笔提交（钉死的常量，见 `_RECEIPT_BOOTSTRAP_SHA`）。
+    """receipt-present 的采用窗锚点（钉死的常量，见 `_RECEIPT_BOOTSTRAP_SHA`）。
 
-    Bootstrap 规则（#1338 改动 3）：规则存在**之前**写的提交、以及引入规则的那笔提交自身都在
-    检查范围外——这也是在途 PR（提交早于本规则）被豁免的机械形式。
+    Bootstrap 规则（#1338 改动 3）：锚点**之前**的提交、以及锚点自身都在检查范围外——
+    这也是在途 PR（提交早于当前锚点）被豁免的机械形式。锚点日期同时决定 7 天 warn-only
+    宽限窗的起点；历次锚定理由见常量处注释。
     """
     return _RECEIPT_BOOTSTRAP_SHA
 
@@ -740,8 +750,12 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None) -> tuple:
     detail = [f"receipt-present（#1338 改动 3 / #1553 形状④）：base={base[:12]} bootstrap={bootstrap[:12]} "
               f"范围 {len(commits)} 笔 / 被查 {len(scope)} 笔 / 违规 {len(violations)} 笔"
               + ("（首周 warn-only）" if warn_only else "")]
+    # #1598：warn-only 期违规行加行内前缀，单行自证不计数（#1578 诊断实录：无前缀时与
+    # coverage 车道的同形行混在一份日志里，grep "missing receipt" 会把不计数行当阻断项）。
+    # 转硬口径（宽限结束）后前缀自然消失。
+    prefix = "warn-only " if warn_only else ""
     for sha, subject in violations:
-        detail.append(f"missing receipt for {sha[:12]} {subject}")
+        detail.append(f"{prefix}missing receipt for {sha[:12]} {subject}")
     if violations and not warn_only:
         detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，或从第一父提交传递"
                       "读数（仅限 docs-only 改动），或在分支冻结 tip 上跑一次全量（其后仅 docs / 收据提交）")
@@ -1240,11 +1254,34 @@ def usage() -> int:
     return 0
 
 
-def _apply_receipt_check(results: list[tuple[Lane, int, float, str]]) -> None:
+def receipt_self_cover(record: bool, partial: bool, ci_env: str | None) -> bool:
+    """#1602：本地**落盘型全量**跑允许 receipt-present 自举（self-cover）。
+
+    背景（死锁实证，issue #1602）：硬口径下「冻结 tip 裸跑全量」自身会被 receipt-present
+    判红（6/7）⇒ 只能落无效 FAIL 收据 ⇒ 第一张 PASS 收据永远无法出生。而违规集合按构造
+    ⊆ `merge-base..HEAD`，全是 HEAD 的祖先、尾判 `HEAD..HEAD` 为空 ⇒ **本次跑即将落盘的
+    PASS 收据（键=HEAD）恰覆盖全部违规**（形状④）。因此在满足全部条件时不把 guards 车道
+    改写为失败，收据按真实车道读数落 PASS； enforcement 移交 CI：
+
+    · `record`（`--no-record` 不落盘 ⇒ 不能自举——没有收据会落地）；
+    · 非 `partial`（`--since/--only/--affected` 是局部跑、不落盘 ⇒ 同上）；
+    · 非 CI（GitHub Actions 恒设 `CI=true`）：CI 侧仍按已提交收据硬口径执法——本地忘了
+      把收据随代码提交 ⇒ CI 的 receipt-present 照红。威胁模型是防手滑不是防对抗（同
+      gate0.yml 头注），环境变量这层判定与全仓既有口径一致。
+    """
+    return record and not partial and not ci_env
+
+
+def _apply_receipt_check(results: list[tuple[Lane, int, float, str]],
+                         self_cover: bool = False) -> None:
     """receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 7 条）。
 
     只在 guards 本身全绿时跑；收据缺失且不在首周 warn-only 内 ⇒ 把该车道改写成失败。
     就地改写 `results`（与原来 main() 里的内联逻辑逐行等价）。
+
+    例外（#1602）：`self_cover=True`（本地落盘型全量跑，见 `receipt_self_cover`）时缺失
+    收据不改写车道——本次跑落盘的 PASS 收据（键=HEAD）按形状④覆盖全部违规；打印响亮
+    提示要求把收据随代码一起提交，执法交给 CI（CI 侧 `self_cover=False`）。
     """
     for i, (lane, rc, secs, out) in enumerate(results):
         if lane.name == "guards":
@@ -1254,6 +1291,12 @@ def _apply_receipt_check(results: list[tuple[Lane, int, float, str]]) -> None:
                     if warn:
                         print("warn-only receipt-present (#1338 change 3, first week): alert only, not counted")
                         print(detail)
+                    elif self_cover:
+                        print("self-cover receipt-present (#1602): 本次本地全量跑落盘的 PASS 收据"
+                              "（键=HEAD）按形状④覆盖以下全部违规 ⇒ 不改写 guards 车道。")
+                        print(detail)
+                        print("⚠ 该收据文件（docs/gate/<本 tip>.json）必须随代码一起提交；"
+                              "漏提交时 CI 侧 receipt-present 仍按硬口径红。")
                     else:
                         results[i] = (lane, 1, secs, out + "\n" + detail)
             break
@@ -1378,7 +1421,14 @@ def main(argv: list[str]) -> int:
         print(f"[{idx}/{len(lanes)}] {lane.name:11s} {'PASS' if rc == 0 else 'FAIL'}  {secs:6.2f}s")
         results.append((lane, rc, secs, out))
 
-    _apply_receipt_check(results)
+    _apply_receipt_check(
+        results,
+        self_cover=receipt_self_cover(
+            record=record,
+            partial=bool(since or only or affected_rev),
+            ci_env=os.environ.get("CI"),
+        ),
+    )
 
     wall = time.time() - started
     for lane, rc, _secs, out in results:
