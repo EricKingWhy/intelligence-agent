@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -66,7 +67,7 @@ def _run(script: Path, args: list[str], cwd: Path) -> subprocess.CompletedProces
 class Fixture:
     """bare origin + 工作 clone：main、feature 自 base 分叉后各自前进一笔。"""
 
-    BASE_FILES = {
+    BASE_FILES: ClassVar[dict[str, str]] = {
         "README.md": "base\n",
         "docs/PHASE_STATUS.md": "# 进度\n",
         "docs/SDD_TICKET_TRACKER.md": "# 票台账\n",
