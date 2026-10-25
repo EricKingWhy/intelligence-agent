@@ -5462,17 +5462,25 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
    `padding-right` 会在计算值阶段落回 0——本票踩过。 */
 .composer-dock {
   --composer-actions-w: 180px;
-  /* 窄屏非流式档（只有发送 + 附图，无 Esc 提示）的簇宽：右缩进 8 + 发送 32 +
-     间距 4 + 附图 32 = 76，取 **80 = 76 + 4px 余量**。旧实现把 76 直接写在
-     `margin-right` 上：与按钮尺寸隐式耦合且零余量（实测控件行右缘 == 簇左缘
-     288，簇里任一 1px 变化就重叠）。 */
+  /* 非流式档（只有发送 + 附图，无 Esc 提示）的簇宽：右缩进 8 + 发送 32 +
+     间距 4 + 附图 32 = 76，取 **80 = 76 + 4px 余量**。#1608 起双消费：base 的
+     `padding-right`（宽工作区）与窄屏的 `margin-right`（滚动视口）。旧实现把
+     76 直接写在 `margin-right` 上：与按钮尺寸隐式耦合且零余量（实测控件行右缘
+     == 簇左缘 288，簇里任一 1px 变化就重叠）。 */
   --composer-actions-w-compact: 80px;
 }
 /* 流式中把档位行的右端让给动作簇。
    为什么必须留：窄工作区（例如 1280 视口 + Inspector 拖到上限 480）下档位行会顶到
    右端，而簇比按钮宽——不留位时提示会盖住最后一个档位控件（实测确认）。此时让
    `flex-wrap` 把放不下的档位换行，而不是让它钻到提示底下。
-   `:has()` 由 DOM 反推「此刻是否流式」，不新增一份与 `streaming` 平行的状态（不变量 #22）。 */
+   `:has()` 由 DOM 反推「此刻是否流式」，不新增一份与 `streaming` 平行的状态（不变量 #22）。
+   非流式档同样要留（#1608）：#1444 给已选会话态加了预算触发按钮后，控件行内容在
+   1280 视口会顶到右缘、钻进只有发送+附图（约 76px）的动作簇底下（e2e 实测
+   `actionsVsControls: ["预算"]`）。给 compact 档预留，让 `flex-wrap` 同样提前换行；
+   流式态的 180px 预留优先级更高（下一条），行为不变。 */
+.composer-dock .composer-controls {
+  padding-right: var(--composer-actions-w-compact);
+}
 .composer-dock:has(.composer-esc-hint) .composer-controls {
   padding-right: var(--composer-actions-w);
 }
@@ -11158,14 +11166,21 @@ button.json-row {
  * `padding-right` 归零**：宽工作区的预留是给 flex 换行用的，窄屏已经用 margin 缩短
  * 滚动视口，两条右缩进会叠加成 360px（实测控件行 clientW 只剩 168、右缘 251 越过
  * 簇左缘 184，压住「权限」pill 67px——P1-1）。margin 与 padding 二选一，不是相加。
- * ⚠ 位置不能挪回上面那个 `@media (max-width: 820px)` 大块：本条覆盖的是**本规则下方**
- * 的 `.composer-controls`（基础形态），而媒体查询不加优先级——同权重下后写的赢，
- * 挪回去 `flex-wrap: wrap` 与 `padding` 简写会把它整个盖掉（实测：计算值仍是 wrap）。 */
+ * ⚠ 位置不能随意上移：本条被 #1608 抬到 (0,2,0) 后，压基础形态（11125，0,1,0）
+ * 已不靠位置，但仍须**写在 base 的 compact `padding-right`（5480，同权重）之后**
+ * ——写到 5480 之前就被 80px 压回，与 80px margin 叠成双预留。#1368 时本条还是
+ * (0,1,0)，须压过 11125 的 `flex-wrap: wrap` 与 `padding` 简写，同样是同权重靠
+ * 位置（实测：挪早了计算值仍是 wrap）。 */
 @media (max-width: 820px) {
-  .composer-controls {
+  /* #1608：base 档位行现在带 compact `padding-right`（`.composer-dock .composer-controls`，
+     0,2,0）。媒体查询不加优先级，本条原先的 `.composer-controls`（0,1,0）压不住它，
+     80px padding 会与本条 80px margin 叠成 160px 双预留——选择器抬到同权重靠后写赢出，
+     并把 padding 显式归零（margin 与 padding 二选一，同下方流式覆盖的口径）。 */
+  .composer-dock .composer-controls {
     flex-wrap: nowrap;
     overflow-x: auto;
     margin-right: var(--composer-actions-w-compact);
+    padding-right: 0;
     scrollbar-width: none;
   }
   .composer-controls::-webkit-scrollbar {
