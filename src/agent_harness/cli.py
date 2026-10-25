@@ -3532,6 +3532,9 @@ def _main_memory(argv: list[str]) -> None:
     discard.add_argument("blocked_id", metavar="ID")
     journey = subcommands.add_parser("journey", help="按版本链列出记忆卡片时间线")
     journey.add_argument("--limit", type=int, default=50)
+    subcommands.add_parser(
+        "migrate", help="把 SQLite 里的 active 记忆一次性导出到 memories/*.md（幂等）",
+    )
     identity = subcommands.add_parser(
         "identity",
         help="盘点旧身份/版本并逐项批准映射（#1493：不自动选赢家，未裁决不写文件）",
