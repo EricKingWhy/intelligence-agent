@@ -37,6 +37,13 @@ class SessionMeta(BaseModel):
     #: #1191（Phase 2，票面 §三.3）：会话工作目录的 git 仓库根（`project_key`）。
     #: 记录后不再重解析；非 git 目录 / 未补写 = None（读取侧回退到按 cwd 现场解析）。
     project_key: str | None = None
+    #: #1333（2026-10-20 已批准方案）：创建请求的关联值（前端每次 POST 生成
+    #: UUID v4）。认领查询按它**精确匹配**回本请求创建的会话——20s 差分窗口
+    #: 内「别的客户端/上一轮迟到」的会话不再可能被误认。写一次性事实
+    #: （同 `project_key`：既有调用方的不带该字段全行 upsert 不得抹掉它）；
+    #: NULL = 旧客户端/存量行。只进 Metadata Store 索引，不进 SessionEvent
+    #: （关联属于索引，不属于会话真相）。
+    client_request_id: str | None = None
 
 
 class SessionMetaStore(ABC):
@@ -60,6 +67,15 @@ class SessionMetaStore(ABC):
     @abstractmethod
     async def list_all(self) -> list[SessionMeta]:
         """全量索引行（lineage 建树与 sessions 列表的读取面，ADR-0017 决策 7）。"""
+
+    @abstractmethod
+    async def get_by_client_request_id(self, client_request_id: str) -> list[SessionMeta]:
+        """#1333：按创建请求关联值**精确匹配**查会话行（全等，非前缀/子串）。
+
+        返回全部命中行（可能 > 1——同一关联值多条 = 数据面异常，由调用方
+        fail-closed 处理，本方法不挑选）。NULL 行永不命中（SQL 语义）；
+        查询无结果返回 `[]`。走 `idx_session_meta_client_request_id` 索引。
+        """
 
     @abstractmethod
     async def set_archived(self, session_id: str, archived: bool = True) -> SessionMeta:

@@ -1,0 +1,1 @@
+2026-10-25	#1597 集成脚本笔审查（自审+冒烟）：scripts/integration/update-pr 流程与退出码语义（3=MANUAL-CONFLICT/4=COVERAGE-RED/5=CODE-IN-CC/9=环境错）、coverage-cmd 经子 shell eval 防 exit 短路、--help 用 awk 截到 set -u 前不漏解析段；poll-pr 只读轮询不合并；冒烟测试 7/7（含 WSL-bash 误选防护、空 cc 提示、--no-push、并集推送臂）；git-workflow §3.1 指针与三退出形态文案一致	b7bf6adc2116aa4e80fb0ea1506bedd140e23606..69a6a27d7161e9ca864e19a841db32e23c1e6445

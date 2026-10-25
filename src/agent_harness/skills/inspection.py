@@ -107,15 +107,15 @@ def inspect_skill_package(
 
     errors: list[dict[str, str]] = report["errors"]
     if scope not in {"project", "global"}:
-        _add_error(errors, "UNSUPPORTED_SCOPE", str(source_path), "Scope must be project or global.")
+        add_inspection_error(errors, "UNSUPPORTED_SCOPE", str(source_path), "Scope must be project or global.")
         return report
     try:
         root = source_path.resolve(strict=True)
     except (OSError, RuntimeError):
-        _add_error(errors, "DIRECTORY_NOT_FOUND", str(source_path), "Package directory does not exist or cannot be resolved.")
+        add_inspection_error(errors, "DIRECTORY_NOT_FOUND", str(source_path), "Package directory does not exist or cannot be resolved.")
         return report
     if not root.is_dir():
-        _add_error(errors, "NOT_A_DIRECTORY", str(source_path), "Package source must be a directory.")
+        add_inspection_error(errors, "NOT_A_DIRECTORY", str(source_path), "Package source must be a directory.")
         return report
     report["source"] = str(root)
 
@@ -124,24 +124,24 @@ def inspect_skill_package(
         try:
             resolved_skill_file = skill_file.resolve(strict=True)
         except (OSError, RuntimeError):
-            _add_error(errors, "BAD_SYMLINK", "SKILL.md", "SKILL.md is a broken or invalid symbolic link.")
+            add_inspection_error(errors, "BAD_SYMLINK", "SKILL.md", "SKILL.md is a broken or invalid symbolic link.")
             return report
         if not _within(resolved_skill_file, root):
-            _add_error(errors, "SYMLINK_OUTSIDE_PACKAGE", "SKILL.md", "SKILL.md resolves outside the package directory.")
+            add_inspection_error(errors, "SYMLINK_OUTSIDE_PACKAGE", "SKILL.md", "SKILL.md resolves outside the package directory.")
             return report
     try:
         resolved_skill_file = skill_file.resolve(strict=True)
     except FileNotFoundError:
-        _add_error(errors, "SKILL_FILE_MISSING", "SKILL.md", "Package must contain a SKILL.md file.")
+        add_inspection_error(errors, "SKILL_FILE_MISSING", "SKILL.md", "Package must contain a SKILL.md file.")
         return report
     except (OSError, RuntimeError):
-        _add_error(errors, "SKILL_FILE_UNREADABLE", "SKILL.md", "SKILL.md cannot be resolved safely.")
+        add_inspection_error(errors, "SKILL_FILE_UNREADABLE", "SKILL.md", "SKILL.md cannot be resolved safely.")
         return report
     if not _within(resolved_skill_file, root):
-        _add_error(errors, "SYMLINK_OUTSIDE_PACKAGE", "SKILL.md", "SKILL.md resolves outside the package directory.")
+        add_inspection_error(errors, "SYMLINK_OUTSIDE_PACKAGE", "SKILL.md", "SKILL.md resolves outside the package directory.")
         return report
     if not resolved_skill_file.is_file():
-        _add_error(errors, "SKILL_FILE_NOT_A_FILE", "SKILL.md", "SKILL.md must be a regular file.")
+        add_inspection_error(errors, "SKILL_FILE_NOT_A_FILE", "SKILL.md", "SKILL.md must be a regular file.")
         return report
     skill_text = _read_skill_file(root, resolved_skill_file, errors)
     if skill_text is None:
@@ -152,7 +152,7 @@ def inspect_skill_package(
     except RecursionError:
         entry, parse_errors = None, ["frontmatter nesting is too deep"]
     if entry is None:
-        _add_error(
+        add_inspection_error(
             errors,
             "SKILL_MARKDOWN_INVALID",
             "SKILL.md",
@@ -169,12 +169,12 @@ def inspect_skill_package(
     if isinstance(declared_license, str) and declared_license.strip():
         report["license"] = declared_license.strip()
     elif declared_license is not None:
-        _add_error(errors, "INVALID_LICENSE", "SKILL.md", "license must be a non-empty string when provided.")
+        add_inspection_error(errors, "INVALID_LICENSE", "SKILL.md", "license must be a non-empty string when provided.")
 
     if not _STRICT_NAME.fullmatch(entry.name) or len(entry.name) > 64:
-        _add_error(errors, "INVALID_SKILL_NAME", "SKILL.md", "name must use lowercase letters, digits, and single hyphens (max 64 characters).")
+        add_inspection_error(errors, "INVALID_SKILL_NAME", "SKILL.md", "name must use lowercase letters, digits, and single hyphens (max 64 characters).")
     if root.name != entry.name:
-        _add_error(
+        add_inspection_error(
             errors,
             "DIRECTORY_NAME_MISMATCH",
             ".",
@@ -182,22 +182,22 @@ def inspect_skill_package(
         )
     description = entry.description
     if len(description) > 1024:
-        _add_error(errors, "DESCRIPTION_TOO_LONG", "SKILL.md", "description exceeds 1024 characters.")
+        add_inspection_error(errors, "DESCRIPTION_TOO_LONG", "SKILL.md", "description exceeds 1024 characters.")
     compatibility = entry.meta.get("compatibility")
     if compatibility is not None and not isinstance(compatibility, str):
-        _add_error(errors, "INVALID_COMPATIBILITY", "SKILL.md", "compatibility must be a string.")
+        add_inspection_error(errors, "INVALID_COMPATIBILITY", "SKILL.md", "compatibility must be a string.")
     elif isinstance(compatibility, str) and len(compatibility) > 500:
-        _add_error(errors, "COMPATIBILITY_TOO_LONG", "SKILL.md", "compatibility exceeds 500 characters.")
+        add_inspection_error(errors, "COMPATIBILITY_TOO_LONG", "SKILL.md", "compatibility exceeds 500 characters.")
     custom_metadata = entry.meta.get("metadata")
     if custom_metadata is not None and (
         not isinstance(custom_metadata, dict)
         or any(not isinstance(key, str) or not isinstance(value, str) for key, value in custom_metadata.items())
     ):
-        _add_error(errors, "INVALID_METADATA", "SKILL.md", "metadata must contain string keys and string values.")
+        add_inspection_error(errors, "INVALID_METADATA", "SKILL.md", "metadata must contain string keys and string values.")
 
     installed_target = _safe_skill_target(existing_skills, entry.name)
     if installed_target is not None and (installed_target.exists() or installed_target.is_symlink()):
-        _add_error(errors, "NAME_CONFLICT", "SKILL.md", f"{scope.title()} Skill name {entry.name!r} already exists.")
+        add_inspection_error(errors, "NAME_CONFLICT", "SKILL.md", f"{scope.title()} Skill name {entry.name!r} already exists.")
 
     files, scan_errors, symlink_paths = _inventory(root)
     errors.extend(scan_errors)
@@ -272,7 +272,7 @@ def inspect_skill_package(
         tool_names = []
     else:
         tool_names = []
-        _add_error(errors, "INVALID_ALLOWED_TOOLS", "SKILL.md", "allowed-tools must be a string or a list of strings.")
+        add_inspection_error(errors, "INVALID_ALLOWED_TOOLS", "SKILL.md", "allowed-tools must be a string or a list of strings.")
     for tool_name in tool_names:
         report["requirements"].append(
             {
@@ -296,7 +296,7 @@ def inspect_skill_package(
 def _read_skill_file(
     root: Path, path: Path, errors: list[dict[str, str]]
 ) -> str | None:
-    return _read_bounded_package_text(
+    return read_bounded_package_text(
         root,
         path,
         "SKILL.md",
@@ -310,7 +310,7 @@ def _read_skill_file(
     )
 
 
-def _read_bounded_package_text(
+def read_bounded_package_text(
     root: Path,
     path: Path,
     relative: str,
@@ -323,24 +323,30 @@ def _read_bounded_package_text(
     not_file_code: str,
     outside_code: str,
 ) -> str | None:
+    """包内文件的有界读取（#1539 转正公开）。
+
+    边界读写只有这一份实现：symlink 解析后必须仍在包内、超限/不可读/变更中
+    各自走调用方给的错误码落进 ``errors``（``add_inspection_error`` 形状）。
+    根级入口（plugin_inspection）与包内检查共用同一套安全边界。
+    """
     try:
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as error:
-        _add_error(errors, unreadable_code, relative, type(error).__name__)
+        add_inspection_error(errors, unreadable_code, relative, type(error).__name__)
         return None
     if not _within(resolved, root):
-        _add_error(errors, outside_code, relative, "File resolves outside the package directory.")
+        add_inspection_error(errors, outside_code, relative, "File resolves outside the package directory.")
         return None
     if resolved != path:
-        _add_error(errors, changed_code, relative, "File path became a symbolic link during inspection.")
+        add_inspection_error(errors, changed_code, relative, "File path became a symbolic link during inspection.")
         return None
     try:
         before = resolved.lstat()
         if not stat.S_ISREG(before.st_mode):
-            _add_error(errors, not_file_code, relative, "Expected a regular file.")
+            add_inspection_error(errors, not_file_code, relative, "Expected a regular file.")
             return None
         if before.st_size > max_bytes:
-            _add_error(
+            add_inspection_error(
                 errors,
                 too_large_code,
                 relative,
@@ -354,10 +360,10 @@ def _read_bounded_package_text(
                 not stat.S_ISREG(opened.st_mode)
                 or not os.path.samestat(before, opened)
             ):
-                _add_error(errors, changed_code, relative, "File changed during inspection; retry with a stable package.")
+                add_inspection_error(errors, changed_code, relative, "File changed during inspection; retry with a stable package.")
                 return None
             if opened.st_size > max_bytes:
-                _add_error(
+                add_inspection_error(
                     errors,
                     too_large_code,
                     relative,
@@ -366,7 +372,7 @@ def _read_bounded_package_text(
                 return None
             content = source.read(max_bytes + 1)
         if len(content) > max_bytes:
-            _add_error(
+            add_inspection_error(
                 errors,
                 too_large_code,
                 relative,
@@ -375,11 +381,11 @@ def _read_bounded_package_text(
             return None
         return content.decode("utf-8-sig")
     except _PackageReadBoundaryError as error:
-        _add_error(errors, error.code, relative, str(error))
+        add_inspection_error(errors, error.code, relative, str(error))
     except UnicodeDecodeError as error:
-        _add_error(errors, unreadable_code, relative, type(error).__name__)
+        add_inspection_error(errors, unreadable_code, relative, type(error).__name__)
     except OSError as error:
-        _add_error(errors, unreadable_code, relative, type(error).__name__)
+        add_inspection_error(errors, unreadable_code, relative, type(error).__name__)
     return None
 
 
@@ -506,7 +512,13 @@ def _windows_path_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _add_error(errors: list[dict[str, str]], code: str, path: str, message: str) -> None:
+def add_inspection_error(errors: list[dict[str, str]], code: str, path: str, message: str) -> None:
+    """追加一条检查报告错误记录 ``{code, path, message}``（#1539 转正公开）。
+
+    记录形状是 skills/MCP 检查报告的**共享合同**——消费侧按该三键形状从报告里
+    摘除/汇总条目（如 ``mcp_precheck`` 的占位条目消费后必须能按同形摘掉）。
+    跨模块调用方不要再手抄 dict 字面量。
+    """
     errors.append({"code": code, "path": path, "message": message})
 
 
@@ -588,7 +600,7 @@ def _inventory(
                 for entry in scan:
                     entry_count += 1
                     if entry_count > MAX_PACKAGE_ENTRIES:
-                        _add_error(
+                        add_inspection_error(
                             errors,
                             "PACKAGE_TOO_MANY_ENTRIES",
                             ".",
@@ -598,7 +610,7 @@ def _inventory(
                         break
                     entries.append(entry)
         except OSError as error:
-            _add_error(errors, "DIRECTORY_UNREADABLE", _relative(directory, root), type(error).__name__)
+            add_inspection_error(errors, "DIRECTORY_UNREADABLE", _relative(directory, root), type(error).__name__)
             continue
         entries.sort(key=lambda item: item.name)
         for entry in entries:
@@ -607,7 +619,7 @@ def _inventory(
             try:
                 if is_junction(path):
                     symlinks.append(relative)
-                    _add_error(
+                    add_inspection_error(
                         errors,
                         "UNSUPPORTED_JUNCTION",
                         relative,
@@ -619,10 +631,10 @@ def _inventory(
                     try:
                         resolved = path.resolve(strict=True)
                     except (OSError, RuntimeError):
-                        _add_error(errors, "BAD_SYMLINK", relative, "Symbolic link is broken or cannot be resolved.")
+                        add_inspection_error(errors, "BAD_SYMLINK", relative, "Symbolic link is broken or cannot be resolved.")
                         continue
                     if not _within(resolved, root):
-                        _add_error(errors, "SYMLINK_OUTSIDE_PACKAGE", relative, "Symbolic link resolves outside the package directory.")
+                        add_inspection_error(errors, "SYMLINK_OUTSIDE_PACKAGE", relative, "Symbolic link resolves outside the package directory.")
                         continue
                     if resolved.is_file():
                         files.append({"path": relative, "size_bytes": resolved.stat().st_size, "symlink": True})
@@ -635,7 +647,7 @@ def _inventory(
                 if entry.is_file(follow_symlinks=False):
                     files.append({"path": relative, "size_bytes": entry.stat(follow_symlinks=False).st_size})
             except OSError as error:
-                _add_error(errors, "RESOURCE_UNREADABLE", relative, type(error).__name__)
+                add_inspection_error(errors, "RESOURCE_UNREADABLE", relative, type(error).__name__)
         if too_many_entries:
             break
     files.sort(key=lambda item: item["path"])
@@ -676,7 +688,7 @@ def _check_markdown_references(
     errors: list[dict[str, str]] = []
     relative_markdown = _relative(markdown_path, root)
     if content is None:
-        content = _read_bounded_package_text(
+        content = read_bounded_package_text(
             root,
             markdown_path,
             relative_markdown,
@@ -941,7 +953,7 @@ def _inspect_dependencies(
             try:
                 parsed_json = json.loads(content)
                 if not isinstance(parsed_json, dict):
-                    _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Dependency manifest must be a JSON object.")
+                    add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Dependency manifest must be a JSON object.")
                 else:
                     for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
                         if section not in parsed_json:
@@ -950,15 +962,15 @@ def _inspect_dependencies(
                         if isinstance(values, dict):
                             dependencies.extend(_dependency(str(name), "package.json") for name in values)
                         else:
-                            _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", f"{section} must be a JSON object.")
+                            add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", f"{section} must be a JSON object.")
             except RecursionError:
                 # 预检契约是"绝不崩"：嵌套超过解析器递归上限的清单只能落成**明确失败**，
                 # 不能把 RecursionError 掀给 CLI / 安装闸门（同文件对 frontmatter 与
                 # plugins 预检已有同款兜底）。深度边界的唯一权威是解析器自己——
                 # 另写一份深度扫描器就是第二份会漂的真相。
-                _add_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "package.json", _DEPENDENCY_TOO_DEEP_MESSAGE)
+                add_inspection_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "package.json", _DEPENDENCY_TOO_DEEP_MESSAGE)
             except (json.JSONDecodeError, TypeError):
-                _add_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Could not statically parse dependency declarations.")
+                add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "package.json", "Could not statically parse dependency declarations.")
     pyproject = paths.get("pyproject.toml")
     if pyproject is not None:
         content = _read_small_file(root, "pyproject.toml", errors)
@@ -967,7 +979,7 @@ def _inspect_dependencies(
                 parsed_toml = tomllib.loads(content)
                 project = parsed_toml.get("project", {})
                 if not isinstance(project, dict):
-                    _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project must be a TOML table.")
+                    add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project must be a TOML table.")
                 else:
                     requires_python = project.get("requires-python")
                     if requires_python is not None:
@@ -981,7 +993,7 @@ def _inspect_dependencies(
                                 )
                             )
                         else:
-                            _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.requires-python must be a non-empty string.")
+                            add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.requires-python must be a non-empty string.")
                     _append_python_dependencies(
                         project.get("dependencies", []),
                         "pyproject.toml [project.dependencies]",
@@ -991,7 +1003,7 @@ def _inspect_dependencies(
                     )
                     optional = project.get("optional-dependencies", {})
                     if not isinstance(optional, dict):
-                        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.optional-dependencies must be a TOML table.")
+                        add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.optional-dependencies must be a TOML table.")
                     else:
                         for group, values in optional.items():
                             _append_python_dependencies(
@@ -1003,7 +1015,7 @@ def _inspect_dependencies(
                             )
                     dynamic = project.get("dynamic", [])
                     if not isinstance(dynamic, list) or any(not isinstance(item, str) for item in dynamic):
-                        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.dynamic must be an array of strings.")
+                        add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "project.dynamic must be an array of strings.")
                     else:
                         dynamic_dependencies = [
                             item
@@ -1030,7 +1042,7 @@ def _inspect_dependencies(
                             )
                 build_system = parsed_toml.get("build-system", {})
                 if not isinstance(build_system, dict):
-                    _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "build-system must be a TOML table.")
+                    add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "build-system must be a TOML table.")
                 else:
                     _append_python_dependencies(
                         build_system.get("requires", []),
@@ -1041,12 +1053,12 @@ def _inspect_dependencies(
                     )
                 tool = parsed_toml.get("tool", {})
                 if not isinstance(tool, dict):
-                    _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool must be a TOML table.")
+                    add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool must be a TOML table.")
                 else:
                     poetry = tool.get("poetry")
                     if poetry is not None:
                         if not isinstance(poetry, dict):
-                            _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool.poetry must be a TOML table.")
+                            add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool.poetry must be a TOML table.")
                         else:
                             if "dependencies" in poetry:
                                 _append_poetry_dependencies(
@@ -1066,11 +1078,11 @@ def _inspect_dependencies(
                                 )
                             groups = poetry.get("group", {})
                             if not isinstance(groups, dict):
-                                _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool.poetry.group must be a TOML table.")
+                                add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "tool.poetry.group must be a TOML table.")
                             else:
                                 for group, definition in groups.items():
                                     if not isinstance(definition, dict):
-                                        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"tool.poetry.group.{group} must be a TOML table.")
+                                        add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"tool.poetry.group.{group} must be a TOML table.")
                                         continue
                                     if "dependencies" in definition:
                                         _append_poetry_dependencies(
@@ -1082,9 +1094,9 @@ def _inspect_dependencies(
                                         )
             except RecursionError:
                 # 同上；tomllib 的递归上限比 json 低得多，故可达深度更小。
-                _add_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "pyproject.toml", _DEPENDENCY_TOO_DEEP_MESSAGE)
+                add_inspection_error(errors, "DEPENDENCY_FILE_TOO_DEEP", "pyproject.toml", _DEPENDENCY_TOO_DEEP_MESSAGE)
             except (tomllib.TOMLDecodeError, AttributeError, TypeError):
-                _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "Could not statically parse dependency declarations.")
+                add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", "Could not statically parse dependency declarations.")
     dependencies.sort(key=lambda item: (item["source"], item["name"].lower()))
     return dependencies, requirements, errors
 
@@ -1097,11 +1109,11 @@ def _append_python_dependencies(
     errors: list[dict[str, str]],
 ) -> None:
     if not isinstance(values, list):
-        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} must be an array of dependency strings.")
+        add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} must be an array of dependency strings.")
         return
     for value in values:
         if not isinstance(value, str):
-            _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} contains a non-string dependency.")
+            add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} contains a non-string dependency.")
             continue
         match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", value)
         if match:
@@ -1125,11 +1137,11 @@ def _append_poetry_dependencies(
     errors: list[dict[str, str]],
 ) -> None:
     if not isinstance(values, dict):
-        _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} must be a TOML table.")
+        add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} must be a TOML table.")
         return
     for name, declaration in values.items():
         if not isinstance(name, str):
-            _add_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} contains a non-string dependency name.")
+            add_inspection_error(errors, "DEPENDENCY_FILE_INVALID", "pyproject.toml", f"{source} contains a non-string dependency name.")
         elif name.lower() == "python":
             requirements.append(
                 _manual_requirement(
@@ -1155,7 +1167,7 @@ def _read_requirements_file(
     visited: set[str],
 ) -> None:
     if len(active) >= _MAX_REQUIREMENT_INCLUDE_DEPTH:
-        _add_error(
+        add_inspection_error(
             errors,
             "DEPENDENCY_INCLUDE_TOO_DEEP",
             relative,
@@ -1163,13 +1175,13 @@ def _read_requirements_file(
         )
         return
     if relative in active:
-        _add_error(errors, "DEPENDENCY_INCLUDE_CYCLE", relative, "Requirements files include each other recursively.")
+        add_inspection_error(errors, "DEPENDENCY_INCLUDE_CYCLE", relative, "Requirements files include each other recursively.")
         return
     if relative in visited:
         return
     file_info = files.get(relative)
     if file_info is None:
-        _add_error(errors, "MISSING_DEPENDENCY_FILE", relative, "Included dependency file is missing from the package.")
+        add_inspection_error(errors, "MISSING_DEPENDENCY_FILE", relative, "Included dependency file is missing from the package.")
         return
     if file_info.get("symlink"):
         requirements.append(
@@ -1195,7 +1207,7 @@ def _read_requirements_file(
         if include is not None:
             include = include.strip().strip("\"'")
             if not include:
-                _add_error(errors, "DEPENDENCY_INCLUDE_INVALID", relative, "Requirements include path is empty.")
+                add_inspection_error(errors, "DEPENDENCY_INCLUDE_INVALID", relative, "Requirements include path is empty.")
                 continue
             decoded_include = unquote(include)
             normalized_include = decoded_include.replace("\\", "/")
@@ -1206,7 +1218,7 @@ def _read_requirements_file(
                 re.match(r"^[A-Za-z]:", decoded_include)
             ) or decoded_include.startswith("\\\\")
             if absolute_path:
-                _add_error(
+                add_inspection_error(
                     errors,
                     "DEPENDENCY_INCLUDE_OUTSIDE_PACKAGE",
                     normalized_include,
@@ -1216,7 +1228,7 @@ def _read_requirements_file(
             try:
                 include_url = urlsplit(include)
             except ValueError:
-                _add_error(errors, "DEPENDENCY_INCLUDE_INVALID", relative, "Requirements include path is malformed.")
+                add_inspection_error(errors, "DEPENDENCY_INCLUDE_INVALID", relative, "Requirements include path is malformed.")
                 continue
             if include_url.scheme or include_url.netloc:
                 requirements.append(
@@ -1234,10 +1246,10 @@ def _read_requirements_file(
                     root / Path(relative).parent / include_path
                 ).resolve(strict=False)
             except (OSError, RuntimeError, ValueError):
-                _add_error(errors, "BAD_DEPENDENCY_INCLUDE", include, "Requirements include cannot be resolved safely.")
+                add_inspection_error(errors, "BAD_DEPENDENCY_INCLUDE", include, "Requirements include cannot be resolved safely.")
                 continue
             if not _within(candidate, root):
-                _add_error(
+                add_inspection_error(
                     errors,
                     "DEPENDENCY_INCLUDE_OUTSIDE_PACKAGE",
                     include_path,
@@ -1247,9 +1259,9 @@ def _read_requirements_file(
             relative_include = _relative(candidate, root)
             if relative_include not in files:
                 if candidate.exists():
-                    _add_error(errors, "DEPENDENCY_INCLUDE_NOT_FILE", relative_include, "Requirements include must point to a file.")
+                    add_inspection_error(errors, "DEPENDENCY_INCLUDE_NOT_FILE", relative_include, "Requirements include must point to a file.")
                 else:
-                    _add_error(errors, "MISSING_DEPENDENCY_FILE", relative_include, "Included dependency file is missing from the package.")
+                    add_inspection_error(errors, "MISSING_DEPENDENCY_FILE", relative_include, "Included dependency file is missing from the package.")
                 continue
             _read_requirements_file(
                 root,
@@ -1324,12 +1336,12 @@ def read_package_text(
 ) -> str | None:
     """按包内**相对路径**读一个文本文件的公共入口（越界 / 过大 / 读取中变化都记错误）。
 
-    边界读写只有一份实现（`_read_bounded_package_text`）：symlink 解析后必须仍在
+    边界读写只有一份实现（`read_bounded_package_text`）：symlink 解析后必须仍在
     包内、打开后再核对 inode、尺寸上限在 stat 与 read 两侧各拦一次。第二个消费者
     （MCP 描述预检）需要同一套保证，只是错误码属于自己那套词表 ⇒ 在这里把码参数化，
     而不是让调用方去 import 私有实现。`_read_small_file` 是本函数的一个旧码表绑定。
     """
-    return _read_bounded_package_text(
+    return read_bounded_package_text(
         root,
         root / relative,
         relative,

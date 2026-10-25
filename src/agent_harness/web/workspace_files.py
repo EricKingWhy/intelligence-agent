@@ -529,7 +529,8 @@ def _boundary_checked(sandbox: Sandbox, value: str) -> str:
     指向外面的绝对路径）必须先在这里被挡掉——否则它会与围栏 pathspec 取**并集**，把外面重新
     拉进输出。`..` 段本身不归本层判：resolve 后仍在内的形态（如 `a/../b`）能过本层，由契约层
     `_checked_pathspec` 按段拒绝（→ 422）。
-    越界 → `PermissionError` → 403；含 NUL → `ValueError`（`Path.resolve()` 抛）→ 422。
+    越界 → `PermissionError` → 403；含 NUL → `ValueError`（`Path.resolve()` 抛）→ 422；
+    Docker 后端的路径解析失败（非法形态等）→ 裸 `OSError` → 422（#1510）。
     """
     if not value:
         return ""
@@ -631,6 +632,11 @@ def register_workspace_file_routes(
             command = git_status_command(checked, scope=_scope_for(checked))
         except PermissionError as error:
             raise workspace_http_error(error, path=pathspec) from error
+        except OSError as error:
+            # #1510：Docker 围栏的"路径解析失败"（非法形态等）以裸 OSError
+            # 上抛——落 `_WORKSPACE_ERROR_STATUS[OSError]` 的 422"路径不合法"档，
+            # 与读文件路由同款分类，不产生未分类 500。
+            raise workspace_http_error(error, path=pathspec) from error
         except ValueError as error:
             # 白名单拒绝（shell 元字符等）：策略与文案都来自工具层那一份。
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -662,6 +668,9 @@ def register_workspace_file_routes(
             checked = await anyio.to_thread.run_sync(_boundary_checked, sandbox, path)
             command = git_diff_command(staged=staged, path=checked, scope=_scope_for(checked))
         except PermissionError as error:
+            raise workspace_http_error(error, path=path) from error
+        except OSError as error:
+            # #1510：同 status 路由——解析失败（非法形态等）落 422 既有分类。
             raise workspace_http_error(error, path=path) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error

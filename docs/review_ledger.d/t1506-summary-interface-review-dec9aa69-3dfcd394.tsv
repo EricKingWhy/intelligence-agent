@@ -1,0 +1,1 @@
+2026-10-25	#1506 fresh 独立复核：审 dec9aa69..3dfcd3948，PASS-WITH-FINDINGS（P0=0/P1=0/P2=1/P3=2/P4=1，不阻塞）；沙箱复测 tip 全量 -n 4 33F/8817P vs 基线 33F/8811P，新增失败 0。	dec9aa6973ad3c8e76ac8fb2c2b2dfb5357ee244..3dfcd3948f56139adcd5deb2bd32bbe113c9a61b

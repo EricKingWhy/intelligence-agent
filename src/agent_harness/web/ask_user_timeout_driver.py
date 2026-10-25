@@ -21,7 +21,7 @@ timer——到点由服务端推进状态机，不依赖任何客户端此刻是
 
 到点推进由组合根的常驻 ticker 调 `check_expiries()`（不再借 WS 心跳：零连接时也必须
 推进）。`on_expire` 是唯一恢复出口（组合根注入 session service 的调用，本模块不调用
-service 的任何方法）。启动重建的三段守卫复用了 `session.service._pending_user_input_pause`
+service 的任何方法）。启动重建的三段守卫复用了 `session.service.pending_user_input_pause`
 （与 `resume_ask_user_timeout` 的在线回退同源的纯函数）——这不构成 web↔service 环：
 `web/app.py` 本就顶层 import `session.service`，依赖方向 web→service 早已存在。
 
@@ -76,7 +76,7 @@ from agent_harness.session.event import (
     USER_MESSAGE,
     SessionEvent,
 )
-from agent_harness.session.service import _pending_user_input_pause
+from agent_harness.session.service import pending_user_input_pause
 
 logger = logging.getLogger("agent_harness.web.ask_user_timeout_driver")
 
@@ -176,17 +176,17 @@ class AskUserTimeoutDriver:
            （保持既有行为；同一 request_id 重复调用保留已累计时长）；
         ② 新近请求 + 合成暂停回退——无可用暂停事实，但请求在 2×timeout 内 ⇒
            复用在线路径 `resume_ask_user_timeout` 的同源回退
-           （`_pending_user_input_pause`）：crash-window 里进程死在
+           （`pending_user_input_pause`）：crash-window 里进程死在
            `user/input-requested` 与 `run/paused` 两次 append 之间，用户确实在等，
            必须保留 #1320 durable 语义；
         ③ 旧流——无可用暂停事实**且**请求已老（`elapsed ≥ 2×timeout`），或新近但
            合成回退未命中 ⇒ `disarm`
            （#1337：否则首轮 ticker 会把早已无人等待的提问当刚超时恢复掉）。
 
-        其中回退段（②）与 `resume_ask_user_timeout` 同源（`_pending_user_input_pause`）——
+        其中回退段（②）与 `resume_ask_user_timeout` 同源（`pending_user_input_pause`）——
         在线守卫是"暂停事实 → 合成回退"的两段式，启动重建在"合成回退"之前再加一段
         新近度门禁（位于段①之后、段②之前），构成三段（A 方案曾只抄了在线守卫的
-        前半段、丢了回退）。注意 `_pending_user_input_pause` 在已有暂停事实时是
+        前半段、丢了回退）。注意 `pending_user_input_pause` 在已有暂停事实时是
         no-op（`state.paused is not None` 即返 `None`）——段②的合成只在 crash-window
         形状（无 `run/paused` 事件）下真正起作用；暂停事实存在但不归属该请求时
         直接走段③ disarm。
@@ -250,7 +250,7 @@ class AskUserTimeoutDriver:
         if elapsed < _RESTORE_RECENCY_MULTIPLIER * timeout_seconds:
             run_id = latest_run_id(events)
             assert run_id is not None  # `request is not None` 蕴含（`latest_pending_input_request` 无 run_id 直接返 `None`）
-            synthesized = _pending_user_input_pause(events, run_id=run_id)
+            synthesized = pending_user_input_pause(events, run_id=run_id)
             if (
                 synthesized is not None
                 and synthesized.reason == REASON_USER_INPUT

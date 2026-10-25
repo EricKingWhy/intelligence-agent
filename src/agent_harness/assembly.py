@@ -45,7 +45,6 @@ from agent_harness.context.project_instructions import (
 )
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.model.config import ConfigError, ModelConfig, model_supports_vision
-from agent_harness.model.provider import create_chat_model
 from agent_harness.multiagent.tools import DelegateTool
 from agent_harness.observability import get_observability_sink
 
@@ -580,6 +579,29 @@ def root_registry_reconcile_info(
     return info
 
 
+def create_chat_model(
+    config: ModelConfig, *, reasoning_effort: str | None = None,
+    request_timeout: float = 300.0,
+) -> Any:
+    """构造 ChatModel 的装配层注入点：真实 provider SDK 在**调用时**才导入（#1527）。
+
+    历史上本名字来自 ``model.provider`` 的顶层 import——这让 ``import
+    agent_harness.assembly``（CLI/Web 轻入口必经）连带加载 openai 全家（实测占
+    CLI 导入墙钟一半以上）。现在导入收进本包装内部，轻入口不再支付这份成本；
+    三个调用点（主模型 / summary / fallback）与测试的 patch 注入点
+    （``patch("agent_harness.assembly.create_chat_model", …)``）语义都不变。
+
+    签名与 ``model.provider.create_chat_model`` **逐字同形**（含
+    ``request_timeout``）：同名注入点签名收窄会让未来调用点的 TypeError 被
+    mock 全绿掩盖（审查 P3；web 的测试专用超时直连 provider，不经此处）。
+    """
+    from agent_harness.model.provider import create_chat_model as _create
+
+    return _create(
+        config, reasoning_effort=reasoning_effort, request_timeout=request_timeout,
+    )
+
+
 async def build_runtime(
     *,
     settings: Settings,
@@ -693,6 +715,11 @@ async def build_runtime(
             config = ModelConfig.resolve_selection(settings, model_name, store)
         except ConfigError as error:
             raise error from None
+    # #1527：provider SDK 链（`model.provider` → `langchain_openai` → `openai`）
+    # 的导入收进上方 `create_chat_model` 包装内部、到真正构造时才发生——CLI/Web
+    # 轻入口（--help、包/审批/记忆管理等无模型子命令）import `assembly` 不再支付
+    # 这份成本。构造点不变：需要模型的路径在此刻照常绑定，`ConfigError` /
+    # 构造期结构化错误的抛出位置与语义都不变。
     model = create_chat_model(config, reasoning_effort=reasoning_effort)
     summary_model = None
     summary_model_name = (settings.summary_model or "").strip()
@@ -978,7 +1005,7 @@ async def build_runtime(
             "os": f"{platform.system()} {platform.release()}",
             # 本地日期（用户看到的"今天"），**不**用 UTC：跨时区时 UTC 日期会与
             # 用户的一天错位。DTZ011 要的是 tz-aware，而这里刻意要本地日历日。
-            "date": date.today().isoformat(),  # noqa: DTZ011
+            "date": date.today().isoformat(),
         }).meta_user_text
         # #1048 AC8：与 build_runtime 的指令加载分支**同源**（`uses_sandbox_path_semantics`）：
         # 容器（Docker）工作区经 `load_for_sandbox_session` 用 sandbox 根（如 /workspace）缓存，

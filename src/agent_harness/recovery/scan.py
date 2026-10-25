@@ -66,6 +66,7 @@ from agent_harness.recovery.coordinator import (
 )
 from agent_harness.recovery.reconcile import ReconcileCallback
 from agent_harness.sandbox.registry import WorkspaceRegistry
+from agent_harness.session.errors import EventLogCorruptError
 from agent_harness.session.event import (
     FORK_IN_PROGRESS,
     MODEL_REQUEST,
@@ -142,9 +143,30 @@ async def scan_interrupted_sessions(
     session_ids = await anyio.to_thread.run_sync(session_store.list_session_ids)
     for session_id in session_ids:
         try:
-            events = await anyio.to_thread.run_sync(
-                session_store.read_events, session_id,
+            # #1516：**先过完整性闸，再写任何恢复事实**。本扫描后续会追加
+            # ``run/interrupted`` / ``session/resumed`` / 合成 tool/result，并跑
+            # Ledger reconcile——这些都是「恢复结论」。在一份有完整坏行 / seq
+            # 断层 / seq 重复的日志上下结论，等于把丢失的 permission/tool 事实
+            # 当成不存在（不变量 #14 的反面）。闸门与 SessionService 恢复入口
+            # 同源（``EventLogIntegrity.raise_if_corrupt``，见 store 的 #565），
+            # 不另造第二套宽松读法；合法尾部半行不在损坏之列，仍按既有语义恢复。
+            events, integrity = await anyio.to_thread.run_sync(
+                session_store.read_events_report, session_id,
             )
+            try:
+                integrity.raise_if_corrupt(session_id)
+            except EventLogCorruptError as error:
+                # 不自动修复、不截断历史、不写恢复事实：只如实上报（用户可见）。
+                logger.warning(
+                    "启动扫描：session=%s 事件日志损坏，拒绝恢复写：%s",
+                    session_id, error,
+                )
+                results.append(InterruptionScanResult(
+                    session_id=session_id,
+                    recovery=ScanRecovery.FAILED,
+                    detail=str(error),
+                ))
+                continue
             budget_key = session_budget_key(events, session_id=session_id)
             try:
                 await _replay_constraint_tool_budget(

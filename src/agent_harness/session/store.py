@@ -19,12 +19,14 @@ per-session 文件锁（``instance_lock.session_append_lock``）串行，见 ``_
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import shutil
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -32,7 +34,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from agent_harness.instance_lock import session_append_lock
-from agent_harness.session.errors import SeqConflict, SessionNotFound
+from agent_harness.session.errors import (
+    EventLogCorruptError,
+    SeqConflict,
+    SessionNotFound,
+)
 from agent_harness.session.event import (
     RUN_TERMINAL_TYPES,
     SESSION_STARTED,
@@ -95,6 +101,47 @@ class EventLogIntegrity:
     @property
     def healthy(self) -> bool:
         return not (self.corrupt_lines or self.seq_gaps or self.seq_duplicates)
+
+    def raise_if_corrupt(self, session_id: str) -> None:
+        """#565 完整性闸门——**恢复类写操作**对损坏日志拒绝继续（唯一判据 owner）。
+
+        「损坏」的三类见类 docstring；合法尾部半行不在其中（`_classify_event_line`
+        按写入中断的预期形状容错），所以本闸门不会误伤崩溃留下的半行。
+
+        文案带**脱敏定位**（行号 / 字节偏移 / 长度 / sha256 / reason，不含行内容）；
+        原字节保留在文件里未动，修复是人工动作。本错误**不可重试**：重读同一
+        文件无用——与写时 `SeqConflict`（可重读快照重试）在语义上分开。
+
+        调用方：`SessionService` 的恢复入口（recover / pending_decisions / fork /
+        get_events）与启动恢复扫描（#1516）。扫描若绕过本闸门直接 append
+        ``run/interrupted``，坏日志上就会多出「恢复结论」，等于把丢失的
+        permission/tool 事实当成不存在（不变量 #14 的反面）。
+        """
+        if self.healthy:
+            return
+        parts: list[str] = []
+        for record in self.corrupt_lines:
+            parts.append(
+                f"损坏行 lineno={record.lineno} offset={record.byte_offset} "
+                f"len={record.byte_length} sha256={record.line_sha256} "
+                f"reason={record.reason}"
+            )
+        for lo, hi in self.seq_gaps:
+            parts.append(f"seq 断层 {lo}-{hi}" if lo != hi else f"seq 缺号 {lo}")
+        for seq in self.seq_duplicates:
+            parts.append(f"seq 重复 {seq}")
+        # 文案封顶（P3 残余修复）：千行全坏的文件会把无界拼接变成数十 KB 的
+        # 409 detail（撑爆错误弹窗、进不了日志检索）。文案只带前 cap 条 +
+        # 总条数——完整定位记录本就在 store WARNING 日志里，一条不少。
+        cap = 5
+        detail = "；".join(parts[:cap])
+        if len(parts) > cap:
+            detail += f"；…共 {len(parts)} 条（其余 {len(parts) - cap} 条见 store WARNING 日志与完整性报告）"
+        raise EventLogCorruptError(
+            f"Session '{session_id}' 事件日志损坏，恢复已拒绝：{detail}。"
+            "请按 store WARNING 日志的定位记录核对原字节后人工修复文件；修复前"
+            "恢复入口保持拒绝（本错误不可重试）"
+        )
 
 
 @dataclass(frozen=True)
@@ -262,6 +309,90 @@ class _ScanGate:
         return result
 
 
+class _FlushTicket:
+    """一次「等本轮 fsync」的凭证：leader 完成后按成功/异常释放。"""
+
+    __slots__ = ("done", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+
+class _GroupFlush:
+    """每会话的刷盘协调器（#1489）：同时到达的写者合并成一次 fsync。
+
+    形状取自 PostgreSQL WAL 的 ``commit_delay``：**只移植「共享刷盘 + 确认边界」**
+    ——leader 在 fsync 返回后才释放整批 waiter，每个 waiter 的 ``append_event``
+    仍在「自己的字节已被 fsync」之后才返回（返回即耐久不变）；不做异步早确认，
+    也不去掉 fsync。
+
+    cohort 在 fsync **之前**快照：fsync 开始后才登记的写者归下一轮，绝不被本轮
+    「顺带确认」。反方向是安全的——写者总是先写完（锁内 write+flush）再登记凭证，
+    所以被释放的凭证对应的字节一定已被本次（或更晚一次）fsync 覆盖。
+
+    为什么是线程原语：写者跨线程（事件循环下放的工作线程 + 同步入口的调用线程），
+    asyncio 层的协调够不着同步写者。
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._pending: list[_FlushTicket] = []
+        self._flushing = False
+        #: 实际执行的 fsync 轮数（原始读数，供 #1489 的组提交观测引用）。
+        self.rounds = 0
+
+    def commit(self, path: Path) -> None:
+        """登记本轮并等 fsync 完成；返回即本条字节已耐久，失败原样抛出。
+
+        leader 只服务**一轮**：cohort 在 fsync 前快照，本轮之后的登记者归下一轮。
+        轮到自己那批释放后立刻退出（`ticket.done` 检查在取 cohort 之前），不会
+        因为队列一直有人而被扣住继续当 leader。
+        """
+        ticket = _FlushTicket()
+        with self._cv:
+            self._pending.append(ticket)
+        while True:
+            with self._cv:
+                if ticket.done.is_set():
+                    break
+                if self._flushing:
+                    self._cv.wait()
+                    continue
+                self._flushing = True
+                cohort, self._pending = self._pending, []
+                self.rounds += 1
+            error: BaseException | None = None
+            try:
+                self._fsync(path)
+            except BaseException as exc:  # noqa: BLE001 — 原样转交整批 waiter
+                error = exc
+            with self._cv:
+                self._flushing = False
+                for waiter in cohort:
+                    waiter.error = error
+                    waiter.done.set()
+                self._cv.notify_all()
+        if ticket.error is not None:
+            raise ticket.error
+
+    @staticmethod
+    def _fsync(path: Path) -> None:
+        # 单独开 fd 而不是复用写句柄：写句柄在写锁内就已关闭（锁内只 write+flush）。
+        # `O_RDWR` 是 Windows 的要求——`FlushFileBuffers` 需要写权限，只读句柄会失败。
+        fd = os.open(path, os.O_RDWR)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+#: 全量事件读缓存的会话数上限（#1526）：全量事件是 MB 级，无界 dict 会把
+#: 「读过的每个会话的整段历史」都钉在内存里——LRU 4 覆盖并发分页重建的
+#: 常见形状（>4 个并发重建时退化为部分命中，正确性不受影响）。
+_EVENTS_CACHE_MAX_SESSIONS = 4
+
+
 class JsonlSessionStore:
     """JSONL append-only 事件存储。
 
@@ -299,7 +430,25 @@ class JsonlSessionStore:
         self._summary_cache: dict[
             str, tuple[tuple[int, int], SessionSummaryStats]
         ] = {}
+        # 全量事件读缓存（#1526）：{session_id: ((size, mtime_ns), (events,
+        # integrity))}。长会话每页都全量解析纯属浪费（#516 摘要缓存的同型
+        # 问题）。与 `_summary_cache` 同款双戳纪律：扫描前后戳一致才入；戳变化
+        # （追加必变 size）→ 以磁盘为准重扫。与摘要缓存的**两点不同**：
+        # ① 全量事件是 MB 级，用 OrderedDict LRU 且上限 4 个会话（摘要行 KB
+        # 级才敢用无界 dict）；② 归还时**拷贝列表**——`Session.__init__` 直接
+        # 持有传入列表并在其上追加，共享同一列表会把 Session 的内存投影写穿
+        # 进缓存。元素级共享是**有意**的：`SessionEvent` frozen+slots 冻结属性
+        # 写，多读者共享同一对象安全；`data`/`source_event_ids` 字段可变，纪律
+        # 是**任何读者不得就地改写元素字段**（仓内现存用法全是读）。
+        self._events_cache: OrderedDict[
+            str,
+            tuple[tuple[int, int], tuple[list[SessionEvent], EventLogIntegrity]],
+        ] = OrderedDict()
         self._state_guard = threading.Lock()
+        # #1489：每会话一个刷盘协调器（懒创建，表结构由 `_state_guard` 保护）。
+        # 与 `_seq_locks` 分表：写锁管「读戳→判定→写」的原子性，协调器管「谁的
+        # fsync 覆盖了谁的字节」，两件事的生命周期不同（协调器可在写锁外被等待）。
+        self._group_flush: dict[str, _GroupFlush] = {}
         # #516 并发列表的单飞闸（用户裁决第五选项）：见 _ScanGate 的契约边界。
         self._scan_gate = _ScanGate()
         # #1389：落盘后的可选观察者（归档索引）。**纯通知**——与本类的一切
@@ -366,6 +515,24 @@ class JsonlSessionStore:
             if lock is None:
                 lock = self._seq_locks[session_id] = threading.Lock()
             return lock
+
+    def _group_flush_for(self, session_id: str) -> _GroupFlush:
+        """取得该会话的刷盘协调器（懒创建；表结构由 `_state_guard` 保护）。"""
+        with self._state_guard:
+            flush = self._group_flush.get(session_id)
+            if flush is None:
+                flush = self._group_flush[session_id] = _GroupFlush()
+            return flush
+
+    def last_written_seq(self, session_id: str) -> int:
+        """已**写入**文件的最大 seq（可能尚未 fsync；无文件 = -1）。
+
+        #1489：异步入口在 await 期间被取消时，那条写仍会在工作线程里跑完，调用方
+        因此不知道它用了哪个号。此时不猜——向 store 要盘面事实，把调用方的计数器
+        对齐到「不小于盘面」。取会话写锁读，与在途写者串行，不会读到半个状态。
+        """
+        with self._lock_for(session_id):
+            return self._last_seq_on_disk(session_id)
 
     def _last_seq_on_disk(self, session_id: str) -> int:
         """已落盘最大 seq（无文件 = -1）。带文件戳校验的缓存，必须在会话写锁内调用。
@@ -473,7 +640,10 @@ class JsonlSessionStore:
                 with path.open("a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
                     fh.flush()
-                    os.fsync(fh.fileno())
+                    # fsync **不在这里**（#1489）：刷盘移出临界区，由 `_GroupFlush`
+                    # 把同时到达的写者合并成一次。锁内等磁盘会把它们串成串行，共享
+                    # 刷盘就无从谈起；耐久边界不动——`append_event` 仍在本轮 fsync
+                    # 成功后才返回。
                 # 文件戳/缓存更新必须**留在文件锁内**（#1063）：原实现放在
                 # `_lock_for` 内、`session_append_lock` 外，跨进程下会在「放锁 → stat」
                 # 之间被另一进程追加，于是把**自己**的 seq 配上**别人刚写后**的
@@ -484,9 +654,35 @@ class JsonlSessionStore:
                     self._last_seq[session_id] = (
                         event.seq, stat.st_size, stat.st_mtime_ns,
                     )
+        # 锁外提交（#1489）：同时到达的写者在这里合并成一次 fsync。返回即耐久。
+        self._group_flush_for(session_id).commit(path)
         # 锁外通知（#1389）：观察者是派生索引，绝不与写临界区共享失败面。
         self._notify_observer(session_id, event)
         return event
+
+    async def append_event_async(
+        self, session_id: str, event: SessionEvent, *, allocate: bool = False,
+    ) -> SessionEvent:
+        """:meth:`append_event` 的异步入口（#1489）：把 durable 刷盘的等待移出事件循环。
+
+        整段都在工作线程里跑 :meth:`append_event`，事件循环只在投递与取回两端各停
+        一次。刻意不另开一条写路径：
+
+        * 顺序合同（#1063 的读戳 → 判定 → 写 → 戳缓存）与同步入口是**同一份代码**，
+          不存在两条会漂移的实现；
+        * 全仓的故障注入替身（``RejectingStore`` / ``FailingFromStore`` 等）都覆写
+          ``append_event``，故障因此在**热路径**上照样传播——这正是验收 3 要的形状。
+
+        返回即耐久：正常返回 ⇒ 本条事件已 fsync（票面「不许确认未耐久事件」）。
+        write/flush/fsync 的失败原样抛进调用方（不吞、不重投）。
+
+        取消语义（诚实披露）：``to_thread`` 的取消只放弃**等待**，线程里那次写会
+        跑完——本条是否落盘属 UNKNOWN。UNKNOWN 不得盲目重投；seq 计数器与盘面的
+        对齐由 :meth:`Session.append_async` 负责（它 shield 本调用并在完成回调里对齐）。
+        """
+        return await asyncio.to_thread(
+            self.append_event, session_id, event, allocate=allocate,
+        )
 
     def _neutralize_torn_tail(self, path: Path) -> None:
         """append 前中立化「无换行撕裂尾段」（#565 双轴收敛 P2 加固）。
@@ -724,10 +920,29 @@ class JsonlSessionStore:
         差别只在多返回一份**脱敏完整性报告**：完整坏行（定位记录）+ 解析后序列的
         seq 断层 / 重复。恢复入口据此拒绝——对有洞的投影做恢复裁决，等于把丢失的
         permission/tool 事实当不存在（不变量 #14 的反面就是这类沉默）。
+
+        结果缓存（#1526）：文件戳 `(size, mtime_ns)` 未变 → 复用上次扫描结果
+        （归还**列表拷贝**，调用方——如 `Session.__init__`——可安全持有/追加；
+        纪律与 `read_session_summary` 的 #516 摘要缓存同款，见 `_events_cache`）。
         """
         path = self._events_path(session_id)
         if not path.exists():
             return [], EventLogIntegrity()
+
+        cached = self._events_cache.get(session_id)
+        if cached is not None and self._summary_stamp(path) == cached[0]:
+            with self._state_guard:
+                # 读侧不加锁的固有竞态（#516 同款取舍）：本线程 `get` 命中后、
+                # `move_to_end` 前，另一线程插入第 5 个会话触发 LRU 逐出，逐出的
+                # 恰是本条（`.get` 不改序，命中的老条目可停在队首）。逐出 = 本地
+                # miss 而非错误——数据已验证过戳，这里吞掉 KeyError 只跳过提序。
+                try:
+                    self._events_cache.move_to_end(session_id)
+                except KeyError:
+                    pass
+            cached_events, integrity = cached[1]
+            return list(cached_events), integrity
+        stamp_before = self._summary_stamp(path)
 
         events: list[SessionEvent] = []
         corrupt: list[CorruptLine] = []
@@ -759,11 +974,19 @@ class JsonlSessionStore:
                 gaps.append((prev + 1, event.seq - 1))
             seen.add(event.seq)
             prev = event.seq
-        return events, EventLogIntegrity(
+        report = EventLogIntegrity(
             corrupt_lines=tuple(corrupt),
             seq_gaps=tuple(gaps),
             seq_duplicates=tuple(duplicates),
         )
+        # 扫描期间无外部追加（双戳一致）才入缓存；LRU 上限防多会话重建撑爆内存。
+        if stamp_before == self._summary_stamp(path):
+            with self._state_guard:
+                self._events_cache[session_id] = (stamp_before, (events, report))
+                self._events_cache.move_to_end(session_id)
+                while len(self._events_cache) > _EVENTS_CACHE_MAX_SESSIONS:
+                    self._events_cache.popitem(last=False)
+        return list(events), report
 
     def read_events(self, session_id: str) -> list[SessionEvent]:
         """读取 Session 的全部有效事件，跳过无法解析的损坏行。

@@ -3,6 +3,8 @@
 from langchain_openai import OpenAIEmbeddings
 
 from agent_harness.config import Settings
+from agent_harness.model.config import endpoint_allowlist
+from agent_harness.model.endpoint_guard import guarded_clients
 
 
 def create_embeddings(settings: Settings) -> OpenAIEmbeddings:
@@ -13,10 +15,17 @@ def create_embeddings(settings: Settings) -> OpenAIEmbeddings:
         None if settings.embedding_model.casefold() in {"baai/bge-m3", "pro/baai/bge-m3"}
         else settings.embedding_dimensions
     )
+    # #1485：embedding 端点同样受误配置守卫约束。地址与 chat 一样来自所有者配置
+    # （env / .env），所以同一套例外；但"配错成元数据地址"这条风险不分 chat/embedding。
+    http_client, http_async_client = guarded_clients(
+        base_url=settings.embedding_base_url,
+        allow=endpoint_allowlist(settings),
+    )
     return OpenAIEmbeddings(
         model=settings.embedding_model, base_url=settings.embedding_base_url,
         api_key=settings.embedding_api_key, check_embedding_ctx_length=False,
         dimensions=dimensions,
+        http_client=http_client, http_async_client=http_async_client,
         # BUG-014：max_retries 0→2——openai SDK 自带指数退避，只对 429/5xx/连接
         # 错误重试（4xx 认证/参数错不重试，不浪费 quota）。此前 0 = 上游一次瞬时
         # 500 就让该次检索/写入失败（真机会话 13 次 memory/degraded 的成因之一）。
