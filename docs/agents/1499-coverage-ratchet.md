@@ -24,8 +24,8 @@
 | **diff-cover** `README.rst` + `diff_cover_tool.py`（main） | `--fail-under` 原文 *"To have `diff-cover` and `diff-quality` return a non zero status code if the report quality/coverage percentage is below a certain threshold"*；实现 `if percent_covered >= fail_under … return 0`（**浮点** `percent_covered`，`>=` 语义）；`--exclude` 走 `fnmatch`；`--expand-coverage-report` 一节自陈 *"diff reports list all lines that changed, coverage reports usually list code statements. As a result, a change in a multi-line statement may not be analyzed"* | 它就是"变更行覆盖率"的原产工具 | **不采用（BUILD 侧保留）**：① 未在本仓依赖里（`pyproject.toml` / `uv.lock` 均无），引入 = 新增依赖，与 §9.5 第 5 级相悖；② 判定走浮点百分比 ⇒ 正是 B 案要绕开的那类精度面，本票要的是整数 `covered*100 >= total*60`；③ 它**不**提供"报告是否属于这棵树"的对账（sha256 + tree），而那正是 AC1 的核心；④ 白名单要"精确文件 + 理由 + 平台"的解析期护栏（AC3），`--exclude` 的 `fnmatch` 反而允许通配 |
 | **coverage.py** `config.html` `[report] fail_under`（B 案对照） | *"A target coverage percentage. If the total coverage measurement is under this value, then exit with a status code of 2."*；*"If you specify a non-integral value, you must also set `[report] precision` properly to make use of the decimal places."*；*"A setting of 100 will fail any value under 100, regardless of the number of decimal places of precision."* | 全仓单一硬阈值，**对精度/取整敏感** | **不采用**（DECIDE：B 案 = 票面否决项）。A 案用整数比较 `covered*100 >= total*60` 绕开取整面；且全仓总率只记录 |
 
-> 三条都是**机制旁证**，不是"行业强制值"：60% 这个数字来自票面裁决允许设定的低门槛，
-> 本票不冒称它是实测值或行业标准。
+> 前三条是**机制旁证**，第四条是**反面参照**（B 案被否的理由）；四条都不是"行业强制值"：
+> 60% 这个数字来自票面裁决允许设定的低门槛，本票不冒称它是实测值或行业标准。
 
 ## 3. 设计（落点与职责边界）
 
@@ -97,8 +97,9 @@
    白名单命中但报告里没有该文件时，输出会标注"报告里没有该文件（盲区）"，不让豁免隐形。
 2. **`git -M` 的 rename 判定有 50% 相似度阈值**：`R<100` 一律按新增计（只有 `R100` 才算纯移动）。
    这是刻意保守的方向（宁可多算分母，不可少算）。
-3. **只覆盖 `src/` 的新增行**：`web/**`（TS）、`tui/**`、`scripts/**` 的变更行不在本棘轮分母内
-   —— 它们各有多测/类型检查车道，且 coverage.py 不覆盖 TS。把这条写进 PR 描述与本文，避免
-   "棘轮绿 = 全仓都测了"的误读。
-4. **本工作流的等待代价**：与 gate1 backend 作业同形同命令（`uv sync` + 全量 pytest + 覆盖率）。
-   实测读数记在 `docs/agents/verification.md` §2 ⑯；引用时连同来源与机器负载。
+3. **只覆盖 `src/**.py` 的新增行**：`web/**`（TS）、`tui/**`、`scripts/**` 的变更行不在本棘轮分母内
+   —— 它们各有多测/类型检查车道，且 coverage.py 不覆盖 TS。`src/` 下的非 `.py`（快照/数据）
+   没有可执行行，同样不进分母。把这条写进 PR 描述与本文，避免"棘轮绿 = 全仓都测了"的误读。
+4. **本工作流的等待代价**：与 gate1 backend 作业同形同命令（`uv sync` + 全量 pytest + 覆盖率），
+   单人 PR 每碰一次 `src/**` 就多等这一轮。实测读数见 PR 描述（本文件不复制数字，避免漂移）；
+   引用时连同来源与机器负载一起给。
