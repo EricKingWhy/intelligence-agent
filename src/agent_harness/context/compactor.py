@@ -387,8 +387,14 @@ class ContextWindowExceededError(RuntimeError):
         self, message: str, *,
         failures: list[CompactionFailure] | None = None,
         raw_artifact_content: str | None = None,
+        breakdown: dict[str, int] | None = None,
     ) -> None:
         super().__init__(message)
+        #: #1497：调用前硬闸门拒绝时携带的**分项预算账本**（各组成 → token 数，
+        #: 全整型）。抛点为 builder 的统一闸门（`_enforce_hard_guard`）——分项
+        #: 数字由 builder 的编码器估算（含 usage 锚只抬高的 messages 项），是
+        #: 项目自有口径，不含 provider 回显。其余抛点保持 None（非闸门语义）。
+        self.breakdown = breakdown
         #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。
         #: #639 的"摘要请求本身超限"与 #648 的"无可压缩早期轮"两类预检超限是
         #: 例外——各携带一条 attempt=0 的诊断（非摘要尝试），经抛错路径的
