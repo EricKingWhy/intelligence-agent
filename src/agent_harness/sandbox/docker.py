@@ -1184,9 +1184,13 @@ class DockerSandbox(Sandbox):
         类型。`test -L` 优先于 `-d`/`-f`（不跟随末级符号链接，与宿主侧
         "符号链接指令文件不跟随"一致）；`-e` 兜底特殊文件（FIFO/socket/device，
         报不可读 kind 而非"缺失"，与宿主侧对齐）。
+
+        #1510：`resolve_within_workspace` 现按容器视角解析 symlink 实际目标
+        判界，本探测因此改走**词法**围栏 `_lexical_within_workspace`——
+        `test -L` 要看到链接本身，不能拿解析后的目标路径来问类型。
         """
         try:
-            target = self.resolve_within_workspace(path)
+            target = self._lexical_within_workspace(path)
         except OSError:
             return None
         self.ensure_started()
@@ -1215,6 +1219,8 @@ class DockerSandbox(Sandbox):
         }.get(lines[-1] if lines else "")
 
     def read_text(self, path: str) -> str:
+        # #1510：target 是容器视角解析后的真实路径——内部链接读穿到目标，
+        # 出界目标在围栏处已拒绝；get_archive 不再经用户路径二次解析。
         target = self.resolve_within_workspace(path)
         self.ensure_started()
         docker = importlib.import_module("docker")
@@ -1235,6 +1241,8 @@ class DockerSandbox(Sandbox):
             return extracted.read().decode("utf-8")
 
     def write_text(self, path: str, content: str) -> None:
+        # #1510：target 是容器视角解析后的真实路径；mkdir / put_archive / cat
+        # 全部落在真实路径上，链接（含中间目录链接）不再被写路径跟随出界。
         target = self.resolve_within_workspace(path)
         self.ensure_started()
         mkdir_result = self._container.exec_run(["mkdir", "-p", str(target.parent)])
@@ -1270,6 +1278,8 @@ class DockerSandbox(Sandbox):
             raise RuntimeError(f"无法写入 Workspace 文件 '{target}'")
 
     def copy_in(self, host_path: Path, workspace_path: str) -> None:
+        # #1510：target 是容器视角解析后的真实路径，put_archive 落在真实
+        # 父目录上，不跟随用户路径里的（中间目录）链接出界。
         target = self.resolve_within_workspace(workspace_path)
         source = Path(host_path)
         if not source.exists():
@@ -1400,7 +1410,31 @@ class DockerSandbox(Sandbox):
             raise
 
     def resolve_within_workspace(self, path: str) -> PurePosixPath:
-        """Resolve a model-supplied path with container-native POSIX semantics."""
+        """Resolve a model-supplied path with container-native POSIX semantics.
+
+        两段判界（#1510）：先词法规范化挡 `..` 穿越，再让**容器自己**解析
+        symlink（`realpath -m`）并按解析后的实际目标复核边界。围栏必须与
+        实际操作同语义：read 的 `get_archive` 跟随中间目录链接（末级链接
+        返回链接条目本身），write 的 `cat >` 与 copy_in 的
+        `put_archive(父目录)` 跟随全部链接——只查词法字符串时，
+        `/workspace/link -> /etc/x` 会让"workspace 路径"静默穿透到容器
+        文件系统（宿主侧基类用 `Path.resolve()` 跟随链接，本实现对齐）。
+
+        `-m`（缺失尾部按词法补全）：目标不存在仍是合法 write 语义；悬空
+        链接按其目标判界（与宿主 strict=False 行为一致）。`path_kind` 的
+        "不跟随末级链接"探测走 `_lexical_within_workspace`，不受影响。
+
+        TOCTOU 残余（如实登记）：realpath 与后续操作之间存在替换链接的
+        竞态窗口；并发攻击者本可用 bash exec 直接读写容器内任意路径
+        （exec 无路径围栏），本围栏执行的是文件工具的 workspace 契约，
+        不是容器逃逸边界（票面明确不声称）。缓解：所有后续操作都落在
+        **解析后的真实路径**上，不再经用户路径二次解析。
+        """
+        resolved = self._lexical_within_workspace(path)
+        return self._resolve_container_symlinks(resolved, original=path)
+
+    def _lexical_within_workspace(self, path: str) -> PurePosixPath:
+        """词法规范化 + 边界检查（不解析 symlink；`path_kind` 探测用）。"""
         root = self.workspace_root
         raw = PurePosixPath(path.replace("\\", "/"))
         candidate = raw if raw.is_absolute() else root / raw
@@ -1408,6 +1442,34 @@ class DockerSandbox(Sandbox):
         if resolved != root and root not in resolved.parents:
             raise PermissionError(
                 f"路径 '{path}' 解析为 '{resolved}'，越出 workspace '{root}' 边界，拒绝访问"
+            )
+        return resolved
+
+    def _resolve_container_symlinks(
+        self, target: PurePosixPath, *, original: str
+    ) -> PurePosixPath:
+        """在容器视角解析 symlink 实际目标并复核 workspace 边界（#1510）。
+
+        `realpath -m` 跑在容器里，与 get_archive / put_archive / `cat >`
+        看到同一文件系统视图（权限检查与实际操作同语义）。解析失败
+        fail-closed（RuntimeError），解析出界 fail-closed（PermissionError），
+        不把"解析不了"降级成放行。
+        """
+        self.ensure_started()
+        result = self._container.exec_run(["realpath", "-m", "--", str(target)])
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"容器内解析路径 '{target}' 失败（realpath 退出 {result.exit_code}）"
+            )
+        decoded = result.output.decode("utf-8", errors="ignore").strip()
+        if not decoded:
+            raise RuntimeError(f"容器内解析路径 '{target}' 失败（realpath 输出为空）")
+        resolved = PurePosixPath(decoded)
+        root = self.workspace_root
+        if resolved != root and root not in resolved.parents:
+            raise PermissionError(
+                f"路径 '{original}' 经容器内 symlink 解析为 '{resolved}'，"
+                f"越出 workspace '{root}' 边界，拒绝访问"
             )
         return resolved
 
