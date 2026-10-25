@@ -261,6 +261,32 @@ def test_path_kind_intermediate_dir_link_fenced(fenced_sandbox: object) -> None:
     assert sandbox.path_kind("pk-sl/tail-link") == "symlink"
 
 
+def test_trailing_newline_filename_preserved(fenced_sandbox: object) -> None:
+    """重审 P4-1：以换行结尾的文件名不被解析输出剥掉。
+
+    realpath 恰好只追加一个 `\\n`；解析剥一个尾换行后，`nl-\\n` 这类
+    名字应原样保留并按它读写（界内同目录错名即 F1 原缺陷形态）。
+    """
+    import shlex
+
+    sandbox = fenced_sandbox
+    create = "python3 -c " + shlex.quote(
+        "open('/workspace/nl-\\nx', 'w').write('trailing-nl')"
+    )
+    assert sandbox.exec(create).exit_code == 0
+
+    assert sandbox.read_text("nl-\nx") == "trailing-nl"
+    sandbox.write_text("nl-\nx", "rewritten")
+    result = sandbox.exec(
+        "python3 -c " + shlex.quote("print(open('/workspace/nl-\\nx').read(), end='')")
+    )
+    assert result.stdout == "rewritten"
+    # 名字未被剥成 "nl-"：由上面的读写穿断言证明（read_text("nl-\nx")
+    # 命中含换行的名字）。不另用 list_files 断言——它的 find 行协议
+    # （`-printf '%P\n'` + splitlines）本就无法表示含换行的名字，属
+    # 既有局限，与围栏无关。
+
+
 def test_symlink_loop_behavior_is_defined(fenced_sandbox: object) -> None:
     """链接环行为明确（Correctness 轴 F2 复核后的实测语义）。
 

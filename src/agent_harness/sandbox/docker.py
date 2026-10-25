@@ -1487,11 +1487,12 @@ class DockerSandbox(Sandbox):
         兜住（get_archive `evalSymlinksInScope` 500 → `read_text` 映射
         OSError；`cat >` shell 失败 → RuntimeError）。
 
-        输出只剥换行（F1）：文件名本身可以以空白结尾，`.strip()` 会把
-        真实文件名字符吃掉、让操作落到同目录另一个文件上（前缀
-        `/workspace` 为 ASCII，缩短尾部无出界方向，仍如实修正）。非
-        UTF-8 文件名字节经 `errors="ignore"` 丢弃的局限保留登记：解析
-        结果可能指向该名字的"可显示形态"，两段围栏仍闭合。
+        输出只剥**一个**尾换行（F1）：文件名本身可以以空白/换行结尾，
+        `.strip()`/`rstrip("\n")` 会把真实文件名字符吃掉、让操作落到
+        同目录另一个文件上（前缀 `/workspace` 为 ASCII，缩短尾部无出界
+        方向，仍如实修正；realpath 恰好只追加一个 `\n`，剥一个即净）。
+        非 UTF-8 文件名字节经 `errors="ignore"` 丢弃的局限保留登记：
+        解析结果可能指向该名字的"可显示形态"，两段围栏仍闭合。
         """
         self.ensure_started()
         result = self._container.exec_run(["realpath", "-m", "--", str(target)])
@@ -1499,7 +1500,7 @@ class DockerSandbox(Sandbox):
             raise OSError(
                 f"容器内解析路径 '{target}' 失败（realpath 退出 {result.exit_code}）"
             )
-        decoded = result.output.decode("utf-8", errors="ignore").rstrip("\n")
+        decoded = result.output.decode("utf-8", errors="ignore").removesuffix("\n")
         if not decoded:
             raise OSError(f"容器内解析路径 '{target}' 失败（realpath 输出为空）")
         resolved = PurePosixPath(decoded)
