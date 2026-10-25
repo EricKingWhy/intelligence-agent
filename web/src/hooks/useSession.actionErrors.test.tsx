@@ -19,7 +19,7 @@ import { act, useEffect } from 'react';
 import { createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent, ConversationState, SessionSummary } from '../types';
+import type { AgentEvent, SessionSummary } from '../types';
 import { NotFoundError, type ResumePausedRunTarget, type UserInputAnswerPayload } from '../lib/api';
 import { useSession } from './useSession';
 
@@ -68,8 +68,6 @@ const settledHistory = (sid: string): AgentEvent[] => [
   { type: 'session/started', seq: 1, session_id: sid, run_id: 'r-1' } as AgentEvent,
   { type: 'run/completed', seq: 2, session_id: sid, run_id: 'r-1' } as AgentEvent,
 ];
-
-const convOf = (sid: string): ConversationState => ({ session_id: sid }) as ConversationState;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

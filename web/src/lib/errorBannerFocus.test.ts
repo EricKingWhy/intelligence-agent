@@ -28,7 +28,7 @@ function button(id: string, attrs: Record<string, string> = {}): HTMLButtonEleme
 
 /** 每个用例自建小 DOM：region（常驻槽位）里挂 banner，关闭按钮在 banner 子树内，
  *  前后放干扰元素。 */
-function fixture(): { banner: HTMLElement; region: HTMLElement; close: HTMLButtonElement } {
+function fixture(): { banner: HTMLElement; region: HTMLElement; close: HTMLButtonElement; after: HTMLButtonElement } {
   document.body.innerHTML = '';
   const before = button('before');
   const region = div('region', { tabindex: '-1' });
