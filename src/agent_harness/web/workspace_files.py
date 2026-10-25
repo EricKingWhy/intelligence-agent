@@ -529,7 +529,8 @@ def _boundary_checked(sandbox: Sandbox, value: str) -> str:
     指向外面的绝对路径）必须先在这里被挡掉——否则它会与围栏 pathspec 取**并集**，把外面重新
     拉进输出。`..` 段本身不归本层判：resolve 后仍在内的形态（如 `a/../b`）能过本层，由契约层
     `_checked_pathspec` 按段拒绝（→ 422）。
-    越界 → `PermissionError` → 403；含 NUL → `ValueError`（`Path.resolve()` 抛）→ 422。
+    越界 → `PermissionError` → 403；含 NUL → `ValueError`（`Path.resolve()` 抛）→ 422；
+    Docker 后端的路径解析失败（非法形态等）→ 裸 `OSError` → 422（#1510）。
     """
     if not value:
         return ""

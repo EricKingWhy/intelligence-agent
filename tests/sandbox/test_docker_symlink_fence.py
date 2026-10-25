@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -305,6 +306,9 @@ def test_symlink_loop_behavior_is_defined(fenced_sandbox: object) -> None:
 
     with pytest.raises(OSError) as excinfo:
         sandbox.read_text("loop-a")
+    # 精确类型必须是裸 OSError（重审 SR1：APIError ⊂ OSError 经 requests 继承，
+    # 只断 raises(OSError) 无法证明 read_text 的映射真的发生）。
+    assert type(excinfo.value) is OSError
     assert not isinstance(excinfo.value, PermissionError)
     assert not isinstance(excinfo.value, FileNotFoundError)
 
@@ -321,3 +325,64 @@ def test_list_files_does_not_enumerate_symlinks(fenced_sandbox: object) -> None:
 
     listed = sandbox.list_files("ls-*")
     assert listed == ["ls-real.txt"]
+
+
+# ---------------------------------------------------------------------------
+# 重审 SR2：错误分类的假容器钉子（不依赖引擎——分类是纯 Python 映射）
+# ---------------------------------------------------------------------------
+
+
+class _FakeExecResult:
+    def __init__(self, exit_code: int, output: bytes) -> None:
+        self.exit_code = exit_code
+        self.output = output
+
+
+def _bare_sandbox(fake_container: object) -> object:
+    """DockerSandbox.__new__ + 假容器（同 test_docker_export_windows 的模式）。
+
+    `workspace_root` 是常量属性（/workspace），裸实例够用；只需挂假
+    容器并把 ensure_started 置为 no-op。
+    """
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = DockerSandbox.__new__(DockerSandbox)
+    sandbox._container = fake_container
+    sandbox.ensure_started = lambda: None  # type: ignore[method-assign]
+    return sandbox
+
+
+def test_resolve_failure_maps_to_bare_oserror() -> None:
+    """realpath 非零退出 → 裸 OSError（精确类型），web 侧落 422 表。"""
+    fake = SimpleNamespace(
+        exec_run=lambda cmd: _FakeExecResult(1, b"realpath: too many levels\n")
+    )
+    sandbox = _bare_sandbox(fake)
+    with pytest.raises(OSError) as excinfo:
+        sandbox.resolve_within_workspace("whatever")
+    assert type(excinfo.value) is OSError
+
+
+def test_resolve_empty_output_maps_to_bare_oserror() -> None:
+    fake = SimpleNamespace(exec_run=lambda cmd: _FakeExecResult(0, b"\n"))
+    sandbox = _bare_sandbox(fake)
+    with pytest.raises(OSError) as excinfo:
+        sandbox.resolve_within_workspace("whatever")
+    assert type(excinfo.value) is OSError
+
+
+def test_read_text_maps_apierror_to_bare_oserror() -> None:
+    """daemon APIError（含链接环 500）→ 裸 OSError，不穿透 SDK 精确类型。"""
+    import docker as docker_sdk
+
+    def raise_api_error(_path: str) -> object:
+        raise docker_sdk.errors.APIError("500 Server Error: too many links")
+
+    fake = SimpleNamespace(
+        exec_run=lambda cmd: _FakeExecResult(0, b"/workspace/loop-ish\n"),
+        get_archive=raise_api_error,
+    )
+    sandbox = _bare_sandbox(fake)
+    with pytest.raises(OSError) as excinfo:
+        sandbox.read_text("loop-ish")
+    assert type(excinfo.value) is OSError
