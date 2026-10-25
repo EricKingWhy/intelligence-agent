@@ -160,7 +160,9 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   await routeApi(page, { sessions: [ROW] });
   // 重读 durable log 的观测点：409 后 useSession 必须 `selectSession` 同一会话，
   // 让历史装载 effect 重跑（不变量 #22：屏幕上的暂停事实以服务器那份为准）。
-  await page.route(new RegExp(`/api/sessions/${SID}/events$`), async (route: Route) => {
+  // （`(\\?.*)?`：#1526 起 /events 恒带 `?after_seq&limit` 查询串，`$` 裸锚定
+  // 匹配不上整条 URL，观测点静默失效——eventsCalls 恒 0、用例假红。）
+  await page.route(new RegExp(`/api/sessions/${SID}/events(\\?.*)?$`), async (route: Route) => {
     eventsCalls += 1;
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(frames) });
   });
