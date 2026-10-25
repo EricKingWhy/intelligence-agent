@@ -1,8 +1,8 @@
 """#684 Phase 2 CLI 面：`agent-harness approvals policy list|remove <id> [--yes]`。
 
 黑盒：经 `cli._main_dispatch()` + monkeypatch `sys.argv` 驱动（同 #616 的
-`tests/test_cli_purge_stale_tools.py` 形态），只读 `.agent-harness/approve-policy.json`
-验证**零改动 / 真删除**，不 import 存储内部符号。
+`tests/test_cli_purge_stale_tools.py` 形态），只读控制文件（#1487：控制目录内
+`<project_key>.json`）验证**零改动 / 真删除**，不 import 存储内部符号。
 
 项目根 = 进程当前工作目录（与 `ToolExecutor.__init__` 的 `project_root` 回落口径逐字一致
 ——管理面与执行域读写同一份文件）；测试用 `monkeypatch.chdir(tmp_path)` 把它钉到临时目录。
@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -33,6 +34,15 @@ from agent_harness.tooling.approve_policy import (
     PolicyGranularity,
 )
 from agent_harness.tooling.contract import ToolPermission
+
+
+@pytest.fixture(autouse=True)
+def _pin_control_root(tmp_path: Path, monkeypatch) -> None:
+    """#1487：控制目录钉 tmp_path 的兄弟目录——默认落 home（hermeticity）；也不
+    放 tmp_path 下：这些用例的项目根就是 tmp_path，控制文件必须不在项目树内。
+    兄弟目录随 pytest 的 run 根目录（pytest-<N>/）一起被 retention 清理。"""
+    control = tmp_path.parent / f"{tmp_path.name}-approve-policy-control"
+    monkeypatch.setenv("AGENT_HARNESS_APPROVE_POLICY_ROOT", str(control))
 
 
 def _rule(rule_id: str = "r1", *, key: str = "npm run build") -> ApprovePolicyRule:
@@ -169,3 +179,63 @@ def test_list_no_rules_still_no_file(tmp_path: Path) -> None:
     # 只读命令不得顺手创建空文件（零副作用）。
     cli.approvals_policy_list_command(project_root=tmp_path)
     assert not (tmp_path / ".agent-harness").exists()
+
+
+# ── import-legacy（#1487 迁移面）────────────────────────────────────────────
+
+
+_LEGACY_FILE = Path(".agent-harness") / "approve-policy.json"
+
+
+def _seed_legacy(tmp_path: Path, *rules: ApprovePolicyRule) -> Path:
+    """在旧工作区路径手写规则文件（迁移源；模拟 #1487 之前版本的产物）。"""
+    target = tmp_path / _LEGACY_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps({"rules": [rule.to_dict() for rule in rules]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return target
+
+
+def test_import_legacy_moves_rules_into_control_file(tmp_path: Path) -> None:
+    legacy = _seed_legacy(tmp_path, _rule("r1"), _rule("r2"))
+    before = legacy.read_bytes()
+    output = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    assert "导入 2 条" in output
+    assert "跳过 0 条" in output
+    assert _ids(tmp_path) == ["r1", "r2"]
+    # 迁移只读旧位、不改写它（删除留给用户手动确认）。
+    assert legacy.read_bytes() == before
+
+
+def test_import_legacy_without_legacy_file_is_noop(tmp_path: Path) -> None:
+    output = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    assert "无需迁移" in output
+    assert not ApprovePolicyStore(tmp_path).path.exists()
+
+
+def test_import_legacy_is_idempotent(tmp_path: Path) -> None:
+    _seed_legacy(tmp_path, _rule("r1"))
+    cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    second = cli.approvals_policy_import_legacy_command(project_root=tmp_path)
+    assert "导入 0 条" in second
+    assert "跳过 1 条" in second
+    assert _ids(tmp_path) == ["r1"]
+
+
+def test_list_hints_legacy_presence(tmp_path: Path) -> None:
+    assert "import-legacy" not in cli.approvals_policy_list_command(project_root=tmp_path)
+    _seed_legacy(tmp_path, _rule("r1"))
+    assert "import-legacy" in cli.approvals_policy_list_command(project_root=tmp_path)
+
+
+def test_import_legacy_via_dispatch(tmp_path: Path, monkeypatch, capsys) -> None:
+    _seed_legacy(tmp_path, _rule("r1"))
+    try:
+        _run_cli(monkeypatch, tmp_path, ["approvals", "policy", "import-legacy"])
+    except SystemExit as exc:
+        assert exc.code in (0, None), f"迁移不该被拒绝：exit={exc.code}"
+    captured = capsys.readouterr()
+    assert "导入 1 条" in captured.out
+    assert _ids(tmp_path) == ["r1"]

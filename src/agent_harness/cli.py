@@ -3887,17 +3887,22 @@ async def _memory_command(
 
 
 def _main_approvals(argv: list[str]) -> None:
-    """CLI approvals 入口（#684 Phase 2）：项目级持久审批规则的公开管理面。
+    """CLI approvals 入口（#684 Phase 2，#1487 迁移面）：持久审批规则的公开管理面。
 
-    - `approvals policy list`：列出本项目 `.agent-harness/approve-policy.json` 的规则；
+    - `approvals policy list`：列出本项目持久审批规则（#1487：控制目录内文件）；
+      检测到旧工作区规则文件时附迁移提示；
     - `approvals policy remove <id> [--yes]`：默认二次确认——无 `--yes` 且规则存在时，
       只打印将删规则并 `SystemExit(2)` 拒绝执行（**零改动**）；`--yes` 真删；id 不存在
-      幂等成功（不报错）。
+      幂等成功（不报错）；
+    - `approvals policy import-legacy`（#1487）：把旧工作区
+      `.agent-harness/approve-policy.json` **显式**迁移进控制目录（严格校验 + 按 id
+      去重 + 幂等）——Runtime 永不自动信任旧位（旧位在 agent 可达空间，静默导入
+      = 信任 agent 自建文件），迁移必须是用户手势。
 
     规则内容由 Runtime 在审批流里精确派生、只读展示，CLI **不提供创建入口**：唯一安装
     路径是用户在审批卡上主动选「以后都允许」（F21：显式授权，禁止静默创建）。项目根 =
     进程当前工作目录，与 `ToolExecutor` 的 `project_root` 回落口径一致——管理面与真正
-    读取规则的执行域指向同一份文件。
+    读取规则的执行域指向同一份控制文件。
     """
     parser = argparse.ArgumentParser(prog="agent-harness approvals")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -3910,11 +3915,18 @@ def _main_approvals(argv: list[str]) -> None:
         "--yes", action="store_true",
         help="显式确认删除；缺省且规则存在时只打印将删规则并拒绝执行（零改动）",
     )
+    policy_sub.add_parser(
+        "import-legacy",
+        help="把旧工作区 .agent-harness/approve-policy.json 显式迁移进控制目录（#1487）",
+    )
     args = parser.parse_args(argv)
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
     if args.policy_command == "list":
         print(approvals_policy_list_command())
+        return
+    if args.policy_command == "import-legacy":
+        print(approvals_policy_import_legacy_command())
         return
     output, confirm_required = approvals_policy_remove_command(
         args.rule_id, yes=args.yes,
@@ -3928,7 +3940,9 @@ def _approve_policy_store(project_root: Path | str | None = None) -> ApprovePoli
     """本项目持久审批规则存储；`project_root` 缺省 = 进程当前工作目录。
 
     与 `ToolExecutor.__init__` 的回落口径逐字一致（`Path.cwd()`），保证 CLI / Web 管理面
-    与执行域读写同一份 `.agent-harness/approve-policy.json`。
+    与执行域读写同一份控制文件（#1487：控制目录内按项目根哈希命名的 JSON；控制目录
+    默认 `<home>/.agent-harness/approve-policy/`，`AGENT_HARNESS_APPROVE_POLICY_ROOT`
+    可钉根）。
     """
     return ApprovePolicyStore(Path(project_root) if project_root is not None else Path.cwd())
 
@@ -3938,17 +3952,55 @@ def approvals_policy_list_command(*, project_root: Path | str | None = None) -> 
 
     无规则时给友好提示（不是空输出）——「没有配置」与「读取失败」在人类眼里都应先是
     一句可读的话。坏文件由 `ApprovePolicyStore.load` fail-closed 成空列表，与无规则同形
-    （回调到默认逐调用审批，绝不臆造放行）。
+    （回调到默认逐调用审批，绝不臆造放行）。检测到旧工作区规则文件（#1487 迁移源）
+    时附一行迁移提示——只探测不读取，提示本身零副作用。
     """
-    rules = _approve_policy_store(project_root).load()
-    if not rules:
-        return "（暂无持久审批规则）"
-    lines = [f"本项目持久审批规则（{len(rules)} 条）："]
+    store = _approve_policy_store(project_root)
+    rules = store.load()
+    lines: list[str] = []
+    if rules:
+        lines.append(f"本项目持久审批规则（{len(rules)} 条）：")
+        lines.extend(
+            f"  id={rule.id}  tool={rule.tool}  key={rule.key}  "
+            f"granularity={rule.granularity.value}  created_at={rule.created_at}"
+            for rule in rules
+        )
+    else:
+        lines.append("（暂无持久审批规则）")
+    if store.legacy_present:
+        lines.append(
+            f"检测到旧工作区规则文件 {store.legacy_path}（Runtime 已不再读取它）；"
+            "运行 `approvals policy import-legacy` 迁移，迁移后可删除旧文件。"
+        )
+    return "\n".join(lines)
+
+
+def approvals_policy_import_legacy_command(
+    *, project_root: Path | str | None = None,
+) -> str:
+    """`approvals policy import-legacy` 的可测核心：显式迁移旧位规则（#1487）。
+
+    为什么必须显式（不能 Runtime 自动导）：旧位在 agent 可达空间，自动信任它 =
+    信任 agent 自建文件——F21「显式授权」在迁移面上的落点。语义全部来自
+    `ApprovePolicyStore.import_legacy`：严格校验（created_at 可解析、command 档
+    无换行）、按 id 去重（控制侧已有同 id 时控制侧胜）、幂等。
+    """
+    store = _approve_policy_store(project_root)
+    if not store.legacy_present:
+        return "（未发现旧工作区规则文件，无需迁移）"
+    result = store.import_legacy()
+    lines = [
+        (
+            f"已从 {store.legacy_path} 导入 {len(result.imported)} 条规则"
+            f"（跳过 {result.skipped} 条：不合规或 id 重复），控制文件：{store.path}"
+        )
+    ]
     lines.extend(
         f"  id={rule.id}  tool={rule.tool}  key={rule.key}  "
         f"granularity={rule.granularity.value}  created_at={rule.created_at}"
-        for rule in rules
+        for rule in result.imported
     )
+    lines.append("旧文件迁移完成后不再被任何代码读取，可手动删除。")
     return "\n".join(lines)
 
 

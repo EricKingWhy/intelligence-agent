@@ -1893,7 +1893,7 @@ def approve_policy_store() -> ApprovePolicyStore:
 
     项目根 = 进程当前工作目录，与 `ToolExecutor.__init__` 的 `project_root` 回落口径
     逐字一致（`project_root is None ⇒ Path.cwd()`）：管理面读写的必须正是执行域用来
-    命中规则的那份 `.agent-harness/approve-policy.json`——否则会出现"撤销了却还在
+    命中规则的那份控制文件（#1487：控制目录内 `<project_key>.json`）——否则会出现"撤销了却还在
     放行"这类两套真相（不变量 #22 同源）。
     """
     return ApprovePolicyStore(Path.cwd())
@@ -3979,7 +3979,7 @@ def create_app(
     ) -> ApprovePolicyRules:
         """列出本项目持久审批规则（#684 Phase 2，管理面）。
 
-        数据源是项目根 `.agent-harness/approve-policy.json`（`ApprovePolicyStore`），
+        数据源是控制目录内的项目控制文件（#1487，`ApprovePolicyStore`），
         与执行域命中规则时读的是**同一份文件**。无规则 / 文件缺失 / 文件损坏都返回
         `{"rules": []}`（fail-closed：读不动就当没有规则，绝不臆造放行）——空列表
         不是 404，因为"没有配置"不是错误。
