@@ -65,7 +65,7 @@
 - **残余（未修，登记）**：① **Correctness P4 ①**——归因快照与判 unknown 之间仍有一次读的间隔（**既存**、NEW/OLD 均有、方向安全：仍退 2、不假成功、不指错文件）；建议后续小票，本 PR 不修。② P4-4/M13 与 R4-5 属票面 §6 范围外，不修。③ 本机 `tests/memory/v2` 的 `test_v2_runner` 两条红为本机并发负载下不可复现（同树沙箱全量 0 failed），未登记 flake 表、未据此放行门禁。
 
 **施工交付（2026-10-26，#1492 / ticket-010 Memory freeze backup）**：分支 `codex/issue-1492-memory-freeze-backup`；已同步当前远程 `origin/main=72b31da0dc138f42f494c87bb11a2e121233c8a6`，同步 merge `ec0e8ce2fee12dbefba9f350e57a2f7660870c38`，代码修复 `c600f80bc0e4f2073c1adcdafbacc43c81f6d3f6`。standalone SQLite Online Backup + AES-GCM 离线归档、六类 writer-proof、全生命周期 manifest 与隔离 staged restore 已实现；不接 runtime/retrieval，不 purge 或删除。
-- **审查**：Standards/Security 与 Spec/Correctness 双轴独立复审均确认实现符合票面、无 P0/P1；指出进度/门禁记录过期，正在本轮收口。最终覆盖范围将记录在 `docs/review_ledger.d/`。
+- **审查**：Spec/Correctness 确认实现符合票面、无 P0/P1；Security 发现 runbook 的交互 shell key 字面赋值示例可能进入 PowerShell history，已移除并改为密钥管理器进程级注入，最终安全复审待复核。最终覆盖范围将记录在 `docs/review_ledger.d/`。
 - **验证**：本票 focused 测试 **16 passed**；完整 `tests/memory` 为 **1316 passed / 4 skipped / 1 failed**，失败是未改动的 `test_1353_ac6_end_to_end.py::test_ten_turn_conversation_is_remembered_without_keywords`，单独复跑 **1 passed**。Ruff、py_compile、`uv lock --check`、`git diff --check` 通过。完整后端套件此前在约 77% 被中断，出现 F/E 标记但没有汇总，**不宣称全量通过**。
 - **门禁**：旧收据 `docs/gate/53d5a58786054cec5f38d82e4e72f83eba2cf215.json` 只对应旧树且为 **6/7（coverage FAIL）**，不是最终通过证据；当前最终树 Gate-0 待运行。
 - **Owner 残余**：只按文件名的只读检查在 main 与 backend clone 发现 `memory.db`、`memory-v2.db`；未读 DB 内容、未停 writer、未写入或备份。所有者尚未确认部署 workspace 范围、离线目的地和 `MEMORY_BACKUP_KEY` 配置状态；真实六类停写证明、生产 backup 与独立 restore 仍待 owner 在场执行。Issue 保持 OPEN，已有标签 `in-progress-CodeX`；尚未 push / 开 PR。

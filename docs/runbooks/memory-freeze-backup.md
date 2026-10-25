@@ -89,7 +89,8 @@ $restore = Join-Path $env:TEMP 'memory-freeze-1492-restore'
 .venv\Scripts\python.exe scripts/memory_freeze_backup.py seed --workspace $seed
 
 # 由所有者从安全输入/密钥管理器设置；不要把密钥写入仓库、日志、报告或命令历史。
-$env:MEMORY_BACKUP_KEY = '<base64 encoding of an owner-managed 32-byte key>'
+# 由所有者批准的密钥管理器仅向 backup/restore 进程注入 MEMORY_BACKUP_KEY；命令只写变量名。
+# 不要在交互 shell 中赋真实 key，也不要把 key 放进命令、参数、脚本、transcript、history、文件或日志。
 .venv\Scripts\python.exe scripts/memory_freeze_backup.py backup `
   --workspace $seed `
   --output $archive `
@@ -129,10 +130,7 @@ absent 数据库项与 workspace 预期来源清单逐项核对；若预期存�
    生产 backup 不得使用 `--rehearsal-fixture`。
 2. 选择 workspace 外、访问权限受控的离线输出目录；不得把 `.iab` 放入 workspace，也不得
    把它挂载成当前 Memory retrieval source。
-3. 从所有者管理的安全输入设置 `MEMORY_BACKUP_KEY`。只传环境变量名给命令；不要把 key
-   本体写入文件、日志、报告、issue 或聊天。恢复时由同一密钥管理流程重新注入该环境变量，
-   再运行 `restore` 到另一个隔离目录；密钥丢失时联系密钥所有者按其备份/轮换流程恢复，
-   本仓库不保存、导出或重置密钥。
+3. 由所有者批准的密钥管理器在 backup/restore 子进程中按进程级注入 `MEMORY_BACKUP_KEY`；命令仅写 `--key-env MEMORY_BACKUP_KEY`。不要在交互 shell 中将真实值赋给环境变量，也不要把 key 放入命令、参数、脚本、transcript、history、文件或日志。恢复时按同一密钥管理流程重新注入，再运行 `restore` 到另一个隔离目录；密钥丢失时联系密钥所有者按其备份/轮换流程恢复，本仓库不保存、导出或重置密钥。
 4. 运行 `backup`，工具会枚举数据库主文件及 WAL/shm/journal、Markdown 主文件与
    bak/tmp/lock，并对每张表记录列、行数、行哈希、状态、旧键、lease、provenance 的
    计数/哈希。冻结期间任何源文件变化都会使命令失败，不会产出可接受的 archive。
