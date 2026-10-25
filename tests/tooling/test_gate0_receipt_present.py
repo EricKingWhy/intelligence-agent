@@ -408,6 +408,48 @@ def test_shape3_same_tree_descendant_receipt(tmp_path):
     assert ok is False, detail  # 那笔 D 提交自身没有收据
 
 
+# ── #1598：warn-only 违规行行内前缀（单行自证不计数） ──
+
+
+def _commit_recent(repo: Repo, files: dict[str, str], msg: str) -> str:
+    """日期不钉旧的提交：让 bootstrap 落进 7 天 warn-only 窗内（#1598 两臂之 warn 臂）。"""
+    for rel, content in files.items():
+        p = repo.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    proc = subprocess.run(["git", "add", "-A"], cwd=repo.root, env=_env(),
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    proc = subprocess.run(["git", "commit", "-q", "-m", msg], cwd=repo.root, env=_env(),
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    return repo.git("rev-parse", "HEAD")
+
+
+def test_warnonly_lines_carry_inline_prefix(tmp_path):
+    """#1598：warn-only 窗内违规行带 `warn-only ` 行内前缀；转硬口径后前缀消失。
+
+    判别力：去掉前缀拼接（或硬口径误带前缀）⇒ 两臂任一转红。
+    """
+    repo = Repo(tmp_path / "warn")
+    base = _commit_recent(repo, {"README.md": "base\n"}, "base")
+    repo.git("update-ref", "refs/remotes/origin/main", base)
+    _fresh_code_branch(repo, base)
+
+    ok, detail, warn = _check(repo, base)
+    assert warn is True, detail
+    assert ok is False, detail
+    assert "warn-only missing receipt for" in detail, detail
+
+    hard = Repo(tmp_path / "hard")
+    hbase = _base_with_origin(hard)  # 日期钉旧 ⇒ 转硬口径
+    _fresh_code_branch(hard, hbase)
+    _, hdetail, hwarn = _check(hard, hbase)
+    assert hwarn is False, hdetail
+    assert "warn-only missing receipt for" not in hdetail, hdetail
+    assert "missing receipt for" in hdetail, hdetail
+
+
 # ── #1602：self-cover 自举（本地落盘型全量跑不因缺收据自红；CI/局部跑照旧硬口径） ──
 
 
