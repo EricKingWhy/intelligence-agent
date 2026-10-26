@@ -111,7 +111,10 @@ _CONTENT_PATH_HINTS = frozenset({
 _ENGINE_HINTS = frozenset({"engine", "_engine", "markdown", "markdown_store"})
 _WRITE_ATTRS = frozenset({
     "write_text", "write_bytes", "replace", "rename",
-    "copyfile", "copy2", "move", "atomic_write_text",
+    "copy", "copyfile", "copy2", "move", "atomic_write_text",
+})
+_WRITE_OPEN_FLAGS = frozenset({
+    "O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND",
 })
 _ALLOWED_WRITE_MODULES = frozenset({
     # 引擎自身与底层原子写原语；其余模块只能经 mutate_now / MemoryCommit。
@@ -194,6 +197,20 @@ def _write_mode(call: ast.Call) -> ast.expr | None:
     return next((kw.value for kw in call.keywords if kw.arg == "mode"), None)
 
 
+def _open_for_write(call: ast.Call) -> bool:
+    """``open(..., "w")`` 与 ``os.open(..., os.O_WRONLY | os.O_CREAT)`` 都算写。"""
+    mode = _write_mode(call)
+    if mode is None:
+        return False
+    if isinstance(mode, ast.Constant):
+        return isinstance(mode.value, str) and any(flag in mode.value for flag in "wax+")
+    return any(
+        (isinstance(node, ast.Attribute) and node.attr in _WRITE_OPEN_FLAGS)
+        or (isinstance(node, ast.Name) and node.id in _WRITE_OPEN_FLAGS)
+        for node in ast.walk(mode)
+    )
+
+
 def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
     """扫一棵 AST：直接对 memories/ 内容文件落笔的调用点行号。"""
     aliases = _engine_aliases(tree)
@@ -221,25 +238,19 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
         suspicious = False
         if attr in _WRITE_ATTRS or name == "atomic_write_text":
             receiver = func.value if isinstance(func, ast.Attribute) else None
-            suspicious = receiver is not None and _references_content(
-                receiver, tainted, aliases)
-            if attr in {"replace", "rename", "copyfile", "copy2", "move"}:
-                suspicious = suspicious or any(
+            suspicious = (
+                (receiver is not None
+                 and _references_content(receiver, tainted, aliases))
+                # 目标也可能在参数里（module-qualified atomic_write_text、
+                # shutil.copy(src, engine.path_for(...))）。
+                or any(
                     _references_content(argument, tainted, aliases)
                     for argument in node.args)
-            if name == "atomic_write_text" and node.args:
-                suspicious = suspicious or _references_content(
-                    node.args[0], tainted, aliases)
-        elif attr == "open" or name == "open":
-            mode = _write_mode(node)
-            writes = (
-                isinstance(mode, ast.Constant)
-                and isinstance(mode.value, str)
-                and any(flag in mode.value for flag in "wax+")
             )
+        elif attr == "open" or name == "open":
             path_arg = node.args[0] if node.args else None
             suspicious = bool(
-                writes and (
+                _open_for_write(node) and (
                     (path_arg is not None
                      and _references_content(path_arg, tainted, aliases))
                     or (isinstance(func, ast.Attribute)
@@ -292,10 +303,13 @@ def test_static_scan_catches_alias_keyword_and_atomic_write() -> None:
         "path.open(mode='w')\n"
         "atomic_write_text(engine.path_for('user'), 'x')\n"
         "getattr(engine, 'path_for')('memory').write_text('x')\n"
+        "file_state.atomic_write_text(engine.path_for('memory'), 'x')\n"
+        "os.open(engine.path_for('memory'), os.O_WRONLY | os.O_CREAT)\n"
+        "shutil.copy('x', engine.path_for('user'))\n"
         "engine.path_for('memory').read_text()\n"
     )
 
-    assert _scan_tree("src/fake.py", ast.parse(source)) == [4, 5, 6]
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [4, 5, 6, 7, 8, 9]
 
 
 def test_live_entries_are_only_assigned_inside_the_engine() -> None:

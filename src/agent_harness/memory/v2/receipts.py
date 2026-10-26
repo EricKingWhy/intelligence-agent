@@ -274,13 +274,21 @@ class ReceiptStore:
 
     def record_target_plan(
         self, operation_id: str, target: str, *, before_digest: str, after_digest: str,
+        spec: dict[str, Any] | None = None,
     ) -> CommitReceipt:
         receipt = self._require(operation_id)
         entry = receipt.targets.setdefault(target, ReceiptTarget())
         entry.before_digest = before_digest
         entry.after_digest = after_digest
         entry.planned = True
-        receipt.targets.setdefault(target, entry)
+        if spec is not None:
+            # 重试时扩了 target：只写 plan 不写意图，崩在发布前会让 reconcile
+            # 看到“有计划、无 spec”，按 noop 收尾成 false COMMITTED。
+            receipt.operations = [
+                item for item in receipt.operations
+                if str(item.get("target")) != target
+            ]
+            receipt.operations.append(dict(spec))
         self._write(receipt)
         return receipt
 

@@ -230,15 +230,29 @@ class StagedWriteStore:
                     raise TypeError(
                         f"staged write {staged_id} has an invalid batch operation")
         pins = payload.get("pinned_entry")
+        actions = (
+            [str(operation.get("action")) for operation in operations]
+            if operations is not None
+            else [str(body.get("action"))]
+        )
         if pins is not None:
             if not isinstance(pins, list):
                 raise TypeError(f"staged write {staged_id} pinned_entry is not a list")
             if operations is None and len(pins) > 1:
                 raise ValueError(f"staged write {staged_id} has too many pinned entries")
-            for pin in pins:
-                if pin is not None and (not isinstance(pin, str) or not pin.strip()):
+            if operations is not None and len(pins) != len(operations):
+                raise ValueError(
+                    f"staged write {staged_id} pinned entries do not match its operations")
+            for action, pin in zip(actions, pins, strict=False):
+                if action in {"replace", "remove"}:
+                    # replace/remove 的 pin 是 stage 时钉住的完整条目；missing pin
+                    # 只能回退到 old_text 重新定位，等于绕过审批的漂移边界。
+                    if not isinstance(pin, str) or not pin.strip():
+                        raise TypeError(
+                            f"staged write {staged_id} {action} operation has no pinned entry")
+                elif pin is not None:
                     raise TypeError(
-                        f"staged write {staged_id} has an invalid pinned entry")
+                        f"staged write {staged_id} add operation must not carry a pinned entry")
         return StagedWrite(
             id=staged_id, payload=dict(body or {}),
             pinned_entry=pins,
@@ -299,7 +313,7 @@ class StagedWriteStore:
             "claimed_at": None,
             "created_at": created,
         }
-
+        self._to_staged(document)  # 坏 pin 不入盘，避免生成 pending 里看不见的记录
         await asyncio.to_thread(write_json, self.path_for(record_id), document)
         return StagedWrite(record_id, payload, pins, PENDING, created)
 
@@ -378,7 +392,7 @@ class StagedWriteStore:
                 return GateDecision(
                     blocked=True,
                     message=(
-                        "Memory write could not be published; record kept for retry "
+                        "Memory write did not commit; record kept for retry or reconcile "
                         f"(operation {error.operation_id})."),
                 ), None
             except (KeyError, TypeError, ValueError, AttributeError) as error:

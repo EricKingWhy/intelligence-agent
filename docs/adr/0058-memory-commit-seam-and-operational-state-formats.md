@@ -140,6 +140,11 @@ class MemoryCommit:
 - 回执本身缺失但文件已是 `after`（写回执前崩溃）⇒ 该次操作没有可判定意图，不动作；由 `memory reproject`
   （派生层）与 `render_snapshot`（内容面）各自收敛，并在报告中如实列出。
 
+收尾校验（`finish` 前）以回执的 `published` 位为发布事实：目标已发布后，前台并发写仍可能
+继续修改同一个文件（formation 不持 content 锁），磁盘离开 `after` 不能反推“这次没发布”。
+只有未发布目标才按 `before` / 不可读 / 既非 before 也非 after 判定；后两者分别留待
+reconcile 补发布或人工对账。
+
 ### D4 job / lease / 幂等（Formation 状态职责）
 
 一 job 一文件，文件即幂等键：
@@ -267,6 +272,8 @@ claim 路径：**claim 锁 → job 锁**。反向获取一律不写进代码。
 另有服务实例内的 `asyncio.Lock`（`MemoryV2Service._content_lock`）：`create` / `update` /
 `invalidate` / `edit` / `delete` / `bulk_delete` 与 `MemoryTool.content_write_scope` 先取
 **content 锁**，再走 op 锁 → 目标文件锁 → SQLite；锁序是 **content → op/文件 → SQLite**。
+`delete` / `bulk_delete` 在 content 锁内先写墓碑文件（墓碑 store 自己的文件锁），再走
+op 锁 → 目标文件锁 → SQLite；墓碑文件锁不嵌在目标文件锁内。
 formation 的 `mirror_committed` 在 SQLite 写事务内发布，反向取 content 锁会与 delete 形成
 锁序反转，因此不进入该临界区（跨进程仍由墓碑重入收敛）。
 

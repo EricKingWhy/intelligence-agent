@@ -21,7 +21,7 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
   formation 恢复、CLI 补发布）必须复用同一个 id，从而「同 key 只一次逻辑更新」；
 - 固定形：`jobp_<job>_apply`（formation apply）、`stgp_<staged>`（待审批准）、
   `blkp_<blocked>_apply`（被拦下写入的 promote）、`del_<memory>`（治理删除）、
-  `legp_<job>_<memory>`（旧数据补发布）、`mig_<memory>`（旧记录一次性迁移）。
+  `legp_<sha256(job:memory)[:32]>`（旧数据补发布）、`mig_<memory>`（旧记录一次性迁移）。
 
 同一 id 已有 `COMMITTED` 回执 ⇒ 直接回放记录的结果，不再碰磁盘（不重复追加、不重复删除）。
 
@@ -204,7 +204,7 @@ class MemoryCommit:
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._perform,
-            {"target": target, "action": "add", "content": content},
+            {"target": target, "action": "add", "content": normalize_entry(content)},
             operation_id=operation_id or new_operation_id(),
             origin=origin or origin_module.current_origin(),
             payload=payload,
@@ -218,8 +218,11 @@ class MemoryCommit:
         return await asyncio.to_thread(
             self._perform,
             {
-                "target": target, "action": "replace", "old_text": old_text,
-                "content": new_content, "matched_entry": matched_entry,
+                "target": target, "action": "replace",
+                "old_text": normalize_entry(old_text),
+                "content": normalize_entry(new_content),
+                "matched_entry": (
+                    normalize_entry(matched_entry) if matched_entry is not None else None),
                 "fallback_add": bool(fallback_add),
             },
             operation_id=operation_id or new_operation_id(),
@@ -236,8 +239,11 @@ class MemoryCommit:
         return await asyncio.to_thread(
             self._perform,
             {
-                "target": target, "action": "remove", "old_text": old_text,
-                "matched_entry": matched_entry, "missing_ok": bool(missing_ok),
+                "target": target, "action": "remove",
+                "old_text": normalize_entry(old_text),
+                "matched_entry": (
+                    normalize_entry(matched_entry) if matched_entry is not None else None),
+                "missing_ok": bool(missing_ok),
             },
             operation_id=operation_id or new_operation_id(),
             origin=origin or origin_module.current_origin(),
@@ -345,31 +351,51 @@ class MemoryCommit:
     def _verify_receipt_targets(
         self, receipt: CommitReceipt, operation_id: str, label: str,
     ) -> None:
-        """``finish`` 前逐个目标核对：回执里每个目标都已计划且磁盘停在 after。
+        """``finish`` 前逐个目标核对，防止本次 plans 之外的目标被一起 COMMITTED。
 
-        重试的目标集合可能比首次小（或回执只写到 prepare 就崩了）。只遍历**本次**
-        ``plans`` 会让 ``finish`` 把整份回执置 COMMITTED，而旧目标既未发布也未计划。
-        这里不替调用方猜意图：任何目标不满足“已计划 + after 已落地”都钉
-        NEED_RECONCILE，交由对账/人工处理。
+        已发布目标以回执的 ``published`` 位为准：发布后前台并发追加会让磁盘离开
+        ``after``，不能据此否定发布事实。未发布目标才看磁盘——仍等于 ``before``
+        或不可读时抛可重试错误、留给 reconcile 补发布；既非 before 也非 after
+        才钉 NEED_RECONCILE。
         """
         if receipt.state == ReceiptState.NEED_RECONCILE:
             raise MemoryCommitError(
                 operation_id, label, f"needs reconcile: {receipt.reason}")
         for target, plan in receipt.targets.items():
+            has_spec = any(
+                str(item.get("target")) == target for item in receipt.operations)
             if not plan.planned or plan.after_digest is None:
-                self._mark_target_reconcile(
-                    operation_id, target, "receipt target was never planned")
+                if not has_spec:
+                    # 该目标本来无事可做（多目标操作里未计划的那一侧）。
+                    continue
+                # 有计划意图但还没计划：属于 D3 的“未发布”可恢复态，交给
+                # reconcile 补发布；不要在这里钉成终态 NEED_RECONCILE。
                 raise MemoryCommitError(
                     operation_id, target,
-                    "needs reconcile: receipt target was never planned")
+                    f"target is not published yet; run `memory reconcile` "
+                    f"for operation {operation_id}")
+            if plan.published:
+                # 发布事实已由回执记录。formation 不持 content 锁，前台写在
+                # 发布后追加同一 target 会让磁盘离开 after；这不是“没发布”，
+                # 不能在收尾时把合法并发写误判成 NEED_RECONCILE。
+                continue
             disk = self._engine.disk_entries(target)
             if disk is None:
-                self._mark_target_reconcile(
-                    operation_id, target, "target file unreadable before commit")
                 raise MemoryCommitError(
                     operation_id, target,
-                    "needs reconcile: target file is unreadable")
-            if entries_digest(disk) != plan.after_digest:
+                    f"target file is unreadable; run `memory reconcile` "
+                    f"for operation {operation_id}")
+            digest = entries_digest(disk)
+            if (
+                plan.before_digest is not None
+                and plan.before_digest != plan.after_digest
+                and digest == plan.before_digest
+            ):
+                raise MemoryCommitError(
+                    operation_id, target,
+                    f"target is still at its before digest; run `memory reconcile` "
+                    f"for operation {operation_id}")
+            if digest != plan.after_digest:
                 self._mark_target_reconcile(
                     operation_id, target, "target is not at its recorded after digest")
                 raise MemoryCommitError(
@@ -393,6 +419,17 @@ class MemoryCommit:
             if existing is not None and existing.state == ReceiptState.NEED_RECONCILE:
                 raise MemoryCommitError(
                     operation_id, label, f"needs reconcile: {existing.reason}")
+            if existing is not None:
+                dropped = set(existing.targets) - set(targets)
+                if dropped:
+                    # 旧回执里已计划/已发布的目标不在这次重试里：不能 finish 成
+                    # COMMITTED（会把未发布目标伪装成全部成功），也不能静默补写
+                    # 调用方这次没要的目标。留给 reconcile 按原意图补发布。
+                    dropped_label = ",".join(sorted(dropped))
+                    raise MemoryCommitError(
+                        operation_id, dropped_label,
+                        "retry target set shrank from the recorded receipt; "
+                        f"run `memory reconcile` for operation {operation_id}")
 
             prepared: list[tuple[dict[str, Any], str, str, bool, bool]] = []
             for target, operations in plans:
@@ -493,7 +530,7 @@ class MemoryCommit:
                 try:
                     self._receipts.record_target_plan(
                         operation_id, str(spec["target"]),
-                        before_digest=before, after_digest=after,
+                        before_digest=before, after_digest=after, spec=spec,
                     )
                 except (OSError, RuntimeError) as error:
                     raise MemoryCommitError(
@@ -647,7 +684,7 @@ class MemoryCommit:
                 self._receipts.record_target_plan(
                     operation_id, target,
                     before_digest=entries_digest(entries),
-                    after_digest=entries_digest(new_entries),
+                    after_digest=entries_digest(new_entries), spec=spec,
                 )
                 prepared["done"] = True
             return result
@@ -670,7 +707,14 @@ class MemoryCommit:
         if prepared["done"]:
             try:
                 self._receipts.mark_target_published(operation_id, target)
+                receipt = self._receipts.load(operation_id)
+                if receipt is None:
+                    raise MemoryCommitError(
+                        operation_id, target, "receipt disappeared before commit")
+                self._verify_receipt_targets(receipt, operation_id, target)
                 self._receipts.finish(operation_id, result=_result_for_replay(response))
+            except MemoryCommitError:
+                raise
             except (OSError, RuntimeError) as error:
                 # 文件已经替换成功，但终态回执没写下去：内容已发布、回执停在 PREPARED。
                 # 必须当成「已发布、待对账」上报，不能返回成功，也不能让裸 OSError
@@ -707,6 +751,13 @@ class MemoryCommit:
             return None
         if receipt.state == ReceiptState.NEED_RECONCILE:
             return self._needs_reconcile_response(receipt)
+        if target not in receipt.targets:
+            # 同一 op id 的单目标写换了 target：不是同一次逻辑更新。继续写会让
+            # 旧 target 留在未发布状态，finish 却把整份回执置 COMMITTED。
+            self._mark_target_reconcile(
+                operation_id, target, "retry target differs from the recorded receipt")
+            return self._needs_reconcile_response(
+                self._receipts.load(operation_id) or receipt)
         recorded = next(
             (item for item in receipt.operations if str(item.get("target")) == target), None)
         if recorded is not None and recorded != spec:
@@ -730,7 +781,11 @@ class MemoryCommit:
         if digest == plan.after_digest:
             try:
                 self._receipts.mark_target_published(operation_id, target)
+                current = self._receipts.load(operation_id) or receipt
+                self._verify_receipt_targets(current, operation_id, target)
                 self._receipts.finish(operation_id, result=receipt.result)
+            except MemoryCommitError:
+                raise
             except (OSError, RuntimeError) as error:
                 # 内容已经是目标态，只是回执没写完：按「已发布、待对账」上报。
                 raise MemoryCommitError(
@@ -786,6 +841,32 @@ class MemoryCommit:
                 {"target": target, "action": "remove_by_digest", "digests": sorted(wanted[target])}
                 for target in targets
             ]
+            if receipt is not None:
+                recorded = {
+                    str(item.get("target")): item
+                    for item in receipt.operations
+                    if isinstance(item, dict)
+                }
+                expected = {str(spec["target"]): spec for spec in specs}
+                dropped = set(recorded) - set(expected)
+                if dropped:
+                    raise MemoryCommitError(
+                        operation_id, "memory+user",
+                        "retry target set shrank from the recorded receipt; "
+                        f"run `memory reconcile` for operation {operation_id}")
+                changed = {
+                    target for target in set(recorded) & set(expected)
+                    if recorded[target] != expected[target]
+                }
+                if changed:
+                    # 同一 operation id 的重试换了哈希：先拦在发布之前，
+                    # 不能按旧回执收尾，也不能拿新意图去删旧回执没记录的内容。
+                    self._mark_target_reconcile(
+                        operation_id, "memory+user",
+                        "retry intent differs from the recorded receipt")
+                    raise MemoryCommitError(
+                        operation_id, "memory+user",
+                        "needs reconcile: retry intent differs from the recorded receipt")
             try:
                 self._receipts.prepare(
                     operation_id, origin=origin, targets=list(targets),
@@ -800,7 +881,12 @@ class MemoryCommit:
                 cleaned.extend(
                     self._publish_digest_target(
                         spec, operation_id, remaining=index < len(specs) - 1))
-            receipt = self._receipts.load(operation_id)
+            try:
+                receipt = self._receipts.load(operation_id)
+            except (OSError, RuntimeError) as error:
+                raise MemoryCommitError(
+                    operation_id, "memory+user",
+                    f"receipt unreadable before commit: {error}") from error
             if receipt is None:
                 raise MemoryCommitError(
                     operation_id, "memory+user", "receipt disappeared before commit")
@@ -831,7 +917,7 @@ class MemoryCommit:
                 self._receipts.record_target_plan(
                     operation_id, target,
                     before_digest=entries_digest(entries),
-                    after_digest=entries_digest(new_entries),
+                    after_digest=entries_digest(new_entries), spec=spec,
                 )
                 prepared["removed"] = int(result[2].get("removed_by_digest") or 0)
             else:
@@ -839,7 +925,7 @@ class MemoryCommit:
                 self._receipts.record_target_plan(
                     operation_id, target,
                     before_digest=entries_digest(entries),
-                    after_digest=entries_digest(entries),
+                    after_digest=entries_digest(entries), spec=spec,
                 )
             return result
 
@@ -951,6 +1037,15 @@ class MemoryCommit:
         """
         specs = [op for op in receipt.operations if str(op.get("target")) == target]
         if not specs:
+            plan = receipt.targets.get(target)
+            if plan is not None and plan.planned:
+                # 有计划但没意图：旧代码会把 before 直接记成 after 后 COMMITTED，
+                # 等于把从未写入的目标伪装成成功。只允许真正无事可做的目标 noop。
+                self._receipts.mark_needs_reconcile(
+                    receipt.operation_id,
+                    f"{target}: planned target has no recorded spec",
+                )
+                return "failed"
             # 该目标本来无事可做（多目标操作里未计划的那一侧）。
             self._receipts.record_target_plan(
                 receipt.operation_id, target, before_digest=before_digest,
