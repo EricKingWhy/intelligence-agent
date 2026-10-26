@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Freeze and rehearse an encrypted, offline Memory workspace backup.
+"""Freeze and rehearse a plaintext, offline Memory workspace backup.
 
 This is deliberately a standalone operator tool.  It does not import the Memory
 runtime, initialize a store, purge tombstones, or register an archive as a live
@@ -27,15 +27,10 @@ from collections import Counter
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Self
-
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from typing import Any, BinaryIO
 
 RETENTION_UNTIL = "2027-10-23"
-FORMAT_MAGIC = b"IA-MEMORY-BACKUP\x00v1\n"
-NONCE_SIZE = 12
-TAG_SIZE = 16
-DEFAULT_KEY_ENV = "MEMORY_BACKUP_KEY"
+ARCHIVE_FORMAT = "plain-tar-v1"
 WRITER_CATEGORIES = (
     "memory_tool",
     "formation",
@@ -61,7 +56,6 @@ WRITER_EVIDENCE_TYPES = {
 }
 DATABASE_NAMES = ("memory.db", "memory-v2.db")
 DATABASE_SIDECARS = ("-wal", "-shm", "-journal")
-KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class BackupError(RuntimeError):
@@ -288,8 +282,23 @@ def _prepare_output(path: Path, workspace: Path) -> Path:
     _ensure_not_inside(resolved, workspace, "backup output")
     if resolved.exists():
         raise BackupError(f"refusing to overwrite existing backup output: {resolved}")
-    resolved.parent.mkdir(parents=True, exist_ok=True)
+    if not resolved.parent.is_dir():
+        raise BackupError(
+            "backup output parent must already exist; operator must verify that it is "
+            f"access-controlled: {resolved.parent}"
+        )
     return resolved
+
+
+def _open_new_file_mode_600(path: Path) -> BinaryIO:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        return os.fdopen(descriptor, "wb")
+    except BaseException:
+        with suppress(OSError):
+            os.close(descriptor)
+        raise
 
 
 def _publish_no_clobber(temporary: Path, output: Path) -> None:
@@ -303,7 +312,7 @@ def _publish_no_clobber(temporary: Path, output: Path) -> None:
     except FileExistsError as error:
         raise BackupError(f"refusing to overwrite existing backup output: {output}") from error
     except OSError as error:
-        raise BackupError(f"cannot publish encrypted backup without overwrite: {error}") from error
+        raise BackupError(f"cannot publish backup without overwrite: {error}") from error
 
 
 def _cleanup_archive_temporary(
@@ -314,27 +323,12 @@ def _cleanup_archive_temporary(
     except FileNotFoundError:
         return
     except OSError as cleanup_error:
-        detail = f"could not remove encrypted temporary archive {temporary}: {cleanup_error}"
+        detail = f"could not remove temporary archive {temporary}: {cleanup_error}"
         if original_error is not None:
             detail += f"; original failure: {original_error}"
         if published_output is not None:
             detail += f"; backup may already be published at {published_output}"
         raise BackupError(detail) from (original_error or cleanup_error)
-
-
-def _load_key(key_env: str) -> bytes:
-    if not KEY_ENV_RE.fullmatch(key_env):
-        raise BackupError(f"invalid key environment variable name: {key_env!r}")
-    encoded = os.environ.get(key_env)
-    if not encoded:
-        raise BackupError(f"encryption key is missing from environment variable {key_env}")
-    try:
-        key = base64.b64decode(encoded, validate=True)
-    except (ValueError, UnicodeEncodeError) as error:
-        raise BackupError(f"{key_env} is not valid base64 key material") from error
-    if len(key) != 32:
-        raise BackupError(f"{key_env} must decode to exactly 32 bytes")
-    return key
 
 
 def _load_writer_proof(path: Path, *, allow_fixture: bool) -> dict[str, Any]:
@@ -558,24 +552,6 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_bytes(_json_bytes(value) + b"\n")
 
 
-class _EncryptedWriter:
-    def __init__(self, destination, encryptor) -> None:
-        self.destination = destination
-        self.encryptor = encryptor
-        self.position = 0
-
-    def write(self, data: bytes) -> int:
-        self.destination.write(self.encryptor.update(data))
-        self.position += len(data)
-        return len(data)
-
-    def tell(self) -> int:
-        return self.position
-
-    def flush(self) -> None:
-        self.destination.flush()
-
-
 def _tar_add_bytes(archive: tarfile.TarFile, name: str, payload: bytes) -> None:
     info = tarfile.TarInfo(name)
     info.mode = 0o600
@@ -598,20 +574,14 @@ def _make_archive(
     manifest: dict[str, Any],
     proof: dict[str, Any],
     output: Path,
-    key: bytes,
 ) -> None:
     completed = False
     created = False
     try:
-        nonce = os.urandom(NONCE_SIZE)
-        encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
-        encryptor.authenticate_additional_data(FORMAT_MAGIC)
-        with output.open("xb") as destination:
-            created = True
-            destination.write(FORMAT_MAGIC)
-            destination.write(nonce)
-            writer = _EncryptedWriter(destination, encryptor)
-            with tarfile.open(fileobj=writer, mode="w|") as archive:
+        destination = _open_new_file_mode_600(output)
+        created = True
+        with destination:
+            with tarfile.open(fileobj=destination, mode="w|") as archive:
                 _tar_add_bytes(archive, "manifest.json", _json_bytes(manifest) + b"\n")
                 _tar_add_bytes(archive, "writer-proof.json", _json_bytes(proof) + b"\n")
                 for name in DATABASE_NAMES:
@@ -625,11 +595,8 @@ def _make_archive(
                             workspace.joinpath(*relative.parts),
                             f"source/files/{relative}",
                         )
-            destination.write(encryptor.finalize())
-            destination.write(encryptor.tag)
             destination.flush()
             os.fsync(destination.fileno())
-        os.chmod(output, 0o600)
         completed = True
     except BaseException as error:
         if created and not completed:
@@ -639,78 +606,10 @@ def _make_archive(
                 pass
             except OSError as cleanup_error:
                 raise BackupError(
-                    f"could not remove incomplete encrypted archive {output}: {cleanup_error}; "
+                    f"could not remove incomplete archive {output}: {cleanup_error}; "
                     f"original failure: {error}"
                 ) from error
         raise
-
-
-class _EncryptedReader:
-    def __init__(self, archive: Path, key: bytes) -> None:
-        size = archive.stat().st_size
-        header_size = len(FORMAT_MAGIC) + NONCE_SIZE
-        if size <= header_size + TAG_SIZE:
-            raise BackupError("encrypted backup is truncated")
-        self.source = archive.open("rb")
-        self.remaining = size - header_size - TAG_SIZE
-        self.finalized = False
-        try:
-            if self.source.read(len(FORMAT_MAGIC)) != FORMAT_MAGIC:
-                raise BackupError("backup format header is invalid")
-            nonce = self.source.read(NONCE_SIZE)
-            self.source.seek(-TAG_SIZE, os.SEEK_END)
-            tag = self.source.read(TAG_SIZE)
-            self.source.seek(header_size)
-            self.decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
-            self.decryptor.authenticate_additional_data(FORMAT_MAGIC)
-        except BaseException:
-            self.source.close()
-            raise
-
-    def _finalize(self) -> None:
-        if self.finalized:
-            return
-        try:
-            self.decryptor.finalize()
-            self.finalized = True
-        except Exception as error:
-            self.close()
-            raise BackupError("encrypted backup authentication failed") from error
-
-    def read(self, size: int = -1) -> bytes:
-        if size == 0 or self.finalized:
-            return b""
-        request = self.remaining if size < 0 else min(size, self.remaining)
-        ciphertext = self.source.read(request)
-        if len(ciphertext) != request:
-            self.close()
-            raise BackupError("encrypted backup ended before its authentication tag")
-        self.remaining -= len(ciphertext)
-        try:
-            plaintext = self.decryptor.update(ciphertext)
-            if self.remaining == 0:
-                plaintext += self.decryptor.finalize()
-                self.finalized = True
-            return plaintext
-        except Exception as error:
-            self.close()
-            raise BackupError("encrypted backup authentication failed") from error
-
-    def finish(self) -> None:
-        while self.remaining:
-            self.read(min(self.remaining, 1024 * 1024))
-        self._finalize()
-
-    def close(self) -> None:
-        self.source.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, exception_type: object, *_args: object) -> None:
-        if exception_type is None:
-            self.finish()
-        self.close()
 
 
 def _allowed_archive_members(manifest: dict[str, Any]) -> set[str]:
@@ -726,14 +625,12 @@ def _allowed_archive_members(manifest: dict[str, Any]) -> set[str]:
 
 
 def _restore_stream(
-    archive_path: Path, destination: Path, key: bytes, restore_root: Path
+    archive_path: Path, destination: Path, restore_root: Path
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest: dict[str, Any] | None = None
     proof: dict[str, Any] | None = None
     seen: set[str] = set()
-    with _EncryptedReader(archive_path, key) as reader, tarfile.open(
-        fileobj=reader, mode="r|"
-    ) as archive:
+    with tarfile.open(archive_path, mode="r|") as archive:
         for member in archive:
             if not member.isfile():
                 raise BackupError("backup contains an unsupported non-file archive member")
@@ -772,7 +669,7 @@ def _restore_stream(
                 proof = _validate_writer_proof(
                     proof_value,
                     require_fresh=False,
-                    allow_fixture=manifest.get("writer_proof_mode") in {None, "fixture"},
+                    allow_fixture=manifest.get("writer_proof_mode") == "fixture",
                 )
                 seen.add(name)
                 continue
@@ -786,9 +683,8 @@ def _restore_stream(
             extracted = archive.extractfile(member)
             if extracted is None:
                 raise BackupError("backup member could not be read")
-            with target.open("wb") as handle:
+            with _open_new_file_mode_600(target) as handle:
                 shutil.copyfileobj(extracted, handle)
-            os.chmod(target, 0o600)
             seen.add(name)
     if manifest is None or proof is None:
         raise BackupError("backup is missing manifest or writer proof")
@@ -816,8 +712,10 @@ def _safe_relative_path(value: str, label: str) -> PurePosixPath:
 
 
 def _validate_manifest(manifest: Any) -> None:
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2:
         raise BackupError("restored manifest schema is unsupported")
+    if manifest.get("archive_format") != ARCHIVE_FORMAT or manifest.get("encrypted") is not False:
+        raise BackupError("restored manifest does not identify the supported plaintext archive format")
     if manifest.get("retention_until") != RETENTION_UNTIL:
         raise BackupError("restored manifest has an unexpected retention date")
     if manifest.get("snapshot_method") != "sqlite-online-backup-api":
@@ -826,7 +724,7 @@ def _validate_manifest(manifest: Any) -> None:
         raise BackupError("restored manifest has no workspace identity")
     if manifest.get("runtime_loaded") is not False or manifest.get("retrieval_registered") is not False:
         raise BackupError("restored manifest claims runtime or retrieval registration")
-    if manifest.get("writer_proof_mode") not in {None, "fixture", "owner"}:
+    if manifest.get("writer_proof_mode") not in {"fixture", "owner"}:
         raise BackupError("restored manifest has an invalid writer proof mode")
     if manifest.get("writer_categories") != list(WRITER_CATEGORIES):
         raise BackupError("restored manifest has an incomplete writer category list")
@@ -1105,7 +1003,6 @@ def _backup(
     workspace_arg: Path,
     output_arg: Path,
     writer_proof_arg: Path,
-    key_env: str,
     allow_fixture: bool,
 ) -> dict[str, Any]:
     workspace = _resolve_existing(workspace_arg, "workspace")
@@ -1115,7 +1012,6 @@ def _backup(
     writer_proof = _resolve_existing(writer_proof_arg, "writer proof")
     proof = _load_writer_proof(writer_proof, allow_fixture=allow_fixture)
     proof_hash = _sha256_file(writer_proof)
-    key = _load_key(key_env)
     before = _source_inventory(workspace)
     snapshots: dict[str, bytes] = {}
     databases: dict[str, Any] = {}
@@ -1130,7 +1026,9 @@ def _backup(
     if not any(database["present"] for database in databases.values()):
         raise BackupError("workspace contains no Memory SQLite database to preserve")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "archive_format": ARCHIVE_FORMAT,
+        "encrypted": False,
         "workspace_root": str(workspace),
         "retention_until": RETENTION_UNTIL,
         "snapshot_method": "sqlite-online-backup-api",
@@ -1144,7 +1042,7 @@ def _backup(
     temporary = output.with_name(f".{output.name}.{os.getpid()}.{secrets.token_hex(16)}.tmp")
     temporary_created = False
     try:
-        _make_archive(workspace, before, snapshots, manifest, proof, temporary, key)
+        _make_archive(workspace, before, snapshots, manifest, proof, temporary)
         temporary_created = True
         after = _source_inventory(workspace)
         if _inventory_signature(before) != _inventory_signature(after):
@@ -1164,7 +1062,8 @@ def _backup(
         "archive": str(output),
         "archive_sha256": _sha256_file(output),
         "archive_size": output.stat().st_size,
-        "encrypted": True,
+        "encrypted": False,
+        "archive_format": ARCHIVE_FORMAT,
         "snapshot_method": "sqlite-online-backup-api",
         "runtime_loaded": False,
         "retrieval_registered": False,
@@ -1174,10 +1073,10 @@ def _backup(
     }
 
 
-def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[str, Any]:
-    archive = _resolve_existing(archive_arg, "encrypted backup")
+def _restore(archive_arg: Path, restore_root_arg: Path) -> dict[str, Any]:
+    archive = _resolve_existing(archive_arg, "backup archive")
     if not archive.is_file():
-        raise BackupError(f"encrypted backup is not a file: {archive}")
+        raise BackupError(f"backup archive is not a file: {archive}")
     _reject_reparse_components(restore_root_arg.expanduser(), "restore root")
     restore_root = restore_root_arg.expanduser().resolve()
     if restore_root.exists():
@@ -1185,16 +1084,22 @@ def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[st
             raise BackupError(f"restore root must be a directory: {restore_root}")
         if any(restore_root.iterdir()):
             raise BackupError(f"restore root must be new or empty: {restore_root}")
-    key = _load_key(key_env)
+    if not restore_root.parent.is_dir():
+        raise BackupError(
+            "restore parent must already exist; operator must verify that it is "
+            f"access-controlled: {restore_root.parent}"
+        )
     try:
-        restore_root.parent.mkdir(parents=True, exist_ok=True)
         staging_root = Path(
             tempfile.mkdtemp(prefix=f".{restore_root.name}.restore-", dir=restore_root.parent)
         )
     except OSError as error:
-        raise BackupError(f"could not create private restore staging directory: {error}") from error
+        raise BackupError(f"could not create restore staging directory: {error}") from error
     try:
-        manifest, proof = _restore_stream(archive, staging_root, key, restore_root)
+        try:
+            manifest, proof = _restore_stream(archive, staging_root, restore_root)
+        except (tarfile.TarError, EOFError) as error:
+            raise BackupError(f"backup archive is not a valid tar: {error}") from error
         source_match = _restore_source_check(staging_root, manifest["source_files"])
         databases_match, table_counts, database_manifests, integrity_checks = (
             _restore_database_check(staging_root, manifest["databases"])
@@ -1203,6 +1108,7 @@ def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[st
             raise BackupError("restored source files or database table manifests do not match")
         receipt = {
             "result": "restore_rehearsal_passed",
+            "encrypted": False,
             "archive_sha256": _sha256_file(archive),
             "restore_root": str(restore_root),
             "source_files_match": source_match,
@@ -1215,7 +1121,7 @@ def _restore(archive_arg: Path, restore_root_arg: Path, key_env: str) -> dict[st
             "manifest_match": True,
             "retention_until": manifest["retention_until"],
             "writer_categories": manifest["writer_categories"],
-            "writer_proof_mode": manifest.get("writer_proof_mode", "legacy"),
+            "writer_proof_mode": manifest["writer_proof_mode"],
             "runtime_loaded": False,
             "retrieval_registered": False,
             "proof_schema_version": proof["schema_version"],
@@ -1245,11 +1151,10 @@ def _parser() -> argparse.ArgumentParser:
     seed = subparsers.add_parser("seed", help="create a representative local rehearsal workspace")
     seed.add_argument("--workspace", type=Path, required=True)
 
-    backup = subparsers.add_parser("backup", help="freeze and encrypt a workspace backup")
+    backup = subparsers.add_parser("backup", help="freeze a workspace backup")
     backup.add_argument("--workspace", type=Path, required=True)
     backup.add_argument("--output", type=Path, required=True)
     backup.add_argument("--writer-proof", type=Path, required=True)
-    backup.add_argument("--key-env", default=DEFAULT_KEY_ENV)
     backup.add_argument(
         "--rehearsal-fixture",
         action="store_true",
@@ -1259,7 +1164,6 @@ def _parser() -> argparse.ArgumentParser:
     restore = subparsers.add_parser("restore", help="restore and verify an isolated backup")
     restore.add_argument("--archive", type=Path, required=True)
     restore.add_argument("--restore-root", type=Path, required=True)
-    restore.add_argument("--key-env", default=DEFAULT_KEY_ENV)
     return parser
 
 
@@ -1273,11 +1177,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.workspace,
                 args.output,
                 args.writer_proof,
-                args.key_env,
                 args.rehearsal_fixture,
             )
         else:
-            result = _restore(args.archive, args.restore_root, args.key_env)
+            result = _restore(args.archive, args.restore_root)
     except (BackupError, OSError, sqlite3.Error) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
