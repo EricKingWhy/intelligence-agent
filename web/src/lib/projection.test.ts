@@ -1364,7 +1364,7 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
     expect(summarizeEvent(ev({
       type: EventType.MODEL_COMPLETED,
       data: { content: 'hello', model: 'qwen-plus-0911', usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 1801 } },
-    }))).toBe('qwen-plus-0911 · 1801 字');
+    }))).toBe('qwen-plus-0911 · 1801 tok');
     expect(summarizeEvent(ev({ type: EventType.MODEL_COMPLETED, data: { content: 'hello' } }))).toBe('5 字符');
   });
 
@@ -1372,7 +1372,7 @@ describe('summarizeEvent — 事件单行摘要（观测字段 + UnknownSurface 
     expect(summarizeEvent(ev({
       type: EventType.RUN_COMPLETED,
       data: { usage_total: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 1801 }, cost_usd: 0.0024 },
-    }))).toBe('1801 字 · $0.0024');
+    }))).toBe('1801 tok · $0.0024');
     expect(summarizeEvent(ev({ type: EventType.RUN_COMPLETED, data: {} }))).toBe('');
   });
 
