@@ -364,6 +364,31 @@ class ReceiptStore:
             self._write(receipt)
         return receipt
 
+    def flag_needs_reconcile(
+        self, operation_id: str, *, origin: str, reason: str,
+    ) -> CommitReceipt:
+        """写一条“待人工对账”标记回执；不存在时**一次落盘**。
+
+        legacy import 用它标记“这条旧状态没法自动接走”。不能拆成 prepare + mark：
+        两次写入之间被 kill 会留下空 PREPARED，下一次直接 reconcile 会把空/空回执
+        当 no-op 收尾成 COMMITTED，把导入失败永久盖掉（review R11-P4-1）。
+        已有回执只推进非终态，COMMITTED 不回退。
+        """
+        receipt = self.load(operation_id)
+        if receipt is None:
+            stamp = utc_stamp()
+            receipt = CommitReceipt(
+                operation_id=operation_id, state=ReceiptState.NEED_RECONCILE,
+                origin=origin, created_at=stamp, updated_at=stamp, reason=reason,
+            )
+            self._write(receipt)
+            return receipt
+        if receipt.state != ReceiptState.COMMITTED:
+            receipt.state = ReceiptState.NEED_RECONCILE
+            receipt.reason = reason
+            self._write(receipt)
+        return receipt
+
     def _require(self, operation_id: str) -> CommitReceipt:
         receipt = self.load(operation_id)
         if receipt is None:

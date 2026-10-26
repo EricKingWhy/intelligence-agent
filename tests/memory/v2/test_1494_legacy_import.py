@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -402,27 +403,51 @@ async def test_expired_legacy_tombstone_is_not_imported(tmp_path: Path) -> None:
     assert not (workspace.state.tombstones_dir / "mem-expired.json").exists()
 
 
-def test_flag_needs_reconcile_takes_the_operation_lock_and_writes_a_valid_receipt(
+@pytest.mark.asyncio
+async def test_flag_needs_reconcile_takes_the_operation_lock_and_writes_a_valid_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """review P4：导入标记与其余回执写路径同一把锁，且落盘形状可被 load 正常读取。"""
+    """review P4/R11-P4-2：同一把锁、落盘形状可读，且阻塞锁不跑在事件循环线程上。"""
     receipts = ReceiptStore(MemoryStateRoot(tmp_path / "memory-state"))
     entered: list[str] = []
+    lock_threads: list[threading.Thread] = []
     real_lock = receipts.lock
 
     @contextmanager
     def _tracked(operation_id: str):
         entered.append(operation_id)
+        lock_threads.append(threading.current_thread())
         with real_lock(operation_id):
             yield
 
     monkeypatch.setattr(receipts, "lock", _tracked)
 
-    _flag_needs_reconcile(
+    await _flag_needs_reconcile(
         receipts, "legp_lock", "legacy record is missing", memory_id="mem-lock")
 
     assert entered == ["legp_lock"]
+    assert lock_threads and lock_threads[0] is not threading.main_thread()
     receipt = receipts.load("legp_lock")
     assert receipt is not None and receipt.state == ReceiptState.NEED_RECONCILE
     assert receipt.targets == {} and receipt.operations == []
     assert "mem-lock" in (receipt.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_flag_needs_reconcile_writes_the_marker_in_one_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """review R11-P4-1：标记一次落盘；prepare 的中间态会让 kill 后 reconcile 误判成功。"""
+    receipts = ReceiptStore(MemoryStateRoot(tmp_path / "memory-state"))
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("legacy marker must not go through prepare")
+
+    monkeypatch.setattr(receipts, "prepare", _forbidden)
+
+    await _flag_needs_reconcile(
+        receipts, "legp_atomic", "legacy record is missing", memory_id="mem-atomic")
+
+    receipt = receipts.load("legp_atomic")
+    assert receipt is not None and receipt.state == ReceiptState.NEED_RECONCILE
+    assert receipt.origin == "legacy_import"

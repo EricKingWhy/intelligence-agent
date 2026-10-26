@@ -1250,9 +1250,16 @@ class MemoryCommit:
         if not receipt.targets:
             if receipt.operations:
                 # targets 为空却有意图：无法判定发布目标，不能 finish 成成功。
-                # 合法回执（含 legacy import 的标记）两者都为空，不受影响。
                 self._receipts.mark_needs_reconcile(
                     receipt.operation_id, "receipt has operations but no targets")
+                return "needs_reconcile", False
+            if receipt.origin == "legacy_import":
+                # legacy import 的空/空回执是“这条旧状态没法自动接走”的标记，
+                # 不是一次 no-op 提交。旧版本先 prepare 后 mark 的中间态被 kill
+                # 会留下空 PREPARED；直接 reconcile 若把它 finish 成 COMMITTED，
+                # 导入失败就被永久盖掉（review R11-P4-1）。
+                self._receipts.mark_needs_reconcile(
+                    receipt.operation_id, "legacy import marker was never finalized")
                 return "needs_reconcile", False
             self._receipts.finish(receipt.operation_id)
             return "committed", False

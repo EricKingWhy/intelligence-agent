@@ -190,6 +190,10 @@ def _references_content(
         if isinstance(child, ast.Attribute):
             if child.attr in _CONTENT_PATH_HINTS:
                 return True
+            if child.attr in methods:
+                # 类体里的 `PATH = engine.path_for(...)`：`store.PATH` 就是内容路径。
+                # 方法名也走这一支（保守：同名属性访问一律当路径）。
+                return True
             if child.attr == "path_for" and _is_engine_ref(child.value, engine_aliases):
                 return True
         if isinstance(child, ast.Call):
@@ -247,15 +251,18 @@ def _references_method_content(
 
 def _content_path_functions(
     tree: ast.AST, aliases: set[str], path_methods: set[str] | None = None,
+    path_vars: set[str] | None = None,
 ) -> set[str]:
     """返回 `def p(): return engine.path_for(...)` / 返回内容路径别名的函数名。
 
     名字集合本身也参与判定并迭代到不动点：`outer()` 只返回 `inner()` 时，必须等
     `inner` 先被认定为内容路径函数，`outer` 才能被认定——否则 `outer().write_text()`
     这种多一层包装的旁路会漏扫。已识别的方法名同样参与，`def f(): return
-    store.content_path()` 才会被追上。
+    store.content_path()` 才会被追上；模块级别名（`PATH = ...`）经函数包装返回时，
+    由 `path_vars` 作为初始 taint 传入（review R11-P4-3）。
     """
     methods = path_methods or set()
+    known_paths = path_vars or set()
     names: set[str] = set()
     changed = True
     while changed:
@@ -265,7 +272,7 @@ def _content_path_functions(
                 continue
             if node.name in names:
                 continue
-            local: set[str] = set()
+            local: set[str] = set(known_paths)
             local_changed = True
             while local_changed:
                 local_changed = False
@@ -292,17 +299,20 @@ def _content_path_functions(
 
 def _content_path_methods(
     tree: ast.AST, aliases: set[str], path_functions: set[str],
+    path_vars: set[str] | None = None,
 ) -> set[str]:
-    """类方法返回内容路径时的**方法名**（`store.content_path()` 这类调用）。
+    """返回类方法名与类级路径属性名（`store.content_path()` / `store.PATH`）。
 
     排除 `path_for`：它在 receipt/staged/job 等状态 store 上同名但指向操作状态
     文件，由 `_is_engine_ref` 单独判定，不能按方法名一刀切。方法名匹配对普通仓库
     可能偏保守（同名方法会被当成路径），但这个静态闸门宁可多报也不漏掉一条动态
     包装的写旁路。
 
-    类级不动点覆盖三种包装：方法内局部别名、`self.<attr> = <内容路径>` 后再返回
-    属性、以及 `return self.other_method()` 的方法链。
+    类级不动点覆盖四种包装：方法内局部别名、`self.<attr> = <内容路径>` 后再返回
+    属性、`return self.other_method()` 的方法链、以及类体 `PATH = engine.path_for(...)`
+    后经实例属性访问（`store.PATH.write_text`，review R11-P4-3）。
     """
+    known_paths = path_vars or set()
     names: set[str] = set()
     attr_names: set[str] = set()
     changed = True
@@ -311,12 +321,28 @@ def _content_path_methods(
         for class_node in ast.walk(tree):
             if not isinstance(class_node, ast.ClassDef):
                 continue
+            for statement in class_node.body:
+                if (
+                    isinstance(statement, (ast.Assign, ast.AnnAssign))
+                    and statement.value is not None
+                    and _references_content(
+                        statement.value, set(known_paths), aliases,
+                        path_functions, names | attr_names,
+                    )
+                ):
+                    for target in _assign_targets(statement):
+                        if (
+                            isinstance(target, ast.Name)
+                            and target.id not in attr_names
+                        ):
+                            attr_names.add(target.id)
+                            changed = True
             for node in class_node.body:
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
                 if node.name == "path_for":
                     continue
-                local: set[str] = set()
+                local: set[str] = set(known_paths)
                 local_changed = True
                 while local_changed:
                     local_changed = False
@@ -355,7 +381,7 @@ def _content_path_methods(
                 ):
                     names.add(node.name)
                     changed = True
-    return names
+    return names | attr_names
 
 
 def _write_mode(call: ast.Call, module_names: set[str]) -> ast.expr | None:
@@ -453,6 +479,9 @@ def _is_path_expr(
         return node.id in path_vars or node.id in _CONTENT_PATH_HINTS
     if isinstance(node, ast.Attribute):
         if node.attr in _CONTENT_PATH_HINTS:
+            return True
+        if node.attr in methods:
+            # 类级缓存属性（`store.PATH`）与方法名同一集合：属性访问也按路径算。
             return True
         if node.attr == "path_for" and _is_engine_ref(node.value, aliases):
             return True
@@ -571,15 +600,23 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
     module_names = _module_aliases(tree)
     path_functions: set[str] = set()
     path_methods: set[str] = set()
+    path_vars: set[str] = set()
     while True:
-        # 函数与方法互相包装：`def f(): return store.content_path()` 与
-        # `def content_path(self): return helper()` 都要迭代到同一个不动点。
-        next_functions = _content_path_functions(tree, aliases, path_methods)
-        next_methods = _content_path_methods(tree, aliases, next_functions)
-        if next_functions == path_functions and next_methods == path_methods:
+        # 函数 / 方法 / 模块级别名互相包装：`def f(): return store.content_path()`、
+        # `PATH = engine.path_for(...)` + `def f(): return PATH` 都要迭代到同一个
+        # 不动点；否则多一层包装的写旁路会漏扫（review R11-P4-3）。
+        next_functions = _content_path_functions(
+            tree, aliases, path_methods, path_vars)
+        next_methods = _content_path_methods(
+            tree, aliases, next_functions, path_vars)
+        next_vars = _path_aliases(tree, aliases, next_functions, next_methods)
+        if (
+            next_functions == path_functions and next_methods == path_methods
+            and next_vars == path_vars
+        ):
             break
         path_functions, path_methods = next_functions, next_methods
-    path_vars = _path_aliases(tree, aliases, path_functions, path_methods)
+        path_vars = next_vars
     flag_vars, mode_vars = _write_mode_vars(tree)
     tainted: set[str] = set()
     changed = True
@@ -803,6 +840,32 @@ def test_static_scan_catches_method_chains_and_cached_path_attributes() -> None:
     )
 
     assert _scan_tree("src/fake.py", ast.parse(source)) == [15, 16, 17, 20]
+
+
+def test_static_scan_catches_class_body_path_attributes() -> None:
+    """review R11-P4-3：类体 `PATH = engine.path_for(...)` 经实例属性访问也不能漏。"""
+    source = (
+        "engine = object()\n"                                  # 1
+        "class Store:\n"                                       # 2
+        "    PATH = engine.path_for('memory')\n"               # 3
+        "store = Store()\n"                                    # 4
+        "store.PATH.write_text('x')\n"                         # 5
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [5]
+
+
+def test_static_scan_catches_module_alias_returned_by_a_wrapper() -> None:
+    """review R11-P4-3：模块级别名经函数包装返回，也要追到落笔点。"""
+    source = (
+        "engine = object()\n"                                  # 1
+        "PATH = engine.path_for('user')\n"                     # 2
+        "def get_path():\n"                                    # 3
+        "    return PATH\n"                                    # 4
+        "get_path().unlink()\n"                                # 5
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [5]
 
 
 def test_collection_remove_and_plain_string_mode_are_not_content_writes() -> None:

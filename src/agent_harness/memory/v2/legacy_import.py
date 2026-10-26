@@ -25,6 +25,7 @@ ADR-0056 的终态不许留 Memory-SQLite 例外：切换完成后，审批态/j
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -41,7 +42,7 @@ from agent_harness.memory.v2.file_state import (
 )
 from agent_harness.memory.v2.jobs import job_id_for
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
-from agent_harness.memory.v2.receipts import ReceiptState, ReceiptStore
+from agent_harness.memory.v2.receipts import ReceiptStore
 from agent_harness.memory.v2.settings_store import FileMemorySettingsStore
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.tombstones import FileTombstoneStore
@@ -324,7 +325,7 @@ async def _republish_completed(
             operation_id = "legp_" + hashlib.sha256(
                 f"{row['job_id']}:{memory_id}".encode()).hexdigest()[:32]
             if record is None:
-                _flag_needs_reconcile(
+                await _flag_needs_reconcile(
                     receipts, operation_id, f"legacy record {memory_id} is missing",
                     memory_id=memory_id,
                 )
@@ -342,7 +343,7 @@ async def _republish_completed(
             except Exception as error:  # noqa: BLE001 — 导入不得因单条发布失败整体失败
                 logger.warning(
                     "legacy republish failed (%s): %s", type(error).__name__, memory_id)
-                _flag_needs_reconcile(
+                await _flag_needs_reconcile(
                     receipts, operation_id,
                     f"republish failed: {type(error).__name__}", memory_id=memory_id,
                 )
@@ -352,7 +353,7 @@ async def _republish_completed(
             if response.get("success"):
                 counts["republished"] += 1
             else:
-                _flag_needs_reconcile(
+                await _flag_needs_reconcile(
                     receipts, operation_id, "legacy content rejected by markdown authority",
                     memory_id=memory_id,
                 )
@@ -361,25 +362,27 @@ async def _republish_completed(
     return converged
 
 
-def _flag_needs_reconcile(
+async def _flag_needs_reconcile(
     receipts: ReceiptStore, operation_id: str, reason: str, *, memory_id: str,
 ) -> None:
-    """缺回执时先落 PREPARED 再置 NEED_RECONCILE；已有 COMMITTED 不回退。
+    """一次落盘写 NEED_RECONCILE 标记；已有 COMMITTED 不回退。
 
     与其余回执写路径同一把 per-operation 文件锁：CLI 与 server 同时导入时，不能
     在 `commit.add(legp_...)` 正在发布的中途把同一 id 改成 NEED_RECONCILE。
     回执用空 targets/operations 的合法形状（标记而不是一次内容写意图），
     memory_id 记进 reason，避免写出一个 load 时被判 corrupt 的文件。
+
+    锁与写入都是阻塞 IO，调用方在事件循环上（导入是 async 路径）⇒ 整体丢进
+    `to_thread`，跨进程锁竞争时不会卡住启动路径的事件循环（review R11-P4-2）。
     """
-    with receipts.lock(operation_id):
-        receipt = receipts.load(operation_id)
-        if receipt is None:
-            receipt = receipts.prepare(
-                operation_id, origin="legacy_import", targets=[], operations=[],
+    def _write() -> None:
+        with receipts.lock(operation_id):
+            receipts.flag_needs_reconcile(
+                operation_id, origin="legacy_import",
+                reason=f"legacy memory {memory_id}: {reason}",
             )
-        if receipt.state != ReceiptState.COMMITTED:
-            receipts.mark_needs_reconcile(
-                operation_id, f"legacy memory {memory_id}: {reason}")
+
+    await asyncio.to_thread(_write)
 
 
 # ---------------------------------------------------------------------- SQL 辅助

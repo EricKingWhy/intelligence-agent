@@ -1112,6 +1112,23 @@ async def test_reconcile_never_commits_operations_outside_the_target_set(seam: S
     assert not (Path(seam.settings.workspace_dir) / "memories" / "USER.md").exists()
 
 
+@pytest.mark.asyncio
+async def test_reconcile_never_commits_an_unfinished_legacy_marker(seam: Seam) -> None:
+    """review R11-P4-1：prepare→mark 之间被 kill 留下的空 PREPARED 不能当 no-op 收尾。
+
+    旧版本把 legacy import 的标记拆成两次写；中间态在直接 reconcile 下会被 finish
+    成 COMMITTED，导入失败从此不可见。空/空回执对 legacy_import 只能是对账标记。
+    """
+    store = ReceiptStore(seam.root)
+    store.prepare("legp_crash", origin="legacy_import", targets=[], operations=[])
+
+    report = await seam.commit.reconcile()
+
+    assert "legp_crash" in {operation_id for operation_id, _reason in report.needs_reconcile}
+    assert "legp_crash" not in report.committed
+    assert store.load("legp_crash").state == ReceiptState.NEED_RECONCILE
+
+
 def test_receipt_prepare_rejects_operations_outside_the_target_set(seam: Seam) -> None:
     """落盘前就拒绝不自洽意图，避免调用方以为拿到了一份可推进的回执。"""
     with pytest.raises(ValueError, match="missing from targets"):
