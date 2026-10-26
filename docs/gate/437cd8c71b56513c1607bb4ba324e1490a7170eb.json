@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "gate": "gate0",
+  "recorded_at": "2026-10-27T03:30:42+08:00",
+  "sha": "437cd8c71b56513c1607bb4ba324e1490a7170eb",
+  "tree": "b7ca57a56dc2e82994f72269f2107d095ce5ffbc",
+  "argv": [],
+  "result": "PASS",
+  "passed": 7,
+  "total": 7,
+  "failed": [],
+  "env_failures": [],
+  "wall_seconds": 51.25,
+  "budget_seconds": 60.0,
+  "lane_timeout_seconds": 300.0,
+  "tool_versions": {
+    "git": "git version 2.52.0.windows.1",
+    "python": "Python 3.12.13",
+    "ruff": "ruff 0.17.1",
+    "node": "v22.21.1",
+    "oxlint": "Version: 1.85.0",
+    "tsc": "Version 7.0.2"
+  },
+  "scope": {
+    "covers": "gate0.py 的机械车道（见 lanes）",
+    "does_not_cover": [
+      "AGENTS.md §14.10 的集成前**完整**门禁重车道：pytest-full / pytest-clean / vitest / build / e2e / live",
+      "两轴独立审查与 Runtime Verification 的人工判据"
+    ]
+  },
+  "affected": null,
+  "worktree": {
+    "tracked_matches_head": true,
+    "untracked": [],
+    "untracked_total": 0
+  },
+  "lanes": [
+    {
+      "name": "diff-check",
+      "desc": "git diff --check",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.08,
+      "cwd": ".",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "command": "git diff --check"
+    },
+    {
+      "name": "ruff",
+      "desc": "ruff check .",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 3.83,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/ruff.exe",
+        "check",
+        "."
+      ],
+      "command": "./.venv/Scripts/ruff.exe check ."
+    },
+    {
+      "name": "oxlint",
+      "desc": "oxlint（web/）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 0.98,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/oxlint/bin/oxlint"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/oxlint/bin/oxlint"
+    },
+    {
+      "name": "tsc",
+      "desc": "tsc -b（web/，类型检查；不含 vite build）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 2.83,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/typescript/bin/tsc",
+        "-b"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/typescript/bin/tsc -b"
+    },
+    {
+      "name": "stylelint",
+      "desc": "stylelint（web/src 的 CSS：禁颜色字面量）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 1.83,
+      "cwd": "web",
+      "argv": [
+        "D:/DevTools/nodejs/node.EXE",
+        "node_modules/stylelint/bin/stylelint.mjs",
+        "--config",
+        "stylelint.config.mjs",
+        "src/**/*.css"
+      ],
+      "command": "D:/DevTools/nodejs/node.EXE node_modules/stylelint/bin/stylelint.mjs --config stylelint.config.mjs src/**/*.css"
+    },
+    {
+      "name": "guards",
+      "desc": "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 24.15,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "-m",
+        "pytest",
+        "tests/test_event_types_generated.py",
+        "tests/test_event_vocabulary_generated.py",
+        "tests/test_verification_map.py",
+        "tests/test_exec_bit_matches_shebang.py",
+        "-q",
+        "-p",
+        "no:randomly",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "command": "./.venv/Scripts/python.exe -m pytest tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py -q -p no:randomly -p no:cacheprovider",
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": ""
+      }
+    },
+    {
+      "name": "coverage",
+      "desc": "覆盖闸门 check_review_coverage.py",
+      "status": "PASS",
+      "rc": 0,
+      "seconds": 8.23,
+      "cwd": ".",
+      "argv": [
+        "./.venv/Scripts/python.exe",
+        "scripts/check_review_coverage.py"
+      ],
+      "command": "./.venv/Scripts/python.exe scripts/check_review_coverage.py"
+    }
+  ],
+  "review_ledger": {
+    "sha256": "edf430b98ae574297316f55fdb51f735775b2a30269e51bd9a511c5898826266",
+    "coverage": {
+      "base": "09ca47a12c45bf273e46494be0fedef143cd89d3",
+      "total": 7213,
+      "covered": 7102
+    }
+  }
+}
