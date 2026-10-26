@@ -148,6 +148,58 @@ def _compaction_ready(tmp_path) -> tuple[Session, ContextBuilder]:
     return session, builder
 
 
+async def _pruner_compaction_ready(tmp_path) -> tuple[Session, ContextBuilder]:
+    """pruner 装配 **且**自动压缩必命中的会话（生产默认路径形状）。
+
+    `_compaction_ready` 不传 artifact_store ⇒ `_pruner is None` ⇒ `_reproject`
+    走非 pruner 分支；而 `assembly.py` 恒装配 pruner，真实部署走的是这一支。
+    夹具逐条照搬 `test_compaction_bracket.py` 的
+    `TestCompactionWithPrunedToolResults`（`max_context_tokens=6000` /
+    `auto_compact_threshold=0.4` / `keep_recent_tool_results=0` /
+    `clear_at_least_tokens=0`），三条溢出 tool 结果保证裁剪决策非空。
+    """
+    from agent_harness.session import TOOL_CALL
+    from agent_harness.tooling.overflow import ArtifactOverflowHandler
+    from agent_harness.tooling.result import ToolResult
+
+    session = make_session(tmp_path)
+    store = FakeArtifactStore()
+    content = "历史数据行，包含编号 R-042 与路径 docs/a.md。\n" * 500
+
+    async def overflowed_read(call_id: str) -> None:
+        session.append(TOOL_CALL, {
+            "tool_call_id": call_id, "tool_name": "read_file",
+            "args": {"path": "big.txt"},
+        })
+        handler = ArtifactOverflowHandler(store, 2000, read_tool_name="read_artifact")
+        overflowed, deferred = await handler.maybe_overflow(
+            session, call_id, "read_file",
+            ToolResult.success("file content", data={"output": content}),
+        )
+        for event_type, data in deferred:
+            session.append(event_type, data)
+        session.append(TOOL_RESULT, {
+            "tool_call_id": call_id,
+            "content": overflowed.model_dump_json(),
+        })
+
+    session.append(USER_MESSAGE, {"content": "读取历史。"})
+    for i in range(3):
+        session.append(MODEL_COMPLETED, {"content": "", "tool_calls": [
+            {"id": f"c{i}", "name": "read_file", "args": {"path": "big.txt"}},
+        ]})
+        await overflowed_read(f"c{i}")
+    session.append(MODEL_COMPLETED, {"content": "background " * 1_000})
+    session.append(USER_MESSAGE, {"content": "当前请求"})
+    builder = ContextBuilder(
+        ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
+        max_context_tokens=6000, auto_compact_threshold=0.4,
+        artifact_store=store, artifact_read_tool_name="read_artifact",
+        keep_recent_tool_results=0, clear_at_least_tokens=0,
+    )
+    return session, builder
+
+
 class TestProjectionEquivalence:
     """六种形态下：消息与 source ranges 必须与全量基准逐条相等。"""
 
@@ -467,10 +519,40 @@ class TestReducedWork:
         await builder.build(session)
         after_build = calls["n"]
 
+        assert any(e.type == "compaction/end" for e in session.events), "前置：必须已压缩"
+
         builder.usage_snapshot(session)
 
         assert calls["n"] == after_build, (
             "压缩 build 之后的首次看板读必须命中 `_reproject` 留下的同一 mark 投影"
+        )
+
+    @pytest.mark.asyncio
+    async def test_post_compaction_snapshot_derives_nothing_with_pruner(
+        self, tmp_path, monkeypatch,
+    ):
+        """同一证据的 **pruner 分支**（生产默认路径：`assembly.py` 恒装配 pruner）。
+
+        `_reproject` 与 `usage_snapshot` 都有 `_pruner is None` 的两分支，上面那条
+        只覆盖非 pruner 支。这里要求 pruner 装配 + 压缩命中，钉住
+        `_reproject` 的 pruner 支也刷新缓存（回退为 uncached ⇒ 看板读多 1 次派生）。
+        """
+        session, builder = await _pruner_compaction_ready(tmp_path)
+        calls = _counting(monkeypatch)
+
+        await builder.build(session)
+        after_build = calls["n"]
+
+        assert builder._pruner is not None, "前置：必须装配 pruner（否则走的是另一支）"
+        assert any(e.type == "compaction/end" for e in session.events), "前置：必须已压缩"
+        assert builder._prune_decisions.get(session.session_id), (
+            "前置：pruner 必须真的裁过（决策非空，否则 pruner 支与空操作同形）"
+        )
+
+        builder.usage_snapshot(session)
+
+        assert calls["n"] == after_build, (
+            "pruner 装配下，压缩后的首次看板读必须命中 `_reproject` 留下的同一 mark 投影"
         )
 
     @pytest.mark.asyncio
