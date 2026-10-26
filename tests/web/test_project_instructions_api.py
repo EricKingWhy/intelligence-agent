@@ -22,7 +22,7 @@ def test_status_and_explicit_reload_are_visible_without_session_events(
         model_api_key="test-key",
     )
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings, allow_testserver=True)) as client:
         created = client.post(
             "/api/sessions",
             params={"launch": "false"},
@@ -76,7 +76,7 @@ def test_reload_exposes_missing_and_unreadable_instruction_files(
         model_api_key="test-key",
     )
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings, allow_testserver=True)) as client:
         created = client.post(
             "/api/sessions",
             params={"launch": "false"},

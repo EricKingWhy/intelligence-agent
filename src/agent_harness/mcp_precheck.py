@@ -52,7 +52,7 @@ from agent_harness.mcp.config import (
     has_static_authorization_header,
     parse_mcp_servers,
 )
-from agent_harness.skills.inspection import _add_error, read_package_text
+from agent_harness.skills.inspection import add_inspection_error, read_package_text
 from agent_harness.tooling.contract import ToolPermission
 
 #: 显式 server 描述文件（相对包根，顺序即优先序）。
@@ -118,7 +118,7 @@ _TOO_DEEP_MESSAGE = "描述嵌套过深，无法静态解析。"
 
 #: 安装闸门分档用的**内部** finding 标记：区分"本仓首版不支持的能力"（可适配的缺口）与
 #: "描述写坏"（作者错误）。它只被 `_blocks_install` 消费一次，不属于 error 契约
-#: （`skills/inspection._add_error` 的 {code, path, message}），消费后必须从报告里摘掉，
+#: （`skills/inspection.add_inspection_error` 的 {code, path, message}），消费后必须从报告里摘掉，
 #: 否则会外泄进 `plugins inspect` 的可见 JSON（#975）。
 _INTERNAL_FINDING_MARKER = "adaptive"
 
@@ -151,7 +151,7 @@ def inspect_mcp_servers(source: Path | str) -> dict[str, Any]:
     try:
         package_root = source_path.resolve(strict=True)
     except (OSError, RuntimeError):
-        _add_error(errors, "MCP_PACKAGE_NOT_FOUND", ".", "包目录不存在或无法解析。")
+        add_inspection_error(errors, "MCP_PACKAGE_NOT_FOUND", ".", "包目录不存在或无法解析。")
         report["status"] = "unsupported"
         return report
     report["source"] = str(package_root)
@@ -195,10 +195,10 @@ def inspect_mcp_servers(source: Path | str) -> dict[str, Any]:
     for name, body in entries:
         name_error = _server_name_error(name)
         if name_error is not None:
-            _add_error(errors, "MCP_SERVER_NAME_INVALID", relative, f"server 名 {name!r} 非法：{name_error}")
+            add_inspection_error(errors, "MCP_SERVER_NAME_INVALID", relative, f"server 名 {name!r} 非法：{name_error}")
             continue
         if name in seen:
-            _add_error(
+            add_inspection_error(
                 errors,
                 "MCP_SERVER_NAME_DUPLICATE",
                 relative,
@@ -214,7 +214,7 @@ def inspect_mcp_servers(source: Path | str) -> dict[str, Any]:
         report["status"] = "unsupported"
     elif not report["servers"]:
         # 描述文件在，但一个 server 都没有：不是一个可用的描述（AC1 的否定面）。
-        _add_error(errors, "MCP_DESCRIPTION_EMPTY", relative, "描述里没有任何 server 条目。")
+        add_inspection_error(errors, "MCP_DESCRIPTION_EMPTY", relative, "描述里没有任何 server 条目。")
         report["status"] = "unsupported"
     elif any(server["errors"] for server in report["servers"]):
         # 有 server **报错**（缺 command/URL、越界路径、非法权限、坏引用……）⇒ 这份描述
@@ -349,13 +349,13 @@ def _parse_description(text: str, relative: str, errors: list[dict[str, str]]) -
         # 同款兜底）。这个上限取决于进程递归限制与栈余量、不是常量——所以这里不设
         # 自己的深度数字，只信解析器抛出来的那一下（无独立产品配额，与 web 层不同：
         # 那边的 `BODY_MAX_DEPTH` 是用户可见契约，必须比解析器更早、且与它无关）。
-        _add_error(errors, "MCP_DESCRIPTION_TOO_DEEP", relative, _TOO_DEEP_MESSAGE)
+        add_inspection_error(errors, "MCP_DESCRIPTION_TOO_DEEP", relative, _TOO_DEEP_MESSAGE)
         return None
     except (json.JSONDecodeError, ValueError) as error:
-        _add_error(errors, "MCP_DESCRIPTION_INVALID", relative, f"JSON 无法解析: {error}")
+        add_inspection_error(errors, "MCP_DESCRIPTION_INVALID", relative, f"JSON 无法解析: {error}")
         return None
     if not isinstance(parsed, dict):
-        _add_error(
+        add_inspection_error(
             errors,
             "MCP_DESCRIPTION_INVALID",
             relative,
@@ -381,14 +381,14 @@ def _report_duplicate_keys(
     server_names = set(wrapper) if isinstance(wrapper, dict) else set()
     for key in sorted(set(duplicates)):
         if key in server_names:
-            _add_error(
+            add_inspection_error(
                 errors,
                 "MCP_SERVER_NAME_DUPLICATE",
                 relative,
                 f"server 名重复: {key!r}（JSON 重复键会被静默取后者，等于少一个 server）",
             )
         else:
-            _add_error(
+            add_inspection_error(
                 errors,
                 "MCP_DESCRIPTION_DUPLICATE_KEY",
                 relative,
@@ -423,7 +423,7 @@ def _server_entries(
     claude = raw.get(_CLAUDE_WRAPPER)
     native = raw.get(_NATIVE_WRAPPER)
     if claude is not None and native is not None:
-        _add_error(
+        add_inspection_error(
             errors,
             "MCP_DESCRIPTION_INVALID",
             relative,
@@ -434,7 +434,7 @@ def _server_entries(
         entries: list[tuple[str, dict[str, Any]]] = []
         for name, body in claude.items():
             if not isinstance(body, dict):
-                _add_error(
+                add_inspection_error(
                     errors,
                     "MCP_SERVER_INVALID",
                     relative,
@@ -447,7 +447,7 @@ def _server_entries(
         entries = []
         for index, body in enumerate(native):
             if not isinstance(body, dict):
-                _add_error(
+                add_inspection_error(
                     errors,
                     "MCP_SERVER_INVALID",
                     relative,
@@ -456,7 +456,7 @@ def _server_entries(
                 continue
             name = body.get("name")
             if not isinstance(name, str) or not name:
-                _add_error(
+                add_inspection_error(
                     errors,
                     "MCP_SERVER_INVALID",
                     relative,
@@ -465,7 +465,7 @@ def _server_entries(
                 continue
             entries.append((name, body))
         return entries
-    _add_error(
+    add_inspection_error(
         errors,
         "MCP_DESCRIPTION_INVALID",
         relative,
@@ -499,7 +499,7 @@ def _inspect_entry(
     requirements: list[dict[str, str]] = report["requirements"]
 
     def fail(code: str, path: str, message: str) -> None:
-        _add_error(failures, code, f"{name}.{path}" if path else name, message)
+        add_inspection_error(failures, code, f"{name}.{path}" if path else name, message)
 
     def narrow(code: str, path: str, message: str) -> None:
         """记一条**能力收窄**级发现：MCP 面内照旧明确失败（AC3），但不拦整包安装。
@@ -509,7 +509,7 @@ def _inspect_entry(
         （可装、不可启用），后者 fail-closed 拦安装。标记是预检内部的路由信号，
         `attach_mcp_section` 消费后即摘除，不外泄进可见 JSON（#975）。
         """
-        _add_error(failures, code, f"{name}.{path}" if path else name, message)
+        add_inspection_error(failures, code, f"{name}.{path}" if path else name, message)
         failures[-1][_INTERNAL_FINDING_MARKER] = True
 
     def gap(kind: str, support: str, name_of_item: str, reason: str) -> None:
@@ -1005,7 +1005,7 @@ def _drop_internal_finding_marker(report: dict[str, Any]) -> None:
 
     `narrow` 把它挂在"本仓首版不支持的能力"那条 error 上，`_blocks_install` 据此区分
     "能力收窄"与"描述写坏"；分类是预检内部的路由信号，不是 error 契约的一部分
-    （`skills/inspection._add_error` 的 {code, path, message}）。消费后即从顶层与每个
+    （`skills/inspection.add_inspection_error` 的 {code, path, message}）。消费后即从顶层与每个
     server 的 errors 里摘除。
     """
     for error in _iter_error_dicts(report):

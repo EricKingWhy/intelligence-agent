@@ -18,6 +18,9 @@ import type { ActiveFallbackModelProjection } from '../lib/modelReasoningEffortP
 import { budgetText, filesFromClipboard, getImageLimits, loadImageLimits, type ImageIntakeLimits } from '../lib/attachments';
 import { onTokenChange } from '../lib/auth';
 import { routeHostFiles } from '../lib/hostFiles';
+/* #1509：队列区取消失败通知复用对话区的 ErrorBar（同源 alert 语义/样式，不另造）。
+ * 无环：Conversation 的导入图不经过 Composer（两者都只由 App 组合）。 */
+import { ErrorBar } from './Conversation';
 import { installDocumentDropEvents } from '../lib/dropEvents';
 import { effectiveModelEntry } from '../lib/modelSelection';
 import type { Ownership } from '../lib/ownership';
@@ -283,6 +286,10 @@ interface Props {
   /** ADR-0030 §4.6「立即发送」：立刻投递队首待发送输入（POST /queue/flush）。
    *  缺席 = 不渲染按钮（重启后手动投递是 ADR 明确的前端职责）。 */
   onFlush?: () => void;
+  /** #1509（INT-1）：取消排队失败的动作位通知（App 侧已按会话身份 + 队列在场
+   *  门控；这里只负责挂到队列条旁）。错误出现在触发它的取消按钮旁边，条目上的
+   *  取消按钮本身就是重试入口，不另设重试钮。 */
+  queueCancelError?: { message: string } | null;
 }
 /** #1367 审查 P1-3：条内「重试」不经 Composer 的 submit 链，受理成功后的草稿
  *  消费必须由同一个实现完成——否则重试成功了、原文还留在输入框，再按 Enter 就是
@@ -338,6 +345,7 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
   onCancelItem,
   onEditItem,
   onFlush,
+  queueCancelError = null,
 }: Props, ref) {
   const [value, setValue] = useState('');
   const [rememberAsProceduralRule, setRememberAsProceduralRule] = useState(false);
@@ -1254,6 +1262,14 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
             </button>
           )}
         </div>
+      )}
+      {/* #1509（INT-1）：取消排队失败的动作位——紧贴队列条（触发取消按钮的旁边），
+          复用对话区的 ErrorBar（视觉/语义同源，不新增第三套 alert 样式）。条目上的
+          取消按钮就是重试入口，不另设重试钮；App 侧保证只在队列仍在场时传入。 */}
+      {queueCancelError !== null && undelivered.length > 0 && (
+        <ErrorBar
+          copy={{ kind: 'server', title: queueCancelError.message, hint: '', detail: '', retryable: false }}
+        />
       )}
       {/* #1195：内联 `/` 菜单——输入框正上方（composer-wrap 的直接子节点、dock 之前；
           absolute 定位锚在 wrap 上，bottom:100% 相对 dock 视觉位）。非 Dialog 中央浮层

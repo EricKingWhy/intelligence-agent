@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -82,7 +83,9 @@ _RESYNC = object()
 class Subscriber:
     """一个 SSE 连接对应一个订阅者：有界队列 + 断连移除。"""
 
-    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX))
+    queue: asyncio.Queue = field(
+        default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX)
+    )
 
 
 @dataclass
@@ -95,7 +98,9 @@ class SessionFollower:
     既有 listener 扇出（`ManagedRun._fanout`），由 RunManager 按 session_id 派发。
     """
 
-    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX))
+    queue: asyncio.Queue = field(
+        default_factory=lambda: asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_MAX)
+    )
 
 
 class ManagedRun:
@@ -108,6 +113,12 @@ class ManagedRun:
         self.subscribers: dict[int, Subscriber] = {}
         self._next_subscriber_id = 0
         self._last_enqueued_seq = -1
+        # #1547（审查 F2）：listener 通道（任意 drain 线程）与镜像通道（run loop
+        # 的 `_drive`）可能并发进入下面的幂等门——无锁的 check-then-set 交错会
+        # 双投（重复帧）或把游标倒退（乱序帧）。锁覆盖「判定 + 推进 + 扇出」
+        # 整体，保证跨线程也严格按 seq 单调地恰好投递一次；`_fanout` 只做
+        # put_nowait（非阻塞、无重入），持锁扇出无死锁面。
+        self._enqueue_guard = threading.Lock()
         self.terminal = False
         # #312（R4）：本执行以 `run/paused` 收口——非终态，但**同样不再调度新工作**
         # （`_drive` 的收口处解释为什么不接力）。与 terminal 分开记：terminal 描述
@@ -160,20 +171,24 @@ class ManagedRun:
 
     def enqueue_agent_event(self, event: AgentEvent) -> None:
         """合并入队：durable 按 seq 幂等（listener 先入、镜像跳过），流式总入队。"""
-        if event.seq is not None:
+        if event.seq is None:
+            self._fanout(event)  # 流式信号无 seq，不参与幂等门
+            return
+        with self._enqueue_guard:
             if event.seq <= self._last_enqueued_seq:
                 return
             self._last_enqueued_seq = event.seq
-        self._fanout(event)
+            self._fanout(event)
 
     def enqueue_session_event(self, event) -> None:
         """listener 通道：SessionEvent → AgentEvent 镜像后合并入队。"""
         from agent_harness.agent.types import to_agent_event
 
-        if event.seq <= self._last_enqueued_seq:
-            return
-        self._last_enqueued_seq = event.seq
-        self._fanout(to_agent_event(event))
+        with self._enqueue_guard:
+            if event.seq <= self._last_enqueued_seq:
+                return
+            self._last_enqueued_seq = event.seq
+            self._fanout(to_agent_event(event))
 
     def finish(self) -> None:
         """run task 终结：标记终态、撤销孤儿计时、广播哨兵。
@@ -219,7 +234,8 @@ class ManagedRun:
             if time.monotonic() >= deadline:
                 logger.warning(
                     "run/started 在 %.1fs 内未落盘（session=%s）——run_id 未知",
-                    timeout, self.session.session_id,
+                    timeout,
+                    self.session.session_id,
                 )
                 return None
             await asyncio.sleep(0.01)
@@ -253,7 +269,8 @@ class ManagedRun:
             return
         loop = asyncio.get_running_loop()
         self._orphan_handle = loop.call_later(
-            grace, self._reap_if_orphaned,
+            grace,
+            self._reap_if_orphaned,
         )
 
     def _cancel_orphan_timer(self) -> None:
@@ -285,12 +302,14 @@ class ManagedRun:
             logger.info(
                 "产品客户端断线（session=%s，零订阅者超过 %.0fs）——无明确退出信号，"
                 "继续跑（选项 B），不置缺席、不暂停",
-                self.session.session_id, self._manager.disconnect_grace_seconds,
+                self.session.session_id,
+                self._manager.disconnect_grace_seconds,
             )
             return
         logger.warning(
             "run 孤儿回收（session=%s，零订阅者超过 %.0fs）",
-            self.session.session_id, self._manager.disconnect_grace_seconds,
+            self.session.session_id,
+            self._manager.disconnect_grace_seconds,
         )
         # 先置位再取消：cancel_reason_supplier 在取消臂收尾时读取（02 §17：
         # 孤儿回收 ≠ 用户取消，reason=orphaned 落 run/failed data）。
@@ -435,7 +454,10 @@ class RunManager:
         return lock
 
     def launch(
-        self, session: Session, runtime: AgentRuntime, user_input: str | None,
+        self,
+        session: Session,
+        runtime: AgentRuntime,
+        user_input: str | None,
         user_input_metadata: dict[str, Any] | None = None,
         presence_managed: bool = False,
     ) -> tuple[ManagedRun, Subscriber]:
@@ -481,7 +503,10 @@ class RunManager:
         return run, subscriber
 
     async def _drive(
-        self, run: ManagedRun, runtime: AgentRuntime, user_input: str | None,
+        self,
+        run: ManagedRun,
+        runtime: AgentRuntime,
+        user_input: str | None,
         user_input_metadata: dict[str, Any] | None,
     ) -> None:
         """run task 本体：驱动 run_stream，终结时广播哨兵。"""
@@ -493,9 +518,17 @@ class RunManager:
 
         try:
             async for event in runtime.run_stream(
-                run.session, user_input, cancel_reason_supplier=cancel_reason,
+                run.session,
+                user_input,
+                cancel_reason_supplier=cancel_reason,
                 user_input_metadata=user_input_metadata,
             ):
+                if event.seq is not None:
+                    # #1547：durable 镜像与 listener 通道共用 `_last_enqueued_seq`
+                    # 幂等门。镜像（含 `end_run` 同步写者的返回值）若先于有序闸门
+                    # 投递入队，会把仍在闸内的更低 seq 判成「重复」永久丢弃。
+                    # 等闸门放行本 seq 再入队 ⇒ 入队序 = seq 序（已投递则零等待）。
+                    await run.session.wait_delivered(event.seq)
                 run.enqueue_agent_event(event)
         finally:
             run.session.remove_listener(run._on_session_event)
@@ -526,13 +559,16 @@ class RunManager:
         if builder is None:
             return
         try:
-            capture(run.session.session_id,
-                    builder.usage_snapshot(run.session),
-                    runtime.registry.export_model_definitions())
+            capture(
+                run.session.session_id,
+                builder.usage_snapshot(run.session),
+                runtime.registry.export_model_definitions(),
+            )
         except Exception:
             logging.getLogger(__name__).debug(
                 "context-usage snapshot capture failed for %s",
-                run.session.session_id, exc_info=True,
+                run.session.session_id,
+                exc_info=True,
             )
 
     async def _notify_run_terminal(self, session_id: str) -> None:
@@ -553,7 +589,9 @@ class RunManager:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("run 终态驱动失败（session=%s）——未投递输入留待下次", session_id)
+            logger.exception(
+                "run 终态驱动失败（session=%s）——未投递输入留待下次", session_id
+            )
 
     def get_active(self, session_id: str) -> ManagedRun | None:
         """在途 run（未终态）；重连续传接 live 流用。
@@ -607,7 +645,10 @@ class RunManager:
     # ── W-12（#356）选项 B：明确退出信号 → 安全暂停 ────────────────────────
 
     async def signal_client_exit(
-        self, session_id: str, *, client_id: str,
+        self,
+        session_id: str,
+        *,
+        client_id: str,
     ) -> ClientExitOutcome:
         """客户端明确退出信号的服务端唯一入口（选项 B 写侧）。
 
@@ -809,7 +850,8 @@ class RunManager:
         )
 
     async def _strict_progress_write_for_exit(
-        self, run: ManagedRun,
+        self,
+        run: ManagedRun,
     ) -> tuple[ProgressWriteOutcome | None, str]:
         """退出信号路径上的 W-05 **严格写**（design §4 / decision 4）。
 
@@ -832,7 +874,10 @@ class RunManager:
             return None, "cwd 目录不存在 → 进度写 N/A（不复活已删目录，decision 4）"
         try:
             outcome = await asyncio.to_thread(
-                write_progress_file, cwd, run.session.session_id, events,
+                write_progress_file,
+                cwd,
+                run.session.session_id,
+                events,
             )
         except Exception as exc:
             # F2（B 轴 P2）：`write_progress_file` 正常契约返回 ProgressWriteOutcome，
@@ -840,9 +885,11 @@ class RunManager:
             # 失败**一律**抛 ClientExitError。合成一个 ok=False 的结果如实记录；
             # fail-closed 本身已成立（mark_absent 未到达），这里补的是 contract。
             unexpected = ProgressWriteOutcome(
-                ok=False, skipped=False,
+                ok=False,
+                skipped=False,
                 path=progress_paths(cwd, run.session.session_id).markdown,
-                source_event_seq=-1, error_kind="unexpected_exception",
+                source_event_seq=-1,
+                error_kind="unexpected_exception",
                 reason=repr(exc),
             )
             raise ClientExitError(

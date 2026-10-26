@@ -1,0 +1,4 @@
+2026-10-23	#1432 初审：Spec 发现成功后再失败会保留 copied 状态（AC 缺口）；Standards PASS。该 finding 已由 1d02e68e 修复，见修后复审	bd97fbfdc157a182e3249481ac21a22e473d4a0c..067dbe333d16a5d35a45ff081aa3ccd2bc77ca2c
+2026-10-23	#1432 修后双轴复审：Spec PASS，Standards PASS；原 finding 关闭；P0–P4=0	bd97fbfdc157a182e3249481ac21a22e473d4a0c..1d02e68e6bd5036e3c051d8ad0699616545173b3
+2026-10-24	#1432 最终双轴复审：Spec PASS，Standards PASS；AC 与双 viewport E2E 一致；P0–P4=0	bd97fbfdc157a182e3249481ac21a22e473d4a0c..43318ce1d3ce90784d768a4815a907189cd2876d
+2026-10-24	机械归属（同步 merge，非内容审查主张）：merge 08d938f2 = origin/main 13a96482 合入本票分支；父一 0a3f50d3、父二 13a96482，merge-base bd97fbfd；ort 自动合并、无冲突；`git show --cc --name-only` 空表，合并树 bc44adfa 与两父不同。相对父二的 7 文件仅为本票 CopyButton 源/测试/E2E 与已登记审查、Gate 证据；本票代码由 bd97..433 双轴审查行覆盖，主线增量沿用 main 自带归属。	13a9648225286b6d240ca55ddfdd72b91018a35a..08d938f2e23cfc8f4b5224a81bf35e200e0b15f6

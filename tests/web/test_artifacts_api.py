@@ -67,7 +67,7 @@ def _client(tmp_path: Path, **overrides) -> TestClient:
         model_api_key="sk-test",
         **overrides,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _create_session(client: TestClient) -> str:

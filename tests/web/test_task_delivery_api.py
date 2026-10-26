@@ -54,7 +54,7 @@ def client(tmp_path, monkeypatch):
         model_api_key="sk-test",
         enable_cors=False,
     )
-    app = create_app(settings, enable_cors=False)
+    app = create_app(settings, enable_cors=False, allow_testserver=True)
     app.state._launched_sessions = launched
     return TestClient(app), app
 

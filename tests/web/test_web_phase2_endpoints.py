@@ -28,7 +28,7 @@ def bare_client(tmp_path):
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 # ── GET /api/permission-modes ──
@@ -116,7 +116,7 @@ class TestCapabilities:
             # 用一个真实 capability 配置触发装配（但我们会替换 registry）
             capabilities='{"memory": {"provider": "builtin"}}',
         )
-        app = create_app(settings, enable_cors=False)
+        app = create_app(settings, enable_cors=False, allow_testserver=True)
 
         # 注入 fake registry：绕过真实装配，直接替换 get_wiring 的产物。
         async def stub_get_wiring():
@@ -166,7 +166,7 @@ class TestCapabilities:
             model_api_key="sk-test", enable_cors=False,
             capabilities='{"memory": {"provider": "builtin"}}',
         )
-        app = create_app(settings, enable_cors=False)
+        app = create_app(settings, enable_cors=False, allow_testserver=True)
 
         async def stub_get_wiring():
             from agent_harness.capability.wiring import CapabilityWiring

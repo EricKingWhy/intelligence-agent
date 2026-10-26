@@ -1,0 +1,1 @@
+2026-10-25	#1516 fresh 独立复核：审 dec9aa69..fc248cff1，PASS-WITH-FINDINGS（P0=0/P1=0/P2=3/P3=3/P4=4，不阻塞）；沙箱复测 tip 全量 -n 4 32F/8820P vs 基线 31F/8812P，新增失败 0。	dec9aa6973ad3c8e76ac8fb2c2b2dfb5357ee244..fc248cff15e0c6252df93a1ee0a9d9af4aabe221

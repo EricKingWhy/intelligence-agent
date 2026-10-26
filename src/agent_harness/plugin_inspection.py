@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agent_harness.skills.inspection import _read_bounded_package_text
+from agent_harness.skills.inspection import read_bounded_package_text
 
 _PACKAGE_NAME = "dsh-codex-effort-slider"
 _PINNED_VERSION = "1.0.0"
@@ -56,7 +56,7 @@ def inspect_dsh_effort_slider(
         return None
 
     errors: list[dict[str, str]] = []
-    package_text = _read_bounded_package_text(
+    package_text = read_bounded_package_text(
         root,
         root / "package.json",
         "package.json",
@@ -102,7 +102,7 @@ def inspect_dsh_effort_slider(
                 }
             )
             continue
-        text = _read_bounded_package_text(
+        text = read_bounded_package_text(
             root,
             package_file,
             relative,

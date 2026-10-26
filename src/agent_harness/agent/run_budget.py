@@ -83,7 +83,8 @@ from agent_harness.agent.resume_evidence import (
     recorded_environment_revision,
     recorded_policy_inputs,
 )
-from agent_harness.model.accounting import ProviderAccounting, decimal_or_none
+from agent_harness.model.accounting import ProviderAccounting
+from agent_harness.model.accounting import decimal_or_none as accounting_decimal_or_none
 from agent_harness.session.event import (
     MODEL_COMPLETED,
     MODEL_REQUEST,
@@ -226,7 +227,7 @@ def deadline_reached(deadline_at: datetime | None, *, now: datetime) -> bool:
     `now >= deadline_at`，到点那一刻就停，不留半格余量："时刻"没有"下一次"可言
     （与 `consumed vs ceiling` 那类"还能不能再花一点"的判定不同，后者才有差一格的问题）。
     `deadline_at is None` ⇒ 不设 deadline，永不判"到点"（**不是**"立刻到点"）。
-    形状由请求面 `parse_deadline_at` 卡死成 RFC 3339 UTC、事件回读走 `_deadline_or_none`，
+    形状由请求面 `parse_deadline_at` 卡死成 RFC 3339 UTC、事件回读走 `deadline_or_none`，
     所以这里不会再遇到朴素时间。
 
     为什么抽出来：这条比较在 agent 侧有三处消费者（`pause_trigger` 的准入判定 /
@@ -441,8 +442,13 @@ _TERMINAL_STATE = {
 }
 
 
-def _decimal_text(value: Decimal | None) -> str | None:
+def decimal_text(value: Decimal | None) -> str | None:
     """`Decimal` → wire 上的十进制**字符串**（`None` 原样）。
+
+    #1539：本组四个编解码（``decimal_text`` / ``deadline_text`` /
+    ``deadline_or_none`` / ``decimal_or_none``）转正为公开合同——budget 值的
+    wire 形态归 agent（run_budget）所有，storage（delegation_tree 持行）与
+    web 只消费，不再 import 私有名。
 
     成本不能进 JSON 浮点：`Decimal` 本身 `json.dumps` 会炸，而 `float()` 会引入与
     wire 不等价的二进制近似（`11 §6.1`：**二进制浮点相等不是契约**）。所以这一维
@@ -451,7 +457,7 @@ def _decimal_text(value: Decimal | None) -> str | None:
     return None if value is None else format(value, "f")
 
 
-def _deadline_text(value: datetime | None) -> str | None:
+def deadline_text(value: datetime | None) -> str | None:
     """`datetime` → wire 上的 UTC ISO 8601 文本（`None` 原样）。
 
     一律用 `Z` 收尾的 UTC 形式（`11 §6.1`：`deadline_at` 是 RFC 3339 UTC）：
@@ -463,7 +469,7 @@ def _deadline_text(value: datetime | None) -> str | None:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _deadline_or_none(raw: Any) -> datetime | None:
+def deadline_or_none(raw: Any) -> datetime | None:
     """读回事件里的 `deadline_at`（**宽容**：读不出来就当没配，不连坐其余维度）。
 
     投影读回与请求校验**故意不同**：请求里的畸形值要响亮拒绝（`parse_deadline_at`
@@ -482,13 +488,13 @@ def _deadline_or_none(raw: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _decimal_or_none(raw: Any) -> Decimal | None:
+def decimal_or_none(raw: Any) -> Decimal | None:
     """读回十进制成本：**同一条规则**在 `model/accounting.decimal_or_none`（唯一实现）。
 
     Provider 响应里的成本与事件 / 投影里读回的成本必须用同一条宽容读法；这里只是
     给本模块的调用点一个短名字，规则本身不在这里再写一遍。
     """
-    return decimal_or_none(raw)
+    return accounting_decimal_or_none(raw)
 
 
 @dataclass(frozen=True)
@@ -566,8 +572,8 @@ class RunLimits:
             "max_agent_turns_total": self.max_agent_turns_total,
             "max_model_requests": self.max_model_requests,
             "max_total_tokens": self.max_total_tokens,
-            "max_cost_usd": _decimal_text(self.max_cost_usd),
-            "deadline_at": _deadline_text(self.deadline_at),
+            "max_cost_usd": decimal_text(self.max_cost_usd),
+            "deadline_at": deadline_text(self.deadline_at),
             "tool_call_limits": {
                 name: self.tool_call_limits[name] for name in sorted(self.tool_call_limits)
             },
@@ -618,7 +624,7 @@ class BudgetConsumed:
             "agent_turns": self.agent_turns,
             "model_requests": self.model_requests,
             "total_tokens": self.total_tokens,
-            "cost_usd": _decimal_text(self.cost_usd),
+            "cost_usd": decimal_text(self.cost_usd),
             # 总数与两张表都写：总数是 `02 §5.1` 的 counter 名（客户端按它读"花了多少
             # 工具调用"），两张表是 per-tool 配额与可观测性要的分维；三者的关系是
             # "总数 = 表和"，所以这里不引入第二份真相，只是把同一份账按两种粒度给出。
@@ -638,7 +644,7 @@ class BudgetConsumed:
             "agent_turns": _remaining(limits.max_agent_turns_total, self.agent_turns),
             "model_requests": _remaining(limits.max_model_requests, self.model_requests),
             "total_tokens": _remaining(limits.max_total_tokens, self.total_tokens),
-            "cost_usd": _decimal_text(
+            "cost_usd": decimal_text(
                 None
                 if limits.max_cost_usd is None or self.cost_usd is None
                 else max(limits.max_cost_usd - self.cost_usd, Decimal(0))
@@ -856,8 +862,8 @@ def _limits_from_projection(raw: Any) -> RunLimits:
         max_total_tokens=(
             tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
         ),
-        max_cost_usd=_decimal_or_none(scope.get("max_cost_usd")),
-        deadline_at=_deadline_or_none(scope.get("deadline_at")),
+        max_cost_usd=decimal_or_none(scope.get("max_cost_usd")),
+        deadline_at=deadline_or_none(scope.get("deadline_at")),
         tool_call_limits=_int_map(scope.get("tool_call_limits")),
     )
 
@@ -1014,7 +1020,7 @@ def consumed_from_events(events: Iterable[SessionEvent]) -> BudgetConsumed:
                 else:
                     tokens = None
             if cost is not None:
-                reported_cost = _decimal_or_none(event.data.get("cost_usd"))
+                reported_cost = decimal_or_none(event.data.get("cost_usd"))
                 cost = None if reported_cost is None else cost + reported_cost
         elif event.type == TOOL_RESULT:
             calls, attempts = _add_tool_delta(
@@ -1201,7 +1207,7 @@ def _consumed_from_projection(raw: Any, *, fallback_turns: int) -> BudgetConsume
             tokens if isinstance(tokens, int) and not isinstance(tokens, bool)
             else None
         ),
-        cost_usd=_decimal_or_none(raw.get("cost_usd")) if "cost_usd" in raw else None,
+        cost_usd=decimal_or_none(raw.get("cost_usd")) if "cost_usd" in raw else None,
         # 工具两表同样**不回落重算**：T6 之前的 run 真的调用过工具，重算得到的 0 是
         # 假话（与 requests / tokens / cost 同一条理由，见上面的 docstring）。表存在
         # 但形状不对 ⇒ 也是未知，不把"读不懂"当"没花过"。
@@ -2324,7 +2330,7 @@ def deterministic_continuation(
                 ),
                 (
                     f"累计 token：{_value_text(consumed.total_tokens)}；"
-                    f"累计成本（USD）：{_decimal_text(consumed.cost_usd) or '未知'}"
+                    f"累计成本（USD）：{decimal_text(consumed.cost_usd) or '未知'}"
                 ),
             ],
             "remaining": ["等待用户处理 protected-fact 冲突后，从同一 run 继续"],
@@ -2363,7 +2369,7 @@ def deterministic_continuation(
             ),
             (
                 f"累计 token：{_value_text(consumed.total_tokens)}；"
-                f"累计成本（USD）：{_decimal_text(consumed.cost_usd) or '未知'}"
+                f"累计成本（USD）：{decimal_text(consumed.cost_usd) or '未知'}"
             ),
             # 工具两个 counter 取 `consumed`（= `02 §5.1` 的计数点：**已接纳**的逻辑调用
             # 与**实际**尝试），不在这里重数 `tool/call` 事件：后者含准入前被拒的调用，
@@ -2456,7 +2462,7 @@ def _client_absent_continuation(*, consumed: BudgetConsumed) -> dict[str, Any]:
     时刻**，文案里不能出现"提高 ceiling 后恢复"（那次恢复必被 `validate_resume`
     409 挡死，`03 §5` / ADR-0044 D4 禁止"暗示可安全续跑"）。它缺的是"客户端在
     场"，所以动作指向唯一恢复依据 `client_return`。`completed` 仍只列已确证的
-    消耗计数（"不可得 ≠ 0"的文案纪律同预算支，见 `_value_text` / `_decimal_text`）。
+    消耗计数（"不可得 ≠ 0"的文案纪律同预算支，见 `_value_text` / `decimal_text`）。
     """
     return {
         "completed": [
@@ -2466,7 +2472,7 @@ def _client_absent_continuation(*, consumed: BudgetConsumed) -> dict[str, Any]:
             ),
             (
                 f"累计 token：{_value_text(consumed.total_tokens)}；"
-                f"累计成本（USD）：{_decimal_text(consumed.cost_usd) or '未知'}"
+                f"累计成本（USD）：{decimal_text(consumed.cost_usd) or '未知'}"
             ),
         ],
         "remaining": [
@@ -2543,7 +2549,7 @@ def _dimension_text(consumed: BudgetConsumed, dimension: str) -> str:
         TRIGGER_RUN_TURNS: str(consumed.agent_turns),
         TRIGGER_RUN_REQUESTS: _value_text(consumed.model_requests),
         TRIGGER_RUN_TOKENS: _value_text(consumed.total_tokens),
-        TRIGGER_RUN_COST: _decimal_text(consumed.cost_usd) or "未知",
+        TRIGGER_RUN_COST: decimal_text(consumed.cost_usd) or "未知",
     }.get(dimension, "未知")
 
 
@@ -2555,7 +2561,7 @@ def _value_text(value: Any) -> str:
     if isinstance(value, datetime):
         # deadline 的 ceiling 是时刻：一律按 wire 的 UTC 写法展示（operator 抄进
         # 恢复请求时要能直接用，`+00:00` 与 `Z` 两种写法对人是两回事、对机器是一回事）。
-        return _deadline_text(value) or "未知"
+        return deadline_text(value) or "未知"
     return str(value)
 
 
@@ -2673,8 +2679,8 @@ class SessionLimits:
             "max_agent_turns_total": self.max_agent_turns_total,
             "max_model_requests": self.max_model_requests,
             "max_total_tokens": self.max_total_tokens,
-            "max_cost_usd": _decimal_text(self.max_cost_usd),
-            "deadline_at": _deadline_text(self.deadline_at),
+            "max_cost_usd": decimal_text(self.max_cost_usd),
+            "deadline_at": deadline_text(self.deadline_at),
             "tool_call_limits": {
                 name: self.tool_call_limits[name] for name in sorted(self.tool_call_limits)
             },
@@ -2719,7 +2725,7 @@ class SessionConsumed:
             "agent_turns": self.agent_turns,
             "model_requests": self.model_requests,
             "total_tokens": self.total_tokens,
-            "cost_usd": _decimal_text(self.cost_usd),
+            "cost_usd": decimal_text(self.cost_usd),
             "tool_calls": self.tool_calls,
             "tool_attempts": self.tool_attempts,
             "tool_calls_by_tool": _map_text(self.tool_calls_by_tool),
@@ -2737,7 +2743,7 @@ class SessionConsumed:
             "agent_turns": _remaining(limits.max_agent_turns_total, self.agent_turns),
             "model_requests": _remaining(limits.max_model_requests, self.model_requests),
             "total_tokens": _remaining(limits.max_total_tokens, self.total_tokens),
-            "cost_usd": _decimal_text(
+            "cost_usd": decimal_text(
                 None
                 if limits.max_cost_usd is None or self.cost_usd is None
                 else max(limits.max_cost_usd - self.cost_usd, Decimal(0))

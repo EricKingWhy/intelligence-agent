@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -24,10 +25,10 @@ from agent_harness.context.tokens import estimate_message_tokens
 from agent_harness.model.concurrency import ModelCallGate
 from agent_harness.prompt import DEFAULT_REGISTRY
 from agent_harness.session.derive import (
-    _USER_GOAL_VALUE_MAX_CHARS,
     COMPACTION_SUMMARY_MESSAGE_NAME,
+    USER_GOAL_VALUE_MAX_CHARS,
     ProtectedFact,
-    _bounded_goal_value,
+    bounded_goal_value,
     serialize_protected_facts,
 )
 from agent_harness.session.event import CONTEXT_COMPACTED, SessionEvent
@@ -386,8 +387,14 @@ class ContextWindowExceededError(RuntimeError):
         self, message: str, *,
         failures: list[CompactionFailure] | None = None,
         raw_artifact_content: str | None = None,
+        breakdown: dict[str, int] | None = None,
     ) -> None:
         super().__init__(message)
+        #: #1497：调用前硬闸门拒绝时携带的**分项预算账本**（各组成 → token 数，
+        #: 全整型）。抛点为 builder 的统一闸门（`_enforce_hard_guard`）——分项
+        #: 数字由 builder 的编码器估算（含 usage 锚只抬高的 messages 项），是
+        #: 项目自有口径，不含 provider 回显。其余抛点保持 None（非闸门语义）。
+        self.breakdown = breakdown
         #: W-04 (#348)：双次摘要尝试的失败记录（最后一次在末尾）。
         #: #639 的"摘要请求本身超限"与 #648 的"无可压缩早期轮"两类预检超限是
         #: 例外——各携带一条 attempt=0 的诊断（非摘要尝试），经抛错路径的
@@ -478,6 +485,34 @@ def _render_transcript(messages: list[AnyMessage]) -> str:
     return json.dumps(
         [message.model_dump(mode="json") for message in messages],
         ensure_ascii=False,
+    )
+
+
+def is_transient_error_class(error_class: str) -> bool:
+    """#1539：摘要失败 ``error_class`` 瞬态/结构性二分的唯一公开判据。
+
+    Runtime 的「这次超限值不值得在循环内再压一次」（``agent/runtime.py`` 的
+    ``_is_retriable_compaction_failure``）消费本谓词；词表本体
+    （``_TRANSIENT_ERROR_CLASSES``，与 ``_SUMMARY_ERROR_CLASSES`` 同 owner
+    同步二分）保持模块私有——调用方只问行为，不再持有常量知识。
+    """
+    return error_class in _TRANSIENT_ERROR_CLASSES
+
+
+def non_summary_user_turn_count(messages: Sequence[AnyMessage]) -> int:
+    """「非摘要 HumanMessage」条数——可压轮数判据的唯一实现。
+
+    消费方：``ContextCompactor.compact`` 的 ``compacted_turn_count``（传实际
+    参与压缩的 early 段——缩小/分块路径下是实际生效段）、
+    ``_programmatic_summary_sections``（经 ``_assemble_summary`` 调用）的归档
+    计数（传全量 messages），与 dry-run 预览
+    （``session/service.py::_has_compactable_early_turn``，传完整 early 窗口）。
+    #1539：session 侧不再 import ``_is_compaction_summary`` 识别细节。
+    """
+    return sum(
+        isinstance(message, HumanMessage)
+        and not _is_compaction_summary(message)
+        for message in messages
     )
 
 
@@ -770,7 +805,7 @@ class ContextCompactor:
         # C-6 #642：early 段每条消息的来源区间（提前到摘要尝试之前，与成功后
         # 的 source_seq 区间计算共用同一次推导；语义与原成功路径逐字一致）。
         # #710 方向 C：同一份 early_ranges 同时供第 0 节承载位的来源指针
-        # （_assemble_summary/_validate_summary）复用。
+        # （#1506：随尝试输入一并交给摘要接口）复用。
         # W-03 (#347)：裁剪后的投影消息与 derive 产物**内容不再逐条相等**
         # （ToolMessage.content 原位替换），但消息数与顺序不变——调用方
         # 传来的 ranges 与 messages 位置一一对应，直接采用、跳过相等对齐。
@@ -779,7 +814,6 @@ class ContextCompactor:
             messages, events, source_ranges, prefix_end, cut,
             supports_vision=supports_vision,
         )
-        trusted_summaries = _trusted_summary_indices(early, early_ranges, events)
         prompt = SystemMessage(
             content=DEFAULT_REGISTRY.assemble("aux:compaction").system_text
         )
@@ -829,9 +863,6 @@ class ContextCompactor:
                     early_ranges = (
                         early_ranges[:narrow_cut - prefix_end]
                         if early_ranges is not None else None
-                    )
-                    trusted_summaries = _trusted_summary_indices(
-                        early, early_ranges, events,
                     )
                     request = narrowed_request
                     request_token_estimate = narrowed_token_estimate
@@ -959,24 +990,18 @@ class ContextCompactor:
                     raise _SummaryRejected("non_text", "Summary must be plain text")
                 if not response.content.strip():
                     raise _SummaryRejected("empty_summary", "Summary must not be empty")
-                model_sections = _parse_summary_sections(
-                    response.content, _MODEL_SUMMARY_HEADINGS,
-                )
-                candidate_summary_text = _assemble_summary(
-                    early, model_sections, protected_facts, trusted_summaries,
-                    source_ranges=early_ranges, events=events,
-                )
-                _validate_summary(
-                    candidate_summary_text, early, protected_facts,
-                    trusted_summaries, source_ranges=early_ranges, events=events,
-                )
-                # W-29 (#383)：摘要第 5 节与进度清单一致性闸门（PRD §6.1 表行 5，
-                # 落盘前校验 = §4.4 闸门语义）。events 为 None（直连 compactor 的
-                # 既有调用面）或会话无清单时 plan_items 为空 ⇒ 闸门不启用——空接缝
-                # 语义保留，无清单会话的行为逐字节等价。窗口推导见尝试循环之前
-                # （#1026 前移：分块请求注入计划块与闸门共用同一投影）。
-                if events is not None:
-                    _validate_plan_section(candidate_summary_text, plan_items)
+                # #1506 裁决 19：文法（parse/assemble）与校验次序（validate →
+                # plan gate）收进 `_compose_verified_summary`——本调用方只提交一次
+                # 摘要尝试输入，四步全过才拿回候选文本（条件门内置于接口：
+                # `events is None` ⇒ 计划闸门不启用，W-29 #383 空接缝语义精确保持）。
+                candidate_summary_text = _compose_verified_summary(_SummaryAttempt(
+                    early=early,
+                    response_content=response.content,
+                    source_ranges=early_ranges,
+                    events=events,
+                    protected_facts=protected_facts,
+                    plan_items=plan_items,
+                ))
                 early_tokens = estimate_message_tokens(early)
                 summary_message = HumanMessage(
                     content=candidate_summary_text,
@@ -1144,11 +1169,7 @@ class ContextCompactor:
             )
         return CompactionResult(
             compacted,
-            sum(
-                isinstance(message, HumanMessage)
-                and not _is_compaction_summary(message)
-                for message in early
-            ),
+            non_summary_user_turn_count(early),
             count,
             False,
             source_seq_start=source_seq_start,
@@ -1460,7 +1481,7 @@ def _carrier_instruction_line(
     触发压缩的当前轮仍在 recent 逐字保留，不会进入本窗口。
 
     口径对齐 `_current_goal_body`：JSON 字符串编码（ensure_ascii=False）、
-    复用 `_USER_GOAL_VALUE_MAX_CHARS`（2000）截断上限 + 超长截断标记（含
+    复用 `USER_GOAL_VALUE_MAX_CHARS`（2000）截断上限 + 超长截断标记（含
     来源 seq 回读指针）。选中消息时用同下标的 range 写指针（用户消息的
     range 是 (seq, seq)，取 [0]）；range 为 None（来源区间不可用的直连调用
     面）时不写指针行、只写 JSON。无候选用户消息（early 全是模型消息等退化
@@ -1486,13 +1507,13 @@ def _carrier_instruction_line(
     raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
     source_range = source_ranges[carrier_index] if source_ranges is not None else None
     content = raw_text
-    if len(raw_text) > _USER_GOAL_VALUE_MAX_CHARS:
+    if len(raw_text) > USER_GOAL_VALUE_MAX_CHARS:
         pointer = (
             f"，见来源事件 seq={source_range[0]}" if source_range is not None else ""
         )
         content = (
-            raw_text[:_USER_GOAL_VALUE_MAX_CHARS]
-            + f"…［已截断：显示前{_USER_GOAL_VALUE_MAX_CHARS}字符，"
+            raw_text[:USER_GOAL_VALUE_MAX_CHARS]
+            + f"…［已截断：显示前{USER_GOAL_VALUE_MAX_CHARS}字符，"
             + f"全文共{len(raw_text)}字符{pointer}］"
         )
     body = json.dumps(content, ensure_ascii=False)
@@ -1524,7 +1545,7 @@ def _current_goal_body(
     state = effective_goal(events or [])
     if state.defined and state.objective:
         raw = state.objective
-        value = _bounded_goal_value(raw, state.source_event_id or "")
+        value = bounded_goal_value(raw, state.source_event_id or "")
     elif state.authoritative:
         # `clear` 墓碑 = 没有目标。不回落旧 user_goal 事实（换源后旧事实已
         # superseded，这里按"无目标"投影，与 /goal 一致）。
@@ -1731,14 +1752,7 @@ def _programmatic_summary_sections(
         f"{_current_goal_body(events, protected_facts)}\n"
         f"{_carrier_instruction_line(messages, source_ranges)}"
     )
-    archived_turns = (
-        sum(
-            1
-            for message in messages
-            if isinstance(message, HumanMessage) and not _is_compaction_summary(message)
-        )
-        - 1
-    )
+    archived_turns = non_summary_user_turn_count(messages) - 1
     if archived_turns > 0:
         section0 += (
             f"\n（更早 {archived_turns} 条用户指令已归档："
@@ -1856,6 +1870,59 @@ def _validate_plan_section(
             "Plan section is inconsistent with the progress plan; "
             f"in-progress item(s) missing: {', '.join(missing)}",
         )
+
+
+@dataclass(frozen=True)
+class _SummaryAttempt:
+    """一次摘要尝试的完整输入（#1506）。语义数据只在此打包一次。"""
+
+    #: 本次摘要覆盖的 early 窗口（#639 缩小后为缩小段）。
+    early: list[AnyMessage]
+    #: 模型响应正文（调用方已完成 AIMessage/非空文本检查）。
+    response_content: str
+    #: 与 `early` 逐条对应的来源区间；None = 区间不可用（直连调用面）。
+    source_ranges: list[tuple[int, int] | None] | None = None
+    events: list[SessionEvent] | None = None
+    protected_facts: list[ProtectedFact] | None = None
+    #: 计划窗口投影（已按 A-vis 收窄）；仅 `events is not None` 时参与闸门。
+    plan_items: tuple[PlanItem, ...] = ()
+
+
+def _compose_verified_summary(attempt: _SummaryAttempt) -> str:
+    """#1506 裁决 19：一次摘要尝试 → 一份核验过的候选摘要（四阶段的唯一串接点）。
+
+    次序**只在这里**：parse（模型四节文法）→ assemble（程序化四节 + 转义）→
+    validate（程序化节逐字比对）→ plan gate（`events is not None` 才启用，
+    W-29 #383 空接缝语义精确保持）。四步全过才返回文本；任一步抛原异常
+    （`_SummaryRejected` 携带 `error_class`、其余 ValueError 由 `_classify_failure`
+    归类），调用方拿不到部分结果——「Commit candidate state only after every
+    validation gate passes」由此成为接口契约，而非调用点注释。
+
+    调用方只提交一次尝试输入，不再知道先 parse 还是先 assemble，也不需要知道
+    `events`/`source_ranges` 该在第几步传。
+
+    本函数按模块全局名调用四个阶段：`test_844_plan_gate_window.py` 用
+    `monkeypatch.setattr(compactor, "_validate_plan_section", spy)` 观测闸门输入，
+    该观测面因此仍然成立。
+    """
+    trusted_summaries = _trusted_summary_indices(
+        attempt.early, attempt.source_ranges, attempt.events,
+    )
+    model_sections = _parse_summary_sections(
+        attempt.response_content, _MODEL_SUMMARY_HEADINGS,
+    )
+    summary = _assemble_summary(
+        attempt.early, model_sections, attempt.protected_facts,
+        trusted_summaries,
+        source_ranges=attempt.source_ranges, events=attempt.events,
+    )
+    _validate_summary(
+        summary, attempt.early, attempt.protected_facts, trusted_summaries,
+        source_ranges=attempt.source_ranges, events=attempt.events,
+    )
+    if attempt.events is not None:
+        _validate_plan_section(summary, attempt.plan_items)
+    return summary
 
 
 def _validate_tool_blocks(messages: list[AnyMessage]) -> None:

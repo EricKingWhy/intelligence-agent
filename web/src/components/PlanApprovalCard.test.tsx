@@ -149,3 +149,34 @@ describe('PlanApprovalCard', () => {
     expect(document.querySelector('.plan-approval-files')).toBeNull();
   });
 });
+
+describe('#1523 裁决提交后的焦点落点', () => {
+  // 同 AskUserCard：以同 id 占位输入框代表真实 Composer（App 的既有焦点惯例）。
+  const mountComposer = (): HTMLInputElement => {
+    const composer = document.createElement('input');
+    composer.id = 'composer-input';
+    document.body.appendChild(composer);
+    return composer;
+  };
+
+  it('裁决提交后焦点落到 composer 输入框（按钮禁用瞬间不悬空 body）', () => {
+    const composer = mountComposer();
+    const onSubmit = vi.fn();
+    render(<PlanApprovalCard request={request()} onSubmit={onSubmit} />);
+
+    click('.plan-approval-revise');
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ decision: 'revise' }));
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it('恢复失败（卡仍在）时焦点回到触发裁决的那个按钮，重试可继续', () => {
+    const composer = mountComposer();
+    render(<PlanApprovalCard request={request()} onSubmit={vi.fn()} />);
+    click('.plan-approval-revise');
+    expect(document.activeElement).toBe(composer);
+
+    render(<PlanApprovalCard request={request()} errorMessage="版本冲突，请刷新后重试" onSubmit={vi.fn()} />);
+    const active = document.activeElement as HTMLElement | null;
+    expect(active?.classList.contains('plan-approval-revise')).toBe(true);
+  });
+});

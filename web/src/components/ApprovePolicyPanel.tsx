@@ -13,7 +13,7 @@
  * 攻击面最大的单点，任何变更都必须由用户主动确认，不能一次点击就生效。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react';
 import {
@@ -21,10 +21,12 @@ import {
   revokeApprovePolicyRule,
   type ApprovePolicyRule,
 } from '../lib/api';
+import { resolveFocusReturnTarget, restoreFocusTarget } from './focusReturn';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  focusReturnTargetRef?: { current: HTMLElement | null };
 }
 
 const GRANULARITY_LABELS: Record<ApprovePolicyRule['granularity'], string> = {
@@ -32,18 +34,25 @@ const GRANULARITY_LABELS: Record<ApprovePolicyRule['granularity'], string> = {
   command: '命令级（不含参数）',
 };
 
-export function ApprovePolicyPanel({ open, onOpenChange }: Props) {
+export function ApprovePolicyPanel({ open, onOpenChange, focusReturnTargetRef }: Props) {
+  const openerRef = useRef<HTMLElement | null>(null);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="palette-overlay" />
-        {open && <ApprovePolicyPanelBody />}
+        {open && <ApprovePolicyPanelBody openerRef={openerRef} focusReturnTargetRef={focusReturnTargetRef} />}
       </Dialog.Portal>
     </Dialog.Root>
   );
 }
 
-function ApprovePolicyPanelBody() {
+function ApprovePolicyPanelBody({
+  openerRef,
+  focusReturnTargetRef,
+}: {
+  openerRef: { current: HTMLElement | null };
+  focusReturnTargetRef?: { current: HTMLElement | null };
+}) {
   const [rules, setRules] = useState<ApprovePolicyRule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -81,7 +90,20 @@ function ApprovePolicyPanelBody() {
   };
 
   return (
-    <Dialog.Content className="project-dialog approve-policy-dialog">
+    <Dialog.Content
+      className="project-dialog approve-policy-dialog"
+      onOpenAutoFocus={() => {
+        const requestedTarget = focusReturnTargetRef?.current ?? null;
+        if (focusReturnTargetRef) focusReturnTargetRef.current = null;
+        openerRef.current = resolveFocusReturnTarget(requestedTarget ?? document.activeElement);
+      }}
+      onCloseAutoFocus={(event) => {
+        if (openerRef.current) {
+          event.preventDefault();
+          restoreFocusTarget(openerRef.current);
+        }
+      }}
+    >
       <div className="project-dialog-head">
         <Dialog.Title className="project-dialog-title">
           <ShieldCheck size={14} aria-hidden="true" /> 持久审批规则

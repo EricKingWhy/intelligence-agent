@@ -318,7 +318,7 @@ def _deadline_instant(value: Any) -> datetime | None:
 
 
 def _deadline_text(value: Any) -> str:
-    """`deadline_at` 的可读文本（证据 detail 用；形状与 `run_budget._deadline_text` 同族）。"""
+    """`deadline_at` 的可读文本（证据 detail 用；形状与 `run_budget.deadline_text` 同族）。"""
     moment = _deadline_instant(value)
     return "" if moment is None else moment.isoformat().replace("+00:00", "Z")
 
