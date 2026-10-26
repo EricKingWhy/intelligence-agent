@@ -17,6 +17,7 @@ formation），再断言回执集合恰好覆盖全部前缀、且全部 COMMITT
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -31,8 +32,14 @@ from agent_harness.memory.v2.capability import (
     MemoryV2Service,
     _digest_operation_id,
 )
-from agent_harness.memory.v2.commit import MemoryCommit, MemoryCommitError
-from agent_harness.memory.v2.executor import MemoryJobExecutor
+from agent_harness.memory.v2.commit import (
+    MemoryBatchRejected,
+    MemoryCommit,
+    MemoryCommitError,
+    MemoryReconcileRequired,
+    _scope_child_id,
+)
+from agent_harness.memory.v2.executor import DegradedReason, MemoryJobExecutor
 from agent_harness.memory.v2.file_state import (
     MemoryStateRoot,
     atomic_write_text,
@@ -247,15 +254,22 @@ async def test_same_operation_id_publishes_one_logical_update(seam: Seam) -> Non
     first, second = await asyncio.gather(
         seam.commit.add("memory", "并发候选 A", operation_id="mcf_one_logical"),
         seam.commit.add("memory", "并发候选 B", operation_id="mcf_one_logical"),
+        return_exceptions=True,
     )
 
     text = seam.memory_file.read_text(encoding="utf-8")
     written = [content for content in ("并发候选 A", "并发候选 B") if content in text]
     assert len(written) == 1, "同一 operation id 只能产生一次逻辑更新"
-    assert sum(1 for response in (first, second) if response.get("replayed")) == 1
-    assert all(response["operation_id"] == "mcf_one_logical" for response in (first, second))
+    responses = [item for item in (first, second) if isinstance(item, dict)]
+    errors = [item for item in (first, second) if isinstance(item, BaseException)]
+    assert len(responses) == 1 and responses[0]["success"] is True
+    assert len(errors) == 1, "换意图的并发重试必须显式失败，不能静默回放旧内容"
+    assert isinstance(errors[0], MemoryReconcileRequired)
+    assert errors[0].operation_id == "mcf_one_logical"
     [receipt] = seam.receipts()
     assert receipt["state"] == ReceiptState.COMMITTED
+    assert receipt["operations"][0]["content_digest"] == hashlib.sha256(
+        written[0].encode()).hexdigest()
 
 
 # --------------------------------------------------------------------------------------
@@ -372,6 +386,36 @@ async def test_formation_publish_failure_rolls_back_records_and_keeps_the_job_re
     ]
     assert jobp_receipts and {item["state"] for item in jobp_receipts} == {
         ReceiptState.PREPARED}, "回执停在 PREPARED，等待重启对账"
+
+
+@pytest.mark.asyncio
+async def test_formation_reconcile_conflict_degrades_instead_of_retrying_forever(
+    seam: Seam, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2-1：重试同一 operation id 不会收敛 ⇒ job 必须降级，不能无限重跑。
+
+    瞬时发布失败仍走 `MemoryCommitError`（job 保持可恢复）；只有「已 NEED_RECONCILE /
+    已 COMMITTED 但意图不同」这类确定性冲突才收敛到 DEGRADED。
+    """
+
+    async def _reconcile_conflict(*_args, **_kwargs):
+        raise MemoryReconcileRequired(
+            "jobp_executor_conflict", "memory", "already committed with a different intent")
+
+    monkeypatch.setattr(
+        seam.service, "mirror_committed", _reconcile_conflict)
+
+    job_id, result = await _formation_run(seam)
+
+    assert result is not None
+    assert result.stage is MemoryJobStage.DEGRADED
+    assert result.reason == DegradedReason.APPLY_FAILED.value
+    job = await seam.jobs.get(job_id)
+    assert job.stage is MemoryJobStage.DEGRADED
+    assert job.reason == DegradedReason.APPLY_FAILED.value
+    assert await seam.service.list_active(
+        LOCAL, scope=MemoryScope.USER_GLOBAL, limit=10) == [], (
+        "确定性冲突不得留下半提交的 records")
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1064,173 @@ async def test_growth_crash_before_spec_recovers_missing_target_with_child_recei
 
 
 @pytest.mark.asyncio
+async def test_growth_preflight_rejection_is_reported_against_the_parent_receipt(
+    seam: Seam, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """扩 scope 的子预检拒绝：错误必须带父 operation id，且不留下无主的子回执。"""
+    memory_content = "父回执已提交"
+    await seam.commit.apply_batch_many(
+        [("memory", [{"action": "add", "content": memory_content}])],
+        operation_id="jobp_growth_reject")
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+    original_preview = seam.commit._preview_batch
+
+    def _reject_user(spec: dict):
+        if spec["target"] == "user":
+            return {"error": "user preflight says no"}, None, None
+        return original_preview(spec)
+
+    monkeypatch.setattr(seam.commit, "_preview_batch", _reject_user)
+    with pytest.raises(MemoryBatchRejected) as error:
+        await seam.commit.apply_batch_many(
+            [
+                ("memory", [{"action": "add", "content": memory_content}]),
+                ("user", [{"action": "add", "content": "被预检拒绝的 USER"}]),
+            ],
+            operation_id="jobp_growth_reject")
+
+    assert error.value.operation_id == "jobp_growth_reject"
+    assert error.value.target == "user"
+    assert not user_file.exists()
+    assert list(
+        ReceiptStore(seam.root).root.receipts_dir.glob("jobp_growth_reject_g*.json")
+    ) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("point", ["prepare", "plan", "publish", "mark", "finish"])
+async def test_growth_child_recovers_from_every_crash_point(
+    seam: Seam, monkeypatch: pytest.MonkeyPatch, point: str,
+) -> None:
+    """子回执 prepare/plan/publish/mark/finish 任一步崩：父回执不动，重试只补一次。"""
+    memory_content = "子回执崩溃测试的父内容"
+    user_content = "子回执崩溃测试的 USER"
+    parent_id = f"jobp_child_{point}"
+    child_id = _scope_child_id(parent_id, "user")
+    await seam.commit.apply_batch_many(
+        [("memory", [{"action": "add", "content": memory_content}])],
+        operation_id=parent_id)
+    store = ReceiptStore(seam.root)
+    parent_before = store.path_for(parent_id).read_bytes()
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+    original = seam.commit.engine._write_file
+    failing = {"on": True}
+
+    def _patched_prepare(operation_id: str, **kwargs):
+        if failing["on"] and operation_id == child_id:
+            raise OSError(f"crash at {point}")
+        return original_prepare(operation_id, **kwargs)
+
+    def _patched_plan(operation_id: str, target: str, **kwargs):
+        if failing["on"] and operation_id == child_id:
+            raise OSError(f"crash at {point}")
+        return original_plan(operation_id, target, **kwargs)
+
+    def _patched_publish(path: Path, entries: list[str]) -> None:
+        if failing["on"] and path.name == "USER.md":
+            raise OSError(f"crash at {point}")
+        original(path, entries)
+
+    def _patched_mark(operation_id: str, target: str):
+        if failing["on"] and operation_id == child_id:
+            raise OSError(f"crash at {point}")
+        return original_mark(operation_id, target)
+
+    def _patched_finish(operation_id: str, **kwargs):
+        if failing["on"] and operation_id == child_id:
+            raise OSError(f"crash at {point}")
+        return original_finish(operation_id, **kwargs)
+
+    original_prepare = seam.commit._receipts.prepare
+    original_plan = seam.commit._receipts.record_target_plan
+    original_mark = seam.commit._receipts.mark_target_published
+    original_finish = seam.commit._receipts.finish
+    monkeypatch.setattr(seam.commit._receipts, "prepare", _patched_prepare)
+    monkeypatch.setattr(seam.commit._receipts, "record_target_plan", _patched_plan)
+    monkeypatch.setattr(seam.commit._receipts, "mark_target_published", _patched_mark)
+    monkeypatch.setattr(seam.commit._receipts, "finish", _patched_finish)
+    if point == "publish":
+        monkeypatch.setattr(seam.commit.engine, "_write_file", _patched_publish)
+
+    with pytest.raises(MemoryCommitError):
+        await seam.commit.apply_batch_many(
+            [
+                ("memory", [{"action": "add", "content": memory_content}]),
+                ("user", [{"action": "add", "content": user_content}]),
+            ],
+            operation_id=parent_id)
+
+    assert store.path_for(parent_id).read_bytes() == parent_before
+    parent = read_json(store.path_for(parent_id))
+    assert parent is not None and parent["state"] == ReceiptState.COMMITTED
+    assert set(parent["targets"]) == {"memory"}
+    child = read_json(store.path_for(child_id))
+    assert child is None or child["state"] != ReceiptState.COMMITTED
+    if point not in {"mark", "finish"}:
+        assert not user_file.exists()
+
+    failing["on"] = False
+    response = await seam.commit.apply_batch_many(
+        [
+            ("memory", [{"action": "add", "content": memory_content}]),
+            ("user", [{"action": "add", "content": user_content}]),
+        ],
+        operation_id=parent_id)
+
+    assert response["success"] is True
+    assert response["scope_operation_ids"] == {"user": child_id}
+    assert user_file.read_text(encoding="utf-8").count(user_content) == 1
+    child_after = read_json(store.path_for(child_id))
+    assert child_after is not None and child_after["state"] == ReceiptState.COMMITTED
+
+
+@pytest.mark.asyncio
+async def test_growth_child_drift_before_publish_mark_needs_reconcile(
+    seam: Seam, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """子内容已写盘、发布位未落时用户改盘：重试必须 NEED_RECONCILE，不覆盖用户改动。"""
+    memory_content = "漂移测试的父内容"
+    user_content = "漂移测试的 USER"
+    parent_id = "jobp_child_drift"
+    child_id = _scope_child_id(parent_id, "user")
+    await seam.commit.apply_batch_many(
+        [("memory", [{"action": "add", "content": memory_content}])],
+        operation_id=parent_id)
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+    original_mark = seam.commit._receipts.mark_target_published
+    failing = {"on": True}
+
+    def _fail_mark(operation_id: str, target: str):
+        if failing["on"] and operation_id == child_id:
+            raise OSError("crash before publish mark")
+        return original_mark(operation_id, target)
+
+    monkeypatch.setattr(
+        seam.commit._receipts, "mark_target_published", _fail_mark)
+    with pytest.raises(MemoryCommitError):
+        await seam.commit.apply_batch_many(
+            [
+                ("memory", [{"action": "add", "content": memory_content}]),
+                ("user", [{"action": "add", "content": user_content}]),
+            ],
+            operation_id=parent_id)
+
+    atomic_write_text(user_file, "用户发布后自己改的内容")
+    failing["on"] = False
+    with pytest.raises(MemoryReconcileRequired):
+        await seam.commit.apply_batch_many(
+            [
+                ("memory", [{"action": "add", "content": memory_content}]),
+                ("user", [{"action": "add", "content": user_content}]),
+            ],
+            operation_id=parent_id)
+
+    assert user_file.read_text(encoding="utf-8") == "用户发布后自己改的内容"
+    child = read_json(ReceiptStore(seam.root).path_for(child_id))
+    assert child is not None and child["state"] == ReceiptState.NEED_RECONCILE
+
+
+@pytest.mark.asyncio
 async def test_single_target_committed_receipt_rejects_a_new_target(seam: Seam) -> None:
     """确定性单目标 id 已 COMMITTED 后再换 target：必须显式报错，不能假回放。"""
     await seam.commit.add(
@@ -1031,6 +1242,83 @@ async def test_single_target_committed_receipt_rejects_a_new_target(seam: Seam) 
 
     user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
     assert not user_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_committed_single_receipt_rejects_a_different_intent(seam: Seam) -> None:
+    """COMMITTED 回执是终态事实：同一 id 换正文必须报对账，不能静默回放旧内容。"""
+    await seam.commit.add("memory", "已提交的意图 A", operation_id="mcf_intent_conflict")
+    before = seam.memory_file.read_text(encoding="utf-8")
+
+    with pytest.raises(
+        MemoryReconcileRequired, match="already committed with a different intent"):
+        await seam.commit.add(
+            "memory", "同一 id 的新意图 B", operation_id="mcf_intent_conflict")
+
+    assert seam.memory_file.read_text(encoding="utf-8") == before
+    receipt = read_json(ReceiptStore(seam.root).path_for("mcf_intent_conflict"))
+    assert receipt is not None and receipt["state"] == ReceiptState.COMMITTED
+    assert receipt["operations"][0]["content_digest"] == (
+        hashlib.sha256("已提交的意图 A".encode()).hexdigest())
+
+
+@pytest.mark.asyncio
+async def test_committed_multi_receipt_rejects_a_different_intent(seam: Seam) -> None:
+    """多目标 COMMITTED 后换掉任一目标意图：整批拒绝，不能把旧内容当新意图回放。"""
+    await seam.commit.apply_batch_many(
+        [("memory", [{"action": "add", "content": "多目标已提交 A"}])],
+        operation_id="jobp_intent_conflict")
+    before = seam.memory_file.read_text(encoding="utf-8")
+
+    with pytest.raises(
+        MemoryReconcileRequired, match="already committed with a different intent"):
+        await seam.commit.apply_batch_many(
+            [("memory", [{"action": "add", "content": "多目标新意图 B"}])],
+            operation_id="jobp_intent_conflict")
+
+    assert seam.memory_file.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_committed_growth_rejects_a_different_parent_intent(seam: Seam) -> None:
+    """COMMITTED 后扩 target 也不能顺手换父目标意图：先报对账，不发布子回执。"""
+    await seam.commit.apply_batch_many(
+        [("memory", [{"action": "add", "content": "父目标已提交 A"}])],
+        operation_id="jobp_growth_intent")
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+
+    with pytest.raises(
+        MemoryReconcileRequired, match="already committed with a different intent"):
+        await seam.commit.apply_batch_many(
+            [
+                ("memory", [{"action": "add", "content": "父目标新意图 B"}]),
+                ("user", [{"action": "add", "content": "增长出来的 USER"}]),
+            ],
+            operation_id="jobp_growth_intent")
+
+    assert not user_file.exists()
+    assert list(
+        ReceiptStore(seam.root).root.receipts_dir.glob("jobp_growth_intent_g*.json")
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_committed_digest_receipt_rejects_a_different_digest(seam: Seam) -> None:
+    """同一 digest 清理 id 换成另一份正文：不能回放旧的 cleaned 列表当成功。"""
+    atomic_write_text(
+        seam.memory_file, ENTRY_DELIMITER.join(["已清理 A", "仍需保留 B"]))
+    cleaned_digest = entry_digest("已清理 A")
+    other_digest = entry_digest("仍需保留 B")
+    await seam.commit.remove_by_digest(
+        digests_by_target={"memory": [cleaned_digest]}, operation_id="del_intent_conflict")
+
+    with pytest.raises(
+        MemoryReconcileRequired, match="already committed with a different intent"):
+        await seam.commit.remove_by_digest(
+            digests_by_target={"memory": [other_digest]},
+            operation_id="del_intent_conflict")
+
+    assert "仍需保留 B" in seam.memory_file.read_text(encoding="utf-8")
 
 
 def test_digest_operation_id_is_scoped_by_target() -> None:
@@ -1546,124 +1834,42 @@ async def test_digest_cleanup_retry_does_not_redelete_a_published_target(
 
 
 @pytest.mark.asyncio
-async def test_digest_cleanup_scope_growth_uses_a_stable_child_receipt(
+async def test_committed_digest_receipt_rejects_a_larger_explicit_scope(
     seam: Seam,
 ) -> None:
-    """review N1：COMMITTED 后扩 target，缺失目标走子回执，旧回执不被改写。"""
+    """生产 `del_dg_` 把 target 集编进幂等键；显式 id 扩 scope 不能伪装成已清理。"""
     user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
-    atomic_write_text(seam.memory_file, "扩 scope 的内存墓碑")
-    atomic_write_text(user_file, "扩 scope 的用户墓碑")
-    memory_digest = entry_digest("扩 scope 的内存墓碑")
-    user_digest = entry_digest("扩 scope 的用户墓碑")
+    atomic_write_text(seam.memory_file, "显式 scope 的内存墓碑")
+    atomic_write_text(user_file, "显式 scope 的用户墓碑")
+    memory_digest = entry_digest("显式 scope 的内存墓碑")
+    user_digest = entry_digest("显式 scope 的用户墓碑")
 
     await seam.commit.remove_by_digest(
-        digests_by_target={"memory": [memory_digest]}, operation_id="del_scope_growth")
-    cleaned = await seam.commit.remove_by_digest(
-        digests_by_target={"memory": [memory_digest], "user": [user_digest]},
-        operation_id="del_scope_growth")
-
-    assert "MEMORY.md" in cleaned and "USER.md" in cleaned
-    assert "扩 scope 的用户墓碑" not in user_file.read_text(encoding="utf-8")
-    store = ReceiptStore(seam.root)
-    base = read_json(store.path_for("del_scope_growth"))
-    assert base is not None and set(base["targets"]) == {"memory"}
-    children = [
-        payload for path in store.root.receipts_dir.glob("del_scope_growth_g*.json")
-        if (payload := read_json(path)) is not None
-    ]
-    assert len(children) == 1
-    assert children[0]["state"] == ReceiptState.COMMITTED
-    assert set(children[0]["targets"]) == {"user"}
-
-    again = await seam.commit.remove_by_digest(
-        digests_by_target={"memory": [memory_digest], "user": [user_digest]},
-        operation_id="del_scope_growth")
-    assert "USER.md" in again
-    assert "扩 scope 的用户墓碑" not in user_file.read_text(encoding="utf-8")
-
-
-@pytest.mark.asyncio
-async def test_digest_cleanup_scope_growth_with_zero_hits_commits_the_child(
-    seam: Seam,
-) -> None:
-    """扩 scope 的目标没有命中墓碑：子回执仍要按 planned 收尾成 COMMITTED。"""
-    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
-    atomic_write_text(seam.memory_file, "零命中扩 scope 的内存墓碑")
-    atomic_write_text(user_file, "用户文件原本的内容")
-    memory_digest = entry_digest("零命中扩 scope 的内存墓碑")
-    missing_digest = entry_digest("用户文件里不存在的正文")
-    await seam.commit.remove_by_digest(
-        digests_by_target={"memory": [memory_digest]}, operation_id="del_scope_zero")
-
-    cleaned = await seam.commit.remove_by_digest(
-        digests_by_target={
-            "memory": [memory_digest], "user": [missing_digest]},
-        operation_id="del_scope_zero")
-
-    assert "MEMORY.md" in cleaned and "USER.md" not in cleaned
-    assert user_file.read_text(encoding="utf-8") == "用户文件原本的内容"
-    store = ReceiptStore(seam.root)
-    children = [
-        payload for path in store.root.receipts_dir.glob("del_scope_zero_g*.json")
-        if (payload := read_json(path)) is not None
-    ]
-    assert len(children) == 1
-    assert children[0]["state"] == ReceiptState.COMMITTED
-    assert children[0]["targets"]["user"]["planned"] is True
-    assert children[0]["targets"]["user"]["published"] is False
-    assert {
-        item["target"]: item for item in children[0]["operations"]
-    }["user"]["digests"] == [missing_digest]
-
-
-@pytest.mark.asyncio
-async def test_digest_cleanup_scope_growth_survives_a_write_failure(
-    seam: Seam, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """review S2：扩 target 的子回执在写失败后保留 intent，重试才能补清理。"""
-    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
-    atomic_write_text(seam.memory_file, "失败重试的内存墓碑")
-    atomic_write_text(user_file, "失败重试的用户墓碑")
-    memory_digest = entry_digest("失败重试的内存墓碑")
-    user_digest = entry_digest("失败重试的用户墓碑")
-    await seam.commit.remove_by_digest(
-        digests_by_target={"memory": [memory_digest]}, operation_id="del_scope_retry")
-
-    original = seam.commit.engine._write_file
-
-    def _fail_user(path: Path, entries: list[str]) -> None:
-        if path.name == "USER.md":
-            raise OSError("disk full")
-        original(path, entries)
-
-    seam.commit.engine._write_file = _fail_user  # type: ignore[method-assign]
-    with pytest.raises(MemoryCommitError):
+        digests_by_target={"memory": [memory_digest]},
+        operation_id="del_scope_explicit")
+    with pytest.raises(
+        MemoryReconcileRequired, match="already committed with a different target set"):
         await seam.commit.remove_by_digest(
             digests_by_target={"memory": [memory_digest], "user": [user_digest]},
-            operation_id="del_scope_retry")
+            operation_id="del_scope_explicit")
 
+    assert "显式 scope 的用户墓碑" in user_file.read_text(encoding="utf-8")
     store = ReceiptStore(seam.root)
-    children = [
-        payload for path in store.root.receipts_dir.glob("del_scope_retry_g*.json")
-        if (payload := read_json(path)) is not None
-    ]
-    assert len(children) == 1
-    child = children[0]
-    assert child["state"] != ReceiptState.COMMITTED
-    assert child["targets"]["user"]["planned"] is True
-    assert {
-        item["target"]: item for item in child["operations"]
-    }["user"]["digests"] == [user_digest]
-    assert "失败重试的用户墓碑" in user_file.read_text(encoding="utf-8")
+    base = read_json(store.path_for("del_scope_explicit"))
+    assert base is not None and set(base["targets"]) == {"memory"}
+    assert list(store.root.receipts_dir.glob("del_scope_explicit_g*.json")) == []
 
-    seam.commit.engine._write_file = original  # type: ignore[method-assign]
+    atomic_write_text(seam.memory_file, "缩小 scope 的内存墓碑")
+    atomic_write_text(user_file, "缩小 scope 的用户墓碑")
+    shrink_memory = entry_digest("缩小 scope 的内存墓碑")
+    shrink_user = entry_digest("缩小 scope 的用户墓碑")
     await seam.commit.remove_by_digest(
-        digests_by_target={"memory": [memory_digest], "user": [user_digest]},
-        operation_id="del_scope_retry")
-
-    assert "失败重试的用户墓碑" not in user_file.read_text(encoding="utf-8")
-    child_after = read_json(store.path_for(child["operation_id"]))
-    assert child_after is not None and child_after["state"] == ReceiptState.COMMITTED
+        digests_by_target={"memory": [shrink_memory], "user": [shrink_user]},
+        operation_id="del_scope_shrink")
+    with pytest.raises(MemoryReconcileRequired, match="different target set"):
+        await seam.commit.remove_by_digest(
+            digests_by_target={"memory": [shrink_memory]},
+            operation_id="del_scope_shrink")
 
 
 @pytest.mark.asyncio

@@ -21,11 +21,15 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
   formation 恢复、CLI 补发布）必须复用同一个 id，从而「同 key 只一次逻辑更新」；
 - 固定形：`jobp_<job>_apply`（formation apply）、`stgp_<staged>`（待审批准）、
   `blkp_<blocked>_apply`（被拦下写入的 promote）、`del_<memory>`（治理删除）、
+  `del_dg_<sha256(target+digest 集)[:32]>`（按 digest 清理，target/正文变化即新逻辑删除）、
   `legp_<sha256(job:memory)[:32]>`（旧数据补发布）、`mig_<memory>`（旧记录一次性迁移）。
-- COMMITTED 后重试又扩了 target：旧回执保持终态，缺失 target 用稳定的
-  `<operation_id>_g<sha256(target)[:16]>` 子回执发布；同一缺失 target 的重试回放同一子回执。
+- 多目标系统 id（`jobp_` / `blkp_`）在 COMMITTED 后重试又扩了 target：旧回执保持终态，
+  缺失 target 用稳定的 `<operation_id>_g<sha256(target)[:16]>` 子回执发布；同一缺失 target
+  的重试回放同一子回执。
 
-同一 id 已有 `COMMITTED` 回执 ⇒ 直接回放记录的结果，不再碰磁盘（不重复追加、不重复删除）。
+同一 id 已有 `COMMITTED` 回执 ⇒ **本次意图与记录一致时**回放记录的结果，不再碰磁盘
+（不重复追加、不重复删除）；意图不同 ⇒ `MemoryReconcileRequired`，绝不把旧内容当成本次
+结果返回。
 
 # 顺序（ADR-0058 D8）
 
@@ -73,6 +77,7 @@ from agent_harness.memory.v2.receipts import (
     CommitReceipt,
     ReceiptState,
     ReceiptStore,
+    scrub_bodies,
 )
 from agent_harness.memory.v2.threat_patterns import first_threat_message
 
@@ -96,6 +101,14 @@ class MemoryCommitError(RuntimeError):
         super().__init__(
             f"memory commit failed (operation {operation_id}, target {target}): {reason}"
         )
+
+
+class MemoryReconcileRequired(MemoryCommitError):
+    """重试同一 operation id 不会收敛：回执已 NEED_RECONCILE，或已 COMMITTED 但意图不同。
+
+    调用方不能把它当成瞬时 IO 失败反复重试；formation 应把 job 收敛到降级终态，
+    由运维按 operation id 对账或换新 id。
+    """
 
 
 class MemoryBatchRejected(ValueError):
@@ -372,7 +385,7 @@ class MemoryCommit:
         才钉 NEED_RECONCILE。
         """
         if receipt.state == ReceiptState.NEED_RECONCILE:
-            raise MemoryCommitError(
+            raise MemoryReconcileRequired(
                 operation_id, label, f"needs reconcile: {receipt.reason}")
         for target, plan in receipt.targets.items():
             if plan.published:
@@ -412,7 +425,7 @@ class MemoryCommit:
             if digest != plan.after_digest:
                 self._mark_target_reconcile(
                     operation_id, target, "target is not at its recorded after digest")
-                raise MemoryCommitError(
+                raise MemoryReconcileRequired(
                     operation_id, target,
                     "needs reconcile: target is not at its recorded after digest")
 
@@ -428,18 +441,31 @@ class MemoryCommit:
         with self._receipts.lock(operation_id):
             receipt = self._receipts.load(operation_id)
             if receipt is not None and receipt.state == ReceiptState.COMMITTED:
+                committed_specs = {
+                    target: self._batch_spec(
+                        target, operations, trusted_pins=trusted_pins,
+                        allow_empty=allow_empty)
+                    for target, operations in plans
+                }
+                self._verify_committed_intents(
+                    receipt, operation_id, targets, committed_specs)
                 missing = [target for target in targets if target not in receipt.targets]
                 if missing:
                     return self._apply_scope_growth(
                         plans, missing, operation_id=operation_id,
                         trusted_pins=trusted_pins, allow_empty=allow_empty,
                         origin=origin, payload=payload)
+                replay = self._replay_if_committed(
+                    operation_id, targets, expected=committed_specs)
+                if replay is not None:
+                    return replay
+                # 锁内重新加载后回执不再是 COMMITTED：按未终态路径继续。
             replay = self._replay_if_committed(operation_id, targets)
             if replay is not None:
                 return replay
             existing = self._receipts.load(operation_id)
             if existing is not None and existing.state == ReceiptState.NEED_RECONCILE:
-                raise MemoryCommitError(
+                raise MemoryReconcileRequired(
                     operation_id, label, f"needs reconcile: {existing.reason}")
             if existing is not None:
                 dropped = set(existing.targets) - set(targets)
@@ -470,14 +496,14 @@ class MemoryCommit:
                         self._mark_target_reconcile(
                             operation_id, target,
                             "published target has no recorded spec")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             "needs reconcile: published target has no recorded spec")
                     if recorded_spec != spec:
                         self._mark_target_reconcile(
                             operation_id, target,
                             "retry intent differs from the recorded receipt")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             "needs reconcile: retry intent differs from the recorded receipt")
                     # 发布位是事实：磁盘回到 before 只说明用户/前台删除了已发布内容，
@@ -496,20 +522,20 @@ class MemoryCommit:
                         self._mark_target_reconcile(
                             operation_id, target,
                             "retry intent differs from the recorded receipt")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             "needs reconcile: retry intent differs from the recorded receipt")
                     if recorded.before_digest is None or recorded.after_digest is None:
                         self._mark_target_reconcile(
                             operation_id, target, "receipt has an incomplete target plan")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             "needs reconcile: receipt has an incomplete target plan")
                     disk = self._engine.disk_entries(target)
                     if disk is None:
                         self._mark_target_reconcile(
                             operation_id, target, "target file unreadable during retry")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             "needs reconcile: target file is unreadable")
                     current = entries_digest(disk)
@@ -522,7 +548,7 @@ class MemoryCommit:
                         self._mark_target_reconcile(
                             operation_id, target,
                             "disk matches neither before nor after")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             "needs reconcile: disk matches neither before nor after")
                     error, _before, after = self._preview_batch(spec)
@@ -530,7 +556,7 @@ class MemoryCommit:
                         detail = error.get("error") or error
                         self._mark_target_reconcile(
                             operation_id, target, f"intent no longer applies ({detail})")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             f"needs reconcile: intent no longer applies: {detail}")
                     assert after is not None
@@ -538,7 +564,7 @@ class MemoryCommit:
                         self._mark_target_reconcile(
                             operation_id, target,
                             "preflight now produces a different after digest")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             "needs reconcile: preflight produces a different after digest")
                     prepared.append(
@@ -553,7 +579,7 @@ class MemoryCommit:
                         # 也不能把新目标拼进旧回执。交给对账判定。
                         self._mark_target_reconcile(
                             operation_id, target, f"retry preflight failed ({detail})")
-                        raise MemoryCommitError(
+                        raise MemoryReconcileRequired(
                             operation_id, target,
                             f"needs reconcile: retry preflight failed: {detail}")
                     # 还没有碰任何文件/回执：整批拒绝，records 事务可以安全回滚。
@@ -676,22 +702,27 @@ class MemoryCommit:
         旧回执是终态事实，不能改写；给每个缺失 target 派生稳定的子 operation id，
         重试同一目标集时回放同一子回执。已发布目标既不重跑 mutator，也不参与
         finish，因此不会撤销用户/前台在发布后做的删除或改写。响应保留父
-        `operation_id`，并附 `scope_operation_ids`，子操作失败时原样返回其响应。
+        `operation_id`，并附 `scope_operation_ids`；子预检拒绝重新归到父 id 上抛
+        `MemoryBatchRejected`，保证错误里的 operation id 始终有回执可查。
         """
         by_target = dict(plans)
         scope_ids = {
             target: _scope_child_id(operation_id, target) for target in missing}
         responses: dict[str, dict[str, Any]] = {}
         for target in missing:
-            response = self._apply_batch_many_sync(
-                [(target, by_target[target])], trusted_pins=trusted_pins,
-                allow_empty=allow_empty, operation_id=scope_ids[target],
-                origin=origin, payload=payload,
-            )
-            if not response.get("success"):
-                response.setdefault("parent_operation_id", operation_id)
-                response["scope_operation_ids"] = scope_ids
-                return response
+            try:
+                response = self._apply_batch_many_sync(
+                    [(target, by_target[target])], trusted_pins=trusted_pins,
+                    allow_empty=allow_empty, operation_id=scope_ids[target],
+                    origin=origin, payload=payload,
+                )
+            except MemoryBatchRejected as error:
+                # 子回执还没落盘（预检拒绝），child id 查不到任何回执；把错误
+                # 归到父 id 上，让 formation/运维始终能从 operation id 找到证据。
+                raise MemoryBatchRejected(
+                    operation_id, target,
+                    f"scope growth preflight rejected: {error.reason}",
+                ) from error
             responses[target] = response
         result: dict[str, Any] = {
             "success": True,
@@ -743,7 +774,8 @@ class MemoryCommit:
     ) -> dict[str, Any]:
         target = str(spec["target"])
         with self._receipts.lock(operation_id):
-            replay = self._replay_if_committed(operation_id, [target])
+            replay = self._replay_if_committed(
+                operation_id, [target], expected={target: spec})
             if replay is not None:
                 return replay
             conflict = self._conflict_if_uncertain(operation_id, target, spec)
@@ -812,8 +844,32 @@ class MemoryCommit:
                 ) from error
         return response
 
+    def _verify_committed_intents(
+        self, receipt: CommitReceipt, operation_id: str, targets: Iterable[str],
+        expected: Mapping[str, dict[str, Any]],
+    ) -> None:
+        """COMMITTED 回执只对“同一份逻辑更新”回放；意图变了必须显式报冲突。
+
+        回执终态会把正文 scrub 成 digest + 长度；这里用同一个脱敏器处理本次 spec，
+        因此比较的是规范化后的意图，而不是留在回执里的原文。
+        """
+        for target in targets:
+            if target not in receipt.targets or target not in expected:
+                continue
+            recorded = [
+                item for item in receipt.operations
+                if str(item.get("target")) == target
+            ]
+            if len(recorded) == 1 and recorded[0] == scrub_bodies(expected[target]):
+                continue
+            raise MemoryReconcileRequired(
+                operation_id, target,
+                "operation already committed with a different intent; "
+                "retry with a new operation id")
+
     def _replay_if_committed(
-        self, operation_id: str, targets: Iterable[str],
+        self, operation_id: str, targets: Iterable[str], *,
+        expected: Mapping[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         receipt = self._receipts.load(operation_id)
         if receipt is None or receipt.state != ReceiptState.COMMITTED:
@@ -824,10 +880,12 @@ class MemoryCommit:
             # 缺失 target 路由到稳定子回执；单目标入口没有可推断的新 scope，
             # 只能让调用方换新 id，不能直接回放 success=True 吞掉新 target。
             missing_label = ",".join(sorted(missing))
-            raise MemoryCommitError(
+            raise MemoryReconcileRequired(
                 operation_id, missing_label,
                 "operation already committed without this target; "
                 "retry with a new operation id")
+        if expected is not None:
+            self._verify_committed_intents(receipt, operation_id, targets, expected)
         recorded = dict(receipt.result or {})
         recorded.setdefault("success", True)
         recorded["operation_id"] = operation_id
@@ -942,25 +1000,33 @@ class MemoryCommit:
         if not wanted:
             return []
         targets = tuple(wanted)
+        expected = {
+            target: {
+                "target": target, "action": "remove_by_digest",
+                "digests": sorted(wanted[target]),
+            }
+            for target in targets
+        }
         with self._receipts.lock(operation_id):
             receipt = self._receipts.load(operation_id)
-            if receipt is not None and receipt.state == ReceiptState.COMMITTED:
-                missing = [target for target in targets if target not in receipt.targets]
-                if missing:
-                    return self._remove_scope_growth(
-                        wanted, missing, operation_id, origin, payload, receipt)
-            replay = self._replay_if_committed(operation_id, targets)
+            if receipt is not None and receipt.state == ReceiptState.NEED_RECONCILE:
+                raise MemoryReconcileRequired(
+                    operation_id, "memory+user", f"needs reconcile: {receipt.reason}")
+            if (
+                receipt is not None and receipt.state == ReceiptState.COMMITTED
+                and set(receipt.targets) != set(targets)
+            ):
+                changed = ",".join(sorted(set(receipt.targets) ^ set(targets)))
+                raise MemoryReconcileRequired(
+                    operation_id, changed,
+                    "operation already committed with a different target set; "
+                    "retry with a new operation id")
+            replay = self._replay_if_committed(
+                operation_id, targets, expected=expected)
             if replay is not None:
                 return [str(item) for item in replay.get("cleaned") or []]
-            receipt = self._receipts.load(operation_id)
-            if receipt is not None and receipt.state == ReceiptState.NEED_RECONCILE:
-                raise MemoryCommitError(
-                    operation_id, "memory+user", f"needs reconcile: {receipt.reason}")
 
-            specs = [
-                {"target": target, "action": "remove_by_digest", "digests": sorted(wanted[target])}
-                for target in targets
-            ]
+            specs = [expected[target] for target in targets]
             if receipt is not None:
                 recorded = {
                     str(item.get("target")): item
@@ -984,7 +1050,7 @@ class MemoryCommit:
                     self._mark_target_reconcile(
                         operation_id, "memory+user",
                         "retry intent differs from the recorded receipt")
-                    raise MemoryCommitError(
+                    raise MemoryReconcileRequired(
                         operation_id, "memory+user",
                         "needs reconcile: retry intent differs from the recorded receipt")
             try:
@@ -1021,22 +1087,6 @@ class MemoryCommit:
                     f"content removed but receipt update failed: {error}",
                 ) from error
             return cleaned
-
-    def _remove_scope_growth(
-        self, wanted: Mapping[str, set[str]], missing: list[str], operation_id: str,
-        origin: str, payload: dict[str, Any] | None, receipt: CommitReceipt,
-    ) -> list[str]:
-        """已 COMMITTED 的 digest 清理又收到新 target：缺失目标走稳定子回执。"""
-        scope_ids = {
-            target: _scope_child_id(operation_id, target) for target in missing}
-        logger.info(
-            "memory cleanup scope grew (%s): %s", operation_id, scope_ids)
-        cleaned = [
-            str(item) for item in (receipt.result or {}).get("cleaned") or []]
-        for target in missing:
-            cleaned.extend(self._remove_by_digest_sync(
-                {target: sorted(wanted[target])}, scope_ids[target], origin, payload))
-        return cleaned
 
     def _publish_digest_target(
         self, spec: dict[str, Any], operation_id: str, *, remaining: bool,

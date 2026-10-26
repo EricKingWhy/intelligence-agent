@@ -473,8 +473,9 @@ class MemoryV2Service:
         用同一批确定性 id / `jobp_` 回执重跑。这里绝不把失败降成 warning——那会让
         job 以 COMMITTED 收尾而权威面没有内容（AC4）。
 
-        每个目标一个 `apply_batch`（一次原子文件替换、一份回执），且**先对全部目标做
-        写前预检**（内容扫描 / 匹配 / 最终预算）：任何一条不合格都在写第一条之前失败。
+        一次 `apply_batch_many` 覆盖全部目标（每目标一次原子文件替换、共用一份回执），且
+        **先对全部目标做写前预检**（内容扫描 / 匹配 / 最终预算）：任何一条不合格都在写第一条
+        之前失败。
         逐条 `add` 会在第二条超限时留下第一条的孤儿内容——records 已回滚、回执却
         COMMITTED，启动对账也不会回收它（review P1-1）。
         """
@@ -765,7 +766,7 @@ def _digest_operation_id(digests_by_target: Mapping[str, Sequence[str]]) -> str:
     joined = "\x00".join(
         f"{target}\x00{digest}"
         for target, values in sorted(digests_by_target.items())
-        for digest in sorted(str(item) for item in values)
+        for digest in sorted({str(item) for item in values})
     )
     return "del_dg_" + hashlib.sha256(joined.encode()).hexdigest()[:32]
 

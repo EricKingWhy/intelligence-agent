@@ -379,6 +379,11 @@ def _scrub_bodies(value: Any) -> Any:
     return value
 
 
+def scrub_bodies(value: Any) -> Any:
+    """终态回执的正文脱敏器；调用方拿它把“本次意图”与已 scrub 的回执对齐比较。"""
+    return _scrub_bodies(value)
+
+
 def _scrub_body_field(key: str, item: Any) -> dict[str, Any]:
     if isinstance(item, str):
         if not item:
@@ -418,4 +423,5 @@ __all__ = [
     "ReceiptState",
     "ReceiptStore",
     "ReceiptTarget",
+    "scrub_bodies",
 ]

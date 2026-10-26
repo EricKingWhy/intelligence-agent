@@ -81,13 +81,18 @@ class MemoryCommit:
   `operation_id` 键；失败响应**必带** `operation_id`（AC 要求「错误响应携带 operation id」）。
 - **拒绝零落盘**：来源（provenance）、delimiter / secret / threat 扫描、pin 名不符、expected revision
   不符，全部在**写回执之前**判定（回执也不算内容落盘，但拒绝路径连回执都不写）——AC4。
-- **幂等键 = operation id**：同一 op 已有 COMMITTED 回执 ⇒ 直接回放当时的结果，不再碰磁盘；
-  同一 op 处于 NEED_RECONCILE ⇒ 原样返回待对账，不重试。
-- **目标集增长 = 新 scope**：确定性 id（`jobp_` / `blkp_` / `del_dg_`）重试时，如果
-  COMMITTED 回执不覆盖本次请求的某个 target，commit **不改写旧回执**，而是为每个缺失
-  target 派生稳定子回执 `<operation_id>_g<sha256(target)[:16]>`，只发布缺失 target。
-  同一缺失 target 的重试回放同一子回执；target 启用变化不会让 formation/blocked 永久
-  重试同一个 id，也不会重放已发布内容。`del_dg_` 的幂等键本身也包含 target 集。
+- **幂等键 = operation id**：同一 op 已有 COMMITTED 回执 ⇒ **本次意图与回执记录一致时**
+  直接回放当时的结果，不再碰磁盘；意图不同（正文、动作、pin 或 digest 集变了）⇒
+  `MemoryReconcileRequired`，不静默回放旧内容，也不得用同一 id 写第二次。同一 op 处于
+  NEED_RECONCILE ⇒ 原样返回待对账，不重试。formation 遇到这类**确定性冲突**收敛为
+  `DEGRADED(APPLY_FAILED)`，不再无限重跑同一 job；瞬时 IO 失败仍是 `MemoryCommitError`，
+  job 保持可恢复。
+- **目标集增长仅限多目标系统 id**：`jobp_` / `blkp_` 重试时，如果 COMMITTED 回执不覆盖
+  本次请求的某个 target，commit **不改写旧回执**，而是为每个缺失 target 派生稳定子回执
+  `<operation_id>_g<sha256(target)[:16]>`，只发布缺失 target。同一缺失 target 的重试回放
+  同一子回执；target 启用变化不会让 formation/blocked 永久重试同一个 id，也不会重放已发布
+  内容。`del_dg_` 的幂等键本身由 target 集与 digest 集共同派生（`_digest_operation_id`）：
+  target 或正文一变就是新的逻辑删除，复用旧 id 按意图冲突报对账，不靠子回执扩 scope。
 - **系统镜像的写前预检**：formation / blocked promote 一次发布多条记录时调用
   `apply_batch_many`：先对每个目标跑同一 mutator（扫描/匹配/最终预算全判），任何一条不合格
   就在写第一条之前抛 `MemoryBatchRejected`（零落盘、零回执）；通过后**先写一份覆盖全部目标的

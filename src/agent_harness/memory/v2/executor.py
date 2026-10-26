@@ -80,7 +80,7 @@ from agent_harness.memory.v2.capability import (
     MarkdownAuthorityError,
     MemoryContentRejected,
 )
-from agent_harness.memory.v2.commit import MemoryCommitError
+from agent_harness.memory.v2.commit import MemoryCommitError, MemoryReconcileRequired
 from agent_harness.memory.v2.formation import (
     AdjudicatedContent,
     AdjudicationAction,
@@ -1313,6 +1313,14 @@ class MemoryJobExecutor:
             # 事务已回滚（零写入）⇒ 改记安静成功：没有任何变更，就不是 COMMITTED。
             return await self._complete_quietly(
                 job, worker_id=worker_id, reason=None, state=state, run_id=run_id, sink=sink)
+        except MemoryReconcileRequired as error:
+            # 回执已 NEED_RECONCILE，或同一 id 已 COMMITTED 但这次意图不同：
+            # 再重跑形成只会得到同一个冲突，必须收敛到降级终态并留下 operation id。
+            logger.error(
+                "memory formation requires reconcile (operation %s): %s",
+                error.operation_id, error.reason,
+            )
+            raise _Degraded(DegradedReason.APPLY_FAILED) from None
         except MemoryCommitError as error:
             # 内容发布失败：记录事务已回滚，job 保持非终态；恢复扫描按同一批确定性 id /
             # operation id 重跑。绝不把这一轮写成 COMMITTED（AC4）。
