@@ -12,6 +12,7 @@
  */
 
 import { expect, test } from '@playwright/test';
+import { EARLY_RESPONSE_WINDOW_MS } from '../src/hooks/useSession';
 import { SID, T, capabilityFixture, fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
 
 const AID = '0123456789abcdef';
@@ -154,7 +155,9 @@ test('AC2/AC6：外置 diff → 就地展开 → 可见（与清单同一渲染�
   const frames = framesWithArtifact();
   // Force the POST response past useSession's early-response window so this also
   // exercises the new-session claim path under nightly-suite load.
-  await openSession(page, frames, { artifactContent: SLICE }, { sessionPostDelayMs: 1_400 });
+  await openSession(page, frames, { artifactContent: SLICE }, {
+    sessionPostDelayMs: EARLY_RESPONSE_WINDOW_MS + 250,
+  });
 
   // 中心列里那张工具卡：diff 已归档 → 占位 + 展开入口
   await expandToolToL2(page);
