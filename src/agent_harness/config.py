@@ -1,9 +1,12 @@
 """全局运行配置：只定义"运行需要什么"，从 .env 读取。"""
 
+import logging
+import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from agent_harness.attachments.validation import parse_allowed_media_types
@@ -13,6 +16,14 @@ from agent_harness.attachments.validation import parse_allowed_media_types
 #: 配置，错误推迟到首个请求内才爆（R6-5）。安装为 site-packages 时锚点
 #: 无意义但无害（该路径下不存在 .env，退化为环境变量配置）。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+logger = logging.getLogger(__name__)
+
+#: 已退役键（#1535）：`MILVUS_COLLECTION` 无任何运行时消费者，检索目标只由
+#: `knowledge_collection`（`KNOWLEDGE_COLLECTION`）决定。部署 `.env` 里残留该键时
+#: **只告警、不拒绝**——`extra="ignore"` 的启动鲁棒性（见下方 `model_config`）不变，
+#: 单为它破例改成拒绝会让"他应用变量混入"这类既有容忍面变成启动崩溃。
+_RETIRED_KEYS: tuple[str, ...] = ("MILVUS_COLLECTION",)
 
 #: 上下文窗口五挡位（#1197 项 1）。**唯一的**挡位清单：`Settings.max_context_tokens`
 #: 的构造期白名单、API 的 PATCH 校验、前端选择器三处都读它——挡位表分列两处就会出现
@@ -301,6 +312,31 @@ class Settings(BaseSettings):
     # development，绝不落入 default）；release 标版本/SHA（空=不塞，SDK 自决）。
     langfuse_tracing_environment: str = "development"
     langfuse_release: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_on_retired_keys(cls, data: Any) -> Any:
+        """残留的已退役键被忽略时**告警**（#1535 AC2），绝不拒绝/改写。
+
+        为什么要检查两处：pydantic-settings 只把 `Settings` 已有字段的键交给
+        validator（env var 路在没有同名字段时根本不会出现在 `data` 里）；而 env file
+        的残留值因为 `extra != "forbid"` 会进 `data`，却**不进** `os.environ`。两条路
+        都是部署实态，缺一条就会漏报。
+
+        为什么是 warning 而不是拒绝：见 `_RETIRED_KEYS` 上方注释——`extra="ignore"`
+        的启动鲁棒性是既有政策，告警只提供可观察信号。
+        """
+        present = {str(key).lower() for key in os.environ}
+        if isinstance(data, Mapping):
+            present.update(str(key).lower() for key in data)
+        for retired in _RETIRED_KEYS:
+            if retired.lower() in present:
+                logger.warning(
+                    "%s 已退役（#1535），该键被忽略：检索目标只由 KNOWLEDGE_COLLECTION"
+                    "（Settings.knowledge_collection）决定，请从部署配置中删除它。",
+                    retired,
+                )
+        return data
 
     @field_validator("max_context_tokens")
     @classmethod
