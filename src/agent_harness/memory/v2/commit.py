@@ -44,7 +44,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -412,7 +412,7 @@ class MemoryCommit:
             raise ValueError(f"duplicate target in batch: {targets!r}")
         label = ",".join(targets)
         with self._receipts.lock(operation_id):
-            replay = self._replay_if_committed(operation_id)
+            replay = self._replay_if_committed(operation_id, targets)
             if replay is not None:
                 return replay
             existing = self._receipts.load(operation_id)
@@ -656,7 +656,7 @@ class MemoryCommit:
     ) -> dict[str, Any]:
         target = str(spec["target"])
         with self._receipts.lock(operation_id):
-            replay = self._replay_if_committed(operation_id)
+            replay = self._replay_if_committed(operation_id, [target])
             if replay is not None:
                 return replay
             conflict = self._conflict_if_uncertain(operation_id, target, spec)
@@ -725,10 +725,23 @@ class MemoryCommit:
                 ) from error
         return response
 
-    def _replay_if_committed(self, operation_id: str) -> dict[str, Any] | None:
+    def _replay_if_committed(
+        self, operation_id: str, targets: Iterable[str] | None = None,
+    ) -> dict[str, Any] | None:
         receipt = self._receipts.load(operation_id)
         if receipt is None or receipt.state != ReceiptState.COMMITTED:
             return None
+        if targets is not None:
+            missing = {str(target) for target in targets} - set(receipt.targets)
+            if missing:
+                # 回执已按旧 scope COMMITTED（例如扩 target 的意图还没落盘就崩了，
+                # reconcile 只看得见旧 targets）。这时直接回放 success=True 等于
+                # 永远丢掉新 target；reconcile 也无从推断它，只能让调用方换新 id。
+                missing_label = ",".join(sorted(missing))
+                raise MemoryCommitError(
+                    operation_id, missing_label,
+                    "operation already committed without this target; "
+                    "retry with a new operation id")
         recorded = dict(receipt.result or {})
         recorded.setdefault("success", True)
         recorded["operation_id"] = operation_id
@@ -792,7 +805,7 @@ class MemoryCommit:
                     operation_id, target,
                     f"content already published but receipt update failed: {error}",
                 ) from error
-            return self._replay_if_committed(operation_id)
+            return self._replay_if_committed(operation_id, [target])
         if digest == plan.before_digest:
             return None
         try:
@@ -827,8 +840,9 @@ class MemoryCommit:
         }
         if not wanted:
             return []
+        targets = tuple(wanted)
         with self._receipts.lock(operation_id):
-            replay = self._replay_if_committed(operation_id)
+            replay = self._replay_if_committed(operation_id, targets)
             if replay is not None:
                 return [str(item) for item in replay.get("cleaned") or []]
             receipt = self._receipts.load(operation_id)
@@ -836,7 +850,6 @@ class MemoryCommit:
                 raise MemoryCommitError(
                     operation_id, "memory+user", f"needs reconcile: {receipt.reason}")
 
-            targets = tuple(wanted)
             specs = [
                 {"target": target, "action": "remove_by_digest", "digests": sorted(wanted[target])}
                 for target in targets
@@ -1006,6 +1019,10 @@ class MemoryCommit:
             return "committed", False
         republished = False
         for target, plan in receipt.targets.items():
+            if plan.published:
+                # 与 finish 侧同一事实：发布位已经记录“内容写过”。发布后用户/前台
+                # 删除或改写属于新的当前内容，reconcile 不能把旧 after 再写回去。
+                continue
             disk = self._engine.disk_entries(target)
             if disk is None:
                 logger.warning("reconcile skipped (%s): %s is unreadable",

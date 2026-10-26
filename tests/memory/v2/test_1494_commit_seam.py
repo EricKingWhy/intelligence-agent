@@ -931,6 +931,67 @@ async def test_multi_target_retry_can_grow_and_reconcile_the_new_target(seam: Se
 
 
 @pytest.mark.asyncio
+async def test_growth_crash_before_spec_cannot_be_replayed_as_success(
+    seam: Seam, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """review N1：扩 target 的意图没落盘就崩，reconcile COMMITTED 旧 scope 后重试不得假成功。"""
+    memory_content = "增长前的 MEMORY"
+    atomic_write_text(seam.memory_file, memory_content)
+    store = ReceiptStore(seam.root)
+    memory_spec = {
+        "target": "memory", "action": "batch",
+        "operations": [{
+            "action": "add", "content": memory_content, "old_text": "",
+            "matched_entry": None, "missing_ok": False,
+        }],
+        "allow_empty": False,
+    }
+    store.prepare(
+        "jobp_lost_growth_apply", origin="test", targets=["memory"],
+        operations=[memory_spec])
+    store.record_target_plan(
+        "jobp_lost_growth_apply", "memory",
+        before_digest=entries_digest([]),
+        after_digest=entries_digest([memory_content]),
+    )
+    store.mark_target_published("jobp_lost_growth_apply", "memory")
+
+    original_record = seam.commit._receipts.record_target_plan
+
+    def _fail_user_plan(operation_id, target, **kwargs):
+        if target == "user":
+            raise OSError("crash before the growth spec is persisted")
+        return original_record(operation_id, target, **kwargs)
+
+    monkeypatch.setattr(seam.commit._receipts, "record_target_plan", _fail_user_plan)
+    with pytest.raises(MemoryCommitError):
+        await seam.commit.apply_batch_many(
+            [
+                ("memory", [{"action": "add", "content": memory_content}]),
+                ("user", [{"action": "add", "content": "增长时丢掉的 USER"}]),
+            ],
+            operation_id="jobp_lost_growth_apply",
+        )
+    monkeypatch.setattr(
+        seam.commit._receipts, "record_target_plan", original_record)
+
+    report = await seam.commit.reconcile()
+    assert "jobp_lost_growth_apply" in report.committed
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+    assert not user_file.exists()
+
+    with pytest.raises(MemoryCommitError, match="already committed without this target"):
+        await seam.commit.apply_batch_many(
+            [
+                ("memory", [{"action": "add", "content": memory_content}]),
+                ("user", [{"action": "add", "content": "增长时丢掉的 USER"}]),
+            ],
+            operation_id="jobp_lost_growth_apply",
+        )
+    assert not user_file.exists(), "回执 COMMITTED 后不得把新 target 伪装成已发布"
+
+
+@pytest.mark.asyncio
 async def test_single_target_retry_with_a_different_intent_needs_reconcile(seam: Seam) -> None:
     """review P3-D：同 operation id 换了意图，不能按旧 before 重跑成另一次更新。"""
     original = seam.commit.engine._write_file
@@ -1030,6 +1091,62 @@ async def test_verify_targets_accepts_a_concurrent_foreground_append(seam: Seam)
     seam.commit._verify_receipt_targets(receipt, "jobp_race_apply", "memory")
 
     assert read_json(store.path_for("jobp_race_apply"))["state"] != ReceiptState.NEED_RECONCILE
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_resurrect_a_published_target_deleted_by_user(
+    seam: Seam,
+) -> None:
+    """review N2：发布位已记录后用户删除内容，reconcile 不得把旧 after 再写回去。"""
+    before = ["原始条目"]
+    after = [*before, "发布后又被用户删掉的条目"]
+    atomic_write_text(seam.memory_file, ENTRY_DELIMITER.join(after))
+    store = ReceiptStore(seam.root)
+    store.prepare(
+        "mcf_published_revert", origin="test", targets=["memory"],
+        operations=[{
+            "target": "memory", "action": "add", "content": "发布后又被用户删掉的条目",
+        }])
+    store.record_target_plan(
+        "mcf_published_revert", "memory",
+        before_digest=entries_digest(before),
+        after_digest=entries_digest(after),
+    )
+    store.mark_target_published("mcf_published_revert", "memory")
+    # 发布成功、finish 还没写时的窗口：用户把刚写入的条目删掉，文件回到 before。
+    atomic_write_text(seam.memory_file, ENTRY_DELIMITER.join(before))
+
+    report = await seam.commit.reconcile()
+
+    assert "mcf_published_revert" in report.committed
+    assert report.republished == []
+    assert seam.commit.engine.disk_entries("memory") == before
+    assert "发布后又被用户删掉的条目" not in seam.memory_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_rejects_a_planned_target_without_a_recorded_spec(
+    seam: Seam,
+) -> None:
+    """review N3：有计划但没意图的目标不能按 noop 收尾成 false COMMITTED。"""
+    atomic_write_text(seam.memory_file, "已存在条目")
+    store = ReceiptStore(seam.root)
+    store.prepare(
+        "mcf_planned_no_spec", origin="test", targets=["memory"], operations=[])
+    store.record_target_plan(
+        "mcf_planned_no_spec", "memory",
+        before_digest=entries_digest(["已存在条目"]),
+        after_digest=entries_digest(["已存在条目", "从未发布的条目"]),
+    )
+
+    report = await seam.commit.reconcile()
+
+    assert [operation_id for operation_id, _ in report.needs_reconcile] == [
+        "mcf_planned_no_spec"]
+    assert "planned target has no recorded spec" in report.needs_reconcile[0][1]
+    assert seam.commit.engine.disk_entries("memory") == ["已存在条目"]
+    receipt = read_json(store.path_for("mcf_planned_no_spec"))
+    assert receipt is not None and receipt["state"] == ReceiptState.NEED_RECONCILE
 
 
 @pytest.mark.asyncio
@@ -1238,6 +1355,25 @@ async def test_digest_cleanup_retry_cannot_change_recorded_intent(
             [entry_digest("要保留的内存正文")], operation_id="del_retry_digest")
 
     assert "要保留的内存正文" in seam.memory_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_digest_cleanup_persists_the_replay_spec_in_the_receipt(seam: Seam) -> None:
+    """review S2：按 digest 清理必须把可重放意图写进回执，不能只留 target plan。"""
+    atomic_write_text(seam.memory_file, "待按 digest 清理的条目")
+    digest = entry_digest("待按 digest 清理的条目")
+
+    cleaned = await seam.commit.remove_by_digest(
+        [digest], operation_id="del_spec_receipt")
+
+    assert cleaned == ["MEMORY.md"]
+    receipt = read_json(ReceiptStore(seam.root).path_for("del_spec_receipt"))
+    assert receipt is not None and receipt["state"] == ReceiptState.COMMITTED
+    specs = {item["target"]: item for item in receipt["operations"]}
+    assert specs["memory"] == {
+        "target": "memory", "action": "remove_by_digest", "digests": [digest]}
+    assert specs["user"] == {
+        "target": "user", "action": "remove_by_digest", "digests": [digest]}
 
 
 @pytest.mark.asyncio

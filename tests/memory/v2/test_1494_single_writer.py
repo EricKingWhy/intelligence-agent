@@ -112,6 +112,7 @@ _ENGINE_HINTS = frozenset({"engine", "_engine", "markdown", "markdown_store"})
 _WRITE_ATTRS = frozenset({
     "write_text", "write_bytes", "replace", "rename",
     "copy", "copyfile", "copy2", "move", "atomic_write_text",
+    "unlink", "remove", "touch", "truncate", "rmtree", "rmdir",
 })
 _WRITE_OPEN_FLAGS = frozenset({
     "O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND",
@@ -197,23 +198,69 @@ def _write_mode(call: ast.Call) -> ast.expr | None:
     return next((kw.value for kw in call.keywords if kw.arg == "mode"), None)
 
 
-def _open_for_write(call: ast.Call) -> bool:
+def _has_open_write_flag(node: ast.AST, known: set[str]) -> bool:
+    return any(
+        (isinstance(child, ast.Attribute) and child.attr in _WRITE_OPEN_FLAGS)
+        or (
+            isinstance(child, ast.Name)
+            and (child.id in _WRITE_OPEN_FLAGS or child.id in known)
+        )
+        for child in ast.walk(node)
+    )
+
+
+def _write_mode_vars(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """``flags = os.O_WRONLY | os.O_CREAT`` / ``mode = "w"`` 先存变量再 open。"""
+    flag_vars: set[str] = set()
+    mode_vars: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = {
+                target.id for target in targets if isinstance(target, ast.Name)
+            }
+            value = node.value
+            if isinstance(value, ast.Name):
+                is_flag = value.id in flag_vars
+                is_mode = value.id in mode_vars
+            else:
+                is_flag = _has_open_write_flag(value, flag_vars)
+                is_mode = (
+                    isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                    and any(flag in value.value for flag in "wax+")
+                )
+            fresh_flags = names - flag_vars if is_flag else set()
+            fresh_modes = names - mode_vars if is_mode else set()
+            if fresh_flags:
+                flag_vars |= fresh_flags
+                changed = True
+            if fresh_modes:
+                mode_vars |= fresh_modes
+                changed = True
+    return flag_vars, mode_vars
+
+
+def _open_for_write(call: ast.Call, flag_vars: set[str], mode_vars: set[str]) -> bool:
     """``open(..., "w")`` 与 ``os.open(..., os.O_WRONLY | os.O_CREAT)`` 都算写。"""
     mode = _write_mode(call)
     if mode is None:
         return False
     if isinstance(mode, ast.Constant):
         return isinstance(mode.value, str) and any(flag in mode.value for flag in "wax+")
-    return any(
-        (isinstance(node, ast.Attribute) and node.attr in _WRITE_OPEN_FLAGS)
-        or (isinstance(node, ast.Name) and node.id in _WRITE_OPEN_FLAGS)
-        for node in ast.walk(mode)
-    )
+    if isinstance(mode, ast.Name):
+        return mode.id in mode_vars or mode.id in flag_vars
+    return _has_open_write_flag(mode, flag_vars)
 
 
 def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
     """扫一棵 AST：直接对 memories/ 内容文件落笔的调用点行号。"""
     aliases = _engine_aliases(tree)
+    flag_vars, mode_vars = _write_mode_vars(tree)
     tainted: set[str] = set()
     changed = True
     while changed:
@@ -238,19 +285,24 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
         suspicious = False
         if attr in _WRITE_ATTRS or name == "atomic_write_text":
             receiver = func.value if isinstance(func, ast.Attribute) else None
-            suspicious = (
-                (receiver is not None
-                 and _references_content(receiver, tainted, aliases))
+            receiver_hit = (
+                receiver is not None
+                and _references_content(receiver, tainted, aliases)
+            )
+            if attr == "replace" and len(node.args) >= 2 and receiver_hit:
+                # Path.replace 只有一个参数；两参形式是 str.replace（文本变换，
+                # 不是写盘）或 os.replace（目标在参数里，由下面的参数扫描兜住）。
+                receiver_hit = False
+            suspicious = receiver_hit or any(
                 # 目标也可能在参数里（module-qualified atomic_write_text、
                 # shutil.copy(src, engine.path_for(...))）。
-                or any(
-                    _references_content(argument, tainted, aliases)
-                    for argument in node.args)
+                _references_content(argument, tainted, aliases)
+                for argument in node.args
             )
         elif attr == "open" or name == "open":
             path_arg = node.args[0] if node.args else None
             suspicious = bool(
-                _open_for_write(node) and (
+                _open_for_write(node, flag_vars, mode_vars) and (
                     (path_arg is not None
                      and _references_content(path_arg, tainted, aliases))
                     or (isinstance(func, ast.Attribute)
@@ -310,6 +362,34 @@ def test_static_scan_catches_alias_keyword_and_atomic_write() -> None:
     )
 
     assert _scan_tree("src/fake.py", ast.parse(source)) == [4, 5, 6, 7, 8, 9]
+
+
+def test_static_scan_catches_delete_and_saved_open_modes() -> None:
+    """P4 S3：删除类原语与「先存 flags/mode 变量再 open」也不能漏。"""
+    source = (
+        "engine = object()\n"
+        "flags = os.O_WRONLY | os.O_CREAT\n"
+        "os.open(engine.path_for('memory'), flags)\n"
+        "mode = 'w'\n"
+        "open(engine.path_for('user'), mode)\n"
+        "engine.path_for('memory').unlink()\n"
+        "engine.path_for('user').touch()\n"
+        "shutil.rmtree(engine.path_for('memory').parent)\n"
+        "os.replace(engine.path_for('memory'), 'backup')\n"
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [3, 5, 6, 7, 8, 9]
+
+
+def test_string_replace_is_not_a_content_write() -> None:
+    """P4 S3：对已读出的文本调用 str.replace 不是对内容文件落笔。"""
+    source = (
+        "engine = object()\n"
+        "text = engine.path_for('memory').read_text()\n"
+        "text.replace('a', 'b')\n"
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == []
 
 
 def test_live_entries_are_only_assigned_inside_the_engine() -> None:
