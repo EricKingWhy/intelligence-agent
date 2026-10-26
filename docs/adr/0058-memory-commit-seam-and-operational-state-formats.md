@@ -87,6 +87,12 @@ class MemoryCommit:
   NEED_RECONCILE ⇒ 原样返回待对账，不重试。formation 遇到这类**确定性冲突**收敛为
   `DEGRADED(APPLY_FAILED)`，不再无限重跑同一 job；瞬时 IO 失败仍是 `MemoryCommitError`，
   job 保持可恢复。
+- **目标集缩表的重试语义**：非终态回执的目标集在重试中被丢掉时，已发布目标算无事可做；
+  未发布但磁盘已等于该目标 `after_digest` 的（`os.replace` 完成、发布位未落盘的 kill 窗口）
+  先补发布位再继续收尾；其余未发布目标才是确定性冲突——标 `NEED_RECONCILE` 并抛
+  `MemoryReconcileRequired`，formation 收敛为降级终态。回执的 `operations[].target`
+  必须是 `targets` 的子集：落盘前与 load 都校验，违反按损坏回执（NEED_RECONCILE）处理，
+  避免「有意图、无目标条目」的回执被 finish 成成功。
 - **目标集增长是 `apply_batch_many` 的通用语义**（当前生产入口是 `jobp_` / `blkp_`）：
   重试时如果 COMMITTED 回执不覆盖
   本次请求的某个 target，commit **不改写旧回执**，而是为每个缺失 target 派生稳定子回执

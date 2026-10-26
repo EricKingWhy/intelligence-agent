@@ -364,15 +364,22 @@ async def _republish_completed(
 def _flag_needs_reconcile(
     receipts: ReceiptStore, operation_id: str, reason: str, *, memory_id: str,
 ) -> None:
-    """缺回执时先落 PREPARED 再置 NEED_RECONCILE；已有 COMMITTED 不回退。"""
-    receipt = receipts.load(operation_id)
-    if receipt is None:
-        receipt = receipts.prepare(
-            operation_id, origin="legacy_import", targets=[],
-            operations=[{"kind": "republish", "memory_id": memory_id}],
-        )
-    if receipt.state != ReceiptState.COMMITTED:
-        receipts.mark_needs_reconcile(operation_id, reason)
+    """缺回执时先落 PREPARED 再置 NEED_RECONCILE；已有 COMMITTED 不回退。
+
+    与其余回执写路径同一把 per-operation 文件锁：CLI 与 server 同时导入时，不能
+    在 `commit.add(legp_...)` 正在发布的中途把同一 id 改成 NEED_RECONCILE。
+    回执用空 targets/operations 的合法形状（标记而不是一次内容写意图），
+    memory_id 记进 reason，避免写出一个 load 时被判 corrupt 的文件。
+    """
+    with receipts.lock(operation_id):
+        receipt = receipts.load(operation_id)
+        if receipt is None:
+            receipt = receipts.prepare(
+                operation_id, origin="legacy_import", targets=[], operations=[],
+            )
+        if receipt.state != ReceiptState.COMMITTED:
+            receipts.mark_needs_reconcile(
+                operation_id, f"legacy memory {memory_id}: {reason}")
 
 
 # ---------------------------------------------------------------------- SQL 辅助

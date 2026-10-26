@@ -1317,8 +1317,8 @@ class MemoryJobExecutor:
             # 回执已 NEED_RECONCILE，或同一 id 已 COMMITTED 但这次意图不同：
             # 再重跑形成只会得到同一个冲突，必须收敛到降级终态并留下 operation id。
             logger.error(
-                "memory formation requires reconcile (operation %s): %s",
-                error.operation_id, error.reason,
+                "memory formation requires reconcile (operation %s, target %s): %s",
+                error.operation_id, error.target, error.reason,
             )
             raise _Degraded(DegradedReason.APPLY_FAILED) from None
         except MemoryCommitError as error:

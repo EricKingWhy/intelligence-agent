@@ -164,6 +164,12 @@ class CommitReceipt:
                 raise CorruptStateFile(
                     f"receipt {operation_id} operation has unknown action "
                     f"{item.get('action')!r}")
+            if str(item.get("target")) not in targets:
+                # 目标集与意图必须自洽：operations 里有、targets 里没有的意图
+                # 会让缩表守卫看不到它，finish 后把从未发布的目标伪装成成功。
+                raise CorruptStateFile(
+                    f"receipt {operation_id} operation target "
+                    f"{item.get('target')!r} is missing from targets")
             operations.append(dict(item))
         raw_payload = payload.get("payload") or {}
         if not isinstance(raw_payload, dict):
@@ -262,6 +268,18 @@ class ReceiptStore:
         existing = self.load(operation_id)
         if existing is not None:
             return existing
+        # 落盘前先拒绝 targets/operations 不自洽的意图：否则 load 会把它判 corrupt，
+        # 而调用方以为已经拿到一份可推进的 PREPARED 回执。
+        planned_targets = {str(name) for name in targets}
+        unknown = planned_targets - _RECEIPT_TARGETS
+        if unknown:
+            raise ValueError(f"unknown receipt target(s): {sorted(unknown)!r}")
+        for item in operations:
+            if str(item.get("target")) not in planned_targets:
+                raise ValueError(
+                    f"operation target {item.get('target')!r} is missing from targets")
+            if str(item.get("action")) not in _OPERATION_ACTIONS:
+                raise ValueError(f"unknown operation action: {item.get('action')!r}")
         stamp = utc_stamp()
         receipt = CommitReceipt(
             operation_id=operation_id, state=ReceiptState.PREPARED, origin=origin,

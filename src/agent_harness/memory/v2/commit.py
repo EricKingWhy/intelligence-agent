@@ -375,6 +375,48 @@ class MemoryCommit:
             raise MemoryCommitError(
                 operation_id, target, f"receipt update failed: {error}") from error
 
+    def _dropped_targets_blocking(
+        self, receipt: CommitReceipt, operation_id: str, dropped: Iterable[str],
+    ) -> list[str]:
+        """缩表重试里被丢掉的目标：哪些仍构成确定性冲突。
+
+        - 已发布、或既无计划也无意图（本来就无事可做）⇒ 不需要动作；
+        - 未发布但磁盘已经等于 after ⇒ `os.replace` 已完成、published 位没落盘的
+          kill 窗口，补发布位后视为已落地（ADR-0058 D3）；
+        - 其余（磁盘仍是 before、不可读、既非 before 也非 after）⇒ 冲突，
+          交人工对账，不能让 formation 无限重跑。
+        """
+        blocking: list[str] = []
+        for target in sorted(set(dropped)):
+            plan = receipt.targets.get(target)
+            has_spec = any(
+                str(item.get("target")) == target for item in receipt.operations)
+            if plan is not None and plan.published:
+                continue
+            if plan is None:
+                # 有意图却没有 target 条目：无法判定磁盘状态，按冲突处理。
+                if has_spec:
+                    blocking.append(target)
+                continue
+            if not plan.planned and not has_spec:
+                # 既没有计划也没有意图：该目标本来就无事可做。
+                continue
+            disk = self._engine.disk_entries(target)
+            if (
+                disk is not None and plan.after_digest is not None
+                and entries_digest(disk) == plan.after_digest
+            ):
+                try:
+                    self._receipts.mark_target_published(operation_id, target)
+                except (OSError, RuntimeError) as error:
+                    raise MemoryCommitError(
+                        operation_id, target,
+                        f"content already published but receipt update failed: {error}",
+                    ) from error
+                continue
+            blocking.append(target)
+        return blocking
+
     def _verify_receipt_targets(
         self, receipt: CommitReceipt, operation_id: str, label: str,
     ) -> None:
@@ -467,22 +509,19 @@ class MemoryCommit:
             if existing is not None:
                 dropped = set(existing.targets) - set(targets)
                 if dropped:
-                    # 旧回执里的目标不在这次重试里：已发布的算无事可做（内容已经落地），
-                    # 未发布的不能 finish 成 COMMITTED（会把未发布目标伪装成全部成功），
-                    # 也不能静默补写调用方这次没要的目标。后者是确定性冲突，标
+                    # 旧回执里的目标不在这次重试里：已发布或磁盘已到 after 的算
+                    # 无事可做；未发布且仍不可判定的目标是确定性冲突，标
                     # NEED_RECONCILE 后抛 `MemoryReconcileRequired`，让 formation 收敛到
                     # 降级终态，而不是把同一次重试无限跑下去。
-                    unpublished = sorted(
-                        target for target in dropped
-                        if not existing.targets[target].published
-                    )
-                    if unpublished:
-                        for target in unpublished:
+                    blocking = self._dropped_targets_blocking(
+                        existing, operation_id, dropped)
+                    if blocking:
+                        for target in blocking:
                             self._mark_target_reconcile(
                                 operation_id, target,
                                 "retry omitted a target that was not published")
                         raise MemoryReconcileRequired(
-                            operation_id, ",".join(unpublished),
+                            operation_id, ",".join(blocking),
                             "retry target set shrank before every recorded target "
                             "was published; "
                             f"run `memory reconcile` for operation {operation_id}")
@@ -1044,10 +1083,18 @@ class MemoryCommit:
                 expected = {str(spec["target"]): spec for spec in specs}
                 dropped = set(recorded) - set(expected)
                 if dropped:
-                    raise MemoryCommitError(
-                        operation_id, "memory+user",
-                        "retry target set shrank from the recorded receipt; "
-                        f"run `memory reconcile` for operation {operation_id}")
+                    blocking = self._dropped_targets_blocking(
+                        receipt, operation_id, dropped)
+                    if blocking:
+                        for target in blocking:
+                            self._mark_target_reconcile(
+                                operation_id, target,
+                                "retry omitted a target that was not published")
+                        raise MemoryReconcileRequired(
+                            operation_id, ",".join(blocking),
+                            "retry target set shrank before every recorded target "
+                            "was published; "
+                            f"run `memory reconcile` for operation {operation_id}")
                 changed = {
                     target for target in set(recorded) & set(expected)
                     if recorded[target] != expected[target]
@@ -1201,6 +1248,12 @@ class MemoryCommit:
     def _resolve_receipt(self, receipt: CommitReceipt) -> tuple[str, bool]:
         """返回 ``(committed|needs_reconcile|unreadable, 本轮是否补发布过)``。"""
         if not receipt.targets:
+            if receipt.operations:
+                # targets 为空却有意图：无法判定发布目标，不能 finish 成成功。
+                # 合法回执（含 legacy import 的标记）两者都为空，不受影响。
+                self._receipts.mark_needs_reconcile(
+                    receipt.operation_id, "receipt has operations but no targets")
+                return "needs_reconcile", False
             self._receipts.finish(receipt.operation_id)
             return "committed", False
         republished = False

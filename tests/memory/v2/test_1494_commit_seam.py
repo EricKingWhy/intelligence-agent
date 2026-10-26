@@ -973,6 +973,46 @@ async def test_multi_target_retry_may_drop_an_already_published_target(seam: Sea
 
 
 @pytest.mark.asyncio
+async def test_shrink_retry_recovers_when_the_dropped_target_reached_after(
+    seam: Seam,
+) -> None:
+    """review P3：文件已替换、published 位未落盘的 kill 窗口，缩表重试必须收敛。"""
+    receipts = seam.commit._receipts
+    original_mark = receipts.mark_target_published
+    failed = {"done": False}
+
+    def _fail_user_mark(operation_id: str, target: str):
+        if target == "user" and not failed["done"]:
+            failed["done"] = True
+            raise OSError("crash after content replace, before publish mark")
+        return original_mark(operation_id, target)
+
+    receipts.mark_target_published = _fail_user_mark  # type: ignore[method-assign]
+    records = (
+        make_record(memory_id="mem-after", content="after 窗口的 MEMORY"),
+        make_record(
+            memory_id="user-after", content="after 窗口的 USER", tier=MemoryTier.PROFILE),
+    )
+    with pytest.raises(MemoryCommitError):
+        await seam.service.mirror_committed(records, operation_prefix="jobp_after_window")
+
+    receipts.mark_target_published = original_mark  # type: ignore[method-assign]
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+    assert "after 窗口的 USER" in user_file.read_text(encoding="utf-8")
+    published = read_json(receipts.path_for("jobp_after_window_apply"))
+    assert published is not None and published["targets"]["user"]["published"] is False
+
+    await seam.service.mirror_committed(
+        records[:1], operation_prefix="jobp_after_window")
+
+    receipt = read_json(receipts.path_for("jobp_after_window_apply"))
+    assert receipt is not None and receipt["state"] == ReceiptState.COMMITTED
+    assert receipt["targets"]["user"]["published"] is True
+    assert "after 窗口的 USER" in user_file.read_text(encoding="utf-8")
+    assert seam.commit._receipts.list_pending() == []
+
+
+@pytest.mark.asyncio
 async def test_formation_shrink_conflict_degrades_instead_of_retrying_forever(
     seam: Seam, caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1005,7 +1045,8 @@ async def test_formation_shrink_conflict_degrades_instead_of_retrying_forever(
     assert not (Path(seam.settings.workspace_dir) / "memories" / "USER.md").exists()
     messages = [record.getMessage() for record in caplog.records]
     assert any(
-        operation_id in message and "retry target set shrank" in message
+        operation_id in message and "target user" in message
+        and "retry target set shrank" in message
         for message in messages
     ), messages
 
@@ -1024,9 +1065,59 @@ async def test_formation_markdown_rejection_logs_operation_id_and_target(
     messages = [record.getMessage() for record in caplog.records]
     assert any(
         "markdown authority" in message and "_apply" in message
-        and "memory" in message
+        and "target memory" in message
         for message in messages
     ), messages
+
+
+@pytest.mark.asyncio
+async def test_service_mirror_rejection_carries_the_target(seam: Seam) -> None:
+    """review P4：service/tool 面的 mirror 拒绝也要带 target，不能只有 operation id。"""
+    seam.commit.engine.user_char_limit = 80
+
+    with pytest.raises(MarkdownAuthorityError) as caught:
+        await seam.service.create(
+            make_draft(content="x" * 200, tier=MemoryTier.PROFILE), LOCAL)
+
+    assert caught.value.target == "user"
+    assert caught.value.operation_id is not None
+    assert caught.value.operation_id.startswith("mcf_")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_never_commits_operations_outside_the_target_set(seam: Seam) -> None:
+    """review P3-2：operations 有、targets 没有的意图不能被 finish 成成功。"""
+    store = ReceiptStore(seam.root)
+    payload = {
+        "schema": 1, "operation_id": "jobp_bad_shape", "state": ReceiptState.PREPARED,
+        "origin": "test", "created_at": "2026-10-26T00:00:00+00:00",
+        "updated_at": "2026-10-26T00:00:00+00:00",
+        "targets": {"memory": {
+            "before_digest": None, "after_digest": None,
+            "planned": False, "published": False,
+        }},
+        "operations": [{"target": "user", "action": "add", "content": "未发布的 USER"}],
+        "payload": {}, "result": None, "reason": None,
+    }
+    atomic_write_text(store.path_for("jobp_bad_shape"), json.dumps(payload))
+
+    report = await seam.commit.reconcile()
+
+    assert "jobp_bad_shape" in {
+        operation_id for operation_id, _reason in report.needs_reconcile}
+    assert "jobp_bad_shape" not in report.committed
+    assert store.load("jobp_bad_shape").state == ReceiptState.NEED_RECONCILE
+    raw = read_json(store.path_for("jobp_bad_shape"))
+    assert raw is None or raw["state"] != ReceiptState.COMMITTED
+    assert not (Path(seam.settings.workspace_dir) / "memories" / "USER.md").exists()
+
+
+def test_receipt_prepare_rejects_operations_outside_the_target_set(seam: Seam) -> None:
+    """落盘前就拒绝不自洽意图，避免调用方以为拿到了一份可推进的回执。"""
+    with pytest.raises(ValueError, match="missing from targets"):
+        ReceiptStore(seam.root).prepare(
+            "jobp_inconsistent", origin="test", targets=["memory"],
+            operations=[{"target": "user", "action": "add", "content": "x"}])
 
 
 @pytest.mark.asyncio
@@ -1977,6 +2068,40 @@ async def test_committed_digest_receipt_rejects_a_larger_explicit_scope(
         await seam.commit.remove_by_digest(
             digests_by_target={"memory": [shrink_memory]},
             operation_id="del_scope_shrink")
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_digest_cleanup_shrink_needs_reconcile(seam: Seam) -> None:
+    """review P4：digest 清理的非终态缩表与 apply_batch_many 同语义，不能可重试。"""
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+    atomic_write_text(seam.memory_file, "digest 缩表 MEMORY")
+    atomic_write_text(user_file, "digest 缩表 USER")
+    memory_digest = entry_digest("digest 缩表 MEMORY")
+    user_digest = entry_digest("digest 缩表 USER")
+    original = seam.commit.engine._write_file
+
+    def _fail_user(path: Path, entries: list[str]) -> None:
+        if path.name == "USER.md":
+            raise OSError("disk full")
+        original(path, entries)
+
+    seam.commit.engine._write_file = _fail_user  # type: ignore[method-assign]
+    with pytest.raises(MemoryCommitError):
+        await seam.commit.remove_by_digest(
+            digests_by_target={"memory": [memory_digest], "user": [user_digest]},
+            operation_id="del_digest_nonterminal_shrink")
+
+    seam.commit.engine._write_file = original  # type: ignore[method-assign]
+    with pytest.raises(MemoryReconcileRequired) as caught:
+        await seam.commit.remove_by_digest(
+            digests_by_target={"memory": [memory_digest]},
+            operation_id="del_digest_nonterminal_shrink")
+
+    assert caught.value.target == "user"
+    receipt = read_json(
+        ReceiptStore(seam.root).path_for("del_digest_nonterminal_shrink"))
+    assert receipt is not None and receipt["state"] == ReceiptState.NEED_RECONCILE
+    assert "digest 缩表 USER" in user_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

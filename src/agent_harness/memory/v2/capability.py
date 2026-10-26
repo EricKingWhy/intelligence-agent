@@ -318,7 +318,9 @@ class MemoryV2Service:
             return None
 
     @staticmethod
-    def _require_markdown_success(response: dict[str, Any], operation: str) -> None:
+    def _require_markdown_success(
+        response: dict[str, Any], operation: str, *, target: str | None = None,
+    ) -> None:
         """markdown 的失败是**返回值**（`success=False`），不是异常。
 
         权威面没写成就不能继续写 SQLite 投影：调用方看到的必须是一次失败写入，
@@ -343,10 +345,12 @@ class MemoryV2Service:
             message += "\n\n当前条目：\n" + "\n".join(f"- {entry}" for entry in entries)
             raise MarkdownBudgetExhausted(
                 f"markdown {operation} failed: {message}",
-                operation_id=str(operation_id) if operation_id else None)
+                operation_id=str(operation_id) if operation_id else None,
+                target=target)
         raise MarkdownAuthorityError(
             f"markdown {operation} failed: {message}",
-            operation_id=str(operation_id) if operation_id else None)
+            operation_id=str(operation_id) if operation_id else None,
+            target=target)
 
     async def _mirror_markdown(
         self, draft: MemoryDraftV2 | None, *, previous_id: str | None = None,
@@ -367,7 +371,8 @@ class MemoryV2Service:
 
         async def _add(target: str, content: str) -> None:
             if engine.target_enabled(target):
-                self._require_markdown_success(await commit.add(target, content), "add")
+                self._require_markdown_success(
+                    await commit.add(target, content), "add", target=target)
 
         async def _remove(record: MemoryRecordV2) -> None:
             target = self.markdown_target(record)
@@ -380,6 +385,7 @@ class MemoryV2Service:
                         missing_ok=True,
                     ),
                     "remove",
+                    target=target,
                 )
 
         async def _replace(target: str, record: MemoryRecordV2, content: str) -> None:
@@ -449,7 +455,7 @@ class MemoryV2Service:
                 target, memory.content, matched_entry=memory.content, missing_ok=True,
                 operation_id=f"del_{memory.memory_id}",
             )
-            self._require_markdown_success(response, "remove")
+            self._require_markdown_success(response, "remove", target=target)
         if digests:
             # 墓碑-only 删除：记录行已不在，只能按正文哈希清理。零命中就是已经清理过；
             # 同一 target 内仍被其它 active 记录引用的正文跳过（跨 target 互不影响）。

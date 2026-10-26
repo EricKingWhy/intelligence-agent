@@ -229,13 +229,33 @@ def _is_write_mode(value: str) -> bool:
     return any(char in value for char in "wax+")
 
 
-def _content_path_functions(tree: ast.AST, aliases: set[str]) -> set[str]:
+def _references_method_content(
+    node: ast.AST, local: set[str], attr_names: set[str], aliases: set[str],
+    path_functions: set[str], path_methods: set[str],
+) -> bool:
+    """方法体里的内容路径引用：额外认 `self.<attr>`（类级属性缓存路径）。"""
+    if _references_content(node, local, aliases, path_functions, path_methods):
+        return True
+    return any(
+        isinstance(child, ast.Attribute)
+        and isinstance(child.value, ast.Name)
+        and child.value.id == "self"
+        and child.attr in attr_names
+        for child in ast.walk(node)
+    )
+
+
+def _content_path_functions(
+    tree: ast.AST, aliases: set[str], path_methods: set[str] | None = None,
+) -> set[str]:
     """返回 `def p(): return engine.path_for(...)` / 返回内容路径别名的函数名。
 
     名字集合本身也参与判定并迭代到不动点：`outer()` 只返回 `inner()` 时，必须等
     `inner` 先被认定为内容路径函数，`outer` 才能被认定——否则 `outer().write_text()`
-    这种多一层包装的旁路会漏扫。
+    这种多一层包装的旁路会漏扫。已识别的方法名同样参与，`def f(): return
+    store.content_path()` 才会被追上。
     """
+    methods = path_methods or set()
     names: set[str] = set()
     changed = True
     while changed:
@@ -252,7 +272,9 @@ def _content_path_functions(tree: ast.AST, aliases: set[str]) -> set[str]:
                 for child in ast.walk(node):
                     if not isinstance(child, (ast.Assign, ast.AnnAssign)) or child.value is None:
                         continue
-                    if not _references_content(child.value, local, aliases, names):
+                    if not _references_content(
+                        child.value, local, aliases, names, methods,
+                    ):
                         continue
                     for target in _assign_targets(child):
                         if isinstance(target, ast.Name) and target.id not in local:
@@ -260,7 +282,7 @@ def _content_path_functions(tree: ast.AST, aliases: set[str]) -> set[str]:
                             local_changed = True
             if any(
                 isinstance(child, ast.Return) and child.value is not None
-                and _references_content(child.value, local, aliases, names)
+                and _references_content(child.value, local, aliases, names, methods)
                 for child in ast.walk(node)
             ):
                 names.add(node.name)
@@ -273,26 +295,66 @@ def _content_path_methods(
 ) -> set[str]:
     """类方法返回内容路径时的**方法名**（`store.content_path()` 这类调用）。
 
-    只收类体内直接 `return <内容路径>` 的方法，且排除 `path_for`：后者在
-    receipt/staged/job 等状态 store 上同名但指向操作状态文件，由 `_is_engine_ref`
-    单独判定，不能按方法名一刀切。方法名匹配对普通仓库可能偏保守（同名方法会被
-    当成路径），但这个静态闸门宁可多报也不漏掉一条动态包装的写旁路。
+    排除 `path_for`：它在 receipt/staged/job 等状态 store 上同名但指向操作状态
+    文件，由 `_is_engine_ref` 单独判定，不能按方法名一刀切。方法名匹配对普通仓库
+    可能偏保守（同名方法会被当成路径），但这个静态闸门宁可多报也不漏掉一条动态
+    包装的写旁路。
+
+    类级不动点覆盖三种包装：方法内局部别名、`self.<attr> = <内容路径>` 后再返回
+    属性、以及 `return self.other_method()` 的方法链。
     """
     names: set[str] = set()
-    for class_node in ast.walk(tree):
-        if not isinstance(class_node, ast.ClassDef):
-            continue
-        for node in class_node.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    attr_names: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for class_node in ast.walk(tree):
+            if not isinstance(class_node, ast.ClassDef):
                 continue
-            if node.name == "path_for":
-                continue
-            if any(
-                isinstance(child, ast.Return) and child.value is not None
-                and _references_content(child.value, set(), aliases, path_functions)
-                for child in ast.walk(node)
-            ):
-                names.add(node.name)
+            for node in class_node.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if node.name == "path_for":
+                    continue
+                local: set[str] = set()
+                local_changed = True
+                while local_changed:
+                    local_changed = False
+                    for child in ast.walk(node):
+                        if (
+                            not isinstance(child, (ast.Assign, ast.AnnAssign))
+                            or child.value is None
+                        ):
+                            continue
+                        if not _references_method_content(
+                            child.value, local, attr_names, aliases,
+                            path_functions, names,
+                        ):
+                            continue
+                        for target in _assign_targets(child):
+                            if isinstance(target, ast.Name) and target.id not in local:
+                                local.add(target.id)
+                                local_changed = True
+                            elif (
+                                isinstance(target, ast.Attribute)
+                                and isinstance(target.value, ast.Name)
+                                and target.value.id == "self"
+                                and target.attr not in attr_names
+                            ):
+                                attr_names.add(target.attr)
+                                changed = local_changed = True
+                if node.name in names:
+                    continue
+                if any(
+                    isinstance(child, ast.Return) and child.value is not None
+                    and _references_method_content(
+                        child.value, local, attr_names, aliases,
+                        path_functions, names,
+                    )
+                    for child in ast.walk(node)
+                ):
+                    names.add(node.name)
+                    changed = True
     return names
 
 
@@ -507,8 +569,16 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
     """扫一棵 AST：直接对 memories/ 内容文件落笔的调用点行号。"""
     aliases = _engine_aliases(tree)
     module_names = _module_aliases(tree)
-    path_functions = _content_path_functions(tree, aliases)
-    path_methods = _content_path_methods(tree, aliases, path_functions)
+    path_functions: set[str] = set()
+    path_methods: set[str] = set()
+    while True:
+        # 函数与方法互相包装：`def f(): return store.content_path()` 与
+        # `def content_path(self): return helper()` 都要迭代到同一个不动点。
+        next_functions = _content_path_functions(tree, aliases, path_methods)
+        next_methods = _content_path_methods(tree, aliases, next_functions)
+        if next_functions == path_functions and next_methods == path_methods:
+            break
+        path_functions, path_methods = next_functions, next_methods
     path_vars = _path_aliases(tree, aliases, path_functions, path_methods)
     flag_vars, mode_vars = _write_mode_vars(tree)
     tainted: set[str] = set()
@@ -705,6 +775,34 @@ def test_static_scan_catches_method_and_nested_helpers() -> None:
     )
 
     assert _scan_tree("src/fake.py", ast.parse(source)) == [6, 11, 13]
+
+
+def test_static_scan_catches_method_chains_and_cached_path_attributes() -> None:
+    """review P4-2：方法→方法、self.<attr> 缓存、函数包装方法都不能漏。"""
+    source = (
+        "engine = object()\n"                                  # 1
+        "class Store:\n"                                       # 2
+        "    def __init__(self):\n"                            # 3
+        "        self.path = self.engine.path_for('user')\n"   # 4
+        "    def raw(self):\n"                                 # 5
+        "        return self.engine.path_for('memory')\n"      # 6
+        "    def wrapped(self):\n"                             # 7
+        "        return self.raw()\n"                          # 8
+        "    def cached(self):\n"                              # 9
+        "        return self.path\n"                           # 10
+        "    def local(self):\n"                               # 11
+        "        p = self.engine.path_for('memory')\n"         # 12
+        "        return p\n"                                   # 13
+        "store = Store()\n"                                    # 14
+        "store.wrapped().write_text('x')\n"                    # 15
+        "store.cached().unlink()\n"                            # 16
+        "store.local().touch()\n"                              # 17
+        "def via_method():\n"                                  # 18
+        "    return store.raw()\n"                             # 19
+        "via_method().write_text('x')\n"                       # 20
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [15, 16, 17, 20]
 
 
 def test_collection_remove_and_plain_string_mode_are_not_content_writes() -> None:
