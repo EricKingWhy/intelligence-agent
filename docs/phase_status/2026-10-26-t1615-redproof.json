@@ -1,13 +1,13 @@
 {
   "base": "ca4234d91bbb5a1d6546086dbe02a8d2de81b83c",
   "tip": "a9e9ba071fb9a7142fffb83cbeba125d07d05b58",
-  "python": "C:\\Users\\王浩宇\\.codex\\worktrees\\issue-1525-deepening\\intelligence-agent\\.venv\\Scripts\\python.exe",
-  "isolated_root": "C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\repo",
-  "import_probe": "C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\repo\\src\\agent_harness\\__init__.py",
+  "python": "<repo>\\.venv\\Scripts\\python.exe",
+  "isolated_root": "<isolated-run>\\repo",
+  "import_probe": "<isolated-run>\\repo\\src\\agent_harness\\__init__.py",
   "baseline": {
     "name": "baseline-red",
     "command": [
-      "C:\\Users\\王浩宇\\.codex\\worktrees\\issue-1525-deepening\\intelligence-agent\\.venv\\Scripts\\python.exe",
+      "<repo>\\.venv\\Scripts\\python.exe",
       "-m",
       "pytest",
       "tests/memory/v2/test_1493_identity_mapping.py",
@@ -16,7 +16,7 @@
       "-p",
       "no:randomly",
       "--tb=short",
-      "--junitxml=C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\baseline-red.xml"
+      "--junitxml=<isolated-run>\\baseline-red.xml"
     ],
     "returncode": 1,
     "testcases": 51,
@@ -153,7 +153,7 @@
   "receipt_mutation": {
     "name": "receipt-count-mutation-red",
     "command": [
-      "C:\\Users\\王浩宇\\.codex\\worktrees\\issue-1525-deepening\\intelligence-agent\\.venv\\Scripts\\python.exe",
+      "<repo>\\.venv\\Scripts\\python.exe",
       "-m",
       "pytest",
       "tests/memory/v2/test_1493_identity_mapping.py::test_empty_rejection_can_be_archived_and_receipt_counts_record_rows",
@@ -161,7 +161,7 @@
       "-p",
       "no:randomly",
       "--tb=short",
-      "--junitxml=C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\receipt-count-mutation-red.xml"
+      "--junitxml=<isolated-run>\\receipt-count-mutation-red.xml"
     ],
     "returncode": 1,
     "testcases": 1,
@@ -178,7 +178,7 @@
   "restored": {
     "name": "receipt-count-restored-green",
     "command": [
-      "C:\\Users\\王浩宇\\.codex\\worktrees\\issue-1525-deepening\\intelligence-agent\\.venv\\Scripts\\python.exe",
+      "<repo>\\.venv\\Scripts\\python.exe",
       "-m",
       "pytest",
       "tests/memory/v2/test_1493_identity_mapping.py::test_empty_rejection_can_be_archived_and_receipt_counts_record_rows",
@@ -186,12 +186,259 @@
       "-p",
       "no:randomly",
       "--tb=short",
-      "--junitxml=C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\receipt-count-restored-green.xml"
+      "--junitxml=<isolated-run>\\receipt-count-restored-green.xml"
     ],
     "returncode": 0,
     "testcases": 1,
     "failures": [],
     "errors": 0,
     "tail": ".                                                                        [100%]\n1 passed in 11.18s\n"
+  },
+  "p3_6_mutations": [
+    {
+      "id": "M6",
+      "source": "src/agent_harness/memory/v2/identity_mapping.py",
+      "before": "if manifest_path.exists():",
+      "after": "if False and manifest_path.exists():",
+      "red": {
+        "command": [
+          "<repo>\\.venv\\Scripts\\python.exe",
+          "-m",
+          "pytest",
+          "tests/memory/v2/test_1493_identity_mapping.py::test_plan_refuses_to_overwrite_existing_manifest",
+          "-q",
+          "-p",
+          "no:randomly",
+          "--tb=short",
+          "--junitxml=<isolated-run>\\M6-red.xml"
+        ],
+        "cwd": "<isolated-run>\\repo",
+        "env": {
+          "PYTHONPATH": "<isolated-run>\\repo\\src",
+          "PYTHONUTF8": "1"
+        },
+        "returncode": 1,
+        "failures": [
+          {
+            "name": "test_plan_refuses_to_overwrite_existing_manifest",
+            "message": "Failed: DID NOT RAISE MappingBlocked",
+            "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1102: in test_plan_refuses_to_overwrite_existing_manifest\n    with pytest.raises(MappingBlocked, match=\"已存在\"):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+          }
+        ],
+        "errors": 0,
+        "tail": "F                                                                        [100%]\n================================== FAILURES ===================================\n______________ test_plan_refuses_to_overwrite_existing_manifest _______________\ntests\\memory\\v2\\test_1493_identity_mapping.py:1102: in test_plan_refuses_to_overwrite_existing_manifest\n    with pytest.raises(MappingBlocked, match=\"已存在\"):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked\n=========================== short test summary info ===========================\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_plan_refuses_to_overwrite_existing_manifest\n1 failed in 20.78s\n"
+      },
+      "restored": {
+        "command": [
+          "<repo>\\.venv\\Scripts\\python.exe",
+          "-m",
+          "pytest",
+          "tests/memory/v2/test_1493_identity_mapping.py::test_plan_refuses_to_overwrite_existing_manifest",
+          "-q",
+          "-p",
+          "no:randomly",
+          "--tb=short",
+          "--junitxml=<isolated-run>\\M6-restored.xml"
+        ],
+        "cwd": "<isolated-run>\\repo",
+        "env": {
+          "PYTHONPATH": "<isolated-run>\\repo\\src",
+          "PYTHONUTF8": "1"
+        },
+        "returncode": 0,
+        "failures": [],
+        "errors": 0,
+        "tail": ".                                                                        [100%]\n1 passed in 11.13s\n"
+      }
+    },
+    {
+      "id": "M8",
+      "source": "src/agent_harness/memory/v2/identity_mapping.py",
+      "before": "used = baseline",
+      "after": "used = 0",
+      "red": {
+        "command": [
+          "<repo>\\.venv\\Scripts\\python.exe",
+          "-m",
+          "pytest",
+          "tests/memory/v2/test_1493_identity_mapping.py::test_plan_budget_includes_existing_memory_file",
+          "-q",
+          "-p",
+          "no:randomly",
+          "--tb=short",
+          "--junitxml=<isolated-run>\\M8-red.xml"
+        ],
+        "cwd": "<isolated-run>\\repo",
+        "env": {
+          "PYTHONPATH": "<isolated-run>\\repo\\src",
+          "PYTHONUTF8": "1"
+        },
+        "returncode": 1,
+        "failures": [
+          {
+            "name": "test_plan_budget_includes_existing_memory_file",
+            "message": "AssertionError: 清单里没有 budget:memory；现有 ['entry:memory:06eb485747125bee', 'entry:user:1e1603ea3c5aae66', 'archive:memory_v2_records:m4', 'archive:memory_v2_records:m5', 'conflict:entry:m6', 'settings', 'archive:memory_v2_staged:stg-pending', 'archive:memory_v2_staged:stg-approving', 'archive:memory_v2_jobs:job-done', 'archive:memory_v2_jobs:job-lost', 'archive:memory_v2_tombstones:tomb-1']",
+            "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1118: in test_plan_budget_includes_existing_memory_file\n    budget = _item(manifest, \"budget:memory\")\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\memory\\v2\\test_1493_identity_mapping.py:232: in _item\n    raise AssertionError(f\"清单里没有 {item_id}；现有 {[i['id'] for i in manifest['items']]}\")\nE   AssertionError: 清单里没有 budget:memory；现有 ['entry:memory:06eb485747125bee', 'entry:user:1e1603ea3c5aae66', 'archive:memory_v2_records:m4', 'archive:memory_v2_records:m5', 'conflict:entry:m6', 'settings', 'archive:memory_v2_staged:stg-pending', 'archive:memory_v2_staged:stg-approving', 'archive:memory_v2_jobs:job-done', 'archive:memory_v2_jobs:job-lost', 'archive:memory_v2_tombstones:tomb-1']"
+          }
+        ],
+        "errors": 0,
+        "tail": "F                                                                        [100%]\n================================== FAILURES ===================================\n_______________ test_plan_budget_includes_existing_memory_file ________________\ntests\\memory\\v2\\test_1493_identity_mapping.py:1118: in test_plan_budget_includes_existing_memory_file\n    budget = _item(manifest, \"budget:memory\")\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\memory\\v2\\test_1493_identity_mapping.py:232: in _item\n    raise AssertionError(f\"清单里没有 {item_id}；现有 {[i['id'] for i in manifest['items']]}\")\nE   AssertionError: 清单里没有 budget:memory；现有 ['entry:memory:06eb485747125bee', 'entry:user:1e1603ea3c5aae66', 'archive:memory_v2_records:m4', 'archive:memory_v2_records:m5', 'conflict:entry:m6', 'settings', 'archive:memory_v2_staged:stg-pending', 'archive:memory_v2_staged:stg-approving', 'archive:memory_v2_jobs:job-done', 'archive:memory_v2_jobs:job-lost', 'archive:memory_v2_tombstones:tomb-1']\n=========================== short test summary info ===========================\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_plan_budget_includes_existing_memory_file\n1 failed in 20.96s\n"
+      },
+      "restored": {
+        "command": [
+          "<repo>\\.venv\\Scripts\\python.exe",
+          "-m",
+          "pytest",
+          "tests/memory/v2/test_1493_identity_mapping.py::test_plan_budget_includes_existing_memory_file",
+          "-q",
+          "-p",
+          "no:randomly",
+          "--tb=short",
+          "--junitxml=<isolated-run>\\M8-restored.xml"
+        ],
+        "cwd": "<isolated-run>\\repo",
+        "env": {
+          "PYTHONPATH": "<isolated-run>\\repo\\src",
+          "PYTHONUTF8": "1"
+        },
+        "returncode": 0,
+        "failures": [],
+        "errors": 0,
+        "tail": ".                                                                        [100%]\n1 passed in 10.88s\n"
+      }
+    },
+    {
+      "id": "M10",
+      "source": "src/agent_harness/memory/v2/identity_mapping.py",
+      "before": "key = (target, digest)",
+      "after": "key = digest",
+      "red": {
+        "command": [
+          "<repo>\\.venv\\Scripts\\python.exe",
+          "-m",
+          "pytest",
+          "tests/memory/v2/test_1493_identity_mapping.py::test_identical_content_for_different_targets_stays_separate",
+          "-q",
+          "-p",
+          "no:randomly",
+          "--tb=short",
+          "--junitxml=<isolated-run>\\M10-red.xml"
+        ],
+        "cwd": "<isolated-run>\\repo",
+        "env": {
+          "PYTHONPATH": "<isolated-run>\\repo\\src",
+          "PYTHONUTF8": "1"
+        },
+        "returncode": 1,
+        "failures": [
+          {
+            "name": "test_identical_content_for_different_targets_stays_separate",
+            "message": "AssertionError: assert 1 == 2\n +  where 1 = len([{'id': 'entry:memory:1c1bb6603304b908', 'kind': 'entry', 'disposition': 'map', 'target': 'memory', ...}])",
+            "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1137: in test_identical_content_for_different_targets_stays_separate\n    assert len(matching) == 2\nE   AssertionError: assert 1 == 2\nE    +  where 1 = len([{'id': 'entry:memory:1c1bb6603304b908', 'kind': 'entry', 'disposition': 'map', 'target': 'memory', ...}])"
+          }
+        ],
+        "errors": 0,
+        "tail": "F                                                                        [100%]\n================================== FAILURES ===================================\n_________ test_identical_content_for_different_targets_stays_separate _________\ntests\\memory\\v2\\test_1493_identity_mapping.py:1137: in test_identical_content_for_different_targets_stays_separate\n    assert len(matching) == 2\nE   AssertionError: assert 1 == 2\nE    +  where 1 = len([{'id': 'entry:memory:1c1bb6603304b908', 'kind': 'entry', 'disposition': 'map', 'target': 'memory', ...}])\n=========================== short test summary info ===========================\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_identical_content_for_different_targets_stays_separate\n1 failed in 14.60s\n"
+      },
+      "restored": {
+        "command": [
+          "<repo>\\.venv\\Scripts\\python.exe",
+          "-m",
+          "pytest",
+          "tests/memory/v2/test_1493_identity_mapping.py::test_identical_content_for_different_targets_stays_separate",
+          "-q",
+          "-p",
+          "no:randomly",
+          "--tb=short",
+          "--junitxml=<isolated-run>\\M10-restored.xml"
+        ],
+        "cwd": "<isolated-run>\\repo",
+        "env": {
+          "PYTHONPATH": "<isolated-run>\\repo\\src",
+          "PYTHONUTF8": "1"
+        },
+        "returncode": 0,
+        "failures": [],
+        "errors": 0,
+        "tail": ".                                                                        [100%]\n1 passed in 11.20s\n"
+      }
+    },
+    {
+      "id": "M12",
+      "source": "src/agent_harness/memory/v2/identity_mapping.py",
+      "before": "return claimed is not None and claimed + APPROVING_LEASE > now",
+      "after": "return False",
+      "red": {
+        "command": [
+          "<repo>\\.venv\\Scripts\\python.exe",
+          "-m",
+          "pytest",
+          "tests/memory/v2/test_1493_identity_mapping.py::test_plan_marks_live_approving_lease_and_blocks_apply",
+          "-q",
+          "-p",
+          "no:randomly",
+          "--tb=short",
+          "--junitxml=<isolated-run>\\M12-red.xml"
+        ],
+        "cwd": "<isolated-run>\\repo",
+        "env": {
+          "PYTHONPATH": "<isolated-run>\\repo\\src",
+          "PYTHONUTF8": "1"
+        },
+        "returncode": 1,
+        "failures": [
+          {
+            "name": "test_plan_marks_live_approving_lease_and_blocks_apply",
+            "message": "assert False is True",
+            "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:989: in test_plan_marks_live_approving_lease_and_blocks_apply\n    assert _item(manifest, item_id)[\"lease_live\"] is True\nE   assert False is True"
+          }
+        ],
+        "errors": 0,
+        "tail": "F                                                                        [100%]\n================================== FAILURES ===================================\n____________ test_plan_marks_live_approving_lease_and_blocks_apply ____________\ntests\\memory\\v2\\test_1493_identity_mapping.py:989: in test_plan_marks_live_approving_lease_and_blocks_apply\n    assert _item(manifest, item_id)[\"lease_live\"] is True\nE   assert False is True\n=========================== short test summary info ===========================\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_plan_marks_live_approving_lease_and_blocks_apply\n1 failed in 14.39s\n"
+      },
+      "restored": {
+        "command": [
+          "<repo>\\.venv\\Scripts\\python.exe",
+          "-m",
+          "pytest",
+          "tests/memory/v2/test_1493_identity_mapping.py::test_plan_marks_live_approving_lease_and_blocks_apply",
+          "-q",
+          "-p",
+          "no:randomly",
+          "--tb=short",
+          "--junitxml=<isolated-run>\\M12-restored.xml"
+        ],
+        "cwd": "<isolated-run>\\repo",
+        "env": {
+          "PYTHONPATH": "<isolated-run>\\repo\\src",
+          "PYTHONUTF8": "1"
+        },
+        "returncode": 0,
+        "failures": [],
+        "errors": 0,
+        "tail": ".                                                                        [100%]\n1 passed in 10.80s\n"
+      }
+    }
+  ],
+  "execution": {
+    "cwd": "<isolated-run>\\repo",
+    "env": {
+      "PYTHONPATH": "<isolated-run>\\repo\\src",
+      "PYTHONUTF8": "1"
+    },
+    "receipt_count_mutation": {
+      "before": "\"records\": count archived memory_v2_records source rows",
+      "after": "\"records\": count only items of kind record_archive"
+    }
+  },
+  "frozen_code": {
+    "sha": "a9e9ba071fb9a7142fffb83cbeba125d07d05b58",
+    "tree": "d0ac4911b03965bc0650e5d8b4954e97ff83bd25",
+    "blobs": {
+      "src/agent_harness/memory/v2/identity_mapping.py": "da1d3266b9a63284ff1a85eec00a1ff426d63d46",
+      "src/agent_harness/cli.py": "3f47537346ddee45fa3212f8a7c243370ea06573",
+      "tests/memory/v2/test_1493_identity_mapping.py": "dd60bd99f3c96074431d6dec27c3132b8caa1879",
+      "tests/memory/v2/test_1493_identity_mapping_cli.py": "7bd8b7592d30a71a01f3dee9446adb7b0eff6fef"
+    }
   }
 }
