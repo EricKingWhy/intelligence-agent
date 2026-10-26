@@ -341,8 +341,12 @@ class MemoryV2Service:
             # 条目是模型就地合并的唯一依据（与 `memory_tool._result` 同形）。
             # 条目只进模型可见的 message，不进事件流（不变量 #22）。
             message += "\n\n当前条目：\n" + "\n".join(f"- {entry}" for entry in entries)
-            raise MarkdownBudgetExhausted(f"markdown {operation} failed: {message}")
-        raise MarkdownAuthorityError(f"markdown {operation} failed: {message}")
+            raise MarkdownBudgetExhausted(
+                f"markdown {operation} failed: {message}",
+                operation_id=str(operation_id) if operation_id else None)
+        raise MarkdownAuthorityError(
+            f"markdown {operation} failed: {message}",
+            operation_id=str(operation_id) if operation_id else None)
 
     async def _mirror_markdown(
         self, draft: MemoryDraftV2 | None, *, previous_id: str | None = None,
@@ -507,7 +511,9 @@ class MemoryV2Service:
             )
         except MemoryBatchRejected as error:
             raise MarkdownAuthorityError(
-                f"markdown preflight rejected: {error.reason}") from error
+                f"markdown preflight rejected: {error.reason}",
+                operation_id=error.operation_id, target=error.target,
+            ) from error
         self._require_markdown_success(response, "apply_batch_many")
 
     async def list_records(
@@ -808,7 +814,20 @@ class MemoryContentRejected(PermissionError):
 
 
 class MarkdownAuthorityError(RuntimeError):
-    """markdown 权威面拒绝了这次写入（成功与否是返回值，不是异常）。"""
+    """markdown 权威面拒绝了这次写入（成功与否是返回值，不是异常）。
+
+    `operation_id` / `target` 在已知时一并携带：formation 的降级日志与运维对账都靠
+    operation id 找到对应回执，错误对象自己丢掉这两个字段就等于把证据断在边界上
+    （ADR-0058 D12「错误里的 operation id 始终可追」）。
+    """
+
+    def __init__(
+        self, message: str, *, operation_id: str | None = None,
+        target: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.operation_id = operation_id
+        self.target = target
 
 
 class MarkdownBudgetExhausted(MarkdownAuthorityError):

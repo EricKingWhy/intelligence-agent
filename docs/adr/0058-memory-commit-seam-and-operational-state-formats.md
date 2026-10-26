@@ -87,7 +87,8 @@ class MemoryCommit:
   NEED_RECONCILE ⇒ 原样返回待对账，不重试。formation 遇到这类**确定性冲突**收敛为
   `DEGRADED(APPLY_FAILED)`，不再无限重跑同一 job；瞬时 IO 失败仍是 `MemoryCommitError`，
   job 保持可恢复。
-- **目标集增长仅限多目标系统 id**：`jobp_` / `blkp_` 重试时，如果 COMMITTED 回执不覆盖
+- **目标集增长是 `apply_batch_many` 的通用语义**（当前生产入口是 `jobp_` / `blkp_`）：
+  重试时如果 COMMITTED 回执不覆盖
   本次请求的某个 target，commit **不改写旧回执**，而是为每个缺失 target 派生稳定子回执
   `<operation_id>_g<sha256(target)[:16]>`，只发布缺失 target。同一缺失 target 的重试回放
   同一子回执；target 启用变化不会让 formation/blocked 永久重试同一个 id，也不会重放已发布

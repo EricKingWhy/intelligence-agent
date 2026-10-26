@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,7 @@ from agent_harness.memory.v2.file_state import (
     atomic_write_text,
     read_json,
 )
-from agent_harness.memory.v2.jobs import MemoryJobStage, MemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryJobStage, MemoryV2JobStore, job_id_for
 from agent_harness.memory.v2.markdown_store import (
     ENTRY_DELIMITER,
     entries_digest,
@@ -577,9 +578,11 @@ async def test_formation_preflight_rejects_oversize_second_record_before_any_pub
         make_record(memory_id="mem-second", content="x" * 200),
     )
 
-    with pytest.raises(MarkdownAuthorityError):
+    with pytest.raises(MarkdownAuthorityError) as caught:
         await seam.service.mirror_committed(records, operation_prefix="jobp_preflight")
 
+    assert caught.value.operation_id == "jobp_preflight_apply"
+    assert caught.value.target == "memory"
     assert not seam.memory_file.exists(), "预检失败不得先发布前一条"
     assert seam.receipts() == [], "预检不写回执（零落盘）"
 
@@ -887,7 +890,12 @@ async def test_multi_target_publish_failure_keeps_one_receipt_for_both_targets(
 
 @pytest.mark.asyncio
 async def test_multi_target_retry_cannot_shrink_the_target_set(seam: Seam) -> None:
-    """P2-1：重试只传一个目标时不得静默 COMMITTED；未发布目标交给 reconcile 补齐。"""
+    """review P2：缩表重试在目标未全部发布时是确定性冲突，必须收敛而不是可重试。
+
+    旧实现抛普通 `MemoryCommitError`，formation 会把同一个 job 无限重跑；现在标
+    NEED_RECONCILE 后抛 `MemoryReconcileRequired`，job 降级、运维按 op id 处理。
+    已发布目标被略过则视为无事可做，不影响收尾。
+    """
     original = seam.commit.engine._write_file
 
     def _fail_user(path: Path, entries: list[str]) -> None:
@@ -905,23 +913,120 @@ async def test_multi_target_retry_cannot_shrink_the_target_set(seam: Seam) -> No
         await seam.service.mirror_committed(records, operation_prefix="jobp_shrink")
 
     seam.commit.engine._write_file = original  # type: ignore[method-assign]
-    with pytest.raises(MemoryCommitError) as caught:
+    with pytest.raises(MemoryReconcileRequired) as caught:
         await seam.service.mirror_committed(records[:1], operation_prefix="jobp_shrink")
 
     assert caught.value.operation_id == "jobp_shrink_apply"
-    assert "target set shrank" in str(caught.value.reason)
+    assert caught.value.target == "user"
+    assert "retry target set shrank" in str(caught.value.reason)
     receipt = read_json(ReceiptStore(seam.root).path_for("jobp_shrink_apply"))
-    assert receipt is not None and receipt["state"] == ReceiptState.PUBLISHED
+    assert receipt is not None and receipt["state"] == ReceiptState.NEED_RECONCILE
     assert receipt["targets"]["user"]["published"] is False
     assert not (Path(seam.settings.workspace_dir) / "memories" / "USER.md").exists()
 
     report = await seam.commit.reconcile()
 
-    assert "jobp_shrink_apply" in report.committed
-    assert (Path(seam.settings.workspace_dir) / "memories" / "USER.md").exists()
-    assert "缩表重试丢掉 USER" in (
+    assert "jobp_shrink_apply" in {
+        operation_id for operation_id, _reason in report.needs_reconcile}
+    assert not (Path(seam.settings.workspace_dir) / "memories" / "USER.md").exists(), (
+        "确定性冲突必须等人处理，reconcile 不能替调用方补写已放弃的目标")
+
+
+@pytest.mark.asyncio
+async def test_multi_target_retry_may_drop_an_already_published_target(seam: Seam) -> None:
+    """已发布目标被缩表重试略过 = 无事可做；不能因此把整份回执判成冲突。"""
+    store = seam.commit._receipts
+    operation_id = "jobp_drop_published_apply"
+    records = (
+        make_record(memory_id="mem-drop", content="已发布的 MEMORY"),
+        make_record(
+            memory_id="user-drop", content="已发布的 USER", tier=MemoryTier.PROFILE),
+    )
+    real_finish = store.finish
+    failures = {"left": 1}
+
+    def _finish_once(*args, **kwargs):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError("disk full while writing receipt")
+        return real_finish(*args, **kwargs)
+
+    store.finish = _finish_once  # type: ignore[method-assign]
+    with pytest.raises(MemoryCommitError):
+        await seam.service.mirror_committed(records, operation_prefix="jobp_drop_published")
+
+    published = read_json(store.path_for(operation_id))
+    assert published is not None and published["state"] in {
+        ReceiptState.PREPARED, ReceiptState.PUBLISHED}
+    assert all(plan["published"] for plan in published["targets"].values())
+
+    store.finish = real_finish  # type: ignore[method-assign]
+    response = await seam.service.mirror_committed(
+        records[:1], operation_prefix="jobp_drop_published")
+
+    assert response is None
+    receipt = read_json(store.path_for(operation_id))
+    assert receipt is not None and receipt["state"] == ReceiptState.COMMITTED
+    assert "已发布的 USER" in (
         Path(seam.settings.workspace_dir) / "memories" / "USER.md"
     ).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_formation_shrink_conflict_degrades_instead_of_retrying_forever(
+    seam: Seam, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """review P2：formation 重试遇到缩表冲突必须降级，且日志留下 operation id。"""
+    store = ReceiptStore(seam.root)
+    job_id = job_id_for("memory-v2:seam-run")
+    operation_id = f"jobp_{job_id}_apply"
+    store.prepare(
+        operation_id, origin="test", targets=["memory", "user"],
+        operations=[{"target": "user", "action": "add", "content": "未发布的 USER"}],
+    )
+    store.record_target_plan(
+        operation_id, "user", before_digest="before", after_digest="after",
+        spec={"target": "user", "action": "add", "content": "未发布的 USER"},
+    )
+    store.mark_target_published(operation_id, "memory")
+    store.mark_partial(operation_id)
+
+    with caplog.at_level(logging.WARNING):
+        job_id, result = await _formation_run(seam)
+
+    assert result is not None
+    assert result.stage is MemoryJobStage.DEGRADED
+    assert result.reason == DegradedReason.APPLY_FAILED.value
+    receipt = read_json(store.path_for(operation_id))
+    assert receipt is not None and receipt["state"] == ReceiptState.NEED_RECONCILE
+    assert await seam.service.list_active(
+        LOCAL, scope=MemoryScope.USER_GLOBAL, limit=10) == [], (
+        "冲突降级不得留下半提交的 records")
+    assert not (Path(seam.settings.workspace_dir) / "memories" / "USER.md").exists()
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        operation_id in message and "retry target set shrank" in message
+        for message in messages
+    ), messages
+
+
+@pytest.mark.asyncio
+async def test_formation_markdown_rejection_logs_operation_id_and_target(
+    seam: Seam, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """review P3：mirror 拒写的日志必须带 operation id/target，不能只留固定文案。"""
+    seam.commit.engine.memory_char_limit = 10
+
+    with caplog.at_level(logging.WARNING):
+        _job_id, result = await _formation_run(seam)
+
+    assert result is not None and result.stage is MemoryJobStage.DEGRADED
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "markdown authority" in message and "_apply" in message
+        and "memory" in message
+        for message in messages
+    ), messages
 
 
 @pytest.mark.asyncio
@@ -1329,6 +1434,8 @@ def test_digest_operation_id_is_scoped_by_target() -> None:
 
     assert memory_only != both
     assert both == _digest_operation_id({"user": [digest], "memory": [digest]})
+    assert _digest_operation_id({"memory": [digest]}) == _digest_operation_id(
+        {"memory": [digest, digest]}), "同一 digest 重复出现必须归一到同一个幂等键"
 
 
 @pytest.mark.asyncio

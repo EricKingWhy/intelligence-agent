@@ -29,7 +29,8 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
 
 同一 id 已有 `COMMITTED` 回执 ⇒ **本次意图与记录一致时**回放记录的结果，不再碰磁盘
 （不重复追加、不重复删除）；意图不同 ⇒ `MemoryReconcileRequired`，绝不把旧内容当成本次
-结果返回。
+结果返回。非终态回执的目标集被缩表重试丢掉时：已发布目标算无事可做，未发布目标标
+`NEED_RECONCILE` 后同样抛 `MemoryReconcileRequired`——确定性冲突不能让 formation 无限重跑。
 
 # 顺序（ADR-0058 D8）
 
@@ -459,10 +460,6 @@ class MemoryCommit:
                     operation_id, targets, expected=committed_specs)
                 if replay is not None:
                     return replay
-                # 锁内重新加载后回执不再是 COMMITTED：按未终态路径继续。
-            replay = self._replay_if_committed(operation_id, targets)
-            if replay is not None:
-                return replay
             existing = self._receipts.load(operation_id)
             if existing is not None and existing.state == ReceiptState.NEED_RECONCILE:
                 raise MemoryReconcileRequired(
@@ -470,14 +467,25 @@ class MemoryCommit:
             if existing is not None:
                 dropped = set(existing.targets) - set(targets)
                 if dropped:
-                    # 旧回执里已计划/已发布的目标不在这次重试里：不能 finish 成
-                    # COMMITTED（会把未发布目标伪装成全部成功），也不能静默补写
-                    # 调用方这次没要的目标。留给 reconcile 按原意图补发布。
-                    dropped_label = ",".join(sorted(dropped))
-                    raise MemoryCommitError(
-                        operation_id, dropped_label,
-                        "retry target set shrank from the recorded receipt; "
-                        f"run `memory reconcile` for operation {operation_id}")
+                    # 旧回执里的目标不在这次重试里：已发布的算无事可做（内容已经落地），
+                    # 未发布的不能 finish 成 COMMITTED（会把未发布目标伪装成全部成功），
+                    # 也不能静默补写调用方这次没要的目标。后者是确定性冲突，标
+                    # NEED_RECONCILE 后抛 `MemoryReconcileRequired`，让 formation 收敛到
+                    # 降级终态，而不是把同一次重试无限跑下去。
+                    unpublished = sorted(
+                        target for target in dropped
+                        if not existing.targets[target].published
+                    )
+                    if unpublished:
+                        for target in unpublished:
+                            self._mark_target_reconcile(
+                                operation_id, target,
+                                "retry omitted a target that was not published")
+                        raise MemoryReconcileRequired(
+                            operation_id, ",".join(unpublished),
+                            "retry target set shrank before every recorded target "
+                            "was published; "
+                            f"run `memory reconcile` for operation {operation_id}")
 
             prepared: list[tuple[dict[str, Any], str, str, bool, bool]] = []
             for target, operations in plans:

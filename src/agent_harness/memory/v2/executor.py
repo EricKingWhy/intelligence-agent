@@ -1329,8 +1329,12 @@ class MemoryJobExecutor:
                 error.operation_id, type(error.reason).__name__,
             )
             return None
-        except MarkdownAuthorityError:
-            logger.warning("memory formation mirror rejected by markdown authority")
+        except MarkdownAuthorityError as error:
+            logger.warning(
+                "memory formation mirror rejected by markdown authority "
+                "(operation %s, target %s): %s",
+                error.operation_id or "unknown", error.target or "unknown", error,
+            )
             raise _Degraded(DegradedReason.APPLY_FAILED) from None
         except Exception:
             logger.exception("Memory V2 formation apply failed")

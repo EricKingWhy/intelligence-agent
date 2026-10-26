@@ -181,31 +181,32 @@ def _is_engine_ref(node: ast.AST, aliases: set[str]) -> bool:
 def _references_content(
     node: ast.AST, tainted: set[str], aliases: set[str] | None = None,
     path_functions: set[str] | None = None,
+    path_methods: set[str] | None = None,
 ) -> bool:
     engine_aliases = aliases or set()
     functions = path_functions or set()
+    methods = path_methods or set()
     for child in ast.walk(node):
         if isinstance(child, ast.Attribute):
             if child.attr in _CONTENT_PATH_HINTS:
                 return True
             if child.attr == "path_for" and _is_engine_ref(child.value, engine_aliases):
                 return True
-        if (
-            isinstance(child, ast.Call)
-            and isinstance(child.func, ast.Name)
-            and child.func.id in functions
-        ):
-            return True
-        if (
-            isinstance(child, ast.Call)
-            and isinstance(child.func, ast.Name)
-            and child.func.id == "getattr"
-            and len(child.args) >= 2
-            and isinstance(child.args[1], ast.Constant)
-            and child.args[1].value == "path_for"
-            and _is_engine_ref(child.args[0], engine_aliases)
-        ):
-            return True
+        if isinstance(child, ast.Call):
+            func = child.func
+            if isinstance(func, ast.Name) and func.id in functions:
+                return True
+            if isinstance(func, ast.Attribute) and func.attr in methods:
+                return True
+            if (
+                isinstance(func, ast.Name)
+                and func.id == "getattr"
+                and len(child.args) >= 2
+                and isinstance(child.args[1], ast.Constant)
+                and child.args[1].value == "path_for"
+                and _is_engine_ref(child.args[0], engine_aliases)
+            ):
+                return True
         if (
             isinstance(child, ast.Constant)
             and isinstance(child.value, str)
@@ -229,30 +230,69 @@ def _is_write_mode(value: str) -> bool:
 
 
 def _content_path_functions(tree: ast.AST, aliases: set[str]) -> set[str]:
-    """返回 `def p(): return engine.path_for(...)` / 返回内容路径别名的函数名。"""
+    """返回 `def p(): return engine.path_for(...)` / 返回内容路径别名的函数名。
+
+    名字集合本身也参与判定并迭代到不动点：`outer()` 只返回 `inner()` 时，必须等
+    `inner` 先被认定为内容路径函数，`outer` 才能被认定——否则 `outer().write_text()`
+    这种多一层包装的旁路会漏扫。
+    """
     names: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name in names:
+                continue
+            local: set[str] = set()
+            local_changed = True
+            while local_changed:
+                local_changed = False
+                for child in ast.walk(node):
+                    if not isinstance(child, (ast.Assign, ast.AnnAssign)) or child.value is None:
+                        continue
+                    if not _references_content(child.value, local, aliases, names):
+                        continue
+                    for target in _assign_targets(child):
+                        if isinstance(target, ast.Name) and target.id not in local:
+                            local.add(target.id)
+                            local_changed = True
+            if any(
+                isinstance(child, ast.Return) and child.value is not None
+                and _references_content(child.value, local, aliases, names)
+                for child in ast.walk(node)
+            ):
+                names.add(node.name)
+                changed = True
+    return names
+
+
+def _content_path_methods(
+    tree: ast.AST, aliases: set[str], path_functions: set[str],
+) -> set[str]:
+    """类方法返回内容路径时的**方法名**（`store.content_path()` 这类调用）。
+
+    只收类体内直接 `return <内容路径>` 的方法，且排除 `path_for`：后者在
+    receipt/staged/job 等状态 store 上同名但指向操作状态文件，由 `_is_engine_ref`
+    单独判定，不能按方法名一刀切。方法名匹配对普通仓库可能偏保守（同名方法会被
+    当成路径），但这个静态闸门宁可多报也不漏掉一条动态包装的写旁路。
+    """
+    names: set[str] = set()
+    for class_node in ast.walk(tree):
+        if not isinstance(class_node, ast.ClassDef):
             continue
-        local: set[str] = set()
-        changed = True
-        while changed:
-            changed = False
-            for child in ast.walk(node):
-                if not isinstance(child, (ast.Assign, ast.AnnAssign)) or child.value is None:
-                    continue
-                if not _references_content(child.value, local, aliases):
-                    continue
-                for target in _assign_targets(child):
-                    if isinstance(target, ast.Name) and target.id not in local:
-                        local.add(target.id)
-                        changed = True
-        if any(
-            isinstance(child, ast.Return) and child.value is not None
-            and _references_content(child.value, local, aliases)
-            for child in ast.walk(node)
-        ):
-            names.add(node.name)
+        for node in class_node.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == "path_for":
+                continue
+            if any(
+                isinstance(child, ast.Return) and child.value is not None
+                and _references_content(child.value, set(), aliases, path_functions)
+                for child in ast.walk(node)
+            ):
+                names.add(node.name)
     return names
 
 
@@ -342,9 +382,11 @@ def _write_mode_vars(tree: ast.AST) -> tuple[set[str], set[str]]:
 def _is_path_expr(
     node: ast.AST, aliases: set[str], path_vars: set[str],
     path_functions: set[str] | None = None,
+    path_methods: set[str] | None = None,
 ) -> bool:
     """判断表达式是不是**单个内容路径**（而不是装着路径的 list/dict）。"""
     functions = path_functions or set()
+    methods = path_methods or set()
     if isinstance(node, ast.Name):
         return node.id in path_vars or node.id in _CONTENT_PATH_HINTS
     if isinstance(node, ast.Attribute):
@@ -353,10 +395,12 @@ def _is_path_expr(
         if node.attr == "path_for" and _is_engine_ref(node.value, aliases):
             return True
         if node.attr in {"parent", "resolve", "absolute", "with_name", "with_suffix"}:
-            return _is_path_expr(node.value, aliases, path_vars, functions)
+            return _is_path_expr(node.value, aliases, path_vars, functions, methods)
         return False
     if isinstance(node, ast.Call):
         if isinstance(node.func, ast.Name) and node.func.id in functions:
+            return True
+        if isinstance(node.func, ast.Attribute) and node.func.attr in methods:
             return True
         if (
             isinstance(node.func, ast.Attribute)
@@ -368,18 +412,19 @@ def _is_path_expr(
             isinstance(node.func, ast.Attribute)
             and node.func.attr in {"joinpath", "resolve", "absolute", "with_name", "with_suffix"}
         ):
-            return _is_path_expr(node.func.value, aliases, path_vars, functions)
+            return _is_path_expr(node.func.value, aliases, path_vars, functions, methods)
         return False
     if isinstance(node, ast.Constant):
         return isinstance(node.value, str) and node.value in _CONTENT_PATH_HINTS
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        return _is_path_expr(node.left, aliases, path_vars, functions) or _is_path_expr(
-            node.right, aliases, path_vars, functions)
+        return _is_path_expr(node.left, aliases, path_vars, functions, methods) or _is_path_expr(
+            node.right, aliases, path_vars, functions, methods)
     return False
 
 
 def _path_aliases(
     tree: ast.AST, aliases: set[str], path_functions: set[str] | None = None,
+    path_methods: set[str] | None = None,
 ) -> set[str]:
     """只收「直接就是内容路径」的别名；装着路径的 list 不在此列。"""
     path_vars: set[str] = set()
@@ -389,7 +434,9 @@ def _path_aliases(
         for node in ast.walk(tree):
             if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
                 continue
-            if not _is_path_expr(node.value, aliases, path_vars, path_functions):
+            if not _is_path_expr(
+                node.value, aliases, path_vars, path_functions, path_methods,
+            ):
                 continue
             for target in _assign_targets(node):
                 if isinstance(target, ast.Name) and target.id not in path_vars:
@@ -401,6 +448,7 @@ def _path_aliases(
 def _bound_write_methods(
     tree: ast.AST, tainted: set[str], aliases: set[str],
     path_functions: set[str] | None = None,
+    path_methods: set[str] | None = None,
 ) -> set[str]:
     """``writer = engine.path_for("memory").write_text; writer("x")`` 也要抓住。"""
     names: set[str] = set()
@@ -412,7 +460,7 @@ def _bound_write_methods(
             isinstance(value, ast.Attribute)
             and value.attr in (_WRITE_ATTRS | {"write_json"})
             and _references_content(
-                value.value, tainted, aliases, path_functions)
+                value.value, tainted, aliases, path_functions, path_methods)
         ):
             names |= {
                 target.id for target in _assign_targets(node)
@@ -460,7 +508,8 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
     aliases = _engine_aliases(tree)
     module_names = _module_aliases(tree)
     path_functions = _content_path_functions(tree, aliases)
-    path_vars = _path_aliases(tree, aliases, path_functions)
+    path_methods = _content_path_methods(tree, aliases, path_functions)
+    path_vars = _path_aliases(tree, aliases, path_functions, path_methods)
     flag_vars, mode_vars = _write_mode_vars(tree)
     tainted: set[str] = set()
     changed = True
@@ -470,13 +519,15 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
             if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if _references_content(node.value, tainted, aliases, path_functions):
+            if _references_content(
+                node.value, tainted, aliases, path_functions, path_methods,
+            ):
                 for target in targets:
                     if isinstance(target, ast.Name) and target.id not in tainted:
                         tainted.add(target.id)
                         changed = True
     bound_writes = _bound_write_methods(
-        tree, tainted, aliases, path_functions)
+        tree, tainted, aliases, path_functions, path_methods)
 
     found: list[int] = []
     for node in ast.walk(tree):
@@ -496,11 +547,12 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
             receiver_hit = (
                 receiver is not None
                 and _references_content(
-                    receiver, tainted, aliases, path_functions)
+                    receiver, tainted, aliases, path_functions, path_methods)
             )
             path_receiver = (
                 receiver is not None
-                and _is_path_expr(receiver, aliases, path_vars, path_functions)
+                and _is_path_expr(
+                    receiver, aliases, path_vars, path_functions, path_methods)
             )
             if attr == "replace" and len(node.args) >= 2 and receiver_hit:
                 # Path.replace 只有一个参数；两参形式是 str.replace（文本变换，
@@ -510,7 +562,7 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
                 # 目标也可能在参数或关键字里（module-qualified atomic_write_text、
                 # shutil.copy(src, engine.path_for(...))、write_json(path=...)）。
                 _references_content(
-                    argument, tainted, aliases, path_functions)
+                    argument, tainted, aliases, path_functions, path_methods)
                 for argument in (
                     *node.args, *(keyword.value for keyword in node.keywords))
             )
@@ -527,10 +579,10 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
                 _open_for_write(node, flag_vars, mode_vars, module_names) and (
                     (path_arg is not None
                      and _references_content(
-                         path_arg, tainted, aliases, path_functions))
+                         path_arg, tainted, aliases, path_functions, path_methods))
                     or (isinstance(func, ast.Attribute)
                         and _references_content(
-                            func.value, tainted, aliases, path_functions))
+                            func.value, tainted, aliases, path_functions, path_methods))
                 )
             )
         elif attr == "fdopen" or name == "fdopen":
@@ -540,7 +592,7 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
                 and isinstance(mode.value, str)
                 and _is_write_mode(mode.value)
                 and _references_content(
-                    func, tainted, aliases, path_functions)
+                    func, tainted, aliases, path_functions, path_methods)
             )
         if suspicious and relative not in _ALLOWED_WRITE_MODULES:
             found.append(node.lineno)
@@ -632,6 +684,27 @@ def test_static_scan_catches_flags_keyword_augassign_write_json_and_bound_method
     )
 
     assert _scan_tree("src/fake.py", ast.parse(source)) == [4, 5, 6, 8, 14, 15, 18, 19]
+
+
+def test_static_scan_catches_method_and_nested_helpers() -> None:
+    """review P4-4：方法返回路径、以及多层包装的函数返回，也必须能追到落笔点。"""
+    source = (
+        "engine = object()\n"                                  # 1
+        "class Store:\n"                                       # 2
+        "    def content_path(self):\n"                        # 3
+        "        return self.engine.path_for('memory')\n"      # 4
+        "store = Store()\n"                                    # 5
+        "store.content_path().write_text('x')\n"               # 6
+        "def inner():\n"                                       # 7
+        "    return engine.path_for('user')\n"                 # 8
+        "def outer():\n"                                       # 9
+        "    return inner()\n"                                 # 10
+        "outer().write_text('x')\n"                            # 11
+        "p = store.content_path()\n"                           # 12
+        "p.unlink()\n"                                         # 13
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [6, 11, 13]
 
 
 def test_collection_remove_and_plain_string_mode_are_not_content_writes() -> None:
