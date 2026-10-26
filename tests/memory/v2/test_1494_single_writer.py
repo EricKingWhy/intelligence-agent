@@ -192,10 +192,30 @@ def _references_content(
     return False
 
 
+def _is_write_mode(value: str) -> bool:
+    """合法文件模式里含写/追加/独占位；``"data"`` / ``"raw"`` 这类普通字符串不算。"""
+    if not value or any(char not in "rwaxbt+" for char in value):
+        return False
+    if sum(char in "rwax" for char in value) != 1 or value.count("+") > 1:
+        return False
+    if "b" in value and "t" in value:
+        return False
+    return any(char in value for char in "wax+")
+
+
 def _write_mode(call: ast.Call) -> ast.expr | None:
+    if (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "open"
+        and not _is_module_receiver(call.func.value)
+        and call.args
+    ):
+        # path.open("w")：第一个位置参数就是 mode，不是路径。
+        return call.args[0]
     if len(call.args) > 1:
         return call.args[1]
-    return next((kw.value for kw in call.keywords if kw.arg == "mode"), None)
+    return next(
+        (kw.value for kw in call.keywords if kw.arg in {"mode", "flags"}), None)
 
 
 def _has_open_write_flag(node: ast.AST, known: set[str]) -> bool:
@@ -209,19 +229,32 @@ def _has_open_write_flag(node: ast.AST, known: set[str]) -> bool:
     )
 
 
+def _assign_targets(node: ast.AST) -> list[ast.expr]:
+    if isinstance(node, ast.Assign):
+        return list(node.targets)
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        return [node.target]
+    return []
+
+
 def _write_mode_vars(tree: ast.AST) -> tuple[set[str], set[str]]:
-    """``flags = os.O_WRONLY | os.O_CREAT`` / ``mode = "w"`` 先存变量再 open。"""
+    """``flags = os.O_WRONLY | os.O_CREAT`` / ``flags |= O_TRUNC`` / ``mode = "w"``。
+
+    先存变量、再用变量 open 的写法同样算写；增量赋值（``|=`` / ``+=``）也要跟到。
+    """
     flag_vars: set[str] = set()
     mode_vars: set[str] = set()
     changed = True
     while changed:
         changed = False
         for node in ast.walk(tree):
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if node.value is None:
+                continue
             names = {
-                target.id for target in targets if isinstance(target, ast.Name)
+                target.id for target in _assign_targets(node)
+                if isinstance(target, ast.Name)
             }
             value = node.value
             if isinstance(value, ast.Name):
@@ -229,11 +262,19 @@ def _write_mode_vars(tree: ast.AST) -> tuple[set[str], set[str]]:
                 is_mode = value.id in mode_vars
             else:
                 is_flag = _has_open_write_flag(value, flag_vars)
-                is_mode = (
-                    isinstance(value, ast.Constant)
-                    and isinstance(value.value, str)
-                    and any(flag in value.value for flag in "wax+")
+                is_mode = any(
+                    isinstance(child, ast.Constant)
+                    and isinstance(child.value, str)
+                    and _is_write_mode(child.value)
+                    for child in ast.walk(value)
                 )
+            if isinstance(node, ast.AugAssign):
+                is_flag = is_flag or any(
+                    isinstance(target, ast.Name) and target.id in flag_vars
+                    for target in _assign_targets(node))
+                is_mode = is_mode or any(
+                    isinstance(target, ast.Name) and target.id in mode_vars
+                    for target in _assign_targets(node))
             fresh_flags = names - flag_vars if is_flag else set()
             fresh_modes = names - mode_vars if is_mode else set()
             if fresh_flags:
@@ -245,21 +286,102 @@ def _write_mode_vars(tree: ast.AST) -> tuple[set[str], set[str]]:
     return flag_vars, mode_vars
 
 
+def _is_path_expr(node: ast.AST, aliases: set[str], path_vars: set[str]) -> bool:
+    """判断表达式是不是**单个内容路径**（而不是装着路径的 list/dict）。"""
+    if isinstance(node, ast.Name):
+        return node.id in path_vars or node.id in _CONTENT_PATH_HINTS
+    if isinstance(node, ast.Attribute):
+        if node.attr in _CONTENT_PATH_HINTS:
+            return True
+        if node.attr == "path_for" and _is_engine_ref(node.value, aliases):
+            return True
+        if node.attr in {"parent", "resolve", "absolute", "with_name", "with_suffix"}:
+            return _is_path_expr(node.value, aliases, path_vars)
+        return False
+    if isinstance(node, ast.Call):
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "path_for"
+            and _is_engine_ref(node.func.value, aliases)
+        ):
+            return True
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"joinpath", "resolve", "absolute", "with_name", "with_suffix"}
+        ):
+            return _is_path_expr(node.func.value, aliases, path_vars)
+        return False
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str) and node.value in _CONTENT_PATH_HINTS
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _is_path_expr(node.left, aliases, path_vars) or _is_path_expr(
+            node.right, aliases, path_vars)
+    return False
+
+
+def _path_aliases(tree: ast.AST, aliases: set[str]) -> set[str]:
+    """只收「直接就是内容路径」的别名；装着路径的 list 不在此列。"""
+    path_vars: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            if not _is_path_expr(node.value, aliases, path_vars):
+                continue
+            for target in _assign_targets(node):
+                if isinstance(target, ast.Name) and target.id not in path_vars:
+                    path_vars.add(target.id)
+                    changed = True
+    return path_vars
+
+
+def _bound_write_methods(
+    tree: ast.AST, tainted: set[str], aliases: set[str],
+) -> set[str]:
+    """``writer = engine.path_for("memory").write_text; writer("x")`` 也要抓住。"""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            continue
+        value = node.value
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr in (_WRITE_ATTRS | {"write_json"})
+            and _references_content(value.value, tainted, aliases)
+        ):
+            names |= {
+                target.id for target in _assign_targets(node)
+                if isinstance(target, ast.Name)
+            }
+    return names
+
+
 def _open_for_write(call: ast.Call, flag_vars: set[str], mode_vars: set[str]) -> bool:
-    """``open(..., "w")`` 与 ``os.open(..., os.O_WRONLY | os.O_CREAT)`` 都算写。"""
+    """``open(..., "w")`` 与 ``os.open(..., flags=os.O_WRONLY)`` 都算写。"""
     mode = _write_mode(call)
     if mode is None:
         return False
     if isinstance(mode, ast.Constant):
-        return isinstance(mode.value, str) and any(flag in mode.value for flag in "wax+")
+        return isinstance(mode.value, str) and _is_write_mode(mode.value)
     if isinstance(mode, ast.Name):
         return mode.id in mode_vars or mode.id in flag_vars
     return _has_open_write_flag(mode, flag_vars)
 
 
+def _is_module_receiver(node: ast.AST | None) -> bool:
+    root: ast.AST | None = node
+    while isinstance(root, ast.Attribute):
+        root = root.value
+    return isinstance(root, ast.Name) and root.id in {
+        "os", "shutil", "pathlib", "io", "codecs", "gzip", "bz2", "lzma", "builtins"}
+
+
 def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
     """扫一棵 AST：直接对 memories/ 内容文件落笔的调用点行号。"""
     aliases = _engine_aliases(tree)
+    path_vars = _path_aliases(tree, aliases)
     flag_vars, mode_vars = _write_mode_vars(tree)
     tainted: set[str] = set()
     changed = True
@@ -274,6 +396,7 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
                     if isinstance(target, ast.Name) and target.id not in tainted:
                         tainted.add(target.id)
                         changed = True
+    bound_writes = _bound_write_methods(tree, tainted, aliases)
 
     found: list[int] = []
     for node in ast.walk(tree):
@@ -283,22 +406,37 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
         attr = func.attr if isinstance(func, ast.Attribute) else None
         name = func.id if isinstance(func, ast.Name) else None
         suspicious = False
-        if attr in _WRITE_ATTRS or name == "atomic_write_text":
+        if name in bound_writes:
+            suspicious = True
+        elif (
+            attr in _WRITE_ATTRS or name == "atomic_write_text"
+            or attr == "write_json" or name == "write_json"
+        ):
             receiver = func.value if isinstance(func, ast.Attribute) else None
             receiver_hit = (
                 receiver is not None
                 and _references_content(receiver, tainted, aliases)
             )
+            path_receiver = (
+                receiver is not None
+                and _is_path_expr(receiver, aliases, path_vars)
+            )
             if attr == "replace" and len(node.args) >= 2 and receiver_hit:
                 # Path.replace 只有一个参数；两参形式是 str.replace（文本变换，
                 # 不是写盘）或 os.replace（目标在参数里，由下面的参数扫描兜住）。
                 receiver_hit = False
-            suspicious = receiver_hit or any(
+            argument_hit = any(
                 # 目标也可能在参数里（module-qualified atomic_write_text、
                 # shutil.copy(src, engine.path_for(...))）。
                 _references_content(argument, tainted, aliases)
                 for argument in node.args
             )
+            if attr == "remove" and not path_receiver:
+                # list/dict/set.remove 是在内存集合里摘元素，不是删文件；只有
+                # os.remove 这类模块函数才继续扫描参数里的内容路径。
+                suspicious = argument_hit and _is_module_receiver(receiver)
+            else:
+                suspicious = receiver_hit or argument_hit
         elif attr == "open" or name == "open":
             path_arg = node.args[0] if node.args else None
             suspicious = bool(
@@ -314,7 +452,7 @@ def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
             suspicious = bool(
                 isinstance(mode, ast.Constant)
                 and isinstance(mode.value, str)
-                and any(flag in mode.value for flag in "wax+")
+                and _is_write_mode(mode.value)
                 and _references_content(func, tainted, aliases)
             )
         if suspicious and relative not in _ALLOWED_WRITE_MODULES:
@@ -376,9 +514,43 @@ def test_static_scan_catches_delete_and_saved_open_modes() -> None:
         "engine.path_for('user').touch()\n"
         "shutil.rmtree(engine.path_for('memory').parent)\n"
         "os.replace(engine.path_for('memory'), 'backup')\n"
+        "os.remove(engine.path_for('user'))\n"
     )
 
-    assert _scan_tree("src/fake.py", ast.parse(source)) == [3, 5, 6, 7, 8, 9]
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [3, 5, 6, 7, 8, 9, 10]
+
+
+def test_static_scan_catches_flags_keyword_augassign_write_json_and_bound_methods() -> None:
+    """P4 S3：关键字 flags、增量标志位、write_json、绑定后的写方法也不能漏。"""
+    source = (
+        "engine = object()\n"                                  # 1
+        "flags = os.O_WRONLY\n"                                # 2
+        "flags |= os.O_CREAT\n"                                # 3
+        "os.open(engine.path_for('memory'), flags=flags)\n"    # 4
+        "write_json(engine.path_for('user'), {})\n"            # 5
+        "engine.path_for('memory').open('w')\n"                # 6
+        "writer = engine.path_for('user').write_bytes\n"       # 7
+        "writer(b'x')\n"                                       # 8
+        "mode = 'data'\n"                                      # 9
+        "open(engine.path_for('memory'), mode)\n"              # 10
+        "paths = [engine.path_for('user')]\n"                  # 11
+        "paths.remove(paths[0])\n"                             # 12
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [4, 5, 6, 8]
+
+
+def test_collection_remove_and_plain_string_mode_are_not_content_writes() -> None:
+    """P4-2：list.remove 不是删文件；普通字符串变量也不是写模式。"""
+    source = (
+        "engine = object()\n"
+        "paths = [engine.path_for('memory')]\n"
+        "paths.remove(paths[0])\n"
+        "mode = 'data'\n"
+        "open(engine.path_for('user'), mode)\n"
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == []
 
 
 def test_string_replace_is_not_a_content_write() -> None:

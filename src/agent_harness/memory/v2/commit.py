@@ -22,6 +22,8 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
 - 固定形：`jobp_<job>_apply`（formation apply）、`stgp_<staged>`（待审批准）、
   `blkp_<blocked>_apply`（被拦下写入的 promote）、`del_<memory>`（治理删除）、
   `legp_<sha256(job:memory)[:32]>`（旧数据补发布）、`mig_<memory>`（旧记录一次性迁移）。
+- COMMITTED 后重试又扩了 target：旧回执保持终态，缺失 target 用稳定的
+  `<operation_id>_g<sha256(target)[:16]>` 子回执发布；同一缺失 target 的重试回放同一子回执。
 
 同一 id 已有 `COMMITTED` 回执 ⇒ 直接回放记录的结果，不再碰磁盘（不重复追加、不重复删除）。
 
@@ -42,6 +44,7 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -141,6 +144,16 @@ class ReconcileReport:
 def new_operation_id(prefix: str = OP_PREFIX_TOOL) -> str:
     """新逻辑写入的 operation id（文件名安全；前缀即职责标记）。"""
     return f"{prefix}{uuid.uuid4().hex}"
+
+
+def _scope_child_id(operation_id: str, target: str) -> str:
+    """确定性 id 重试时扩了 target：为缺失 target 派生一个稳定的子操作 id。
+
+    旧回执保持 COMMITTED，不因 target 集变化被改写；同一缺失 target 的每次重试
+    都落到同一个子回执，从而既能补发布、又不会重复发布已提交的目标。
+    """
+    suffix = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
+    return f"{operation_id}_g{suffix}"
 
 
 def build_markdown_commit(
@@ -362,6 +375,12 @@ class MemoryCommit:
             raise MemoryCommitError(
                 operation_id, label, f"needs reconcile: {receipt.reason}")
         for target, plan in receipt.targets.items():
+            if plan.published:
+                # 发布事实已由回执记录。formation 不持 content 锁，前台写在
+                # 发布后追加同一 target 会让磁盘离开 after；这不是“没发布”，
+                # 不能在收尾时把合法并发写误判成 NEED_RECONCILE。该判断先于
+                # planned/after 检查，与 reconcile 的 published 优先口径一致。
+                continue
             has_spec = any(
                 str(item.get("target")) == target for item in receipt.operations)
             if not plan.planned or plan.after_digest is None:
@@ -374,11 +393,6 @@ class MemoryCommit:
                     operation_id, target,
                     f"target is not published yet; run `memory reconcile` "
                     f"for operation {operation_id}")
-            if plan.published:
-                # 发布事实已由回执记录。formation 不持 content 锁，前台写在
-                # 发布后追加同一 target 会让磁盘离开 after；这不是“没发布”，
-                # 不能在收尾时把合法并发写误判成 NEED_RECONCILE。
-                continue
             disk = self._engine.disk_entries(target)
             if disk is None:
                 raise MemoryCommitError(
@@ -412,6 +426,14 @@ class MemoryCommit:
             raise ValueError(f"duplicate target in batch: {targets!r}")
         label = ",".join(targets)
         with self._receipts.lock(operation_id):
+            receipt = self._receipts.load(operation_id)
+            if receipt is not None and receipt.state == ReceiptState.COMMITTED:
+                missing = [target for target in targets if target not in receipt.targets]
+                if missing:
+                    return self._apply_scope_growth(
+                        plans, missing, operation_id=operation_id,
+                        trusted_pins=trusted_pins, allow_empty=allow_empty,
+                        origin=origin, payload=payload)
             replay = self._replay_if_committed(operation_id, targets)
             if replay is not None:
                 return replay
@@ -438,6 +460,32 @@ class MemoryCommit:
                     allow_empty=allow_empty)
                 recorded = (
                     existing.targets.get(target) if existing is not None else None)
+                if recorded is not None and recorded.published:
+                    recorded_spec = next(
+                        (item for item in existing.operations
+                         if str(item.get("target")) == target),
+                        None,
+                    )
+                    if recorded_spec is None:
+                        self._mark_target_reconcile(
+                            operation_id, target,
+                            "published target has no recorded spec")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            "needs reconcile: published target has no recorded spec")
+                    if recorded_spec != spec:
+                        self._mark_target_reconcile(
+                            operation_id, target,
+                            "retry intent differs from the recorded receipt")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            "needs reconcile: retry intent differs from the recorded receipt")
+                    # 发布位是事实：磁盘回到 before 只说明用户/前台删除了已发布内容，
+                    # 不能按未发布重跑（否则会撤销这次删除）。
+                    prepared.append(
+                        (spec, recorded.before_digest or "",
+                         recorded.after_digest or "", True, False))
+                    continue
                 if recorded is not None and recorded.planned:
                     recorded_spec = next(
                         (item for item in existing.operations
@@ -618,6 +666,45 @@ class MemoryCommit:
                 ) from error
             return response
 
+    def _apply_scope_growth(
+        self, plans: list[tuple[str, list[dict[str, Any]]]], missing: list[str], *,
+        operation_id: str, trusted_pins: bool, allow_empty: bool, origin: str,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """已 COMMITTED 的确定性 id 又收到新 target：只让缺失目标走子回执。
+
+        旧回执是终态事实，不能改写；给每个缺失 target 派生稳定的子 operation id，
+        重试同一目标集时回放同一子回执。已发布目标既不重跑 mutator，也不参与
+        finish，因此不会撤销用户/前台在发布后做的删除或改写。响应保留父
+        `operation_id`，并附 `scope_operation_ids`，子操作失败时原样返回其响应。
+        """
+        by_target = dict(plans)
+        scope_ids = {
+            target: _scope_child_id(operation_id, target) for target in missing}
+        responses: dict[str, dict[str, Any]] = {}
+        for target in missing:
+            response = self._apply_batch_many_sync(
+                [(target, by_target[target])], trusted_pins=trusted_pins,
+                allow_empty=allow_empty, operation_id=scope_ids[target],
+                origin=origin, payload=payload,
+            )
+            if not response.get("success"):
+                response.setdefault("parent_operation_id", operation_id)
+                response["scope_operation_ids"] = scope_ids
+                return response
+            responses[target] = response
+        result: dict[str, Any] = {
+            "success": True,
+            "operation_id": operation_id,
+            "published": [self._engine.path_for(target).name for target in by_target],
+            "targets": {target: True for target in by_target},
+            "scope_operation_ids": scope_ids,
+        }
+        if all(item.get("replayed") for item in responses.values()):
+            result["replayed"] = True
+        if any(item.get("result_unknown") for item in responses.values()):
+            result["result_unknown"] = True
+        return result
 
     async def remove_by_digest(
         self, digests: Sequence[str] = (), *,
@@ -726,22 +813,21 @@ class MemoryCommit:
         return response
 
     def _replay_if_committed(
-        self, operation_id: str, targets: Iterable[str] | None = None,
+        self, operation_id: str, targets: Iterable[str],
     ) -> dict[str, Any] | None:
         receipt = self._receipts.load(operation_id)
         if receipt is None or receipt.state != ReceiptState.COMMITTED:
             return None
-        if targets is not None:
-            missing = {str(target) for target in targets} - set(receipt.targets)
-            if missing:
-                # 回执已按旧 scope COMMITTED（例如扩 target 的意图还没落盘就崩了，
-                # reconcile 只看得见旧 targets）。这时直接回放 success=True 等于
-                # 永远丢掉新 target；reconcile 也无从推断它，只能让调用方换新 id。
-                missing_label = ",".join(sorted(missing))
-                raise MemoryCommitError(
-                    operation_id, missing_label,
-                    "operation already committed without this target; "
-                    "retry with a new operation id")
+        missing = {str(target) for target in targets} - set(receipt.targets)
+        if missing:
+            # 回执已按旧 scope COMMITTED。多目标系统入口会在调用本函数前把
+            # 缺失 target 路由到稳定子回执；单目标入口没有可推断的新 scope，
+            # 只能让调用方换新 id，不能直接回放 success=True 吞掉新 target。
+            missing_label = ",".join(sorted(missing))
+            raise MemoryCommitError(
+                operation_id, missing_label,
+                "operation already committed without this target; "
+                "retry with a new operation id")
         recorded = dict(receipt.result or {})
         recorded.setdefault("success", True)
         recorded["operation_id"] = operation_id
@@ -751,6 +837,25 @@ class MemoryCommit:
             # success=True 冒充「拿到了完整原始响应」——调用方需要知道哪些读数缺失。
             recorded["result_unknown"] = True
         return recorded
+
+    def _finish_published_target(
+        self, operation_id: str, target: str, receipt: CommitReceipt,
+    ) -> dict[str, Any]:
+        """已发布目标的收尾：不再看磁盘、不再跑 mutator，只补齐终态并回放。"""
+        try:
+            self._receipts.mark_target_published(operation_id, target)
+            current = self._receipts.load(operation_id) or receipt
+            self._verify_receipt_targets(current, operation_id, target)
+            self._receipts.finish(operation_id, result=receipt.result)
+        except MemoryCommitError:
+            raise
+        except (OSError, RuntimeError) as error:
+            # 内容已经是目标态，只是回执没写完：按「已发布、待对账」上报。
+            raise MemoryCommitError(
+                operation_id, target,
+                f"content already published but receipt update failed: {error}",
+            ) from error
+        return self._replay_if_committed(operation_id, [target])
 
     def _conflict_if_uncertain(
         self, operation_id: str, target: str, spec: dict[str, Any],
@@ -785,6 +890,15 @@ class MemoryCommit:
             return self._needs_reconcile_response(
                 self._receipts.load(operation_id) or receipt)
         plan = receipt.targets.get(target)
+        if plan is not None and plan.published:
+            if recorded is None:
+                self._mark_target_reconcile(
+                    operation_id, target, "published target has no recorded spec")
+                return self._needs_reconcile_response(
+                    self._receipts.load(operation_id) or receipt)
+            # 与 finish/reconcile 同一事实：发布位已记录“写过”。用户/前台在发布后
+            # 删除或改写内容，重试不能把它当作“尚未发布”再写一遍。
+            return self._finish_published_target(operation_id, target, receipt)
         if plan is None or not plan.planned:
             return None
         disk = self._engine.disk_entries(target)
@@ -792,20 +906,7 @@ class MemoryCommit:
             return self._needs_reconcile_response(receipt, "target file is unreadable")
         digest = entries_digest(disk)
         if digest == plan.after_digest:
-            try:
-                self._receipts.mark_target_published(operation_id, target)
-                current = self._receipts.load(operation_id) or receipt
-                self._verify_receipt_targets(current, operation_id, target)
-                self._receipts.finish(operation_id, result=receipt.result)
-            except MemoryCommitError:
-                raise
-            except (OSError, RuntimeError) as error:
-                # 内容已经是目标态，只是回执没写完：按「已发布、待对账」上报。
-                raise MemoryCommitError(
-                    operation_id, target,
-                    f"content already published but receipt update failed: {error}",
-                ) from error
-            return self._replay_if_committed(operation_id, [target])
+            return self._finish_published_target(operation_id, target, receipt)
         if digest == plan.before_digest:
             return None
         try:
@@ -842,6 +943,12 @@ class MemoryCommit:
             return []
         targets = tuple(wanted)
         with self._receipts.lock(operation_id):
+            receipt = self._receipts.load(operation_id)
+            if receipt is not None and receipt.state == ReceiptState.COMMITTED:
+                missing = [target for target in targets if target not in receipt.targets]
+                if missing:
+                    return self._remove_scope_growth(
+                        wanted, missing, operation_id, origin, payload, receipt)
             replay = self._replay_if_committed(operation_id, targets)
             if replay is not None:
                 return [str(item) for item in replay.get("cleaned") or []]
@@ -915,10 +1022,31 @@ class MemoryCommit:
                 ) from error
             return cleaned
 
+    def _remove_scope_growth(
+        self, wanted: Mapping[str, set[str]], missing: list[str], operation_id: str,
+        origin: str, payload: dict[str, Any] | None, receipt: CommitReceipt,
+    ) -> list[str]:
+        """已 COMMITTED 的 digest 清理又收到新 target：缺失目标走稳定子回执。"""
+        scope_ids = {
+            target: _scope_child_id(operation_id, target) for target in missing}
+        logger.info(
+            "memory cleanup scope grew (%s): %s", operation_id, scope_ids)
+        cleaned = [
+            str(item) for item in (receipt.result or {}).get("cleaned") or []]
+        for target in missing:
+            cleaned.extend(self._remove_by_digest_sync(
+                {target: sorted(wanted[target])}, scope_ids[target], origin, payload))
+        return cleaned
+
     def _publish_digest_target(
         self, spec: dict[str, Any], operation_id: str, *, remaining: bool,
     ) -> list[str]:
         target = str(spec["target"])
+        receipt = self._receipts.load(operation_id)
+        plan = receipt.targets.get(target) if receipt is not None else None
+        if plan is not None and plan.published:
+            # 发布位是事实：发布后用户恢复/改写内容，重试不能再删一遍。
+            return [self._engine.path_for(target).name]
         cleaned: list[str] = []
         mutator = self._mutator_for(spec)
         prepared = {"removed": 0}

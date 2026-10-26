@@ -83,6 +83,11 @@ class MemoryCommit:
   不符，全部在**写回执之前**判定（回执也不算内容落盘，但拒绝路径连回执都不写）——AC4。
 - **幂等键 = operation id**：同一 op 已有 COMMITTED 回执 ⇒ 直接回放当时的结果，不再碰磁盘；
   同一 op 处于 NEED_RECONCILE ⇒ 原样返回待对账，不重试。
+- **目标集增长 = 新 scope**：确定性 id（`jobp_` / `blkp_` / `del_dg_`）重试时，如果
+  COMMITTED 回执不覆盖本次请求的某个 target，commit **不改写旧回执**，而是为每个缺失
+  target 派生稳定子回执 `<operation_id>_g<sha256(target)[:16]>`，只发布缺失 target。
+  同一缺失 target 的重试回放同一子回执；target 启用变化不会让 formation/blocked 永久
+  重试同一个 id，也不会重放已发布内容。`del_dg_` 的幂等键本身也包含 target 集。
 - **系统镜像的写前预检**：formation / blocked promote 一次发布多条记录时调用
   `apply_batch_many`：先对每个目标跑同一 mutator（扫描/匹配/最终预算全判），任何一条不合格
   就在写第一条之前抛 `MemoryBatchRejected`（零落盘、零回执）；通过后**先写一份覆盖全部目标的
@@ -148,6 +153,11 @@ reconcile 补发布或人工对账。
 reconcile 使用同一事实：已发布目标不再重放。发布后用户删除/前台改写属于新的当前内容，
 不能把旧 `after` 再写回去（否则会撤销用户的显式删除）；`COMMITTED` 只承诺本次发布发生过，
 不承诺文件此后一直停在 `after`。
+
+**重试路径同样以 `published` 位为准**：未终态回执里已发布的目标，即使磁盘回到 `before`
+（用户删除了刚写入的条目、或恢复了刚删除的条目），重试也不重跑 mutator，只补终态/回执；
+否则 add 会把用户删除复活、remove 会把用户恢复的内容再次删掉。未发布目标仍按
+`before` / `after` 判定补发布。
 
 ### D4 job / lease / 幂等（Formation 状态职责）
 

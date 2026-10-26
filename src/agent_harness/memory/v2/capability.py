@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from enum import Enum
 from typing import Any, Protocol
@@ -461,7 +461,7 @@ class MemoryV2Service:
             if by_target:
                 await commit.remove_by_digest(
                     digests_by_target=by_target,
-                    operation_id=_digest_operation_id(digests))
+                    operation_id=_digest_operation_id(by_target))
 
     async def mirror_committed(
         self, records: Sequence[MemoryRecordV2], *, invalidated: Sequence[MemoryRecordV2] = (),
@@ -756,9 +756,17 @@ class MemoryV2Service:
                 )
 
 
-def _digest_operation_id(digests: Sequence[str]) -> str:
-    """同一批墓碑哈希 ⇒ 同一个 operation id（重试回放，不重复清理）。"""
-    joined = "\x00".join(sorted(str(digest) for digest in digests))
+def _digest_operation_id(digests_by_target: Mapping[str, Sequence[str]]) -> str:
+    """同一批「target + 墓碑哈希」⇒ 同一个 operation id（重试回放，不重复清理）。
+
+    target 必须进入幂等键：同一正文在 MEMORY.md 与 USER.md 的清理是两次不同的
+    逻辑删除；只用 digest 会让后一次直接回放前一次的结果，漏清另一个文件。
+    """
+    joined = "\x00".join(
+        f"{target}\x00{digest}"
+        for target, values in sorted(digests_by_target.items())
+        for digest in sorted(str(item) for item in values)
+    )
     return "del_dg_" + hashlib.sha256(joined.encode()).hexdigest()[:32]
 
 
