@@ -18,7 +18,7 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from enum import Enum
 from typing import Any, Protocol
 
@@ -89,6 +89,10 @@ class MemoryV2Capability(Protocol):
         self, query: str, trusted: TrustedMemoryIdentity, *, scope: MemoryScope, limit: int,
     ) -> list[MemoryRecordV2]: ...
 
+    def content_write_scope(self) -> AbstractAsyncContextManager[None]:
+        """串行化「内容发布 + 派生投影」，与 delete/bulk_delete 使用同一把服务实例锁。"""
+        ...
+
 
 class MemoryV2Service:
     """SQLite 权威 + 派生索引 + 检索权威复核的组合实现。
@@ -124,9 +128,10 @@ class MemoryV2Service:
         self._legacy_import_report: dict[str, Any] | None = None
         self._tombstone_purger: asyncio.Task | None = None
         #: #1494 review P3-2/P3-3：delete 的 prepare→remove→records 三步不能被并发的
-        #: service 写（create/update/invalidate）或工具面「内容发布 + 派生投影」插入，
-        #: 否则删除按旧快照清理正文、新记录却已指向它。覆盖范围是**服务入口**与
-        #: `MemoryTool`；formation 的 `mirror_committed` 在 SQLite 写事务内发布，
+        #: 服务实例内的内容锁（`asyncio.Lock`，不是跨进程/跨实例锁）：service 写
+        #: （create/update/invalidate/edit）或工具面「内容发布 + 派生投影」插入，
+        #: 否则删除按旧快照清理正文、新记录却已指向它。覆盖范围是**服务实例的入口**
+        #: 与 `MemoryTool`；formation 的 `mirror_committed` 在 SQLite 写事务内发布，
         #: 反向加这把锁会与 delete（持锁后开 SQLite）形成锁序反转，故不进入本临界区。
         #: 跨进程仍由墓碑重入收敛（单机单用户部署，不为它引入分布式租约）。
         self._content_lock = asyncio.Lock()
@@ -540,26 +545,29 @@ class MemoryV2Service:
         content: str, payload: MemoryPayload, importance: float | None = None,
         strength: float | None = None,
     ) -> MemoryRecordV2:
-        previous = await self._store.get(memory_id, trusted)
-        if previous.status is not MemoryStatus.ACTIVE:
-            raise ValueError("only an active memory can be edited")
-        if previous.version != expected_version:
-            raise StaleMemoryVersion(memory_id)
-        if payload.kind != previous.kind.value:
-            raise InvalidMemoryPayload("payload kind must match the existing memory kind")
-        evidence_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        draft = MemoryDraftV2(
-            kind=previous.kind, tier=previous.tier, scope=previous.scope,
-            project_id=previous.project_id, content=content, payload=payload,
-            importance=previous.importance if importance is None else importance,
-            strength=previous.strength if strength is None else strength,
-            source_type=SourceType.USER_EDIT, source_session_id=None,
-            source_event_ids=[],
-            evidence=[EvidenceItem(role="user_edit", excerpt="", hash=evidence_hash)],
-        )
-        self._reject_secret(draft)
-        await self._mirror_markdown(draft, previous_id=memory_id, trusted=trusted)
-        return await self._store.update(memory_id, draft, trusted)
+        # 与 delete 同锁：否则 delete 在 “edit 读到旧行” 之后删掉全部版本、清完 Markdown，
+        # edit 再把新正文镜像进去，最终留下“有内容、无记录”的孤儿条目（P2-2）。
+        async with self._content_lock:
+            previous = await self._store.get(memory_id, trusted)
+            if previous.status is not MemoryStatus.ACTIVE:
+                raise ValueError("only an active memory can be edited")
+            if previous.version != expected_version:
+                raise StaleMemoryVersion(memory_id)
+            if payload.kind != previous.kind.value:
+                raise InvalidMemoryPayload("payload kind must match the existing memory kind")
+            evidence_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            draft = MemoryDraftV2(
+                kind=previous.kind, tier=previous.tier, scope=previous.scope,
+                project_id=previous.project_id, content=content, payload=payload,
+                importance=previous.importance if importance is None else importance,
+                strength=previous.strength if strength is None else strength,
+                source_type=SourceType.USER_EDIT, source_session_id=None,
+                source_event_ids=[],
+                evidence=[EvidenceItem(role="user_edit", excerpt="", hash=evidence_hash)],
+            )
+            self._reject_secret(draft)
+            await self._mirror_markdown(draft, previous_id=memory_id, trusted=trusted)
+            return await self._store.update(memory_id, draft, trusted)
 
     async def delete(
         self, memory_id: str, trusted: TrustedMemoryIdentity,

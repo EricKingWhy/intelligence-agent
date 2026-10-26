@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -110,7 +111,7 @@ _CONTENT_PATH_HINTS = frozenset({
 _ENGINE_HINTS = frozenset({"engine", "_engine", "markdown", "markdown_store"})
 _WRITE_ATTRS = frozenset({
     "write_text", "write_bytes", "replace", "rename",
-    "copyfile", "copy2", "move",
+    "copyfile", "copy2", "move", "atomic_write_text",
 })
 _ALLOWED_WRITE_MODULES = frozenset({
     # 引擎自身与底层原子写原语；其余模块只能经 mutate_now / MemoryCommit。
@@ -121,17 +122,61 @@ _ALLOWED_WRITE_MODULES = frozenset({
 })
 
 
-def _references_content(node: ast.AST, tainted: set[str]) -> bool:
+def _engine_aliases(tree: ast.AST) -> set[str]:
+    """`md = engine` / `store = markdown` 这类别名，静态图里也必须跟着走。"""
+    aliases: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            is_engine = (
+                isinstance(value, ast.Name)
+                and (value.id in _ENGINE_HINTS or value.id in aliases)
+            ) or (
+                isinstance(value, ast.Attribute) and value.attr in _ENGINE_HINTS
+            )
+            if not is_engine:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in aliases:
+                    aliases.add(target.id)
+                    changed = True
+    return aliases
+
+
+def _is_engine_ref(node: ast.AST, aliases: set[str]) -> bool:
+    return any(
+        (isinstance(part, ast.Name)
+         and (part.id in _ENGINE_HINTS or part.id in aliases))
+        or (isinstance(part, ast.Attribute) and part.attr in _ENGINE_HINTS)
+        for part in ast.walk(node)
+    )
+
+
+def _references_content(
+    node: ast.AST, tainted: set[str], aliases: set[str] | None = None,
+) -> bool:
+    engine_aliases = aliases or set()
     for child in ast.walk(node):
         if isinstance(child, ast.Attribute):
             if child.attr in _CONTENT_PATH_HINTS:
                 return True
-            if child.attr == "path_for" and any(
-                (isinstance(part, ast.Name) and part.id in _ENGINE_HINTS)
-                or (isinstance(part, ast.Attribute) and part.attr in _ENGINE_HINTS)
-                for part in ast.walk(child.value)
-            ):
+            if child.attr == "path_for" and _is_engine_ref(child.value, engine_aliases):
                 return True
+        if (
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "getattr"
+            and len(child.args) >= 2
+            and isinstance(child.args[1], ast.Constant)
+            and child.args[1].value == "path_for"
+            and _is_engine_ref(child.args[0], engine_aliases)
+        ):
+            return True
         if (
             isinstance(child, ast.Constant)
             and isinstance(child.value, str)
@@ -141,6 +186,77 @@ def _references_content(node: ast.AST, tainted: set[str]) -> bool:
         if isinstance(child, ast.Name) and child.id in tainted:
             return True
     return False
+
+
+def _write_mode(call: ast.Call) -> ast.expr | None:
+    if len(call.args) > 1:
+        return call.args[1]
+    return next((kw.value for kw in call.keywords if kw.arg == "mode"), None)
+
+
+def _scan_tree(relative: str, tree: ast.AST) -> list[int]:
+    """扫一棵 AST：直接对 memories/ 内容文件落笔的调用点行号。"""
+    aliases = _engine_aliases(tree)
+    tainted: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if _references_content(node.value, tainted, aliases):
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in tainted:
+                        tainted.add(target.id)
+                        changed = True
+
+    found: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        attr = func.attr if isinstance(func, ast.Attribute) else None
+        name = func.id if isinstance(func, ast.Name) else None
+        suspicious = False
+        if attr in _WRITE_ATTRS or name == "atomic_write_text":
+            receiver = func.value if isinstance(func, ast.Attribute) else None
+            suspicious = receiver is not None and _references_content(
+                receiver, tainted, aliases)
+            if attr in {"replace", "rename", "copyfile", "copy2", "move"}:
+                suspicious = suspicious or any(
+                    _references_content(argument, tainted, aliases)
+                    for argument in node.args)
+            if name == "atomic_write_text" and node.args:
+                suspicious = suspicious or _references_content(
+                    node.args[0], tainted, aliases)
+        elif attr == "open" or name == "open":
+            mode = _write_mode(node)
+            writes = (
+                isinstance(mode, ast.Constant)
+                and isinstance(mode.value, str)
+                and any(flag in mode.value for flag in "wax+")
+            )
+            path_arg = node.args[0] if node.args else None
+            suspicious = bool(
+                writes and (
+                    (path_arg is not None
+                     and _references_content(path_arg, tainted, aliases))
+                    or (isinstance(func, ast.Attribute)
+                        and _references_content(func.value, tainted, aliases))
+                )
+            )
+        elif attr == "fdopen" or name == "fdopen":
+            mode = _write_mode(node)
+            suspicious = bool(
+                isinstance(mode, ast.Constant)
+                and isinstance(mode.value, str)
+                and any(flag in mode.value for flag in "wax+")
+                and _references_content(func, tainted, aliases)
+            )
+        if suspicious and relative not in _ALLOWED_WRITE_MODULES:
+            found.append(node.lineno)
+    return found
 
 
 def _content_write_sites() -> dict[str, list[int]]:
@@ -153,50 +269,9 @@ def _content_write_sites() -> dict[str, list[int]]:
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
         relative = str(path.relative_to(REPO_ROOT)).replace("\\", "/")
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        tainted: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if _references_content(node.value, tainted):
-                    tainted.update(
-                        target.id for target in targets
-                        if isinstance(target, ast.Name)
-                    )
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            attr = func.attr if isinstance(func, ast.Attribute) else None
-            name = func.id if isinstance(func, ast.Name) else None
-            suspicious = False
-            if attr in _WRITE_ATTRS:
-                receiver = func.value
-                suspicious = _references_content(receiver, tainted)
-                if attr in {"replace", "rename", "copyfile", "copy2", "move"}:
-                    suspicious = suspicious or any(
-                        _references_content(argument, tainted) for argument in node.args)
-            elif attr == "open" or name == "open":
-                path_arg = node.args[0] if node.args else None
-                mode = node.args[1] if len(node.args) > 1 else None
-                writes = (
-                    isinstance(mode, ast.Constant)
-                    and isinstance(mode.value, str)
-                    and any(flag in mode.value for flag in "wax+")
-                )
-                suspicious = bool(
-                    writes and path_arg is not None
-                    and _references_content(path_arg, tainted)
-                )
-            elif attr == "fdopen" or name == "fdopen":
-                mode = node.args[1] if len(node.args) > 1 else None
-                suspicious = bool(
-                    isinstance(mode, ast.Constant)
-                    and isinstance(mode.value, str)
-                    and any(flag in mode.value for flag in "wax+")
-                    and _references_content(func, tainted)
-                )
-            if suspicious and relative not in _ALLOWED_WRITE_MODULES:
-                found.setdefault(relative, []).append(node.lineno)
+        hits = _scan_tree(relative, tree)
+        if hits:
+            found[relative] = hits
     return found
 
 
@@ -206,6 +281,21 @@ def test_no_module_opens_a_second_write_handle_on_content_files() -> None:
         "这些模块直接对 memories/ 内容文件落笔，绕过 mutate_now/MemoryCommit："
         f"{offenders}"
     )
+
+
+def test_static_scan_catches_alias_keyword_and_atomic_write() -> None:
+    """静态图必须覆盖别名/关键字 mode/atomic_write_text/getattr 这些旁路写法。"""
+    source = (
+        "engine = object()\n"
+        "md = engine\n"
+        "path = md.path_for('memory')\n"
+        "path.open(mode='w')\n"
+        "atomic_write_text(engine.path_for('user'), 'x')\n"
+        "getattr(engine, 'path_for')('memory').write_text('x')\n"
+        "engine.path_for('memory').read_text()\n"
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [4, 5, 6]
 
 
 def test_live_entries_are_only_assigned_inside_the_engine() -> None:
@@ -251,6 +341,11 @@ async def test_every_runtime_write_is_paired_with_a_committed_receipt(tmp_path: 
     updated = await service.update(
         created.id, make_draft(content="服务更新", source_event_ids=["event-2"]), LOCAL)
     await service.invalidate(updated.id, LOCAL)
+    editable = await service.create(
+        make_draft(content="服务编辑", source_event_ids=["event-edit"]), LOCAL)
+    await service.edit(
+        editable.id, LOCAL, expected_version=1, content="服务编辑修订",
+        payload=make_draft(content="服务编辑修订").payload)
     doomed = await service.create(
         make_draft(content="服务删除", source_event_ids=["event-3"]), LOCAL)
     await service.delete(doomed.id, LOCAL)
@@ -285,27 +380,39 @@ async def test_every_runtime_write_is_paired_with_a_committed_receipt(tmp_path: 
     )
     assert blocked_id is not None
     assert (await service.blocked.promote(blocked_id, LOCAL)).applied is True
+    # bulk_delete 也必须是同一条 seam（治理批量删除）
+    assert await service.bulk_delete(LOCAL, kind=None)
 
     assert writes, "本用例必须真的发生内容落盘"
 
-    planned: set[tuple[str, str]] = set()
-    prefixes: set[str] = set()
+    planned: list[tuple[str, str, str]] = []
     for path in service.state_root.receipts_dir.glob("*.json"):
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["state"] == "COMMITTED", path.name
-        prefixes.add(payload["operation_id"].split("_", 1)[0] + "_")
         for target, plan in payload["targets"].items():
             if (
                 plan.get("planned")
                 and plan.get("after_digest")
                 and plan["after_digest"] != plan.get("before_digest")
             ):
-                planned.add((target, plan["after_digest"]))
+                planned.append(
+                    (payload["operation_id"], target, plan["after_digest"]))
+
+    prefixes = {operation_id.split("_", 1)[0] + "_" for operation_id, _, _ in planned}
     assert {"mcf_", "del_", "stgp_", "blkp_", "jobp_"} <= prefixes
 
-    unpaired = [item for item in writes if item not in planned]
-    assert unpaired == [], f"这些落盘没有回执计划（说明绕过了 commit）：{unpaired}"
+    # 每一次落盘恰好对应一条计划（数量也相等，集合相等只能证明包含关系）。
+    assert Counter(writes) == Counter(
+        (target, digest) for _, target, digest in planned
+    ), "落盘与回执计划必须一一配对（多写或无回执写都会在这里暴露）"
 
-    # 反向：每一条计划也确实发生过一次落盘（没有"记了回执但没写"的假提交）
-    for target, digest in planned:
-        assert (target, digest) in writes, (target, digest)
+    # 每个入口自己的 operation id 必须真的对上一次落盘，而不是只有前缀出现过。
+    by_operation = {operation_id: (target, digest)
+                    for operation_id, target, digest in planned}
+    assert by_operation["jobp_single_writer_apply"][0] == "memory"
+    assert by_operation[f"stgp_{record.id}"][0] == "memory"
+    assert by_operation[f"blkp_{blocked_id}_apply"][0] == "memory"
+    assert by_operation["del_single_writer_digest"][0] == "memory"
+    assert any(operation_id.startswith("mcf_") for operation_id in by_operation)
+    assert any(operation_id.startswith("del_") and operation_id != "del_single_writer_digest"
+               for operation_id in by_operation)

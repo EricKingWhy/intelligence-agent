@@ -254,8 +254,10 @@ class MemoryTool(Tool):
                 error_code=ErrorCode.PERMISSION_DENIED,
             )
         # #1494 review P3-3：工具面把「内容发布 + 派生投影」放进 service 的 content
-        # 临界区，避免 delete 在两者之间按旧快照清理正文。`service` 缺席（静态对账 /
-        # 只接 commit 的测试）时没有共享锁，保持原行为。
+        # 临界区，避免 delete 在两者之间按旧快照清理正文。真实装配的
+        # `MemoryV2Capability` 在 Protocol 上保证 `content_write_scope`；`service` 缺席
+        # （静态对账 / 只接 commit 的测试）或只提供 settings 的轻量 fake 没有共享锁，
+        # 保持原行为。
         scope_factory = getattr(self._service, "content_write_scope", None)
         scope = scope_factory() if callable(scope_factory) else contextlib.nullcontext()
         async with scope:
@@ -272,8 +274,9 @@ class MemoryTool(Tool):
                 else:
                     response = await self._commit.remove(target, args.old_text or "")
             except MemoryCommitError as error:
-                # AC5：发布失败的回执停在 PREPARED（未 committed），operation id 是唯一能
-                # 把这次失败与盘上回执对上的键，必须进工具结果给模型/用户做 reconcile。
+                # AC5：失败回执可能是 PREPARED / PUBLISHED / NEED_RECONCILE，但绝不会是
+                # COMMITTED；operation id 是唯一能把这次失败与盘上回执对上的键，必须
+                # 进工具结果给模型/用户做 reconcile。
                 logger.warning(
                     "memory tool commit failed (%s, operation %s)",
                     type(error).__name__, error.operation_id,

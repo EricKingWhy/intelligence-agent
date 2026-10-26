@@ -22,8 +22,8 @@ allow / stage——``blocked`` 是**审批结果**（用户明确拒绝）而不
   终态并返回"已处理"。这替代了旧表的 ``status=approving`` 抢占中间态 + 租约回收：
   崩溃由内核释放锁，状态仍是 pending/blocked，重试即可。
 - 重放**只经** `MemoryCommit`（ADR-0058 D2）：单条用 ``stgp_<staged id>``、
-  blocked 用 ``blkp_<blocked id>_<index>`` 的确定性 operation id，审批重试因此
-  是回执回放，不会重复追加/删除。
+  blocked 用 ``blkp_<blocked id>_apply`` 的确定性 operation id（一份多目标回执），
+  审批重试因此是回执回放，不会重复追加/删除。
 - 落盘后转 ``approved`` / ``promoted`` 是**文件写**；崩溃在内容已发布、状态未转
   之间，重试按同一 operation id 回放内容，再转状态——收敛且不重复。
 
@@ -67,6 +67,7 @@ from agent_harness.memory.v2.file_state import (
     write_json,
 )
 from agent_harness.memory.v2.origin import ORIGINS, current_origin
+from agent_harness.memory.v2.receipts import ReceiptState
 from agent_harness.memory.v2.store import (
     MemorySettingsV2,
     SqliteMemoryV2Store,
@@ -228,9 +229,19 @@ class StagedWriteStore:
                 }:
                     raise TypeError(
                         f"staged write {staged_id} has an invalid batch operation")
+        pins = payload.get("pinned_entry")
+        if pins is not None:
+            if not isinstance(pins, list):
+                raise TypeError(f"staged write {staged_id} pinned_entry is not a list")
+            if operations is None and len(pins) > 1:
+                raise ValueError(f"staged write {staged_id} has too many pinned entries")
+            for pin in pins:
+                if pin is not None and (not isinstance(pin, str) or not pin.strip()):
+                    raise TypeError(
+                        f"staged write {staged_id} has an invalid pinned entry")
         return StagedWrite(
             id=staged_id, payload=dict(body or {}),
-            pinned_entry=payload.get("pinned_entry"),
+            pinned_entry=pins,
             status=status, created_at=str(payload.get("created_at")),
         )
 
@@ -360,7 +371,26 @@ class StagedWriteStore:
                 return GateDecision(
                     blocked=True, message=f"This memory write is already {status}."), None
             staged = self._to_staged({**payload, "status": status})
-            response = await self._replay(staged)
+            try:
+                response = await self._replay(staged)
+            except MemoryCommitError as error:
+                # 发布阶段失败：record 保留，用户可按 operation id 对账后重试。
+                return GateDecision(
+                    blocked=True,
+                    message=(
+                        "Memory write could not be published; record kept for retry "
+                        f"(operation {error.operation_id})."),
+                ), None
+            except (KeyError, TypeError, ValueError, AttributeError) as error:
+                # 结构损坏（例如篡改过的 pinned_entry/operations）不得打崩审批入口。
+                logger.warning(
+                    "staged replay rejected (%s): %s", staged_id, type(error).__name__)
+                return GateDecision(
+                    blocked=True,
+                    message=(
+                        "Pending record is malformed; refusing to replay. "
+                        "Reject it or recreate the write."),
+                ), None
             if response is None:
                 return GateDecision(
                     blocked=True,
@@ -772,9 +802,29 @@ class BlockedWriteStore:
                 return BlockedDecision(
                     applied=False, reason=f"这条写入已被处置（{payload.get('status')}）。")
             actions = list((payload.get("payload") or {}).get("actions") or [])
+            operation_id = f"blkp_{blocked_id}_apply"
+            receipt = self.commit.inspect_receipt(operation_id)
+            if receipt is not None and receipt.state == ReceiptState.NEED_RECONCILE:
+                await asyncio.to_thread(
+                    self._set_note, blocked_id, payload,
+                    f"needs_reconcile: {receipt.reason}")
+                return BlockedDecision(
+                    applied=False,
+                    reason=(
+                        "内容回执处于 NEED_RECONCILE，整条拒绝；记录保持 blocked。"
+                        f"（operation {operation_id}: {receipt.reason}）"))
             try:
                 async with write_connection(self.store.database_path) as connection:
-                    drift = await _pin_drift(connection, actions)
+                    already_applied = (
+                        receipt is not None
+                        and receipt.state == ReceiptState.COMMITTED
+                        and await _records_already_applied(
+                            connection, actions, blocked_id=blocked_id))
+                    # records 已提交后，pin 必然被本次 promote 自己的更新改写：
+                    # 这时的“漂移”是预期的，不能把已生效的写入永久卡在 blocked。
+                    drift = (
+                        None if already_applied
+                        else await _pin_drift(connection, actions))
                     if drift is not None:
                         await asyncio.to_thread(
                             self._set_note, blocked_id, payload, f"{DRIFT_PREFIX}{drift}")
@@ -904,6 +954,32 @@ class BlockedWriteStore:
             records.append(await self.writer.update_in(
                 connection, previous_id, draft, owner, new_memory_id=memory_id))
         return tuple(records), tuple(superseded), tuple(invalidated)
+
+
+async def _records_already_applied(
+    connection: aiosqlite.Connection, actions: list[dict[str, Any]], *, blocked_id: str,
+) -> bool:
+    """promote 的 records 事务是否已经提交（用于识别「内容已发布、状态未写」的窗口）。
+
+    每条动作的 records 结果都是确定性的：add/update 落在 `blkp-<id>-<index>`，
+    invalidate 落在 pin 指向的现有行上。全部可见 ⇒ 事务已提交；否则（含部分可见）
+    按未提交处理，仍走 pin 复核，避免跳过真正的并发漂移。
+    """
+    if not actions:
+        return False
+    for index, item in enumerate(actions, 1):
+        action = item.get("action")
+        if action == "invalidate":
+            pin = item.get("pin") or {}
+            row = await _current_row(connection, pin.get("memory_id"))
+            if row is None or row["status"] != MemoryStatus.INVALIDATED.value:
+                return False
+            continue
+        if action not in {"add", "update"}:
+            return False
+        if await _current_row(connection, f"blkp-{blocked_id}-{index}") is None:
+            return False
+    return True
 
 
 async def _pin_drift(

@@ -291,11 +291,18 @@ class ReceiptStore:
         return receipt
 
     def mark_partial(self, operation_id: str) -> CommitReceipt:
-        """至少一个目标已发布、尚有未发布：置 ``PUBLISHED``（幂等，COMMITTED 不回退）。"""
+        """至少一个目标已发布、尚有未发布：置 ``PUBLISHED``（幂等，COMMITTED 不回退）。
+
+        最后一个目标发布后不再置 PUBLISHED——此时只差终态写，调用方紧接着 ``finish``；
+        中途崩溃时回执仍可对账（全部 after ⇒ 收尾 COMMITTED）。
+        """
         receipt = self._require(operation_id)
-        if receipt.state == ReceiptState.PREPARED:
-            receipt.state = ReceiptState.PUBLISHED
-            self._write(receipt)
+        if receipt.state != ReceiptState.PREPARED:
+            return receipt
+        if all(plan.published for plan in receipt.targets.values()):
+            return receipt
+        receipt.state = ReceiptState.PUBLISHED
+        self._write(receipt)
         return receipt
 
     def finish(

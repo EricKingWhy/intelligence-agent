@@ -19,9 +19,9 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
 
 - tool / service 每次逻辑写入生成一个 `mcf_<uuid>`；同一次逻辑写入被重试（审批重放、
   formation 恢复、CLI 补发布）必须复用同一个 id，从而「同 key 只一次逻辑更新」；
-- 固定形：`jobp_<job>`（formation apply）、`stgp_<staged>`（待审批准）、`blkp_<blocked>`
-  （被拦下写入的 promote）、`del_<memory>`（治理删除）、`legp_<job>_<memory>`（旧数据补发布）、
-  `mig_<memory>`（旧记录一次性迁移）。
+- 固定形：`jobp_<job>_apply`（formation apply）、`stgp_<staged>`（待审批准）、
+  `blkp_<blocked>_apply`（被拦下写入的 promote）、`del_<memory>`（治理删除）、
+  `legp_<job>_<memory>`（旧数据补发布）、`mig_<memory>`（旧记录一次性迁移）。
 
 同一 id 已有 `COMMITTED` 回执 ⇒ 直接回放记录的结果，不再碰磁盘（不重复追加、不重复删除）。
 
@@ -292,6 +292,14 @@ class MemoryCommit:
             return result, None, None
         return None, entries_digest(entries), entries_digest(list(result[0]))
 
+    def inspect_receipt(self, operation_id: str) -> CommitReceipt | None:
+        """只读一条回执：供入口在重试前收敛「内容已提交、状态未写」的窗口。
+
+        `load` 对损坏/未知回执返回 NEED_RECONCILE 而不是 `None`，调用方必须按
+        状态处理，不能把「读不到」当成「没发生过」。
+        """
+        return self._receipts.load(operation_id)
+
     async def apply_batch_many(
         self, plans: Sequence[tuple[str, list[dict[str, Any]]]], *,
         trusted_pins: bool = False, allow_empty: bool = False,
@@ -309,8 +317,9 @@ class MemoryCommit:
         磁盘 == before 的目标重新预检但必须得到同一 after；既非 before 也非 after、
         或意图/预检结果变了 ⇒ NEED_RECONCILE，不盲重跑（review P3-1/P3-4）。
 
-        预检失败抛 `MemoryBatchRejected`（磁盘未动）；已经开始发布后的失败抛
-        `MemoryCommitError`（回执已落盘、可对账）。
+        全新 operation 的预检失败抛 `MemoryBatchRejected`（磁盘未动、零回执）；已有
+        回执的重试若预检不再成立，或已经开始发布后失败，抛 `MemoryCommitError`
+        （回执已落盘、可对账）。
         """
         if not plans:
             raise ValueError("plans list is empty")
@@ -332,6 +341,40 @@ class MemoryCommit:
         except (OSError, RuntimeError) as error:
             raise MemoryCommitError(
                 operation_id, target, f"receipt update failed: {error}") from error
+
+    def _verify_receipt_targets(
+        self, receipt: CommitReceipt, operation_id: str, label: str,
+    ) -> None:
+        """``finish`` 前逐个目标核对：回执里每个目标都已计划且磁盘停在 after。
+
+        重试的目标集合可能比首次小（或回执只写到 prepare 就崩了）。只遍历**本次**
+        ``plans`` 会让 ``finish`` 把整份回执置 COMMITTED，而旧目标既未发布也未计划。
+        这里不替调用方猜意图：任何目标不满足“已计划 + after 已落地”都钉
+        NEED_RECONCILE，交由对账/人工处理。
+        """
+        if receipt.state == ReceiptState.NEED_RECONCILE:
+            raise MemoryCommitError(
+                operation_id, label, f"needs reconcile: {receipt.reason}")
+        for target, plan in receipt.targets.items():
+            if not plan.planned or plan.after_digest is None:
+                self._mark_target_reconcile(
+                    operation_id, target, "receipt target was never planned")
+                raise MemoryCommitError(
+                    operation_id, target,
+                    "needs reconcile: receipt target was never planned")
+            disk = self._engine.disk_entries(target)
+            if disk is None:
+                self._mark_target_reconcile(
+                    operation_id, target, "target file unreadable before commit")
+                raise MemoryCommitError(
+                    operation_id, target,
+                    "needs reconcile: target file is unreadable")
+            if entries_digest(disk) != plan.after_digest:
+                self._mark_target_reconcile(
+                    operation_id, target, "target is not at its recorded after digest")
+                raise MemoryCommitError(
+                    operation_id, target,
+                    "needs reconcile: target is not at its recorded after digest")
 
     def _apply_batch_many_sync(
         self, plans: list[tuple[str, list[dict[str, Any]]]], *, trusted_pins: bool,
@@ -458,12 +501,16 @@ class MemoryCommit:
                         f"receipt plan failed: {error}") from error
 
             published: list[str] = []
-            for spec, _before, after, already_published, _needs_plan in prepared:
+            for index, (spec, _before, after, already_published, _needs_plan) in enumerate(
+                prepared
+            ):
                 target = str(spec["target"])
+                remaining = index < len(prepared) - 1
                 if already_published:
                     try:
                         self._receipts.mark_target_published(operation_id, target)
-                        self._receipts.mark_partial(operation_id)
+                        if remaining:
+                            self._receipts.mark_partial(operation_id)
                     except (OSError, RuntimeError) as error:
                         raise MemoryCommitError(
                             operation_id, target,
@@ -502,7 +549,8 @@ class MemoryCommit:
                     raise MemoryCommitError(operation_id, target, reason)
                 try:
                     self._receipts.mark_target_published(operation_id, target)
-                    self._receipts.mark_partial(operation_id)
+                    if remaining:
+                        self._receipts.mark_partial(operation_id)
                 except (OSError, RuntimeError) as error:
                     raise MemoryCommitError(
                         operation_id, target,
@@ -515,6 +563,15 @@ class MemoryCommit:
                 "published": list(published),
                 "targets": {target: True for target in targets},
             }
+            try:
+                receipt = self._receipts.load(operation_id)
+            except (OSError, RuntimeError) as error:
+                raise MemoryCommitError(
+                    operation_id, label, f"receipt unreadable before commit: {error}") from error
+            if receipt is None:
+                raise MemoryCommitError(
+                    operation_id, label, "receipt disappeared before commit")
+            self._verify_receipt_targets(receipt, operation_id, label)
             try:
                 self._receipts.finish(operation_id, result=response)
             except (OSError, RuntimeError) as error:
@@ -565,7 +622,7 @@ class MemoryCommit:
             replay = self._replay_if_committed(operation_id)
             if replay is not None:
                 return replay
-            conflict = self._conflict_if_uncertain(operation_id, target)
+            conflict = self._conflict_if_uncertain(operation_id, target, spec)
             if conflict is not None:
                 return conflict
             return self._publish_one(
@@ -638,8 +695,10 @@ class MemoryCommit:
             recorded["result_unknown"] = True
         return recorded
 
-    def _conflict_if_uncertain(self, operation_id: str, target: str) -> dict[str, Any] | None:
-        """已有未终态回执：先按 digest 判一次，再决定「续跑/重放/冲突」。
+    def _conflict_if_uncertain(
+        self, operation_id: str, target: str, spec: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """已有未终态回执：先核对意图，再按 digest 判「续跑/重放/冲突」。
 
         返回 None ⇒ 磁盘仍是 before（或回执没有该目标的计划），可继续按本次调用完成。
         """
@@ -648,6 +707,19 @@ class MemoryCommit:
             return None
         if receipt.state == ReceiptState.NEED_RECONCILE:
             return self._needs_reconcile_response(receipt)
+        recorded = next(
+            (item for item in receipt.operations if str(item.get("target")) == target), None)
+        if recorded is not None and recorded != spec:
+            # 同 operation id 但意图变了：既不能按旧计划收尾，也不能把新意图套在
+            # 旧 before 上重跑——这正是「同 key 一次逻辑更新」要拦的重复更新。
+            try:
+                self._receipts.mark_needs_reconcile(
+                    operation_id, f"{target}: retry intent differs from the recorded receipt")
+            except (OSError, RuntimeError) as error:
+                raise MemoryCommitError(
+                    operation_id, target, f"receipt update failed: {error}") from error
+            return self._needs_reconcile_response(
+                self._receipts.load(operation_id) or receipt)
         plan = receipt.targets.get(target)
         if plan is None or not plan.planned:
             return None
@@ -728,6 +800,11 @@ class MemoryCommit:
                 cleaned.extend(
                     self._publish_digest_target(
                         spec, operation_id, remaining=index < len(specs) - 1))
+            receipt = self._receipts.load(operation_id)
+            if receipt is None:
+                raise MemoryCommitError(
+                    operation_id, "memory+user", "receipt disappeared before commit")
+            self._verify_receipt_targets(receipt, operation_id, "memory+user")
             try:
                 self._receipts.finish(
                     operation_id, result={"cleaned": list(cleaned), "success": True})

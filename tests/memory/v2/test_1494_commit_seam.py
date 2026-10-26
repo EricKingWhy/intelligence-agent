@@ -25,6 +25,7 @@ import pytest_asyncio
 
 from agent_harness.config import Settings
 from agent_harness.memory.v2 import assembly
+from agent_harness.memory.v2 import write_approval as write_approval_module
 from agent_harness.memory.v2.capability import MarkdownAuthorityError, MemoryV2Service
 from agent_harness.memory.v2.commit import MemoryCommit, MemoryCommitError
 from agent_harness.memory.v2.executor import MemoryJobExecutor
@@ -573,6 +574,53 @@ async def test_blocked_promote_preflight_rejects_whole_batch_before_any_publish(
 
 
 @pytest.mark.asyncio
+async def test_blocked_promote_recovers_after_records_commit_but_status_write_fails(
+    seam: Seam, monkeypatch,
+) -> None:
+    """review P3：records 已提交、状态写失败后，重试不得被自己的 pin 漂移永久拒绝。"""
+    blocked_id = await seam.service.blocked.insert(
+        job_id="job-promote-retry", identity=_identity(LOCAL), project_id=None,
+        payload={"actions": [{
+            "action": "add", "scope": "user_global",
+            "draft": make_draft(
+                content="状态写失败也能收敛", source_event_ids=["event-promote-retry"],
+            ).model_dump(mode="json"),
+            "pin": None,
+        }]},
+    )
+    assert blocked_id is not None
+    original_write = write_approval_module.write_json
+
+    def _fail_promoted(path: Path, payload: dict) -> None:
+        if payload.get("status") == "promoted":
+            raise OSError("disk full")
+        original_write(path, payload)
+
+    monkeypatch.setattr(write_approval_module, "write_json", _fail_promoted)
+    with pytest.raises(OSError, match="disk full"):
+        await seam.service.blocked.promote(blocked_id, LOCAL)
+
+    receipt = read_json(ReceiptStore(seam.root).path_for(f"blkp_{blocked_id}_apply"))
+    assert receipt is not None and receipt["state"] == ReceiptState.COMMITTED
+    blocked = await seam.service.blocked.get(blocked_id)
+    assert blocked is not None and blocked.status == "blocked"
+    active = await seam.service.list_active(
+        LOCAL, scope=MemoryScope.USER_GLOBAL, limit=10)
+    assert [record.content for record in active] == ["状态写失败也能收敛"]
+
+    monkeypatch.setattr(write_approval_module, "write_json", original_write)
+    decision = await seam.service.blocked.promote(blocked_id, LOCAL)
+
+    assert decision.applied is True
+    assert [record.content for record in decision.records] == ["状态写失败也能收敛"]
+    blocked = await seam.service.blocked.get(blocked_id)
+    assert blocked is not None and blocked.status == "promoted"
+    active = await seam.service.list_active(
+        LOCAL, scope=MemoryScope.USER_GLOBAL, limit=10)
+    assert [record.content for record in active] == ["状态写失败也能收敛"], "重试不得新增第二条"
+
+
+@pytest.mark.asyncio
 async def test_corrupt_job_files_do_not_break_recovery_or_claim(seam: Seam) -> None:
     """review P2-1：一条坏 job 文件不能把恢复扫描与认领一起打崩。"""
     jobs_dir = seam.jobs.root.jobs_dir
@@ -673,6 +721,32 @@ async def test_deleting_one_root_keeps_content_shared_by_another_active_memory(
 
 
 @pytest.mark.asyncio
+async def test_edit_waits_for_the_content_lock(seam: Seam, monkeypatch) -> None:
+    """review P2-2：edit 必须与 delete/工具面共享同一把内容锁，不能绕过。"""
+    draft = make_draft(content="编辑前的正文")
+    record = await seam.service.create(draft, LOCAL)
+    started = asyncio.Event()
+    get = seam.service._store.get
+
+    async def _tracked_get(*args, **kwargs):
+        started.set()
+        return await get(*args, **kwargs)
+
+    monkeypatch.setattr(seam.service._store, "get", _tracked_get)
+    async with seam.service.content_write_scope():
+        edit = asyncio.create_task(seam.service.edit(
+            record.id, LOCAL, expected_version=1, content="编辑后的正文",
+            payload=draft.payload,
+        ))
+        await asyncio.sleep(0.05)
+        assert not started.is_set(), "edit 在内容锁释放前不得读取记录"
+        assert not edit.done()
+    edited = await edit
+    assert edited.content == "编辑后的正文"
+    assert edited.version == 2
+
+
+@pytest.mark.asyncio
 async def test_multi_target_publish_failure_keeps_one_receipt_for_both_targets(
     seam: Seam,
 ) -> None:
@@ -708,6 +782,62 @@ async def test_multi_target_publish_failure_keeps_one_receipt_for_both_targets(
 
     assert "jobp_partial_apply" in report.committed
     assert "后发布到 USER" in user_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_multi_target_retry_cannot_shrink_the_target_set(seam: Seam) -> None:
+    """review P2-1：重试只传一个目标时，旧回执里未发布的 target 不得被静默 COMMITTED。"""
+    original = seam.commit.engine._write_file
+
+    def _fail_user(path: Path, entries: list[str]) -> None:
+        if path.name == "USER.md":
+            raise OSError("disk full")
+        original(path, entries)
+
+    seam.commit.engine._write_file = _fail_user  # type: ignore[method-assign]
+    records = (
+        make_record(memory_id="mem-shrink", content="缩表重试保留 MEMORY"),
+        make_record(
+            memory_id="user-shrink", content="缩表重试丢掉 USER", tier=MemoryTier.PROFILE),
+    )
+    with pytest.raises(MemoryCommitError):
+        await seam.service.mirror_committed(records, operation_prefix="jobp_shrink")
+
+    seam.commit.engine._write_file = original  # type: ignore[method-assign]
+    with pytest.raises(MemoryCommitError) as caught:
+        await seam.service.mirror_committed(records[:1], operation_prefix="jobp_shrink")
+
+    assert caught.value.operation_id == "jobp_shrink_apply"
+    assert "after digest" in str(caught.value.reason)
+    receipt = read_json(ReceiptStore(seam.root).path_for("jobp_shrink_apply"))
+    assert receipt is not None and receipt["state"] == ReceiptState.NEED_RECONCILE
+    assert receipt["targets"]["user"]["published"] is False
+    assert not (Path(seam.settings.workspace_dir) / "memories" / "USER.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_single_target_retry_with_a_different_intent_needs_reconcile(seam: Seam) -> None:
+    """review P3-D：同 operation id 换了意图，不能按旧 before 重跑成另一次更新。"""
+    original = seam.commit.engine._write_file
+
+    def _fail(_path: Path, _entries: list[str]) -> None:
+        raise RuntimeError("disk full")
+
+    seam.commit.engine._write_file = _fail  # type: ignore[method-assign]
+    with pytest.raises(MemoryCommitError):
+        await seam.commit.add("memory", "第一次意图", operation_id="mcf_intent")
+
+    seam.commit.engine._write_file = original  # type: ignore[method-assign]
+    response = await seam.commit.add("memory", "第二次意图", operation_id="mcf_intent")
+
+    assert response["success"] is False
+    assert response["needs_reconcile"] is True
+    assert response["operation_id"] == "mcf_intent"
+    receipt = read_json(ReceiptStore(seam.root).path_for("mcf_intent"))
+    assert receipt is not None and receipt["state"] == ReceiptState.NEED_RECONCILE
+    text = seam.memory_file.read_text(encoding="utf-8") if seam.memory_file.exists() else ""
+    assert "第一次意图" not in text
+    assert "第二次意图" not in text
 
 
 @pytest.mark.asyncio
@@ -930,6 +1060,15 @@ async def test_malformed_staged_and_blocked_shapes_are_skipped(seam: Seam) -> No
     (root.staged_dir / "stg_empty_payload.json").write_text(json.dumps({
         "id": "stg_empty_payload", "status": "pending", "payload": {},
     }), encoding="utf-8")
+    (root.staged_dir / "stg_bad_pin.json").write_text(json.dumps({
+        "id": "stg_bad_pin", "status": "pending", "identity": _identity(LOCAL),
+        "payload": {
+            "target": "memory", "action": "replace",
+            "old_text": "旧条目", "content": "新条目",
+        },
+        "pinned_entry": {"x": 1},
+        "created_at": "2026-10-01T00:00:00+00:00",
+    }), encoding="utf-8")
     (root.blocked_dir / "blk_bad_action.json").write_text(json.dumps({
         "id": "blk_bad_action", "job_id": "job-bad-action",
         "identity": _identity(LOCAL), "payload": {"actions": [{"action": "explode"}]},
@@ -952,6 +1091,8 @@ async def test_malformed_staged_and_blocked_shapes_are_skipped(seam: Seam) -> No
     }), encoding="utf-8")
 
     assert await seam.service.staged.pending(LOCAL) == []
+    decision, _response = await seam.service.staged.approve("stg_bad_pin", LOCAL)
+    assert decision.blocked is True, "畸形 pinned_entry 不得打崩审批入口"
     assert await seam.service.blocked.list_for(LOCAL.tenant_id, LOCAL.user_id) == []
     with pytest.raises(KeyError):
         await seam.service.blocked.promote("blk_bad_identity", LOCAL)

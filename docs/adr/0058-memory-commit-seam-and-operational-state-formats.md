@@ -66,7 +66,7 @@ class MemoryCommit:
     async def replace(self, target, old_text, new_content, matched_entry=None, *, fallback_add=False, operation_id=None, origin=None, payload=None) -> dict
     async def remove(self, target, old_text, matched_entry=None, *, missing_ok=False, operation_id=None, origin=None, payload=None) -> dict
     async def apply_batch(self, target, operations, *, trusted_pins=False, allow_empty=False, operation_id=None, origin=None, payload=None) -> dict
-    async def apply_batch_many(self, plans, *, trusted_pins=False, allow_empty=False, operation_id=None, origin=None, payload=None) -> dict
+    async def apply_batch_many(self, plans, *, trusted_pins=False, allow_empty=False, operation_id: str, origin=None, payload=None) -> dict
     async def remove_by_digest(self, digests, *, digests_by_target=None, operation_id=None, origin=None, payload=None) -> list[str]
     def content_error(self, content) -> str | None            # 系统镜像的碰盘前全量预检
     async def resolve_entry(self, target, old_text, verb) -> dict
@@ -263,6 +263,12 @@ DEGRADED），重试或启动对账按同一回执补齐；失败目标与已发
 `markdown_store._file_lock`，本次抽到 `file_state.py` 复用一处实现）：进程崩溃自动释放，
 无死锁残留；单机单用户场景不需要分布式租约。锁序固定：**op 锁 → 目标文件锁 → 无**；
 claim 路径：**claim 锁 → job 锁**。反向获取一律不写进代码。
+
+另有服务实例内的 `asyncio.Lock`（`MemoryV2Service._content_lock`）：`create` / `update` /
+`invalidate` / `edit` / `delete` / `bulk_delete` 与 `MemoryTool.content_write_scope` 先取
+**content 锁**，再走 op 锁 → 目标文件锁 → SQLite；锁序是 **content → op/文件 → SQLite**。
+formation 的 `mirror_committed` 在 SQLite 写事务内发布，反向取 content 锁会与 delete 形成
+锁序反转，因此不进入该临界区（跨进程仍由墓碑重入收敛）。
 
 ### D12 唯一写者的机器化证明
 
