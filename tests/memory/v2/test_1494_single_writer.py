@@ -888,7 +888,7 @@ def test_static_scan_catches_direct_self_attribute_writes() -> None:
 
 
 def test_static_scan_catches_class_body_attributes_inside_control_flow() -> None:
-    """review R12-P4-1：类体 `if` / `try` 里的路径属性同样要登记。"""
+    """review R12-P4-1/R13-P4-1：类体 if/try/for/with 里的路径属性都要登记。"""
     source = (
         "engine = object()\n"                                    # 1
         "class Store:\n"                                         # 2
@@ -896,17 +896,28 @@ def test_static_scan_catches_class_body_attributes_inside_control_flow() -> None
         "        PATH = engine.path_for('memory')\n"             # 4
         "    else:\n"                                            # 5
         "        PATH = engine.path_for('user')\n"               # 6
-        "    def __init__(self):\n"                              # 7
-        "        try:\n"                                         # 8
-        "            self.path = engine.path_for('user')\n"      # 9
-        "        except Exception:\n"                            # 10
-        "            self.path = None\n"                         # 11
-        "store = Store()\n"                                      # 12
-        "store.PATH.write_text('x')\n"                           # 13
-        "store.path.unlink()\n"                                  # 14
+        "    try:\n"                                             # 7
+        "        GUARDED = engine.path_for('user')\n"            # 8
+        "    except Exception:\n"                                # 9
+        "        GUARDED = None\n"                               # 10
+        "    for _name in ():\n"                                 # 11
+        "        LOOPED = engine.path_for('memory')\n"           # 12
+        "    with context():\n"                                  # 13
+        "        SCOPED = engine.path_for('user')\n"             # 14
+        "    def __init__(self):\n"                              # 15
+        "        try:\n"                                         # 16
+        "            self.path = engine.path_for('user')\n"      # 17
+        "        except Exception:\n"                            # 18
+        "            self.path = None\n"                         # 19
+        "store = Store()\n"                                      # 20
+        "store.PATH.write_text('x')\n"                           # 21
+        "store.GUARDED.write_text('x')\n"                        # 22
+        "store.LOOPED.write_text('x')\n"                         # 23
+        "store.SCOPED.write_text('x')\n"                         # 24
+        "store.path.unlink()\n"                                  # 25
     )
 
-    assert _scan_tree("src/fake.py", ast.parse(source)) == [13, 14]
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [21, 22, 23, 24, 25]
 
 
 def test_static_scan_catches_module_alias_returned_by_a_wrapper() -> None:
