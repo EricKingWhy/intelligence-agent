@@ -398,6 +398,14 @@ test('active fallback projects its own default without replacing the primary pre
   const fallbackFrameGate = new Promise<void>((resolve) => {
     releaseFallbackFrames = resolve;
   });
+  let releaseFallbackCompletion!: () => void;
+  const fallbackCompletionGate = new Promise<void>((resolve) => {
+    releaseFallbackCompletion = resolve;
+  });
+  page.once('close', () => {
+    releaseFallbackFrames();
+    releaseFallbackCompletion();
+  });
   const primaryModel = {
     ...REASONING_MODEL,
     name: 'primary-model',
@@ -446,7 +454,7 @@ test('active fallback projects its own default without replacing the primary pre
       frames: [frames[3], completed],
       hasActiveRun: true,
       frameGate: fallbackFrameGate,
-      frameDelayMs: 5000,
+      frameGateAfterFirstFrame: fallbackCompletionGate,
       ending: 'done',
     }),
   });
@@ -482,7 +490,8 @@ test('active fallback projects its own default without replacing the primary pre
     .evaluate((el) => getComputedStyle(el).backgroundImage);
   expect(fillBackground).toContain('rgb(77, 147, 248)');
   expect(fillBackground).not.toContain('rgba(0, 0, 0');
-  await expect(slider).toBeEnabled({ timeout: 10_000 });
+  releaseFallbackCompletion();
+  await expect(slider).toBeEnabled();
   await expect(effortTrigger).toContainText('Deep');
   await expect(slider).toHaveAttribute('aria-valuetext', /Deep/);
 });
