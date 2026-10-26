@@ -420,7 +420,11 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
       **9414 passed / 1 failed / 156 skipped / 43 deselected**，墙钟 **775s（12.9 分钟）**。
       唯一一条红 = `tests/memory/test_writeback.py::test_late_writeback_append_cannot_resurrect_a_deleted_session`
       **既有负载敏感 flake**（基线树 `f49223ff4` 同频复现：整文件 6 轮 2 红、单测 3 轮 3 绿；
-      且 `git diff f49223ff4..HEAD -- src/ tests/memory/` 为空 ⇒ 机械排除本票引入）。
+      且**本票从未碰过该文件**：`git log f49223ff4..HEAD -- tests/memory/test_writeback.py` 为空、
+      该文件与 `origin/main` 逐字节相同 ⇒ 机械排除本票引入）。
+      （口径修正：早先此处写的是「`git diff f49223ff4..HEAD -- src/ tests/memory/` 为空」，那句在
+      读数当时的树 `62c21d225` 上成立，但第三次 sync merge `bf4fb6cf8` 已从 main 带入 `src/` 的多处
+      改动 ⇒ **现在不成立**，故改为上面这条对 flake 文件本身、且至今仍成立的判据。）
     - **受影响块重验**（第三次 sync merge `bf4fb6cf8` 从 main 带入 2 个 `src/` + 2 个 `tests/` 文件后，
       按 §8.1「旧读数不传递」在新树 `745caf159` / tree `1ecb68d668` 上重跑这三块）：`tests/sandbox`
       **237 passed / 59 skipped**（84s）、`tests/tooling` **597 passed**（18s）、`tests/web`

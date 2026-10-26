@@ -335,7 +335,8 @@ class ToolExecutor:
         overflow_handler: OverflowHandler | None = None,
         resource_locks: ResourceLockRegistry | None = None,
         decision_hook_runner: DecisionHookRunner | None = None,
-        # #684：项目根——持久审批规则存 `<project_root>/.agent-harness/approve-policy.json`。
+        # #684 / #1487：项目根——持久审批规则的控制文件按它哈希命名，存控制目录
+        # （默认 `<home>/.agent-harness/approve-policy/`，env 可钉根），不在项目树内。
         # None 回落 `Path.cwd()`（执行域构造时求值）；测试 / 多项目可显式传。
         project_root: Path | str | None = None,
         # #358 / W-14：审批层权限规则引擎（见 `tooling/permission_rules.py`）。
