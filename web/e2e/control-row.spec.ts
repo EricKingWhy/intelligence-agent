@@ -394,6 +394,10 @@ test('Reasoning Effort refresh keeps a value supported by the selected model', a
 });
 
 test('active fallback projects its own default without replacing the primary preference', async ({ page }) => {
+  let releaseFallbackFrames!: () => void;
+  const fallbackFrameGate = new Promise<void>((resolve) => {
+    releaseFallbackFrames = resolve;
+  });
   const primaryModel = {
     ...REASONING_MODEL,
     name: 'primary-model',
@@ -441,7 +445,8 @@ test('active fallback projects its own default without replacing the primary pre
       events: frames.slice(0, 3),
       frames: [frames[3], completed],
       hasActiveRun: true,
-      frameDelayMs: 750,
+      frameGate: fallbackFrameGate,
+      frameDelayMs: 5000,
       ending: 'done',
     }),
   });
@@ -462,6 +467,7 @@ test('active fallback projects its own default without replacing the primary pre
   await expect(page.locator('.picker-content')).toHaveCount(0);
 
   await page.locator('.session-item').first().click();
+  releaseFallbackFrames();
   await expect(effortTrigger).toContainText('Minimal');
   await effortTrigger.click();
   await expect(slider).toBeDisabled();
@@ -476,7 +482,7 @@ test('active fallback projects its own default without replacing the primary pre
     .evaluate((el) => getComputedStyle(el).backgroundImage);
   expect(fillBackground).toContain('rgb(77, 147, 248)');
   expect(fillBackground).not.toContain('rgba(0, 0, 0');
-  await expect(slider).toBeEnabled();
+  await expect(slider).toBeEnabled({ timeout: 10_000 });
   await expect(effortTrigger).toContainText('Deep');
   await expect(slider).toHaveAttribute('aria-valuetext', /Deep/);
 });

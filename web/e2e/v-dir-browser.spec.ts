@@ -47,9 +47,8 @@ const browserPath = (page: Page) => browser(page).locator('.dir-browser-path');
 
 async function openCreateDialog(page: Page) {
   await page.goto('/');
-  // 侧栏右上角的「新建项目」：真空态下它是**文字**按钮，有会话时是 icon 按钮，
-  // 两者可访问名相同——按角色+名字定位才不会随"有没有会话"而失效。
-  await page.getByRole('button', { name: '新建项目', exact: true }).click();
+  // 侧栏动作条与项目区标题都有「新建项目」按钮；固定到动作条，避免严格定位歧义。
+  await page.locator('.session-list-actions button[aria-label="新建项目"]').click();
   await expect(dialog(page)).toBeVisible();
 }
 

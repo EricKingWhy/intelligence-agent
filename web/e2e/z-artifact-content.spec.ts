@@ -2,7 +2,7 @@
  *
  *  票面 AC6 明说"e2e 对 artifact/diff 目前零覆盖，至少新增一条'外置 diff → 就地展开
  *  → 可见'"。这里给四条：
- *  - **清单 → 打开内容**（AC1 的正路，走 #185 的真实端点形状）；
+ *  - **清单 → 默认预览内容**（AC1 的正路，走 #185 的真实端点形状）；
  *  - **归档 diff → 就地展开 → 可见**（AC2 的正路，且与清单**同一渲染器**）；
  *  - **503 与 404 两种拿不到**（AC1 的三态：失败原因必须分开说，detail 照显原文）。
  *
@@ -110,22 +110,25 @@ async function openArtifactsTab(page: import('@playwright/test').Page) {
   await aside.getByRole('tab', { name: '产出文件' }).click();
 }
 
-test('AC1：Artifacts 清单 → 点"查看内容" → 内容真的可见（走 #185 端点）', async ({ page }) => {
+test('AC1：Artifacts 清单 → 默认预览选中的产物内容（走 #185 端点）', async ({ page }) => {
   const frames = framesWithArtifact();
-  await openSession(page, frames, { artifactContent: SLICE });
+  const requestedIds: string[] = [];
+  await openSession(page, frames, {
+    artifactContent: SLICE,
+    onArtifactGet: async (_route, artifactId) => {
+      requestedIds.push(artifactId);
+      return false;
+    },
+  });
   await openArtifactsTab(page);
 
   // 清单本身在（票面要求"保留并可读"，不是被内容面板取代）
   await expect(page.locator('.step-detail')).toContainText(AID.slice(0, 16));
   await expect(page.locator('.step-detail')).toContainText('text/plain');
 
-  // 内容**未**展开时不请求（组件只在展开后取数）
-  await expect(page.locator('.artifact-content')).toHaveCount(0);
-
-  await page.getByRole('button', { name: '查看内容' }).click();
-
   const content = page.locator('.artifact-content');
   await expect(content).toBeVisible();
+  await expect.poll(() => requestedIds).toContain(AID);
   await expect(content).toContainText('CONTENT_LINE_ONE');
   await expect(content).toContainText('CONTENT_LINE_TWO');
   await expect(content).toContainText('共 2 行');
@@ -237,7 +240,6 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
     },
   });
   await openArtifactsTab(page);
-  await page.getByRole('button', { name: '查看内容' }).click();
   const err = page.locator('.artifact-content-error');
   await expect(err).toBeVisible();
   await expect(err).toContainText('本部署没有可读取的产出文件存储');
@@ -254,7 +256,6 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
     artifactContentError: { status: 404, detail: `artifact '${AID}' 不在会话 's1' 的命名空间里` },
   });
   await openArtifactsTab(page);
-  await page.getByRole('button', { name: '查看内容' }).click();
   const gone = page.locator('.artifact-content-error');
   await expect(gone).toContainText('不在本会话里');
   await expect(gone).not.toContainText('本部署没有可读取的产出文件存储');
@@ -272,7 +273,6 @@ test('#227：同一个 503 的**第二个原因**（自带码）不说成"部署
     },
   });
   await openArtifactsTab(page);
-  await page.getByRole('button', { name: '查看内容' }).click();
   const err = page.locator('.artifact-content-error');
   await expect(err).toBeVisible();
   // 后端文案照显（含码本体的诊断信息由它承担）

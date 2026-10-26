@@ -25,8 +25,14 @@ const SUCCESS_FRAMES = [
 ];
 
 test('竞态守卫：旧请求迟到失败不污染新会话', async ({ page }) => {
+  test.setTimeout(60_000);
   let postCount = 0;
   let secondPostHit = false;
+  let firstPostSettled = false;
+  let releaseFirstPost!: () => void;
+  const firstPostGate = new Promise<void>((resolve) => {
+    releaseFirstPost = resolve;
+  });
 
   await routeApi(page, {
     sessions: [],
@@ -34,13 +40,15 @@ test('竞态守卫：旧请求迟到失败不污染新会话', async ({ page }) 
     onSessionPost: async (route) => {
       postCount++;
       if (postCount === 1) {
-        // 任务 A：延迟 1500ms 后返回 500——制造迟到失败
-        await new Promise((r) => setTimeout(r, 1500));
-        return route.fulfill({ status: 500, body: '{"detail":"server error"}', contentType: 'application/json' });
+        // 任务 A：等任务 B 完成后才返回 500，确定性制造迟到失败。
+        await firstPostGate;
+        await route.fulfill({ status: 500, body: '{"detail":"server error"}', contentType: 'application/json' });
+        firstPostSettled = true;
+        return;
       }
       // 任务 B：立即返回成功 SSE 流
+      await fulfillSse(route, SUCCESS_FRAMES);
       secondPostHit = true;
-      return fulfillSse(route, SUCCESS_FRAMES);
     },
   });
 
@@ -57,8 +65,10 @@ test('竞态守卫：旧请求迟到失败不污染新会话', async ({ page }) 
   // 等待任务 B 的 POST 被拦截
   await expect.poll(() => secondPostHit).toBe(true);
 
-  // 等任务 A 的迟到 500 返回（1500ms + 余量）
-  await page.waitForTimeout(2500);
+  // 确认 B 已收到成功回执后，才放行 A 的迟到 500。
+  releaseFirstPost();
+  await expect.poll(() => firstPostSettled).toBe(true);
+  await page.waitForTimeout(0);
 
   // 关键断言：UI 不应显示任务 A 的 setError 污染
   // 修复前：旧请求的 catch 会 setError('提交失败：Start failed: 500')
