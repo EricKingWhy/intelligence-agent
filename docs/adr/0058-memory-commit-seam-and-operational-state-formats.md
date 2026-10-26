@@ -66,9 +66,9 @@ class MemoryCommit:
     async def replace(self, target, old_text, new_content, matched_entry=None, *, fallback_add=False, operation_id=None, origin=None, payload=None) -> dict
     async def remove(self, target, old_text, matched_entry=None, *, missing_ok=False, operation_id=None, origin=None, payload=None) -> dict
     async def apply_batch(self, target, operations, *, trusted_pins=False, allow_empty=False, operation_id=None, origin=None, payload=None) -> dict
-    async def remove_by_digest(self, digests, *, operation_id=None, origin=None, payload=None) -> list[str]
+    async def apply_batch_many(self, plans, *, trusted_pins=False, allow_empty=False, operation_id=None, origin=None, payload=None) -> dict
+    async def remove_by_digest(self, digests, *, digests_by_target=None, operation_id=None, origin=None, payload=None) -> list[str]
     def content_error(self, content) -> str | None            # 系统镜像的碰盘前全量预检
-    def validate_batch(self, target, operations, *, trusted_pins=False, allow_empty=False) -> dict | None
     async def resolve_entry(self, target, old_text, verb) -> dict
     async def resolve_batch_entries(self, target, operations) -> dict
     async def reconcile(self) -> ReconcileReport
@@ -83,10 +83,12 @@ class MemoryCommit:
   不符，全部在**写回执之前**判定（回执也不算内容落盘，但拒绝路径连回执都不写）——AC4。
 - **幂等键 = operation id**：同一 op 已有 COMMITTED 回执 ⇒ 直接回放当时的结果，不再碰磁盘；
   同一 op 处于 NEED_RECONCILE ⇒ 原样返回待对账，不重试。
-- **系统镜像的写前预检**：formation / blocked promote 一次发布多条记录时，先对每个目标调
-  `validate_batch`（同一 mutator，扫描/匹配/最终预算全判），任何一条不合格就在写第一条之前失败；
-  预检通过后每个目标一次 `apply_batch`（一次原子替换、一份回执）。`allow_empty` 只给系统镜像
-  （全部撤回是有意清空），模型工具面的 batch 仍拒绝一次删空。
+- **系统镜像的写前预检**：formation / blocked promote 一次发布多条记录时调用
+  `apply_batch_many`：先对每个目标跑同一 mutator（扫描/匹配/最终预算全判），任何一条不合格
+  就在写第一条之前抛 `MemoryBatchRejected`（零落盘、零回执）；通过后**先写一份覆盖全部目标的
+  PREPARED 回执**，再逐目标一次原子替换。后一目标失败时已发布目标仍在该回执里，重试与启动
+  对账都能按 before/after 继续，不会出现「内容已发布、却没有回执可查」的孤儿。
+  `allow_empty` 只给系统镜像（全部撤回是有意清空），模型工具面的 batch 仍拒绝一次删空。
 - **markdown_store 降为文件引擎**：只保留只读 API（`render_snapshot` / `disk_entries` /
   `resolve_entry` / `resolve_batch_entries` / `target_for` / `entry_digest` / `load_from_disk` /
   上限与启用开关）与一个 `mutate_now(target, mutator)` 临界区（锁 + 重读 + 漂移备份 + 原子写）；
@@ -111,8 +113,10 @@ class MemoryCommit:
 `replaced_entries`、`removed_entries` 等）替换为 `<field>_digest(s)` + `<field>_chars`：
 回执保留「是不是同一份意图」的可核对性，但不长期复制一份记忆正文——删除回执尤其不能把
 已删正文留在 `receipts/` 里（未终态回执保持原样供补发布）。
-`result` 仍是可回放快照；净化后的条目字段只保留摘要与长度，需要原文的调用方必须从
-内容面/记录层取，不能把回执当第二份真相。
+`result` 仍是可回放快照；净化后的条目字段只保留摘要与长度。重放通道（审批重试）
+需要被删/被替换原文时，从 stage 时钉住的 `pinned_entry` 重建 `removed_entry(s)` /
+`replaced_entry(s)` 后交给派生层，不把回执当第二份正文真相；其它调用方需要原文时从
+内容面/记录层取。
 
 摘要口径：`digest = sha256("\n§\n".join(entries))`——对**解析后的条目序列**取摘要（不是原始字节），
 与 `entry_digest` 同一族，行尾归一化不影响判定。
@@ -205,16 +209,21 @@ deleted_at, expires_at, deletion_reason, content_hashes[], source_hashes[]}`。
 所有写者统一为：**① 计划与校验（纯计算，拒绝零落盘）→ ② 内容发布（`MemoryCommit`，权威）
 → ③ 派生态投影（records / outbox / FTS）→ ④ 操作终态（job / 审批 / 被拦下状态）**。
 
-多记录系统镜像（formation apply、blocked promote）的 ① 是**跨目标的全量预检**
-（`validate_batch`：内容扫描 / pin / 最终预算），② 是每个目标一次 `apply_batch`
-（一次原子替换、一份 `jobp_`/`blkp_` 回执）。这样「第二条超限」在写第一条之前就被拒；
-跨文件仍不原子，IO 失败的半批由回执对账补齐（D3），不会出现「records 回滚了、内容却
-已发布且无人可对账」的孤儿。
+多记录系统镜像（formation apply、blocked promote）的 ① 是 `apply_batch_many` 内的**跨目标全量预检**
+（`_preview_batch`：内容扫描 / pin / 最终预算；不合格抛 `MemoryBatchRejected`、不写回执），
+② 是同一份 PREPARED 回执下逐目标一次原子替换（`jobp_`/`blkp_` 回执覆盖全部目标）。
+这样「第二条超限」在写第一条之前就被拒；跨文件仍不原子，IO 失败的半批由回执对账补齐（D3），
+不会出现「records 回滚了、内容却已发布且无人可对账」的孤儿。
 
 被翻转的路径：formation apply（原 SQLite 先、Markdown 后仅警告）、blocked promote、
 `delete` / `bulk_delete`（原 SQLite 先、墓碑同事务、Markdown 后仅警告）。
 created/update/invalidate/edit 原为 Markdown 先，只需把「Markdown 直写」换成「经 commit」。
 「文件拒写 ⇒ 不报 committed」由此成为结构性事实：② 失败时 ③④ 根本不执行。
+
+系统镜像的跨文件发布（formation / blocked promote）用 `apply_batch_many`：全部目标先预检，
+再写一份覆盖全部目标的 PREPARED 回执，最后逐目标替换。跨文件替换不可能原子（D1），
+后一目标失败时 job / blocked 拿到 `MemoryCommitError`（带 operation id，不进入不可恢复的
+DEGRADED），重试或启动对账按同一回执补齐；失败目标与已发布目标都可从回执定位。
 
 ### D9 旧 SQLite 操作状态的一次性导入 + 旧 completed-but-unpublished 对账
 

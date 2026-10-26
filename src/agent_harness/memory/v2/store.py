@@ -47,7 +47,7 @@ from agent_harness.memory.v2.file_state import (
     MEMORY_STATE_DIRECTORY_NAME,
     MemoryStateRoot,
 )
-from agent_harness.memory.v2.markdown_store import entry_digest
+from agent_harness.memory.v2.markdown_store import entry_digest, target_for
 from agent_harness.memory.v2.settings_store import FileMemorySettingsStore
 from agent_harness.memory.v2.tombstones import FileTombstoneStore, TombstoneDraft
 from agent_harness.memory.v2.types import (
@@ -810,23 +810,31 @@ class SqliteMemoryV2Store:
         return await self._tombstones.versions_async(root_id, trusted)
 
     @retry_on_busy
-    async def active_contents_excluding(self, *, exclude_ids: set[str]) -> set[str]:
-        """仍被**其它 active 记录**引用的正文（删除前判共享，避免跨 root 误删）。
+    async def active_contents_by_target_excluding(
+        self, *, exclude_ids: set[str],
+    ) -> dict[str, set[str]]:
+        """仍被**其它 active 记录**引用的正文，按 Markdown 目标分组。
 
-        Markdown 对同一正文只有一条；两个 root 恰好同正文时，删其中一个不能把另一个
-        的唯一副本也清掉。这里返回所有 active 正文，由调用方排除本次要删的 id 后比对。
+        Markdown 对同一 target 内的同一正文只有一条；两个 root 恰好同正文时，删其中一个
+        不能把另一个的唯一副本清掉。但跨 target 的同正文各自独立存在——把全局正文集合
+        当成共享会让 MEMORY.md 的真删除被 USER.md 的副本挡掉（review P2-2）。这里按
+        `target_for(kind, tier)` 分组返回，由调用方只在**同一文件**内判共享。
         """
         async with (
             connect(self.database_path) as connection,
             connection.execute(
-                "SELECT memory_id, content FROM memory_v2_records WHERE status='active'",
+                "SELECT memory_id, content, kind, tier FROM memory_v2_records "
+                "WHERE status='active'",
             ) as cursor,
         ):
             rows = await cursor.fetchall()
-        return {
-            str(row["content"]) for row in rows
-            if str(row["memory_id"]) not in exclude_ids
-        }
+        grouped: dict[str, set[str]] = {"memory": set(), "user": set()}
+        for row in rows:
+            if str(row["memory_id"]) in exclude_ids:
+                continue
+            target = target_for(str(row["kind"]), str(row["tier"]))
+            grouped.setdefault(target, set()).add(str(row["content"]))
+        return grouped
 
     @retry_on_busy
     async def prepare_tombstones(

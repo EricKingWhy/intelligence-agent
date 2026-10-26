@@ -34,7 +34,7 @@ from agent_harness.memory.v2.file_state import (
     read_json,
 )
 from agent_harness.memory.v2.jobs import MemoryJobStage, MemoryV2JobStore
-from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER
+from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER, entry_digest
 from agent_harness.memory.v2.memory_tool import MemoryTool, _MemoryArgs
 from agent_harness.memory.v2.receipts import ReceiptState, ReceiptStore
 from agent_harness.memory.v2.roles import MemoryModelRoles
@@ -42,6 +42,7 @@ from agent_harness.memory.v2.types import (
     MemoryKind,
     MemoryScope,
     MemoryStatus,
+    MemoryTier,
     TrustedMemoryIdentity,
 )
 from agent_harness.memory.v2.write_approval import _identity
@@ -669,3 +670,170 @@ async def test_deleting_one_root_keeps_content_shared_by_another_active_memory(
 
     assert "共享正文" in seam.memory_file.read_text(encoding="utf-8")
     assert (await seam.service.read(second.id, LOCAL)).content == "共享正文"
+
+
+@pytest.mark.asyncio
+async def test_multi_target_publish_failure_keeps_one_receipt_for_both_targets(
+    seam: Seam,
+) -> None:
+    """review P1-1/P1-2：后一目标失败时，已发布目标必须留在同一份可对账回执里。"""
+    original = seam.commit.engine._write_file
+
+    def _fail_user(path: Path, entries: list[str]) -> None:
+        if path.name == "USER.md":
+            raise OSError("disk full")
+        original(path, entries)
+
+    seam.commit.engine._write_file = _fail_user  # type: ignore[method-assign]
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+    records = (
+        make_record(memory_id="mem-partial", content="先发布到 MEMORY"),
+        make_record(
+            memory_id="user-partial", content="后发布到 USER", tier=MemoryTier.PROFILE),
+    )
+
+    with pytest.raises(MemoryCommitError) as caught:
+        await seam.service.mirror_committed(records, operation_prefix="jobp_partial")
+
+    assert caught.value.operation_id == "jobp_partial_apply"
+    assert "先发布到 MEMORY" in seam.memory_file.read_text(encoding="utf-8")
+    assert not user_file.exists()
+    receipt = read_json(ReceiptStore(seam.root).path_for("jobp_partial_apply"))
+    assert receipt is not None and receipt["state"] == ReceiptState.PREPARED
+    assert receipt["targets"]["memory"]["published"] is True
+    assert receipt["targets"]["user"]["published"] is False
+
+    seam.commit.engine._write_file = original  # type: ignore[method-assign]
+    report = await seam.commit.reconcile()
+
+    assert "jobp_partial_apply" in report.committed
+    assert "后发布到 USER" in user_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_staged_remove_replay_restores_scrubbed_body_from_pin(seam: Seam) -> None:
+    """review P2-1：终态回执 scrub 后，审批重放仍必须把被删原文交给派生层。"""
+    await seam.commit.add("memory", "审阅时钉住的条目")
+    payload = {
+        "target": "memory", "action": "remove", "old_text": "审阅时钉住的条目",
+    }
+    pins, error = await seam.service.staged.resolve_pins(payload)
+    assert error is None and pins == ["审阅时钉住的条目"]
+    record = await seam.service.staged.stage(payload, pins, LOCAL)
+
+    decision, _response = await seam.service.staged.approve(record.id, LOCAL)
+    assert decision.allow is True
+    receipt = read_json(
+        ReceiptStore(seam.root).path_for(f"stgp_{record.id}"))
+    assert "审阅时钉住的条目" not in json.dumps(receipt, ensure_ascii=False), (
+        "终态回执不得保留已删正文")
+
+    replayed = await seam.service.staged._replay(record)
+
+    assert replayed is not None and replayed["replayed"] is True
+    assert replayed["removed_entry"] == "审阅时钉住的条目"
+
+
+@pytest.mark.asyncio
+async def test_staged_batch_remove_replay_restores_removed_entries_map(seam: Seam) -> None:
+    await seam.commit.add("memory", "批删甲")
+    await seam.commit.add("memory", "批留乙")
+    payload = {
+        "target": "memory", "action": "batch",
+        "operations": [{"action": "remove", "old_text": "批删甲"}],
+    }
+    pins, error = await seam.service.staged.resolve_pins(payload)
+    assert error is None and pins == ["批删甲"]
+    record = await seam.service.staged.stage(payload, pins, LOCAL)
+    decision, _response = await seam.service.staged.approve(record.id, LOCAL)
+    assert decision.allow is True
+
+    replayed = await seam.service.staged._replay(record)
+
+    assert replayed is not None and replayed["replayed"] is True
+    assert replayed["removed_entries"] == {1: "批删甲"}
+
+
+@pytest.mark.asyncio
+async def test_tombstone_digest_cleanup_is_scoped_per_target(seam: Seam) -> None:
+    """review P2-2：跨 target 的同正文各自独立；墓碑清理只清没有共享副本的文件。"""
+    user_file = Path(seam.settings.workspace_dir) / "memories" / "USER.md"
+    atomic_write_text(seam.memory_file, "跨文件同正文")
+    atomic_write_text(user_file, "跨文件同正文")
+    await seam.service.create(
+        make_draft(
+            content="跨文件同正文", tier=MemoryTier.PROFILE, source_event_ids=["event-user"],
+        ), LOCAL)
+
+    await seam.service._mirror_deleted(
+        (), digests=[entry_digest("跨文件同正文")])
+
+    assert "跨文件同正文" not in seam.memory_file.read_text(encoding="utf-8")
+    assert "跨文件同正文" in user_file.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------------------
+# 修后重审回归（二轮）：损坏回执/任务的更多形状
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_utf8_receipt_does_not_break_reconcile(seam: Seam) -> None:
+    path = ReceiptStore(seam.root).path_for("mcf_non_utf8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe\x00not-utf8")
+
+    report = await seam.commit.reconcile()
+
+    assert [operation_id for operation_id, _ in report.needs_reconcile] == ["mcf_non_utf8"]
+
+
+@pytest.mark.asyncio
+async def test_receipt_with_unknown_action_is_isolated_as_needs_reconcile(seam: Seam) -> None:
+    """review P2-3/P3-2：结构合法但 action 未知的回执不得让 reconcile 抛 ValueError。"""
+    path = ReceiptStore(seam.root).path_for("mcf_bad_action")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "operation_id": "mcf_bad_action", "state": ReceiptState.PREPARED,
+        "targets": {"memory": {"before_digest": "x", "after_digest": "y", "planned": True}},
+        "operations": [{"target": "memory", "action": "mystery"}],
+    }), encoding="utf-8")
+
+    report = await seam.commit.reconcile()
+
+    assert [operation_id for operation_id, _ in report.needs_reconcile] == ["mcf_bad_action"]
+
+
+@pytest.mark.asyncio
+async def test_job_with_non_mapping_state_does_not_break_recovery(seam: Seam) -> None:
+    jobs_dir = seam.jobs.root.jobs_dir
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    (jobs_dir / "job_bad_state.json").write_text(
+        json.dumps({"job_id": "job_bad_state", "state": 5}), encoding="utf-8")
+
+    assert await seam.jobs.list_recoverable() == []
+    assert await seam.jobs.claim(worker_id="bad-state-worker") is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_staged_and_blocked_shapes_are_skipped(seam: Seam) -> None:
+    root = seam.root
+    root.ensure()
+    (root.staged_dir / "stg_empty_payload.json").write_text(json.dumps({
+        "id": "stg_empty_payload", "status": "pending", "payload": {},
+    }), encoding="utf-8")
+    (root.blocked_dir / "blk_bad_action.json").write_text(json.dumps({
+        "id": "blk_bad_action", "job_id": "job-bad-action",
+        "identity": _identity(LOCAL), "payload": {"actions": [{"action": "explode"}]},
+        "status": "blocked", "created_at": "2026-10-01T00:00:00+00:00",
+    }), encoding="utf-8")
+    (root.blocked_dir / "blk_bad_identity.json").write_text(json.dumps({
+        "id": "blk_bad_identity", "job_id": "job-bad-identity",
+        "identity": "not-json", "payload": {"actions": []},
+        "status": "blocked", "created_at": "2026-10-01T00:00:00+00:00",
+    }), encoding="utf-8")
+
+    assert await seam.service.staged.pending(LOCAL) == []
+    assert await seam.service.blocked.list_for(LOCAL.tenant_id, LOCAL.user_id) == []
+    with pytest.raises(KeyError):
+        await seam.service.blocked.promote("blk_bad_identity", LOCAL)

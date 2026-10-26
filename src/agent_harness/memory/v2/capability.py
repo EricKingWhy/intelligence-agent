@@ -24,7 +24,7 @@ from typing import Any, Protocol
 import aiosqlite
 
 from agent_harness.memory.v2 import reprojection
-from agent_harness.memory.v2.commit import MemoryCommit
+from agent_harness.memory.v2.commit import MemoryBatchRejected, MemoryCommit
 from agent_harness.memory.v2.index import MemoryV2IndexRelay, MemoryV2VectorIndex
 from agent_harness.memory.v2.markdown_store import (
     MarkdownMemoryStore,
@@ -122,10 +122,11 @@ class MemoryV2Service:
         #: CLI `memory reconcile` 要能看见并计入退出码，不能只留在启动日志。
         self._legacy_import_report: dict[str, Any] | None = None
         self._tombstone_purger: asyncio.Task | None = None
-        #: #1494 review P3-2：prepare_tombstones 与 delete 的两次读取之间若有新版本写入，
-        #: 内容清理会落在 records 删除之后。删除是低频动作，进程内一把锁串行化即可；
-        #: 跨进程仍由墓碑重入收敛（单机单用户部署，不为它引入分布式租约）。
-        self._delete_lock = asyncio.Lock()
+        #: #1494 review P3-2/P3-3：delete 的 prepare→remove→records 三步不能被并发的
+        #: create/update 插入（否则删除按旧快照清理正文、新记录却已指向它）。删除是
+        #: 低频动作，进程内一把锁串行化全部内容写入即可；跨进程仍由墓碑重入收敛
+        #: （单机单用户部署，不为它引入分布式租约）。
+        self._content_lock = asyncio.Lock()
 
     @property
     def legacy_import_report(self) -> dict[str, Any] | None:
@@ -165,18 +166,21 @@ class MemoryV2Service:
 
     async def create(self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         self._reject_secret(draft)
-        await self._mirror_markdown(draft, previous_id=None)
-        return await self._store.create(draft, trusted)
+        async with self._content_lock:
+            await self._mirror_markdown(draft, previous_id=None)
+            return await self._store.create(draft, trusted)
 
     async def update(self, previous_id: str, draft: MemoryDraftV2,
                      trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
         self._reject_secret(draft)
-        await self._mirror_markdown(draft, previous_id=previous_id, trusted=trusted)
-        return await self._store.update(previous_id, draft, trusted)
+        async with self._content_lock:
+            await self._mirror_markdown(draft, previous_id=previous_id, trusted=trusted)
+            return await self._store.update(previous_id, draft, trusted)
 
     async def invalidate(self, memory_id: str, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
-        await self._mirror_markdown(None, previous_id=memory_id, trusted=trusted)
-        return await self._store.invalidate(memory_id, trusted)
+        async with self._content_lock:
+            await self._mirror_markdown(None, previous_id=memory_id, trusted=trusted)
+            return await self._store.invalidate(memory_id, trusted)
 
     # ----------------------------------------------------------------------------------
     # 工具写入 → 派生层投影（#1437 F-01 甲案 / F-06 / F-06b）
@@ -408,18 +412,20 @@ class MemoryV2Service:
         if commit is None:
             return
         engine = commit.engine
-        # Markdown 对同一正文只有一条：两个 root 恰好同正文时，删其中一个不能把另一个
-        # 的唯一副本也清掉（review P3-5）。先查仍被其它 active 记录引用的正文。
-        shared = await self._store.active_contents_excluding(
+        # Markdown 对**同一目标文件内**的同一正文只有一条：两个 root 恰好同正文时，
+        # 删其中一个不能把另一个的唯一副本也清掉（review P3-5）。共享判定必须带
+        # target 维度——MEMORY.md 与 USER.md 的同正文各自独立，全局判定会放过真删除
+        # （review P2-2）。
+        shared = await self._store.active_contents_by_target_excluding(
             exclude_ids={memory.memory_id for memory in memories})
         for memory in memories:
-            if memory.content in shared:
-                logger.info(
-                    "skip markdown removal for %s: content is still referenced by "
-                    "another active memory", memory.memory_id)
-                continue
             target = self.markdown_target(memory)
             if not engine.target_enabled(target):
+                continue
+            if memory.content in shared.get(target, set()):
+                logger.info(
+                    "skip markdown removal for %s: content is still referenced by "
+                    "another active memory in %s", memory.memory_id, target)
                 continue
             response = await commit.remove(
                 target, memory.content, matched_entry=memory.content, missing_ok=True,
@@ -428,12 +434,20 @@ class MemoryV2Service:
             self._require_markdown_success(response, "remove")
         if digests:
             # 墓碑-only 删除：记录行已不在，只能按正文哈希清理。零命中就是已经清理过；
-            # 仍被其它 active 记录引用的正文同样跳过。
-            live_digests = {entry_digest(content) for content in shared}
-            remaining = [digest for digest in digests if digest not in live_digests]
-            if remaining:
+            # 同一 target 内仍被其它 active 记录引用的正文跳过（跨 target 互不影响）。
+            by_target: dict[str, list[str]] = {}
+            for target in ("memory", "user"):
+                if not engine.target_enabled(target):
+                    continue
+                live_digests = {
+                    entry_digest(content) for content in shared.get(target, set())}
+                remaining = [digest for digest in digests if digest not in live_digests]
+                if remaining:
+                    by_target[target] = remaining
+            if by_target:
                 await commit.remove_by_digest(
-                    remaining, operation_id=_digest_operation_id(digests))
+                    digests_by_target=by_target,
+                    operation_id=_digest_operation_id(digests))
 
     async def mirror_committed(
         self, records: Sequence[MemoryRecordV2], *, invalidated: Sequence[MemoryRecordV2] = (),
@@ -470,19 +484,16 @@ class MemoryV2Service:
         plans = [(target, ops) for target, ops in operations.items() if ops]
         if not plans:
             return
-        for target, ops in plans:
-            error = commit.validate_batch(
-                target, ops, trusted_pins=True, allow_empty=True)
-            if error is not None:
-                raise MarkdownAuthorityError(
-                    f"markdown {target} preflight rejected: "
-                    f"{error.get('error') or 'batch rejected'}")
         prefix = operation_prefix or "mirror"
-        for target, ops in plans:
-            self._require_markdown_success(await commit.apply_batch(
-                target, ops, trusted_pins=True, allow_empty=True,
-                operation_id=f"{prefix}_apply_{target}",
-            ), "apply_batch")
+        try:
+            response = await commit.apply_batch_many(
+                plans, trusted_pins=True, allow_empty=True,
+                operation_id=f"{prefix}_apply",
+            )
+        except MemoryBatchRejected as error:
+            raise MarkdownAuthorityError(
+                f"markdown preflight rejected: {error.reason}") from error
+        self._require_markdown_success(response, "apply_batch_many")
 
     async def list_records(
         self, trusted: TrustedMemoryIdentity, *, query: str | None = None,
@@ -546,7 +557,7 @@ class MemoryV2Service:
     ) -> MemoryDeletionReceiptV2:
         # D7/D8：墓碑 → 内容 → records。内容清理失败时记录仍在，重试删除是幂等的。
         # 整段持进程内删除锁：prepare 的读和 delete 的重读必须是同一批可见行（P3-2）。
-        async with self._delete_lock:
+        async with self._content_lock:
             prepared = await self._store.prepare_tombstones(trusted, memory_id=memory_id)
             await self._mirror_deleted(prepared)
             receipt = await self._store.delete(memory_id, trusted)
@@ -572,7 +583,7 @@ class MemoryV2Service:
     async def bulk_delete(
         self, trusted: TrustedMemoryIdentity, *, kind: MemoryKind | None,
     ) -> list[MemoryDeletionReceiptV2]:
-        async with self._delete_lock:
+        async with self._content_lock:
             prepared = await self._store.prepare_tombstones(
                 trusted, kind=kind, reason="bulk_delete")
             await self._mirror_deleted(prepared)

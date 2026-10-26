@@ -39,8 +39,8 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -242,18 +242,35 @@ class MarkdownMemoryStore:
         没有 session/run 维度。并发 run 的 run-start 会互相把对方的计数清零，正在累计
         的那一侧会被中途续满额度。单用户部署里并发 run 罕见，影响小。
         """
-        self._consolidation_failures = 0
+        with self._guard:
+            self._consolidation_failures = 0
+
+    @contextmanager
+    def preserve_consolidation_failures(self) -> Iterator[None]:
+        """预检期间冻结计数：预检不是一次模型尝试，不能消耗/回滚别人的自纠额度。
+
+        整段持 `_guard`（RLock，mutator 内的 `batch_failure` 可重入），因此并发写入的
+        计数递增/清零不会与快照还原交错；预检本身只做内存计算，不阻塞文件写。
+        """
+        with self._guard:
+            failures = self._consolidation_failures
+            try:
+                yield
+            finally:
+                self._consolidation_failures = failures
 
     def consolidation_failure(self, response: dict[str, Any]) -> dict[str, Any]:
         """记一次 consolidation 失败：未超上限返回原响应（含重试指引），超上限返回 TERMINAL。"""
-        self._consolidation_failures += 1
-        if self._consolidation_failures <= MAX_CONSOLIDATION_FAILURES_PER_TURN:
+        with self._guard:
+            self._consolidation_failures += 1
+            failures = self._consolidation_failures
+        if failures <= MAX_CONSOLIDATION_FAILURES_PER_TURN:
             return response
         return {
             "success": False,
             "done": True,
             "error": (
-                f"Memory consolidation failed {self._consolidation_failures} times this turn. Stop "
+                f"Memory consolidation failed {failures} times this turn. Stop "
                 "retrying memory calls — leave memory unchanged for now and continue with your reply "
                 "to the user. The fact can be saved in a later turn."
             ),
@@ -373,8 +390,9 @@ class MarkdownMemoryStore:
 
     @consolidation_failures.setter
     def consolidation_failures(self, value: int) -> None:
-        """只给 `MemoryCommit.validate_batch` 的写前预检还原计数用：预检不是模型尝试。"""
-        self._consolidation_failures = value
+        """兼容旧调用点；预检已改用 `preserve_consolidation_failures`。"""
+        with self._guard:
+            self._consolidation_failures = value
 
     def _usage(self, target: str) -> str:
         return f"{self._char_count(target):,}/{self._char_limit(target):,}"
@@ -538,7 +556,8 @@ class MarkdownMemoryStore:
         self, target: str, entries: Sequence[str], message: str | None = None, **extra: Any,
     ) -> dict[str, Any]:
         """TERMINAL 且**不带**条目列表：回显条目会诱导模型「再找点要修的」并重发同样的操作。"""
-        self._consolidation_failures = 0
+        with self._guard:
+            self._consolidation_failures = 0
         return {
             "success": True,
             "done": True,

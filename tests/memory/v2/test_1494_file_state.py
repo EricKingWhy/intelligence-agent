@@ -12,6 +12,7 @@ AC2 的判据是"每个操作状态 owner 有非 SQLite 持久实现与重启验
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from hashlib import sha256
 from pathlib import Path
@@ -20,7 +21,7 @@ import pytest
 import pytest_asyncio
 
 from agent_harness.config import Settings
-from agent_harness.memory.v2 import assembly
+from agent_harness.memory.v2 import assembly, file_state
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.file_state import (
     CorruptStateFile,
@@ -185,6 +186,55 @@ def test_atomic_write_leaves_no_temporary_files(tmp_path: Path) -> None:
     atomic_write_text(target, '{"a": 2}\n')
     assert read_json(target) == {"a": 2}
     assert [path.name for path in target.parent.iterdir()] == ["one.json"]
+
+
+def test_atomic_write_retries_a_transient_windows_sharing_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """读句柄短暂占着目标时，Windows 的 `os.replace` 会报 WinError 5；必须退避重试。
+
+    并发 job 测试在 Windows 上偶发 `PermissionError: [WinError 5]`——`_scan` / `read_json`
+    的读句柄与原子替换撞车，不是数据冲突。重试耗尽才把真实错误抛出去。
+    """
+    real_replace = os.replace
+    calls: list[int] = []
+
+    def flaky(source: str, destination: Path) -> None:
+        calls.append(1)
+        if len(calls) <= 2:
+            error = PermissionError(13, "Access denied")
+            error.winerror = 5  # type: ignore[attr-defined]
+            raise error
+        real_replace(source, destination)
+
+    monkeypatch.setattr(file_state.os, "replace", flaky)
+    target = tmp_path / "state" / "retried.json"
+
+    atomic_write_text(target, '{"ok": true}\n')
+
+    assert len(calls) == 3
+    assert read_json(target) == {"ok": True}
+    assert [path.name for path in target.parent.iterdir()] == ["retried.json"]
+
+
+def test_atomic_write_does_not_retry_a_non_windows_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有 Windows 错误码的 `PermissionError`（真正没权限）只尝试一次，不吞成超时。"""
+    calls: list[int] = []
+
+    def denied(source: str, destination: Path) -> None:
+        calls.append(1)
+        raise PermissionError(13, "Access denied")
+
+    monkeypatch.setattr(file_state.os, "replace", denied)
+    target = tmp_path / "state" / "denied.json"
+
+    with pytest.raises(PermissionError):
+        atomic_write_text(target, '{"ok": true}\n')
+
+    assert len(calls) == 1
+    assert [path.name for path in target.parent.iterdir()] == []
 
 
 # --------------------------------------------------------------------------------------

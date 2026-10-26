@@ -29,7 +29,9 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
 
 **校验 → 回执 → 发布** 三步都在**同一个目标文件锁**内完成（`markdown_store.mutate_now`
 的临界区）：校验失败连回执都不写（零落盘）；回执写不进去就不发布；发布后把回执置终态。
-跨文件操作（按 digest 清理两个文件）逐目标执行，部分完成时回执为 `PUBLISHED`，由对账补齐。
+跨文件操作（按 digest 清理两个文件、系统镜像一次发布多条记录）逐目标执行；
+`apply_batch_many` 先为全部目标写一份 PREPARED 回执，再逐目标替换，部分完成时
+回执记录已发布/未发布目标，由重试或对账补齐——失败目标不会「没有回执可查」。
 
 # 不冒称
 
@@ -42,7 +44,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,6 +92,24 @@ class MemoryCommitError(RuntimeError):
         self.reason = reason
         super().__init__(
             f"memory commit failed (operation {operation_id}, target {target}): {reason}"
+        )
+
+
+class MemoryBatchRejected(ValueError):
+    """多目标批量在**写任何文件之前**被拒（校验/预算/pin）。
+
+    与 `MemoryCommitError` 的区别是恢复语义：这里磁盘完全没动，records 事务回滚
+    后重试只会得到同一个拒绝；生产方据此把它归成永久失败（formation DEGRADED），
+    而不是让 job 无限重试。真正的发布失败（IO / 并发漂移）才用 `MemoryCommitError`。
+    """
+
+    def __init__(self, operation_id: str, target: str, reason: object) -> None:
+        self.operation_id = operation_id
+        self.target = target
+        self.reason = reason
+        super().__init__(
+            f"memory batch rejected before publish (operation {operation_id}, "
+            f"target {target}): {reason}"
         )
 
 
@@ -233,7 +253,8 @@ class MemoryCommit:
         allow_empty: bool = False, operation_id: str | None = None,
         origin: str | None = None, payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """``trusted_pins=True`` 只给审批重放用：它携带 stage 时从磁盘钉住的条目全文。
+        """``trusted_pins=True`` 只给系统侧调用：审批重放携带 stage 时钉住的条目全文，
+        系统镜像（formation / blocked promote）携带自己刚从内容面读到的 match。
 
         其余调用方（含模型工具面）的 ``matched_entry`` 一律剥掉，按 ``old_text`` 重新定位。
         ``allow_empty=True`` 只给系统镜像用：它可能有意清空一个文件（例如全部撤回），
@@ -248,42 +269,188 @@ class MemoryCommit:
             payload=payload,
         )
 
-    def validate_batch(
-        self, target: str, operations: list[dict[str, Any]], *, trusted_pins: bool = False,
-        allow_empty: bool = False,
-    ) -> dict[str, Any] | None:
-        """在**不碰盘**的前提下跑一遍 batch 判定；返回错误响应或 ``None``。
+    def _preview_batch(
+        self, spec: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str | None, str | None]:
+        """在**不碰盘**的前提下跑一遍 batch 判定。
 
-        系统镜像（formation / blocked promote）一次要发布多条记录，必须先对所有目标做
-        全量预检：任何一条内容/匹配/预算不合格都在写第一条之前失败，否则会出现
-        「前一条已进 Markdown、后一条被拒、records 回滚」的半批孤儿内容。
-        这里复用与 `apply_batch` 相同的 mutator；只把 consolidation 计数按原值还原——
-        预检不是一次模型尝试，不能消耗它的自纠额度。
+        返回 ``(错误响应, before_digest, after_digest)``：成功时错误为 ``None``，
+        两个 digest 供多目标回执在发布前记录计划。预检复用与 `apply_batch` 相同的
+        mutator；consolidation 计数按原值还原——预检不是一次模型尝试，不能消耗
+        自纠额度。整个快照/还原在引擎锁内完成，避免与并发写入的计数互相覆盖。
         """
-        spec = self._batch_spec(
-            target, operations, trusted_pins=trusted_pins, allow_empty=allow_empty)
+        target = str(spec["target"])
         entries = self._engine.disk_entries(target)
         if entries is None:
-            return error_response(
-                f"{self._engine.path_for(target).name} is unreadable; refusing to write.")
-        failures = self._engine.consolidation_failures
-        try:
+            return (
+                error_response(
+                    f"{self._engine.path_for(target).name} is unreadable; refusing to write."),
+                None, None)
+        with self._engine.preserve_consolidation_failures():
             result = self._mutator_for(spec)(list(entries), self._engine.char_limit(target))
-        finally:
-            self._engine.consolidation_failures = failures
-        return result if isinstance(result, dict) else None
+        if isinstance(result, dict):
+            return result, None, None
+        return None, entries_digest(entries), entries_digest(list(result[0]))
+
+    async def apply_batch_many(
+        self, plans: Sequence[tuple[str, list[dict[str, Any]]]], *,
+        trusted_pins: bool = False, allow_empty: bool = False,
+        operation_id: str, origin: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """多目标系统镜像：**一份回执覆盖全部目标**，预检失败零落盘。
+
+        与逐个 `apply_batch` 的区别是回执先于第一次写入、且覆盖所有目标。跨文件
+        替换本身不可能原子（ADR-0058 D1）；后一个目标失败时，已发布目标的事实
+        留在同一份 PREPARED 回执里，job / blocked 的重试与启动对账都能按 before/after
+        继续，不会出现「内容已进 Markdown、却没有任何回执可查」的孤儿（review P1-1/P1-2）。
+
+        预检失败抛 `MemoryBatchRejected`（磁盘未动）；已经开始发布后的失败抛
+        `MemoryCommitError`（回执已落盘、可对账）。
+        """
+        if not plans:
+            raise ValueError("plans list is empty")
+        return await asyncio.to_thread(
+            self._apply_batch_many_sync,
+            [(target, list(operations)) for target, operations in plans],
+            trusted_pins=trusted_pins, allow_empty=allow_empty,
+            operation_id=operation_id,
+            origin=origin or origin_module.current_origin(),
+            payload=payload,
+        )
+
+    def _apply_batch_many_sync(
+        self, plans: list[tuple[str, list[dict[str, Any]]]], *, trusted_pins: bool,
+        allow_empty: bool, operation_id: str, origin: str,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        targets = [target for target, _ in plans]
+        if len(set(targets)) != len(targets):
+            raise ValueError(f"duplicate target in batch: {targets!r}")
+        label = ",".join(targets)
+        with self._receipts.lock(operation_id):
+            replay = self._replay_if_committed(operation_id)
+            if replay is not None:
+                return replay
+            existing = self._receipts.load(operation_id)
+            if existing is not None and existing.state == ReceiptState.NEED_RECONCILE:
+                raise MemoryCommitError(
+                    operation_id, label, f"needs reconcile: {existing.reason}")
+
+            prepared: list[tuple[dict[str, Any], str, str]] = []
+            for target, operations in plans:
+                spec = self._batch_spec(
+                    target, operations, trusted_pins=trusted_pins,
+                    allow_empty=allow_empty)
+                error, before, after = self._preview_batch(spec)
+                if error is not None:
+                    # 还没有碰任何文件/回执：整批拒绝，records 事务可以安全回滚。
+                    raise MemoryBatchRejected(
+                        operation_id, target, error.get("error") or error)
+                assert before is not None and after is not None
+                prepared.append((spec, before, after))
+
+            if existing is None:
+                try:
+                    self._receipts.prepare(
+                        operation_id, origin=origin, targets=targets,
+                        operations=[spec for spec, _, _ in prepared],
+                        payload=payload,
+                    )
+                except (OSError, RuntimeError) as error:
+                    raise MemoryCommitError(
+                        operation_id, label, f"receipt prepare failed: {error}") from error
+
+            for spec, before, after in prepared:
+                try:
+                    self._receipts.record_target_plan(
+                        operation_id, str(spec["target"]),
+                        before_digest=before, after_digest=after,
+                    )
+                except (OSError, RuntimeError) as error:
+                    raise MemoryCommitError(
+                        operation_id, str(spec["target"]),
+                        f"receipt plan failed: {error}") from error
+
+            published: list[str] = []
+            for spec, _before, after in prepared:
+                target = str(spec["target"])
+                mutator = self._mutator_for(spec)
+
+                def _guarded(
+                    entries: list[str], limit: int, *, _mutator: Callable = mutator,
+                    _after: str = after, _target: str = target,
+                ) -> Any:
+                    result = _mutator(entries, limit)
+                    if isinstance(result, dict):
+                        return result
+                    if entries_digest(list(result[0])) != _after:
+                        # 预检之后文件被外部改过：这一目标写下去就会和回执计划不符，
+                        # 更会在其它目标已发布时放大半批窗口。停在这里，让对账判定。
+                        return error_response(
+                            f"{self._engine.path_for(_target).name} changed after preflight; "
+                            f"refusing to publish a partial batch. Run `memory reconcile` "
+                            f"for operation {operation_id}.",
+                            needs_reconcile=True, operation_id=operation_id,
+                        )
+                    return result
+
+                try:
+                    outcome = self._engine.mutate_now(target, _guarded)
+                except (OSError, RuntimeError) as error:
+                    raise MemoryCommitError(operation_id, target, error) from error
+                if outcome.response is not None:
+                    raise MemoryCommitError(
+                        operation_id, target,
+                        outcome.response.get("error") or "markdown batch apply failed")
+                try:
+                    self._receipts.mark_target_published(operation_id, target)
+                except (OSError, RuntimeError) as error:
+                    raise MemoryCommitError(
+                        operation_id, target,
+                        f"content published but receipt update failed: {error}",
+                    ) from error
+                published.append(self._engine.path_for(target).name)
+
+            response = {
+                "success": True, "operation_id": operation_id,
+                "published": list(published),
+                "targets": {target: True for target in targets},
+            }
+            try:
+                self._receipts.finish(operation_id, result=response)
+            except (OSError, RuntimeError) as error:
+                raise MemoryCommitError(
+                    operation_id, label,
+                    f"content published but receipt update failed: {error}",
+                ) from error
+            return response
+
 
     async def remove_by_digest(
-        self, digests: Sequence[str], *, operation_id: str | None = None,
+        self, digests: Sequence[str] = (), *,
+        digests_by_target: Mapping[str, Sequence[str]] | None = None,
+        operation_id: str | None = None,
         origin: str | None = None, payload: dict[str, Any] | None = None,
     ) -> list[str]:
-        """按正文哈希清理两个文件；返回被清理的文件名（不返回内容）。
+        """按正文哈希清理文件；返回被清理的文件名（不返回内容）。
 
         墓碑是 content-free 的，除哈希外没有分拣线索，所以不能替调用方猜 USER/MEMORY。
+        默认清理两个目标；`digests_by_target` 给需要按文件区分共享正文的调用方
+        （删除记录已不在时，共享判定只能按目标各自做，见 `_mirror_deleted`）。
         **幂等**：同一 operation id 的重复调用回放第一次的结果，不会再删任何东西。
         """
+        if digests_by_target is None:
+            wanted = {"memory": list(digests), "user": list(digests)}
+        else:
+            wanted = {
+                str(target): [str(item) for item in values]
+                for target, values in digests_by_target.items()
+            }
+        if not any(wanted.values()):
+            return []
         return await asyncio.to_thread(
-            self._remove_by_digest_sync, [str(item) for item in digests],
+            self._remove_by_digest_sync, wanted,
             operation_id or new_operation_id(),
             origin or origin_module.current_origin(),
             payload,
@@ -426,10 +593,13 @@ class MemoryCommit:
     # ------------------------------------------------------------------ 多目标：按 digest 清理
 
     def _remove_by_digest_sync(
-        self, digests: list[str], operation_id: str, origin: str,
+        self, digests_by_target: Mapping[str, list[str]], operation_id: str, origin: str,
         payload: dict[str, Any] | None,
     ) -> list[str]:
-        wanted = set(digests)
+        wanted = {
+            str(target): set(values)
+            for target, values in digests_by_target.items() if values
+        }
         if not wanted:
             return []
         with self._receipts.lock(operation_id):
@@ -441,9 +611,9 @@ class MemoryCommit:
                 raise MemoryCommitError(
                     operation_id, "memory+user", f"needs reconcile: {receipt.reason}")
 
-            targets = ("memory", "user")
+            targets = tuple(wanted)
             specs = [
-                {"target": target, "action": "remove_by_digest", "digests": sorted(wanted)}
+                {"target": target, "action": "remove_by_digest", "digests": sorted(wanted[target])}
                 for target in targets
             ]
             try:
@@ -532,14 +702,17 @@ class MemoryCommit:
             try:
                 finished, republished = await asyncio.to_thread(
                     self._reconcile_one, receipt.operation_id)
-            except (OSError, RuntimeError) as error:
-                # 单条回执写不进去（磁盘满/只读）不能阻断整轮对账，也不能丢掉归因：
-                # operation id 进 unreadable，CLI 与启动日志都能定位到同一份文件。
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+                # 单条回执写不进去或意图不可重放（磁盘满/只读/未知 action）不能阻断整轮
+                # 对账，也不能丢掉归因：operation id 进 unreadable，CLI 与启动日志都能
+                # 定位到同一份文件。
                 report.unreadable.append(
                     (receipt.operation_id,
                      f"reconcile failed: {type(error).__name__}: {error}"))
                 continue
             if finished is None:
+                if republished:
+                    report.republished.append(receipt.operation_id)
                 report.unreadable.append(
                     (receipt.operation_id, "target file unreadable; will retry"))
                 continue
@@ -669,7 +842,8 @@ class MemoryCommit:
                 "content": normalize_entry(
                     (operation or {}).get("content") or (operation or {}).get("new_text") or ""),
                 "old_text": normalize_entry((operation or {}).get("old_text") or ""),
-                # 系统 pin：只有审批重放能携带（模型直填等于绕过 old_text 改任意条目）。
+                # 系统侧 pin：审批重放与系统镜像能携带（模型直填等于绕过 old_text
+                # 改任意条目）。
                 "matched_entry": (
                     (operation or {}).get("matched_entry") if trusted_pins else None),
                 # 系统镜像重放要幂等：条目已经不在了 = 这次撤回已经完成，不是失败。

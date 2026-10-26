@@ -211,6 +211,11 @@ class MemoryV2JobStore:
             # 一条坏文件把 claim/list_recoverable/runner.recover 全部打崩（review P2-1）。
             logger.warning("unreadable job file skipped (%s): %s", job_id, error)
             return None
+        except (TypeError, ValueError, AttributeError) as error:
+            # 合法 JSON 但结构坏（state 不是对象、字段类型不对）同样是不可读；
+            # `_scan` 已按同类集合跳过，单条读取保持一致（review P3-4a）。
+            logger.warning("malformed job file skipped (%s): %s", job_id, error)
+            return None
 
     def _write(self, job: MemoryFormationJob, *, updated_at: str) -> MemoryFormationJob:
         payload = _to_payload(job, updated_at=updated_at)
@@ -246,7 +251,8 @@ class MemoryV2JobStore:
                 if payload is None:
                     continue
                 jobs.append(_to_job(payload))
-            except (CorruptStateFile, StateFileError, KeyError, ValueError) as error:
+            except (CorruptStateFile, StateFileError, KeyError, TypeError,
+                    ValueError, AttributeError) as error:
                 logger.warning("unreadable job file skipped (%s): %s", path.name, error)
         return jobs
 

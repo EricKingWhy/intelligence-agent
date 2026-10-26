@@ -52,7 +52,11 @@ import aiosqlite
 
 from agent_harness.memory.v2 import reprojection
 from agent_harness.memory.v2._sqlite import stamp, write_connection
-from agent_harness.memory.v2.commit import MemoryCommit, MemoryCommitError
+from agent_harness.memory.v2.commit import (
+    MemoryBatchRejected,
+    MemoryCommit,
+    MemoryCommitError,
+)
 from agent_harness.memory.v2.file_state import (
     CorruptStateFile,
     MemoryStateRoot,
@@ -201,10 +205,32 @@ class StagedWriteStore:
 
     @staticmethod
     def _to_staged(payload: dict[str, Any]) -> StagedWrite:
+        staged_id = str(payload["id"])
+        status = str(payload.get("status"))
+        body = payload.get("payload")
+        if not isinstance(body, dict):
+            raise TypeError(f"staged write {staged_id} payload is not an object")
+        target = body.get("target")
+        if target not in {"memory", "user"}:
+            raise ValueError(f"staged write {staged_id} has unknown target {target!r}")
+        operations = body.get("operations")
+        if operations is None:
+            if body.get("action") not in {"add", "replace", "remove"}:
+                raise ValueError(
+                    f"staged write {staged_id} has unknown action {body.get('action')!r}")
+        elif not isinstance(operations, list) or not operations:
+            raise TypeError(f"staged write {staged_id} has invalid operations")
+        else:
+            for operation in operations:
+                if not isinstance(operation, dict) or operation.get("action") not in {
+                    "add", "replace", "remove",
+                }:
+                    raise TypeError(
+                        f"staged write {staged_id} has an invalid batch operation")
         return StagedWrite(
-            id=str(payload["id"]), payload=dict(payload.get("payload") or {}),
+            id=staged_id, payload=dict(body or {}),
             pinned_entry=payload.get("pinned_entry"),
-            status=str(payload.get("status")), created_at=str(payload.get("created_at")),
+            status=status, created_at=str(payload.get("created_at")),
         )
 
     @staticmethod
@@ -411,12 +437,15 @@ class StagedWriteStore:
             if pins is None or not pins or pins[0] is None:
                 return None
             if action == "replace":
-                return await self.commit.replace(
+                response = await self.commit.replace(
                     target, payload.get("old_text") or "", payload.get("content") or "",
                     matched_entry=pins[0], operation_id=operation_id)
-            return await self.commit.remove(
+                return self._restore_replay_bodies(
+                    response, action="replace", pins=pins)
+            response = await self.commit.remove(
                 target, payload.get("old_text") or "", matched_entry=pins[0],
                 operation_id=operation_id)
+            return self._restore_replay_bodies(response, action="remove", pins=pins)
         if pins is None:
             # batch 里可能全是 add（无 pin 也安全）；只要有一条 replace/remove 就必须有 pin。
             if any(op.get("action") in ("replace", "remove") for op in operations):
@@ -435,8 +464,49 @@ class StagedWriteStore:
             for op, pin in zip(operations, pins)
         ]
         # 这些 pin 是 stage 时从磁盘钉住的全文（系统侧），只有重放通道认它们。
-        return await self.commit.apply_batch(
+        response = await self.commit.apply_batch(
             target, pinned_ops, trusted_pins=True, operation_id=operation_id)
+        return self._restore_replay_bodies(
+            response, operations=pinned_ops, pins=pins)
+
+    @staticmethod
+    def _restore_replay_bodies(
+        response: dict[str, Any] | None, *, action: str | None = None,
+        operations: list[dict[str, Any]] | None = None,
+        pins: list[Any] | tuple[Any, ...] | None = None,
+    ) -> dict[str, Any] | None:
+        """终态回执的正文已 scrub；重放时用 stage 时的 pin 把它补回给派生层。
+
+        `reprojection.apply_write` 需要被删/被替换的原文才能撤回派生行；回执只保留
+        digest 是隐私要求，但 pin 本来就是系统侧在 stage 时钉住的全文。缺了这一步，
+        审批重试会拿到「成功但没有正文」的回放响应，派生层就会残留已删除内容
+        （review P2-1）。首次调用（非回放）响应本就带正文，``setdefault`` 不覆盖。
+        """
+        if not isinstance(response, dict) or not response.get("success"):
+            return response
+        if operations is None:
+            key = {
+                "remove": "removed_entry", "replace": "replaced_entry",
+            }.get(action or "")
+            if key is not None and pins and pins[0] is not None:
+                response.setdefault(key, pins[0])
+            return response
+        removed = dict(response.get("removed_entries") or {})
+        replaced = dict(response.get("replaced_entries") or {})
+        for index, (operation, pin) in enumerate(
+            zip(operations, pins or []), 1,
+        ):
+            if pin is None or not isinstance(operation, dict):
+                continue
+            if operation.get("action") == "remove":
+                removed.setdefault(index, pin)
+            elif operation.get("action") == "replace":
+                replaced.setdefault(index, pin)
+        if removed:
+            response["removed_entries"] = removed
+        if replaced:
+            response["replaced_entries"] = replaced
+        return response
 
 
 # --------------------------------------------------------------------------------------
@@ -539,11 +609,38 @@ class BlockedWriteStore:
 
     @staticmethod
     def _to_blocked(payload: dict[str, Any]) -> BlockedWrite:
+        blocked_id = str(payload["id"])
+        job_id = str(payload["job_id"])
+        identity = str(payload["identity"])
+        body = payload.get("payload")
+        if not isinstance(body, dict):
+            raise TypeError(f"blocked write {blocked_id} payload is not an object")
+        actions = body.get("actions")
+        if not isinstance(actions, list):
+            raise TypeError(f"blocked write {blocked_id} has non-list actions")
+        for action in actions:
+            if not isinstance(action, dict):
+                raise TypeError(f"blocked write {blocked_id} has a non-object action")
+            kind = action.get("action")
+            # formation 的动作词汇：新增 / 更新旧行 / 撤回旧行，与 `_replay_in` 一一对应。
+            if kind not in {"add", "update", "invalidate"}:
+                raise ValueError(
+                    f"blocked write {blocked_id} has unknown action {kind!r}")
+            if kind == "invalidate":
+                if not isinstance(action.get("pin"), dict):
+                    raise ValueError(
+                        f"blocked write {blocked_id} invalidate action has no pin")
+                continue
+            if not isinstance(action.get("draft"), dict):
+                raise TypeError(f"blocked write {blocked_id} action has no draft")
+            if kind == "update" and not isinstance(action.get("pin"), dict):
+                raise TypeError(
+                    f"blocked write {blocked_id} update action has no pin")
         return BlockedWrite(
-            id=str(payload["id"]), job_id=str(payload["job_id"]),
-            identity=str(payload["identity"]), project_id=payload.get("project_id"),
+            id=blocked_id, job_id=job_id, identity=identity,
+            project_id=payload.get("project_id"),
             origin=str(payload.get("origin") or ""), reason=str(payload.get("reason") or ""),
-            payload=dict(payload.get("payload") or {}), status=str(payload.get("status")),
+            payload=dict(body), status=str(payload.get("status")),
             disposition_note=payload.get("disposition_note"),
             created_at=str(payload.get("created_at")),
             disposed_at=payload.get("disposed_at"),
@@ -657,7 +754,11 @@ class BlockedWriteStore:
             payload = await asyncio.to_thread(self._read, blocked_id)
             if payload is None:
                 raise KeyError(blocked_id)
-            owner = _identity_trusted(str(payload["identity"]))
+            try:
+                owner = _identity_trusted(str(payload["identity"]))
+            except (KeyError, TypeError, ValueError) as error:
+                # 坏 identity 与「不是你的记录」同语义：拒绝处置而不是 500（review P3-4c）。
+                raise KeyError(blocked_id) from error
             if (owner.tenant_id, owner.user_id) != (trusted.tenant_id, trusted.user_id):
                 raise KeyError(blocked_id)
             if payload.get("status") != BLOCKED:
@@ -682,9 +783,15 @@ class BlockedWriteStore:
                 logger.warning(
                     "blocked promote publish failed (%s): %s",
                     type(error).__name__, blocked_id)
+                operation = getattr(error, "operation_id", None)
+                suffix = (
+                    f" 回执 {operation} 记录了已发布/未发布的目标。"
+                    if operation else "")
                 return BlockedDecision(
                     applied=False,
-                    reason="内容发布失败，记录已回滚；这条写入仍保持 blocked，可重试。")
+                    reason=(
+                        "内容发布失败，记录已回滚；这条写入仍保持 blocked，可重试。"
+                        + suffix))
             await asyncio.to_thread(write_json, self.path_for(blocked_id), {
                 **payload, "status": PROMOTED, "disposition_note": None,
                 "disposed_at": stamp(),
@@ -701,7 +808,10 @@ class BlockedWriteStore:
             payload = await asyncio.to_thread(self._read, blocked_id)
             if payload is None:
                 raise KeyError(blocked_id)
-            owner = _identity_trusted(str(payload["identity"]))
+            try:
+                owner = _identity_trusted(str(payload["identity"]))
+            except (KeyError, TypeError, ValueError) as error:
+                raise KeyError(blocked_id) from error
             if (owner.tenant_id, owner.user_id) != (trusted.tenant_id, trusted.user_id):
                 raise KeyError(blocked_id)
             if payload.get("status") != BLOCKED:
@@ -719,9 +829,9 @@ class BlockedWriteStore:
     ) -> None:
         """把记录投影到 markdown（确定性 `blkp_` operation id，可回执回放）。
 
-        调用点在 records 事务提交前；失败必须上抛让事务回滚。每个目标一次
-        `apply_batch`，且**先对全部目标做写前预检**：逐条 add 时第二条超限会在
-        第一条已发布后失败，records 回滚、blocked 仍待处置，却留下无记录的孤儿内容
+        调用点在 records 事务提交前；失败必须上抛让事务回滚。所有目标共用**一份**
+        `blkp_` 回执并先做全量预检：任何一条不合格都在写第一个文件之前拒绝；
+        预检后某一目标发布失败时，已发布目标也留在同一份回执里供重试/对账
         （review P1-2）。
         """
         commit = self.commit
@@ -740,19 +850,17 @@ class BlockedWriteStore:
             if commit.engine.target_enabled(target):
                 operations[target].append({"action": "add", "content": record.content})
         plans = [(target, ops) for target, ops in operations.items() if ops]
-        for target, ops in plans:
-            error = commit.validate_batch(
-                target, ops, trusted_pins=True, allow_empty=True)
-            if error is not None:
-                raise ValueError(
-                    f"markdown {target} preflight rejected: "
-                    f"{error.get('error') or 'batch rejected'}")
-        for target, ops in plans:
-            response = await commit.apply_batch(
-                target, ops, trusted_pins=True, allow_empty=True,
-                operation_id=f"blkp_{blocked_id}_apply_{target}")
-            if not response.get("success"):
-                raise ValueError(str(response.get("error") or "markdown apply failed"))
+        if not plans:
+            return
+        try:
+            response = await commit.apply_batch_many(
+                plans, trusted_pins=True, allow_empty=True,
+                operation_id=f"blkp_{blocked_id}_apply",
+            )
+        except MemoryBatchRejected as error:
+            raise ValueError(f"markdown preflight rejected: {error.reason}") from error
+        if not response.get("success"):
+            raise ValueError(str(response.get("error") or "markdown apply failed"))
 
     async def _replay_in(
         self, connection: aiosqlite.Connection, actions: list[dict[str, Any]],

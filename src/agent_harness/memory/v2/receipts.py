@@ -37,6 +37,7 @@ from typing import Any
 from agent_harness.memory.v2.file_state import (
     CorruptStateFile,
     MemoryStateRoot,
+    StateFileError,
     file_lock,
     read_json,
     safe_id,
@@ -66,6 +67,12 @@ class ReceiptState:
     NEED_RECONCILE = "NEED_RECONCILE"
 
     TERMINAL = frozenset({COMMITTED})
+
+
+#: 回执里可重放的最小意图集合。与 `commit._ACTIONS` 同源；分开定义是为了避免
+#: receipts → commit 的循环导入。
+_OPERATION_ACTIONS = frozenset({"add", "replace", "remove", "batch", "remove_by_digest"})
+_RECEIPT_TARGETS = frozenset({"memory", "user"})
 
 
 @dataclass
@@ -132,18 +139,44 @@ class CommitReceipt:
             ReceiptState.COMMITTED, ReceiptState.NEED_RECONCILE,
         }:
             raise CorruptStateFile(f"receipt {operation_id or '?'} has an unknown state {state!r}")
+        raw_targets = payload.get("targets") or {}
+        if not isinstance(raw_targets, dict):
+            raise CorruptStateFile(f"receipt {operation_id} has non-object targets")
+        targets: dict[str, ReceiptTarget] = {}
+        for name, value in raw_targets.items():
+            if str(name) not in _RECEIPT_TARGETS:
+                raise CorruptStateFile(f"receipt {operation_id} has unknown target {name!r}")
+            if value is not None and not isinstance(value, dict):
+                raise CorruptStateFile(f"receipt {operation_id} target {name!r} is not an object")
+            targets[str(name)] = ReceiptTarget.from_dict(value or {})
+        raw_operations = payload.get("operations") or []
+        if not isinstance(raw_operations, list):
+            raise CorruptStateFile(f"receipt {operation_id} has non-list operations")
+        operations: list[dict[str, Any]] = []
+        for item in raw_operations:
+            if not isinstance(item, dict):
+                raise CorruptStateFile(f"receipt {operation_id} has a non-object operation")
+            if str(item.get("target")) not in _RECEIPT_TARGETS:
+                raise CorruptStateFile(
+                    f"receipt {operation_id} operation has unknown target "
+                    f"{item.get('target')!r}")
+            if str(item.get("action")) not in _OPERATION_ACTIONS:
+                raise CorruptStateFile(
+                    f"receipt {operation_id} operation has unknown action "
+                    f"{item.get('action')!r}")
+            operations.append(dict(item))
+        raw_payload = payload.get("payload") or {}
+        if not isinstance(raw_payload, dict):
+            raise CorruptStateFile(f"receipt {operation_id} has non-object payload")
         return cls(
             operation_id=operation_id,
             state=state,
             origin=str(payload.get("origin") or ""),
             created_at=str(payload.get("created_at") or ""),
             updated_at=str(payload.get("updated_at") or ""),
-            targets={
-                str(name): ReceiptTarget.from_dict(value or {})
-                for name, value in (payload.get("targets") or {}).items()
-            },
-            operations=[dict(item) for item in (payload.get("operations") or [])],
-            payload=dict(payload.get("payload") or {}),
+            targets=targets,
+            operations=operations,
+            payload=dict(raw_payload),
             result=(dict(payload["result"]) if isinstance(payload.get("result"), dict) else None),
             reason=payload.get("reason"),
         )
@@ -175,7 +208,7 @@ class ReceiptStore:
     def load(self, operation_id: str) -> CommitReceipt | None:
         try:
             payload = read_json(self.path_for(operation_id))
-        except CorruptStateFile as error:
+        except (CorruptStateFile, StateFileError) as error:
             # 坏回执不能当「没有回执」：那会允许一次重复发布。按 NEED_RECONCILE 处理。
             logger.warning("receipt unreadable (%s): %s", operation_id, error)
             return CommitReceipt(
@@ -185,9 +218,16 @@ class ReceiptStore:
         if payload is None:
             return None
         try:
-            return CommitReceipt.from_dict(payload)
+            receipt = CommitReceipt.from_dict(payload)
+            if receipt.operation_id != operation_id:
+                # 文件名是调用方的幂等键；与 payload 不一致时按哪个都会重复发布或
+                # 覆盖另一条操作，只能当损坏回执交给人工对账（review P4-3）。
+                raise CorruptStateFile(
+                    f"receipt filename {operation_id!r} does not match payload "
+                    f"operation_id {receipt.operation_id!r}")
+            return receipt
         except (CorruptStateFile, KeyError, TypeError, ValueError, AttributeError) as error:
-            # 合法 JSON 但结构坏（state 未知 / targets 不是对象 / 条目缺字段）同样是
+            # 合法 JSON 但结构坏（state/action/targets 非法、条目缺字段）同样是
             # 「有回执但不认识」：既不能当不存在（会重复发布），也不能让一条坏文件
             # 把整个 reconcile / 启动装配打崩。语义与坏 JSON 一致：NEED_RECONCILE。
             logger.warning("receipt unreadable (%s): %s", operation_id, error)

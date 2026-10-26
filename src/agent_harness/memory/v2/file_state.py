@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import UTC, datetime
@@ -99,6 +100,33 @@ def _sync_directory(path: Path) -> None:
         os.close(fd)
 
 
+#: Windows 上 `os.replace` 的瞬时拒绝：`ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION`。
+#: 目标文件正被另一个线程用 `open()` 读着时，原子替换会撞上这两个错误——CRT 的读打开
+#: 不带 `FILE_SHARE_DELETE`。POSIX `rename` 没有这个窗口，所以只在 Windows 错误码上重试。
+_WINDOWS_REPLACE_CONFLICTS = frozenset({5, 32})
+_REPLACE_ATTEMPTS = 20
+_REPLACE_RETRY_BASE_SECONDS = 0.005
+
+
+def _replace_with_retry(source: str, destination: Path) -> None:
+    """`os.replace`，对 Windows 的共享冲突做有界退避重试。
+
+    读路径（`read_json` / `_scan`）与写路径各自持锁不同：文件锁串行化的是写者，
+    读者可以随时打开目标。Windows 的替换因此可能被一个短暂的读句柄拒绝；这是文件系统
+    语义，不是数据冲突。重试上限约 1.4 秒，超过就把真实错误抛出去，不无限吞。
+    """
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) not in _WINDOWS_REPLACE_CONFLICTS:
+                raise
+            if attempt == _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(min(_REPLACE_RETRY_BASE_SECONDS * 2 ** (attempt - 1), 0.1))
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     """同目录 tempfile + ``os.replace``：读者永远看不到半截文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,7 +140,7 @@ def atomic_write_text(path: Path, text: str) -> None:
             os.fsync(handle.fileno())
         with suppress(OSError):
             os.chmod(tmp_name, FILE_MODE)
-        os.replace(tmp_name, path)
+        _replace_with_retry(tmp_name, path)
     except BaseException:
         with suppress(OSError):
             os.unlink(tmp_name)
@@ -194,6 +222,8 @@ def read_json(path: Path) -> dict[str, Any] | None:
         raw = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return None
+    except UnicodeDecodeError as error:
+        raise CorruptStateFile(f"{path.name} is not valid UTF-8") from error
     except OSError as error:
         raise StateFileError(f"cannot read {path.name}: {type(error).__name__}") from error
     try:
