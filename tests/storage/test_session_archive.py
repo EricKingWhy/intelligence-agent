@@ -942,7 +942,7 @@ class TestStoreObserverWiring:
         def worker() -> None:
             archive.ensure_session("worker", source="interactive", started_at=time.time())
             ready.set()
-            release.wait(timeout=5)
+            release.wait(timeout=_WORKER_WAIT_SECONDS)
             try:
                 archive.ensure_session(
                     "after-close", source="interactive", started_at=time.time(),
@@ -954,10 +954,10 @@ class TestStoreObserverWiring:
 
         thread = threading.Thread(target=worker)
         thread.start()
-        assert ready.wait(timeout=5)
+        assert ready.wait(timeout=_WORKER_WAIT_SECONDS)
         archive.close()
         release.set()
-        thread.join(timeout=5)
+        thread.join(timeout=_WORKER_WAIT_SECONDS)
 
         assert not thread.is_alive()
         assert outcomes == ["closed"]
@@ -982,7 +982,7 @@ class TestStoreObserverWiring:
 
                 def trace(_statement: str) -> None:
                     started.set()
-                    release.wait(timeout=5)
+                    release.wait(timeout=_WORKER_WAIT_SECONDS)
 
                 conn.set_trace_callback(trace)
                 archive.append_message("active", "user", "in flight", timestamp=time.time())
@@ -991,7 +991,7 @@ class TestStoreObserverWiring:
 
         worker_thread = threading.Thread(target=worker)
         worker_thread.start()
-        assert started.wait(timeout=5)
+        assert started.wait(timeout=_WORKER_WAIT_SECONDS)
 
         def close_archive() -> None:
             archive.close()
@@ -1001,8 +1001,8 @@ class TestStoreObserverWiring:
         close_thread.start()
         assert not closed.wait(timeout=0.1), "close must wait for the active SQLite operation"
         release.set()
-        worker_thread.join(timeout=5)
-        close_thread.join(timeout=5)
+        worker_thread.join(timeout=_WORKER_WAIT_SECONDS)
+        close_thread.join(timeout=_WORKER_WAIT_SECONDS)
 
         assert not worker_thread.is_alive()
         assert not close_thread.is_alive()
@@ -1061,7 +1061,9 @@ class TestStoreObserverWiring:
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
             for thread in threads:
                 thread.start()
-            assert all(event.wait(timeout=_WORKER_WAIT_SECONDS) for event in ready)
+            assert all(
+                event.wait(timeout=_WORKER_WAIT_SECONDS) for event in ready
+            ), f"worker readiness timed out; worker errors: {errors}"
             after_workers = handle_count()
             archive.close()
             after_close = handle_count()
@@ -1120,7 +1122,9 @@ class TestStoreObserverWiring:
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
             for thread in threads:
                 thread.start()
-            assert all(event.wait(timeout=_WORKER_WAIT_SECONDS) for event in ready)
+            assert all(
+                event.wait(timeout=_WORKER_WAIT_SECONDS) for event in ready
+            ), f"worker readiness timed out; worker errors: {errors}"
             after_workers = _posix_archive_fds(db_path)
             archive.close()
             after_close = _posix_archive_fds(db_path)
@@ -1162,7 +1166,7 @@ class TestStoreObserverWiring:
                 kwargs={"source": "interactive", "started_at": time.time()},
             )
             thread.start()
-            thread.join(timeout=5)
+            thread.join(timeout=_WORKER_WAIT_SECONDS)
             assert not thread.is_alive()
 
         # 先跑一个线程取基线：第二个连接会把库的 -wal fd 常驻下来（两棵树的
