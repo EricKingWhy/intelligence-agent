@@ -3,6 +3,7 @@
  *  票面 AC6 明说"e2e 对 artifact/diff 目前零覆盖，至少新增一条'外置 diff → 就地展开
  *  → 可见'"。这里给四条：
  *  - **清单 → 默认预览内容**（AC1 的正路，走 #185 的真实端点形状）；
+ *  - **切换所选卡片 → 对应预览内容**（AC1 的多产物路径）；
  *  - **归档 diff → 就地展开 → 可见**（AC2 的正路，且与清单**同一渲染器**）；
  *  - **503 与 404 两种拿不到**（AC1 的三态：失败原因必须分开说，detail 照显原文）。
  *
@@ -149,6 +150,87 @@ test('AC1：Artifacts 清单 → 默认预览选中的产物内容（走 #185 �
   await expect(content).toContainText('共 2 行');
   // 行号在场（左列）
   await expect(page.locator('.artifact-line-no').first()).toHaveText('1');
+});
+
+test('AC1：切换所选卡片后预览请求并显示对应产物内容', async ({ page }) => {
+  const secondArtifactId = 'fedcba9876543210';
+  const frames = framesWithArtifact();
+  const completed = frames.pop()!;
+  frames.push(
+    {
+      type: 'tool/call',
+      data: { tool_call_id: 'tc-2', tool_name: 'write', args: { path: 'second.txt' } },
+      seq: 7, session_id: SID, run_id: 'run-186', step_id: 1, time: T,
+    },
+    {
+      type: 'tool/result',
+      data: {
+        tool_call_id: 'tc-2',
+        content: JSON.stringify({
+          ok: true,
+          message: 'ok',
+          artifact_ref: secondArtifactId,
+          data: { path: 'second.txt', before: '', after: '... [truncated, 1 lines total]', truncated: true },
+        }),
+      },
+      seq: 8, session_id: SID, run_id: 'run-186', step_id: 1, time: T,
+    },
+    {
+      type: 'artifact/externalized',
+      data: {
+        artifact_id: secondArtifactId, session_id: SID, source_tool: 'write',
+        tool_call_id: 'tc-2', size: 2048, mime_type: 'text/plain',
+      },
+      seq: 9, session_id: SID, run_id: 'run-186', step_id: 1, time: T,
+    },
+    { ...completed, seq: 10 },
+  );
+
+  const slices: Record<string, typeof SLICE> = {
+    [AID]: {
+      ...SLICE,
+      lines: [{ line_number: 1, text: 'FIRST_ARTIFACT_CONTENT' }],
+      total_lines: 1,
+      returned_lines: 1,
+    },
+    [secondArtifactId]: {
+      ...SLICE,
+      artifact_id: secondArtifactId,
+      lines: [{ line_number: 1, text: 'SECOND_ARTIFACT_CONTENT' }],
+      total_lines: 1,
+      returned_lines: 1,
+    },
+  };
+  const requestedIds: string[] = [];
+  await openSession(page, frames, {
+    onArtifactGet: async (route, artifactId) => {
+      requestedIds.push(artifactId);
+      const slice = slices[artifactId];
+      if (!slice) return false;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(slice) });
+      return true;
+    },
+  });
+  await openArtifactsTab(page);
+
+  const cards = page.locator('.art-card');
+  const preview = page.locator('.art-preview');
+  const content = preview.locator('.artifact-content');
+  await expect(cards).toHaveCount(2);
+  // 默认选中最新产物，并从真实路由载入它的内容。
+  await expect(cards.nth(1)).toHaveAttribute('aria-pressed', 'true');
+  await expect(preview.locator('.pv-name')).toHaveText('second.txt');
+  await expect(content).toContainText('SECOND_ARTIFACT_CONTENT');
+  await expect.poll(() => requestedIds.at(-1)).toBe(secondArtifactId);
+
+  const requestsBeforeSwitch = requestedIds.length;
+  await cards.nth(0).click();
+  await expect(cards.nth(0)).toHaveAttribute('aria-pressed', 'true');
+  await expect(cards.nth(1)).toHaveAttribute('aria-pressed', 'false');
+  await expect(preview.locator('.pv-name')).toHaveText('big.txt');
+  await expect(content).toContainText('FIRST_ARTIFACT_CONTENT');
+  await expect(content).not.toContainText('SECOND_ARTIFACT_CONTENT');
+  await expect.poll(() => requestedIds.slice(requestsBeforeSwitch)).toContain(AID);
 });
 
 test('AC2/AC6：外置 diff → 就地展开 → 可见（与清单同一渲染器）', async ({ page }) => {
