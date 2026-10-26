@@ -887,3 +887,92 @@ describe('sessionIdBaselineDetailed（#1333 服务端时钟锚点）', () => {
     expect(await sessionIdBaselineDetailed()).toBeNull();
   });
 });
+
+describe('discoverNewSessionId #1333 client_request_id 关联认领', () => {
+  const T0 = 1_750_000_000_000;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const CID = '01234567-89ab-4cde-8f01-23456789abcd';
+  const fast = { timeoutMs: 8000, baseDelayMs: 20, maxDelayMs: 100, random: () => 0 };
+
+  it('关联查询命中恰一条 → 认领（other 先可见也不误认：关联响应里没有它）', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        urls.push(String(url));
+        // 关联查询（新后端）：只返回本请求创建的会话——即便全量列表里
+        // other-0 先于 fresh 可见（票面 AC 场景），它也不在关联响应里。
+        return new Response(
+          JSON.stringify([{ session_id: 'fresh-0', first_event_time: iso(T0 + 100) }]),
+          { status: 200 },
+        );
+      }),
+    );
+    const sid = await discoverNewSessionId(new Set(['base-1']), {
+      ...fast,
+      submittedAtServerMs: T0,
+      clientRequestId: CID,
+    });
+    expect(sid).toBe('fresh-0');
+    expect(urls[0]).toContain(`client_request_id=${CID}`);
+  });
+
+  it('同一关联值命中多条 → 抛 SessionClaimAmbiguousError（fail-closed，不任意挑选）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([
+            { session_id: 'dup-1', first_event_time: iso(T0 + 50) },
+            { session_id: 'dup-2', first_event_time: iso(T0 + 60) },
+          ]),
+          { status: 200 },
+        ),
+      ),
+    );
+    await expect(
+      discoverNewSessionId(new Set(['base-1']), {
+        ...fast,
+        submittedAtServerMs: T0,
+        clientRequestId: CID,
+      }),
+    ).rejects.toBeInstanceOf(SessionClaimAmbiguousError);
+  });
+
+  it('关联查询持续为空 → 认领超时（查询无结果时继续等待的预算边界不变）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify([]), { status: 200 })),
+    );
+    await expect(
+      discoverNewSessionId(new Set(['base-1']), {
+        timeoutMs: 200,
+        baseDelayMs: 20,
+        maxDelayMs: 50,
+        random: () => 0,
+        submittedAtServerMs: T0,
+        clientRequestId: CID,
+      }),
+    ).rejects.toBeInstanceOf(SessionClaimTimeoutError);
+  });
+
+  it('不传 clientRequestId → 走既有全量差分（URL 不带关联参数，claimLoad 20/20 口径不变）', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        urls.push(String(url));
+        return new Response(
+          JSON.stringify([{ session_id: 'fresh', first_event_time: iso(T0 + 100) }]),
+          { status: 200 },
+        );
+      }),
+    );
+    const sid = await discoverNewSessionId(new Set(['base-1']), {
+      ...fast,
+      submittedAtServerMs: T0,
+    });
+    expect(sid).toBe('fresh');
+    expect(urls[0]).toBe('/api/sessions?include_archived=true');
+  });
+});

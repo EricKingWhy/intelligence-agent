@@ -57,7 +57,7 @@ def captured_build(monkeypatch, tmp_path):
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
     )
-    client = TestClient(create_app(settings, enable_cors=False))
+    client = TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
     return client, calls
 
 

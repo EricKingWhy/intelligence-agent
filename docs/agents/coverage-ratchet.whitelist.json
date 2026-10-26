@@ -1,0 +1,14 @@
+{
+  "schema": "coverage-ratchet-whitelist/1",
+  "consumed_by": "scripts/check_line_coverage_ratchet.py ratchet --whitelist",
+  "rule": "每条 = 精确文件路径 + reason + platform 三个非空字段。命中的文件变更行不进分母。字段形状与解析期拒绝规则见 `scripts/check_line_coverage_ratchet.py` 的模块 docstring（唯一事实源），本文件不复述。",
+  "forbidden": [
+    "因为\"这个文件覆盖率低\"而入册：本表只收**测不到**的盲区（平台专有 / 容器内 / 无运行时绑定），不收\"没测\"的欠账 —— 这一条是本表**收什么**的判据，脚本无法机械校验，故写在这里"
+  ],
+  "candidate_blind_spots": [
+    "平台专有实现：只在 Windows 上可执行的模块（CI 跑 ubuntu；Linux 上该文件的可执行行本来就到不了），platform 栏写 windows",
+    "容器内代码：在受限 Docker 计算容器里单独执行的脚本（宿主的覆盖率追踪器看不见容器内进程），platform 栏写 container",
+    "第三方二进制 / 平台 API 绑定：只有在特定机器上才有对应运行时的绑定层，platform 栏写实际平台"
+  ],
+  "entries": []
+}

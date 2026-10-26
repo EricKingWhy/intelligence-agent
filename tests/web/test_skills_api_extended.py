@@ -64,7 +64,7 @@ def _client(tmp_path: Path, entries: list[SimpleNamespace]) -> TestClient:
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path / "ws"), model_api_key="test-key"
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     app.state.agent = _FakeAgent(_Capability(entries))
     return TestClient(app)
 
@@ -150,7 +150,7 @@ def test_legacy_stub_entries_still_work(tmp_path: Path) -> None:
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path / "ws"), model_api_key="test-key"
     )
-    app = create_app(settings)
+    app = create_app(settings, allow_testserver=True)
     app.state.agent = _FakeAgent(_LegacyCapability([]))
     with TestClient(app) as client:
         body = client.get("/api/skills").json()

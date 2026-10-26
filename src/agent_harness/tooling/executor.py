@@ -335,7 +335,8 @@ class ToolExecutor:
         overflow_handler: OverflowHandler | None = None,
         resource_locks: ResourceLockRegistry | None = None,
         decision_hook_runner: DecisionHookRunner | None = None,
-        # #684：项目根——持久审批规则存 `<project_root>/.agent-harness/approve-policy.json`。
+        # #684 / #1487：项目根——持久审批规则的控制文件按它哈希命名，存控制目录
+        # （默认 `<home>/.agent-harness/approve-policy/`，env 可钉根），不在项目树内。
         # None 回落 `Path.cwd()`（执行域构造时求值）；测试 / 多项目可显式传。
         project_root: Path | str | None = None,
         # #358 / W-14：审批层权限规则引擎（见 `tooling/permission_rules.py`）。
@@ -1053,6 +1054,64 @@ class ToolExecutor:
             session.append(event_type, data, run_id=run_id, step_id=step_id)
             for event_type, data in pending_events
         ]
+
+    async def emit_call_event_async(
+        self,
+        session: Any,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        args: dict[str, Any],
+        run_id: str | None,
+        step_id: int | None,
+    ) -> SessionEvent:
+        """:meth:`emit_call_event` 的异步入口（#1489）：刷盘等待不占事件循环。"""
+        return await session.append_async(
+            TOOL_CALL,
+            {"tool_call_id": tool_call_id, "tool_name": tool_name, "args": args,
+             **parent_exec_metadata()},
+            run_id=run_id, step_id=step_id,
+        )
+
+    async def emit_pending_events_async(
+        self,
+        session: Any,
+        *,
+        pending_events: list[tuple[str, dict[str, Any]]],
+        run_id: str | None,
+        step_id: int | None,
+    ) -> list[SessionEvent]:
+        """:meth:`emit_pending_events` 的异步入口（#1489）。
+
+        逐条 await 而不是并发 gather：事件流**顺序即语义**（延迟事件必须落在
+        tool/call 之后、tool/result 之前），并发会把顺序交给调度器。
+        """
+        return [
+            await session.append_async(
+                event_type, data, run_id=run_id, step_id=step_id,
+            )
+            for event_type, data in pending_events
+        ]
+
+    async def emit_result_event_async(
+        self,
+        session: Any,
+        *,
+        tool_call_id: str,
+        content: str,
+        run_id: str | None,
+        step_id: int | None,
+        budget_delta: dict[str, Any] | None = None,
+    ) -> SessionEvent:
+        """:meth:`emit_result_event` 的异步入口（#1489）。"""
+        data: dict[str, Any] = {
+            "tool_call_id": tool_call_id, "content": content, **parent_exec_metadata(),
+        }
+        if budget_delta is not None:
+            data["budget_delta"] = budget_delta
+        return await session.append_async(
+            TOOL_RESULT, data, run_id=run_id, step_id=step_id,
+        )
 
     def emit_result_event(
         self,

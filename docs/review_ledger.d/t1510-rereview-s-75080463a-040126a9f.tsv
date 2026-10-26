@@ -1,0 +1,1 @@
+2026-10-25	#1510 Standards 轴修后重审：全读 75080463a..040126a9f（含 5eeb8d000 P4 处置与 040126a9f P4-1 修复），处置核验通过；新报 SR1（环用例断言需钉 type is OSError）/ SR2（错误分类缺引擎无关钉子）/ SR3（_boundary_checked docstring 分类税则滞后），均修复于 9bb3d2a9b	75080463ac40f2d814a5221e8fa36cebe0a99307..040126a9fa768dd6ed8c75d4cdcf2cf50354783a

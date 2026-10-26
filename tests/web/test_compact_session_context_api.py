@@ -50,7 +50,7 @@ def _client(tmp_path: Path, **overrides) -> TestClient:
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test", **overrides
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _seed_history(client: TestClient) -> str:
@@ -201,6 +201,7 @@ def test_no_early_turns_is_409_with_machine_readable_reason(tmp_path):
                 _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
             ),
             enable_cors=False,
+            allow_testserver=True,
         ),
         raise_server_exceptions=False,
     )
@@ -227,7 +228,7 @@ def test_post_write_error_is_500_fail_closed(tmp_path, monkeypatch):
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
     )
     client = TestClient(
-        create_app(settings, enable_cors=False), raise_server_exceptions=False,
+        create_app(settings, enable_cors=False, allow_testserver=True), raise_server_exceptions=False,
     )
     sid = _seed_history(client)
 

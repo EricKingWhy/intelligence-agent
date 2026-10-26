@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -211,6 +211,53 @@ class _UnsetRuntimeContext:
 
 #: 缺省哨兵见 `_UnsetRuntimeContext`。
 _RUNTIME_CONTEXT_UNSET = _UnsetRuntimeContext()
+
+
+@dataclass
+class _AccountedSnapshot:
+    """#1497：一次 build 的完整预算账本（私有、单一真相）。
+
+    裁决 9-A：投影 messages（含图片近似成本与 usage 锚只抬高）、保护事实、
+    运行时快照、系统提示词、清单锚、最近修改文件、进度核对、PLAN 档指令、
+    接近硬护栏 warning、provider 注入——**全部请求组成**只在此记账一次；
+    provider 剩余预算（`_with_providers`）与调用前硬闸门（`_enforce_hard_guard`）
+    读同一份 `total`，不并存第二套口径。压缩成功路径 `messages` 项替换为
+    `CompactionResult.token_estimate`（messages-only 契约）；no-op 路径保持
+    Phase A 的 max(估算, 锚) 值，不再二次裸估算。
+    """
+
+    messages: int = 0
+    protected_facts: int = 0
+    runtime_context: int = 0
+    system_prompt: int = 0
+    plan: int = 0
+    modified_paths: int = 0
+    progress: int = 0
+    plan_mode: int = 0
+    pressure_warning: int = 0
+    providers: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def total(self) -> int:
+        # 分项枚举只维护在 breakdown() 一处（Standards 审查 P3-2：平行枚举
+        # 两处会在新增组成时静默漂移）。
+        return sum(self.breakdown().values())
+
+    def breakdown(self) -> dict[str, int]:
+        """分项账本（拒绝时随异常携带；provider 聚合为单项，按名明细见
+        `usage_snapshot` 的既有记账口 `other_breakdown`）。"""
+        return {
+            "messages": self.messages,
+            "protected_facts": self.protected_facts,
+            "runtime_context": self.runtime_context,
+            "system_prompt": self.system_prompt,
+            "plan": self.plan,
+            "modified_paths": self.modified_paths,
+            "progress": self.progress,
+            "plan_mode": self.plan_mode,
+            "pressure_warning": self.pressure_warning,
+            "providers": sum(self.providers.values()),
+        }
 
 
 def _insert_before_last_human(
@@ -740,7 +787,8 @@ class ContextBuilder:
         self._last_plan_mode_tokens: int = 0
         # W-04 (#348)：最近一次 build 实际注入的接近硬护栏 warning 文本成本
         # （同清单锚块的记账口径：非持久化注入、独立记账口——warning 文本的
-        # token 成本先计入 provider_estimate 再注入，usage_snapshot 折进 "other"）。
+        # token 成本先计入账本（#1497 `ledger.pressure_warning`）再注入，
+        # usage_snapshot 折进 "other"）。
         self._last_pressure_warning_tokens: int = 0
         # 清单兜底重注入周期（PRD §4.6 Cline Focus Chain 默认值 6，配置可调）。
         self.plan_reinject_every_messages = plan_reinject_every_messages
@@ -912,6 +960,10 @@ class ContextBuilder:
         # usage / 事件全被 shadow）⇒ 0，纯估算路径零回归。
         usage_anchor = self._usage_anchored_tokens(session, messages, anchor_ranges)
         token_estimate = max(token_estimate, usage_anchor)
+        # #1497：账本 messages 项——投影的 max(估算, usage 锚)。此后各组成只
+        # `+=` 进 token_estimate；分支点从此值与各局部量一次性立账（ledger），
+        # 不再有第二套口径。
+        messages_tokens = token_estimate
         token_estimate += protected_facts_tokens
         # 运行时上下文快照（T7）：provider 每次 build **只调一次**——token 估算与
         # 注入必须用同一份文本，否则预算与内容可能不一致（且 callable 的调用
@@ -977,12 +1029,26 @@ class ContextBuilder:
         )
         token_estimate += plan_mode_tokens
         self._last_plan_mode_tokens = plan_mode_tokens
+        # #1497：一次性立账——Phase A 的全部组成进入同一份私有账本；此后
+        # provider 剩余预算与调用前硬闸门都只读它（token_estimate 与
+        # ledger.total 在此处同值，保留 int 累积仅为阈值判定的既有读法）。
+        ledger = _AccountedSnapshot(
+            messages=messages_tokens,
+            protected_facts=protected_facts_tokens,
+            runtime_context=runtime_context_tokens,
+            system_prompt=self._system_prompt_tokens or 0,
+            plan=plan_tokens,
+            modified_paths=paths_tokens,
+            progress=progress_tokens,
+            plan_mode=plan_mode_tokens,
+        )
         logger.debug(
             "Context projection token estimate: %s", token_estimate,
             extra={"session_id": session.session_id, "token_estimate": token_estimate},
         )
         if token_estimate <= self.max_context_tokens * self.auto_compact_threshold:
             built = await self._with_providers(session, messages, token_estimate)
+            ledger.providers = dict(self._last_provider_tokens_by_name)
             built = self._inject_protected_facts(built, protected_facts_messages)
             built = self._inject_runtime_context(built, runtime_context)
             if plan_mode_text is not None:
@@ -993,6 +1059,9 @@ class ContextBuilder:
                 built = _inject_progress_block(built, progress_text)
             if paths_text is not None:
                 built = _inject_modified_paths(built, paths_text)
+            # #1497：正常路径同样过统一硬闸门（本路径由 `_with_providers` 的
+            # remaining 截断天然有界，闸门在此是不变式断言——两分支一个裁决点）。
+            self._enforce_hard_guard(ledger, post_compaction=None)
             return self._finalize(built)
         # T2 (#635)：阈值命中的压缩整段抽到 `compact_now`——手动路径（#635 T3）
         # 复用**同一实现**（不变量 #22），本 build 只负责决定"该压了"。
@@ -1000,15 +1069,15 @@ class ContextBuilder:
         # 契约不变（否则会被 compact_now 再渲染一次）。
         result = await self.compact_now(session, runtime_context=runtime_context)
         if result is None:
-            # 低水位 / 无可压缩早期轮：零 bracket 写入。压缩未发生 ⇒ 沿用原投影
-            # （compactor 的 no-op 结果就是 messages-only 的原估算），继续走下方
-            # 与"已压缩"共用的收尾装配（含接近硬护栏 warning）——与抽取前
-            # `if result.compacted_turn_count:` 为假时的行为逐字节等价。
+            # 低水位 / 无可压缩早期轮：零 bracket 写入。压缩未发生 ⇒ 沿用原投影；
+            # #1497：账本 messages 项**保持 Phase A 的 max(估算, usage 锚) 值**——
+            # 旧行为在此二次裸估算（丢锚）是与 Phase A 并存的第二套口径，已删。
             compacted_messages = messages
-            compacted_token_estimate = estimate_message_tokens(messages)
         else:
             compacted_messages = result.messages
-            compacted_token_estimate = result.token_estimate
+            # 压缩成功：messages 项替换为新投影的 messages-only 估算
+            # （CompactionResult.token_estimate 契约）；锚对旧投影失效、不继承。
+            ledger.messages = result.token_estimate
         # W-29 (#383)：落 bracket 后重算清单决策——本次 build 可能恰好触发首次
         # 压缩，决策必须在 bracket 事件在场的前提下重估，才能进入"压缩后恒注入"
         # 状态（判据①：压缩后模型输入含完整清单）。
@@ -1025,11 +1094,16 @@ class ContextBuilder:
         paths_tokens = injection.paths_tokens
         self._last_plan_tokens = plan_tokens
         self._last_modified_paths_tokens = paths_tokens
+        # #1497：压缩后重估的清单/路径块同步入账（清单可能因 bracket 落地
+        # 从静默窗翻转为恒注入，成本随之入账——这正是旧复核口径漏计的项）。
+        ledger.plan = plan_tokens
+        ledger.modified_paths = paths_tokens
         # W-06（#350）：落 bracket 后重估进度核对块——本次 build 可能恰好触发
         # 首次压缩，判据必须在 bracket 事件在场的前提下重估（压缩后模型输入含
         # 经核对的原目标/下一步）。
         progress_text, progress_tokens = await self._resolve_progress_block(session)
         self._last_progress_tokens = progress_tokens
+        ledger.progress = progress_tokens
         # #1356 方案 1：PLAN 档指令块（压缩后同样先计入再注入）。
         plan_mode_text = _plan_mode_block(session.events)
         plan_mode_tokens = (
@@ -1037,45 +1111,35 @@ class ContextBuilder:
             if plan_mode_text is not None else 0
         )
         self._last_plan_mode_tokens = plan_mode_tokens
-        # 压缩后的 token_estimate 只含 messages；所有在 messages 之外的上下文
-        # （system prompt、运行时快照、保护事实与计划锚块）在 provider 预算中各补回一次。
-        reserved_tokens = (
-            protected_facts_tokens
-            + (self._system_prompt_tokens or 0)
-            + runtime_context_tokens
-            + plan_tokens
-            + paths_tokens
-            + progress_tokens
-            + plan_mode_tokens
-        )
-        # 硬护栏复核只对**确已压缩**的路径生效（no-op 沿用原投影，不在此拒）。
-        recheck = compacted_token_estimate + protected_facts_tokens
-        if result is not None and (
-                recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
-                > self.max_context_tokens * self.hard_guard_threshold):
-            raise ContextWindowExceededError(
-                f"Re-projected compaction still exceeds hard guard: {recheck} tokens"
-            )
-        provider_estimate = compacted_token_estimate + reserved_tokens
+        ledger.plan_mode = plan_mode_tokens
+        # #1497：旧分叉已删——`reserved_tokens` 手工汇总、压缩路径专用 recheck
+        # （刻意不含 plan/paths/progress/plan_mode）、no-op 路径的二次裸估算，
+        # 统一并入本账本 + 尾部 `_enforce_hard_guard` 单一裁决（裁决 9-A）。
         # W-04 (#348)：接近硬护栏 warning（PRD §4.5 增量）。判据是**有效用量**
         # （messages + system prompt + 运行时快照，与 :103 的看板口径同源）落
         # [auto, hard) 带：有效用量 < auto 的健康路径不发；成功压缩的 messages
         # 估算必然 < auto 线（compactor 的 target 闸门），但 system/快照可能把它
-        # 顶回带内——那时上下文确实接近上限，提醒成立，不是误报。判据仍对**未
-        # 并入 warning 的 provider_estimate** 求值（现有判据行为不变）；判据成立
-        # 时先估算 warning 文本 tokens、记入独立记账口并并入 provider_estimate
+        # 顶回带内——那时上下文确实接近上限，提醒成立，不是误报。判据对**未
+        # 并入 warning 的账本总量**（此时 providers 尚未注入）求值；判据成立
+        # 时先估算 warning 文本 tokens、记入独立记账口并并入账本
         # （先计入再注入，与 plan/paths 同口径——provider 的 remaining 预算
         # 必须诚实），注入动作在下方各注入序列的末段执行。
         pressure_text = DEFAULT_REGISTRY.assemble("frame:context_pressure").meta_user_text
         pressure_tokens = 0
-        if (self.auto_compact_threshold * self.max_context_tokens <= provider_estimate
+        if (self.auto_compact_threshold * self.max_context_tokens <= ledger.total
                 < self.hard_guard_threshold * self.max_context_tokens and pressure_text):
-            pressure_tokens = estimate_message_tokens(
+            candidate = estimate_message_tokens(
                 [HumanMessage(content=pressure_text)]
             )
-            self._last_pressure_warning_tokens = pressure_tokens
-            provider_estimate += pressure_tokens
-        built = await self._with_providers(session, compacted_messages, provider_estimate)
+            # #1497：warning 与 provider 注入同一条截断纪律——并入后越硬护栏就
+            # 不注入（"提醒接近上限"的文本不得把请求顶过线，也不得因此暂停 run）。
+            if (ledger.total + candidate
+                    <= self.hard_guard_threshold * self.max_context_tokens):
+                pressure_tokens = candidate
+                self._last_pressure_warning_tokens = candidate
+                ledger.pressure_warning = candidate
+        built = await self._with_providers(session, compacted_messages, ledger.total)
+        ledger.providers = dict(self._last_provider_tokens_by_name)
         built = self._inject_protected_facts(built, protected_facts_messages)
         built = self._inject_runtime_context(built, runtime_context)
         if plan_mode_text is not None:
@@ -1090,6 +1154,17 @@ class ContextBuilder:
             built = _insert_before_last_human(
                 built, HumanMessage(content=pressure_text),
             )
+        # #1497：调用前硬闸门——账本含全部请求组成（含压缩后翻转注入的清单块、
+        # 进度块、warning 与 provider 注入），strict `>`（H 接受 / H+1 拒绝）。
+        # 拒绝不触发自动二次压缩（failures 为空 ⇒ runtime 判结构性），落
+        # ADR-0033 的 durable pause 收口。
+        if result is not None and result.bracket_id is not None:
+            post_compaction = f"post-compaction bracket={result.bracket_id}"
+        elif result is not None and result.fallback_used:
+            post_compaction = "post-compaction: deterministic truncation fallback"
+        else:
+            post_compaction = None
+        self._enforce_hard_guard(ledger, post_compaction=post_compaction)
         return self._finalize(built)
 
     async def compact_now(
@@ -1380,13 +1455,13 @@ class ContextBuilder:
         # 注入，其成本已经从 provider remaining 里扣减，总量越界由下一 build 的
         # 阈值判定（含清单）自纠。
         #
-        # F7 (#635)：与 build() 尾部公式（:534–541，`recheck =
-        # compacted_token_estimate + protected_facts_tokens`）的分工差异——build 侧
-        # 的 `recheck` 已含 protected_facts_tokens，本式不含：本方法把保护事实的
-        # 成本记在 `token_estimate`（调用方入参，仅用于压缩阈值判定），而复核对象是
-        # `projected`（纯投影 messages，保护事实是 build 末尾另行注入、不在投影内）；
-        # 若此处再减一次会重复计账。两侧共同守住"越硬护栏即 fail-closed"，口径按各自
-        # 持有的事实源各自成立，此注释防后续把两式当同一公式同步改动而漂移。
+        # #1497 更新：build 侧的压缩后专用 recheck 已删（它刻意漏了
+        # plan/paths/progress/plan_mode），总量裁决统一收口到 build 尾部的
+        # `_enforce_hard_guard`（完整账本，含上述四项与 warning/provider 注入）。
+        # 本式保留**持久化投影**的 fail-closed 面（`CompactionPostWriteError`
+        # 的"bracket 已落盘、不得吞成未改动"语义归手动路径），口径不随 build 侧
+        # 收口而扩大——两式分工：这里守持久化投影本身，build 闸门守即将发出的
+        # 请求总量。此注释防后续把两式当同一公式同步改动而漂移。
         if (recheck + (self._system_prompt_tokens or 0) + runtime_context_tokens
                 > self.max_context_tokens * self.hard_guard_threshold):
             raise CompactionPostWriteError(
@@ -1805,6 +1880,36 @@ class ContextBuilder:
             total += cost
         self._token_estimate_total = total
         return total
+
+    def _enforce_hard_guard(
+        self, ledger: _AccountedSnapshot, *, post_compaction: str | None,
+    ) -> None:
+        """#1497（裁决 8-A / 9-A）：模型调用前的统一硬闸门——build 的唯一预算裁决点。
+
+        比较**同一份私有账本**的 `total` 与 `max_context_tokens *
+        hard_guard_threshold`（与既有各闸门同一浮点表达式、strict `>`：H 接受、
+        H+1 拒绝）。越限 ⇒ fail-closed 抛 `ContextWindowExceededError`，携带
+        分项账本与 post-compaction 标记；`failures` 为空（结构性）⇒ runtime
+        `_is_retriable_compaction_failure` 不再压、无自动二次压缩环，收口走
+        ADR-0033 的 `_terminal_context_exceeded` → durable pause。
+
+        三禁（裁决 8-A）在此落地：不重算（`_finalize` 后的 provider 载荷不回
+        估算——账本在注入序列前已定型）；usage 锚只抬高不降低（Phase A 的
+        max 已入账）；post-compaction 不自动再压（failures 恒空）。
+        """
+        hard_cap = self.max_context_tokens * self.hard_guard_threshold
+        total = ledger.total
+        if total <= hard_cap:
+            return
+        breakdown = ledger.breakdown()
+        raise ContextWindowExceededError(
+            "Hard guard exceeded before model call: "
+            f"total={total} > cap={hard_cap:.0f}"
+            + (f"; {post_compaction}" if post_compaction else "")
+            + "; ledger: "
+            + ", ".join(f"{name}={value}" for name, value in breakdown.items()),
+            breakdown=breakdown,
+        )
 
     async def _with_providers(
         self, session: Session, messages: list[AnyMessage], token_estimate: int,

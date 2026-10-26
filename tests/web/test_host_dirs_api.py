@@ -34,7 +34,7 @@ def _client(tmp_path: Path) -> TestClient:
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test"
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _get(client: TestClient, path: str | None = None) -> dict:

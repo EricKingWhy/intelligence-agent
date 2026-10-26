@@ -17,24 +17,32 @@ from pathlib import Path
 
 import pytest
 
+from agent_harness import host_service
+from agent_harness.config import Settings
 from agent_harness.host_service import (
     HOST_PROTOCOL_VERSION,
     HOST_SKILLS_NONCE_HEADER,
     HOST_SKILLS_PROOF_HEADER,
     HOST_SKILLS_RESPONSE_PROOF_HEADER,
     HOST_SKILLS_TIMESTAMP_HEADER,
+    AttachResult,
     AttachStatus,
     HostEndpointInfo,
+    HostServiceError,
     HostTokenStore,
     attach_probe,
     clear_endpoint,
+    describe_lock_error_with_attach,
     host_skills_request_proof,
     host_skills_response_proof,
     host_token_username,
+    loopback_url,
     publish_endpoint,
     query_attached_skill_catalog,
     read_endpoint,
+    serve_once,
 )
+from agent_harness.instance_lock import InstanceLockError
 from agent_harness.model.provider_store import MemoryCredentialStore
 
 
@@ -43,6 +51,14 @@ def _free_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def test_serve_rejects_non_loopback_binding_before_startup(tmp_path: Path) -> None:
+    with pytest.raises(HostServiceError, match="loopback"):
+        serve_once(
+            Settings(_env_file=None, workspace_dir=str(tmp_path)),
+            host="0.0.0.0",
+        )
 
 
 class _StubService:
@@ -169,6 +185,7 @@ def test_endpoint_roundtrip_clear_and_no_secret(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.pid == 4242
     assert loaded.port == 51820
+    assert loaded.host == "127.0.0.1"
     assert loaded.protocol_version == HOST_PROTOCOL_VERSION
     assert loaded.auth_required is True
 
@@ -186,6 +203,55 @@ def test_endpoint_read_corrupt_file_is_absent(tmp_path: Path) -> None:
     root.mkdir()
     (root / ".host-service.json").write_text("{not json", encoding="utf-8")
     assert read_endpoint(root) is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_host"),
+    [
+        pytest.param({"host": None}, "127.0.0.1", id="null-host"),
+        pytest.param({}, "127.0.0.1", id="missing-host"),
+        pytest.param({"host": ""}, "127.0.0.1", id="empty-host"),
+        pytest.param({"host": "::1"}, "::1", id="normal-host"),
+    ],
+)
+def test_endpoint_read_host_shape_falls_back_to_loopback(
+    tmp_path: Path, payload: dict[str, object], expected_host: str
+) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / ".host-service.json").write_text(
+        json.dumps(
+            {
+                "pid": 1,
+                "port": 8000,
+                "owner": "test-user",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "service_uuid": "test-service",
+                **payload,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    endpoint = read_endpoint(root)
+
+    assert endpoint is not None
+    assert endpoint.host == expected_host
+
+
+def test_loopback_url_and_cli_attach_message_use_bound_ipv6_host(monkeypatch) -> None:
+    endpoint = HostEndpointInfo(pid=1, port=51820, host="::1")
+    assert loopback_url(endpoint.host, endpoint.port, "") == "http://[::1]:51820"
+
+    monkeypatch.setattr(
+        host_service,
+        "attach_probe",
+        lambda *args, **kwargs: AttachResult(AttachStatus.ATTACHABLE, endpoint),
+    )
+    message = describe_lock_error_with_attach(
+        "workspace", InstanceLockError("lock held")
+    )
+    assert "http://[::1]:51820" in message
 
 
 # ── token 限权通道（REUSE Credentials seam，测试注入内存后端） ────────────────
@@ -439,7 +505,10 @@ def test_live_skill_catalog_rejects_deep_json_without_raising(
 # ── serve_once 优雅停机（审查修复轮 P2-1：此前 finally 清理只被崩溃路径间接覆盖） ──
 
 
-def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(tmp_path: Path) -> None:
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(
+    tmp_path: Path, host: str
+) -> None:
     """进程内走一次完整「就绪 → 停机」闭环（`stop_when` 接缝），钉住 finally 三件
     清理：端点文件、host token、实例锁。此前没有任何测试覆盖优雅停机路径——
     子进程测试全部以 kill 收尾（非优雅路径），删掉 finally 里的清理依旧全绿。"""
@@ -460,7 +529,12 @@ def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(tmp_path: Path)
     def _run() -> None:
         try:
             outcomes.append(
-                serve_once(settings, credentials=backend, stop_when=stop.is_set)
+                serve_once(
+                    settings,
+                    credentials=backend,
+                    host=host,
+                    stop_when=stop.is_set,
+                )
             )
         except Exception as error:  # noqa: BLE001 — 线程边界：失败带回主线程断言，不静默
             errors.append(error)
@@ -482,7 +556,9 @@ def test_serve_once_graceful_shutdown_cleans_endpoint_token_lock(tmp_path: Path)
             pytest.fail("60s 内未达到 ATTACHABLE")
 
         # 就绪面：端点已发布、token 已入限权通道。
-        assert read_endpoint(root) is not None
+        endpoint = read_endpoint(root)
+        assert endpoint is not None
+        assert endpoint.host == host
         assert HostTokenStore(backend).get_token(root)
 
         stop.set()

@@ -739,7 +739,9 @@ async def test_concurrent_resume_with_the_same_version_has_exactly_one_winner(
     app = create_app(Settings(
         _env_file=None, workspace_dir=str(tmp_path),
         model_api_key="sk-test", enable_cors=False,
-    ))
+    ),
+    allow_testserver=True,
+    )
 
     winner_plan_ready = asyncio.Event()
     loser_plan_ready = asyncio.Event()

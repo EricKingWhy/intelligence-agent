@@ -34,6 +34,7 @@ from agent_harness.memory.errors import MemoryNotFound
 from agent_harness.memory.v2.capability import (
     InvalidMemoryPayload,
     MarkdownAuthorityError,
+    MemoryContentRejected,
     MemoryIndexDeletePending,
     StaleMemoryVersion,
 )
@@ -740,6 +741,8 @@ def register_memory_routes(app: FastAPI) -> None:
             raise _blocked_missing(blocked_id) from error
         except StorageBusyError as error:
             raise _storage_busy_error(error) from error
+        except MemoryContentRejected as error:
+            raise memory_http_error(error) from error
         if not decision.applied:
             # 409 而非 404：行还在，只是已被处置 / pin 漂移——用户可 discard 或重建。
             raise HTTPException(
