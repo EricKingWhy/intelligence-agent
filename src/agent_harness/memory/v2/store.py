@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import aiosqlite
@@ -809,6 +810,48 @@ class SqliteMemoryV2Store:
         return await self._tombstones.versions_async(root_id, trusted)
 
     @retry_on_busy
+    async def prepare_tombstones(
+        self, trusted: TrustedMemoryIdentity, *, memory_id: str | None = None,
+        kind: MemoryKind | None = None, reason: str = "user_request",
+    ) -> tuple[DeletedMemoryV2, ...]:
+        """先落墓碑并返回待删记录（#1494 / ADR-0058 D7+D8）。
+
+        删除的顺序是 **墓碑 → 内容 → records**：调用方拿到本方法的返回值后先让
+        `MemoryCommit` 清 markdown，成功后才调用 `delete/bulk_delete` 删记录。
+        墓碑先于内容落盘，所以即使进程在中间被杀，旧输入也已不能重放。
+        """
+        async with connect(self.database_path) as connection:
+            if memory_id is not None:
+                row = await _row_in(connection, memory_id)
+                if row is None or not self._visible(row, trusted):
+                    return ()
+                root_ids = [str(row["root_id"])]
+            else:
+                clauses = [
+                    "tenant_id=?", "user_id=?", "(scope <> 'project' OR project_id = ?)",
+                ]
+                values: list[object] = [
+                    trusted.tenant_id, trusted.user_id, trusted.project_id,
+                ]
+                if kind is not None:
+                    clauses.append("kind=?")
+                    values.append(kind.value)
+                async with connection.execute(
+                    "SELECT DISTINCT root_id FROM memory_v2_records WHERE "
+                    + " AND ".join(clauses) + " ORDER BY root_id", values,
+                ) as cursor:
+                    root_ids = [str(row["root_id"]) for row in await cursor.fetchall()]
+            rows: list[Any] = []
+            for root_id in root_ids:
+                rows.extend(await self._root_rows(connection, root_id, trusted))
+            if rows:
+                await self._tombstones.record_async(
+                    [TombstoneDraft.from_record(item) for item in rows],
+                    reason=reason, now=self._now(),
+                )
+            return tuple(_deleted_from_row(item) for item in rows)
+
+    @retry_on_busy
     async def delete(
         self, memory_id: str, trusted: TrustedMemoryIdentity, *,
         reason: str = "user_request",
@@ -872,22 +915,17 @@ class SqliteMemoryV2Store:
         trusted: TrustedMemoryIdentity, *, reason: str, now: datetime,
     ) -> MemoryDeletionReceiptV2:
         rows = await self._root_rows(connection, root_id, trusted)
-        # 墓碑先于记录删除落盘（ADR-0058 D8）：崩溃在它之后，旧输入已经不能重放。
+        # 墓碑先于记录删除落盘（ADR-0058 D7）：崩溃在它之后，旧输入已经不能重放。
         # 这是几个小 JSON 的原子替换，随调用方事务一起完成；跨载体不原子，由删除
         # 重入 + 墓碑（`del_` 回执对内容）收敛。
         if rows:
-            self._tombstones.record(
+            await self._tombstones.record_async(
                 [TombstoneDraft.from_record(item) for item in rows],
                 reason=reason, now=now,
             )
         deleted: list[DeletedMemoryV2] = []
         for item in rows:
-            deleted.append(DeletedMemoryV2(
-                memory_id=item["memory_id"], tenant_id=item["tenant_id"],
-                user_id=item["user_id"], scope=MemoryScope(item["scope"]),
-                project_id=item["project_id"], kind=MemoryKind(item["kind"]),
-                tier=MemoryTier(item["tier"]), content=item["content"],
-            ))
+            deleted.append(_deleted_from_row(item))
             await self._enqueue(
                 connection, item["memory_id"], MemoryOperationV2.DELETE,
                 item["tenant_id"], item["user_id"], item["scope"], item["project_id"],
@@ -1309,6 +1347,15 @@ async def _row_in(connection: aiosqlite.Connection, memory_id: str) -> aiosqlite
         "SELECT * FROM memory_v2_records WHERE memory_id=?", (memory_id,)
     ) as cursor:
         return await cursor.fetchone()
+
+
+def _deleted_from_row(row: aiosqlite.Row) -> DeletedMemoryV2:
+    return DeletedMemoryV2(
+        memory_id=row["memory_id"], tenant_id=row["tenant_id"],
+        user_id=row["user_id"], scope=MemoryScope(row["scope"]),
+        project_id=row["project_id"], kind=MemoryKind(row["kind"]),
+        tier=MemoryTier(row["tier"]), content=row["content"],
+    )
 
 
 def _to_record(row: aiosqlite.Row) -> MemoryRecordV2:

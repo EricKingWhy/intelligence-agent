@@ -18,6 +18,7 @@ import pytest
 import pytest_asyncio
 
 from agent_harness.memory.v2 import MemoryScope, TrustedMemoryIdentity
+from agent_harness.memory.v2.commit import MemoryCommitError
 from agent_harness.memory.v2.jobs import (
     MemoryJobOutcome,
     MemoryJobStage,
@@ -460,6 +461,33 @@ async def test_commit_with_outcome_rolls_back_the_work_when_it_raises(tmp_path) 
             job_id=claimed.job_id, worker_id="w1", outcome=MemoryJobOutcome.COMMITTED,
             work=work)
 
+    assert await records.list_active(
+        USER_A, scope=MemoryScope.USER_GLOBAL, limit=10) == []
+    after = await jobs.get(claimed.job_id)
+    assert after.stage is not MemoryJobStage.COMPLETED
+    assert after.outcome is None and after.reason is None
+
+
+@pytest.mark.asyncio
+async def test_commit_with_outcome_rolls_back_when_before_commit_raises(tmp_path) -> None:
+    """D8：内容发布挂在事务提交前；发布失败 ⇒ records 与 job 终态都不落地。"""
+    records, jobs, claimed = await _claimed_pair(tmp_path)
+    published: list[str] = []
+
+    async def work(connection) -> str:
+        created = await records.create(make_draft(), USER_A, connection=connection)
+        return created.id
+
+    async def before_commit(memory_id: str) -> None:
+        published.append(memory_id)
+        raise MemoryCommitError("jobp_test", "memory", OSError("disk full"))
+
+    with pytest.raises(MemoryCommitError):
+        await jobs.commit_with_outcome(
+            job_id=claimed.job_id, worker_id="w1", outcome=MemoryJobOutcome.COMMITTED,
+            work=work, before_commit=before_commit)
+
+    assert published, "发布必须发生在事务提交前，且看得到 work 的返回值"
     assert await records.list_active(
         USER_A, scope=MemoryScope.USER_GLOBAL, limit=10) == []
     after = await jobs.get(claimed.job_id)

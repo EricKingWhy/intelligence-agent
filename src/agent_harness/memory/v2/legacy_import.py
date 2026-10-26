@@ -35,6 +35,7 @@ from agent_harness.memory.v2.commit import MemoryCommit
 from agent_harness.memory.v2.file_state import safe_id, utc_stamp, write_json
 from agent_harness.memory.v2.jobs import job_id_for
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
+from agent_harness.memory.v2.receipts import ReceiptState, ReceiptStore
 from agent_harness.memory.v2.settings_store import FileMemorySettingsStore
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.tombstones import FileTombstoneStore
@@ -67,56 +68,91 @@ async def import_legacy_state(
 
     counts: dict[str, Any] = {
         "settings": 0, "settings_rows": 0, "settings_conflicts": 0,
-        "tombstones": 0, "staged": 0, "staged_existing": 0,
+        "settings_existing": 0,
+        "tombstones": 0, "tombstones_expired": 0,
+        "staged": 0, "staged_existing": 0,
         "blocked": 0, "blocked_existing": 0, "jobs": 0, "jobs_existing": 0,
-        "republished": 0, "republish_unreadable": 0,
+        "republished": 0, "republish_unreadable": 0, "republish_needs_reconcile": 0,
     }
+    converged = True
     async with connect(database) as connection:
-        await _import_settings(connection, root, counts)
+        converged &= await _import_settings(connection, root, counts)
         await _import_tombstones(connection, root, counts)
         await _import_staged(connection, root, counts)
         await _import_blocked(connection, root, counts)
         await _import_jobs(connection, root, counts)
-        await _republish_completed(connection, commit, counts)
+        converged &= await _republish_completed(connection, root, commit, counts)
 
+    if not converged:
+        # D9：有未收敛项（settings 冲突 / 补发布不可读）⇒ 不写完成标记，下次启动重试。
+        logger.warning("memory legacy import not converged: %s", counts)
+        return {"skipped": False, "converged": False, **counts}
     write_json(root.legacy_marker_path, {
         "schema": MARKER_SCHEMA,
+        "source_database": database.name,
         "imported_at": utc_stamp(),
         "counts": counts,
     })
     logger.info("memory legacy state imported: %s", counts)
-    return {"skipped": False, **counts}
+    return {"skipped": False, "converged": True, **counts}
 
 
 # ---------------------------------------------------------------------- 五类导入
 
 
-async def _import_settings(connection, root, counts: dict[str, Any]) -> None:
+async def _import_settings(connection, root, counts: dict[str, Any]) -> bool:
     rows = [dict(row) for row in await _fetch(
         connection, "SELECT * FROM memory_v2_settings ORDER BY updated_at DESC")]
     counts["settings_rows"] = len(rows)
     if not rows:
-        return
+        return True
+    store = FileMemorySettingsStore(root)
+    if store.path.exists():
+        # 已经写过的文件是证据：崩溃重跑不能覆盖用户在窗口内改过的设置。
+        counts["settings_existing"] += 1
+        return True
     latest = rows[0]
     defaults = MemorySettingsV2()
     keys = ("extraction_enabled", "recall_enabled", "fallback_enabled", "write_approval")
-    # 旧表可能还没有后加的列：缺列按既有默认（fallback/write_approval 的 DEFAULT）读，
-    # 不能把「旧库没表达过」当成「用户关掉了」。
-    resolved = {
-        key: bool(latest.get(key, getattr(defaults, key))) for key in keys
-    }
+
+    def _value(row: dict[str, Any], key: str) -> bool:
+        # 旧表可能还没有后加的列：缺列/NULL 按既有默认读，不能把「旧库没表达过」
+        # 当成「用户关掉了」。
+        raw = row.get(key)
+        return getattr(defaults, key) if raw is None else bool(raw)
+
+    resolved = {key: _value(latest, key) for key in keys}
     counts["settings_conflicts"] = sum(
         1 for row in rows
-        if any(bool(row.get(key, getattr(defaults, key))) != resolved[key] for key in keys)
+        if any(_value(row, key) != resolved[key] for key in keys)
     )
-    await FileMemorySettingsStore(root).update(None, **resolved)
+    if counts["settings_conflicts"]:
+        # D9：多行且有差异 ⇒ 不导入、不折叠；落一个可见的冲突文件供人工裁决，
+        # 并让 marker 保持未完成（下次启动仍能看到）。
+        write_json(root.base / "settings-conflict.json", {
+            "schema": 1,
+            "detected_at": utc_stamp(),
+            "keys": list(keys),
+            "distinct_values": {
+                key: sorted({_value(row, key) for row in rows}) for key in keys
+            },
+            "resolution": "编辑 memory-state/settings.json 后删除本文件（或旧库）再启动",
+        })
+        return False
+    await store.update(None, **resolved)
     counts["settings"] = 1
+    return True
 
 
 async def _import_tombstones(connection, root, counts: dict[str, Any]) -> None:
     tombstones = FileTombstoneStore(root)
+    now_stamp = utc_stamp()
     for raw_row in await _fetch(connection, "SELECT * FROM memory_v2_tombstones"):
         row = dict(raw_row)
+        if str(row.get("expires_at") or "") <= now_stamp:
+            # 保留期已过的墓碑按既有策略失效；导入它等于把删除抑制凭空续期 30 天。
+            counts["tombstones_expired"] += 1
+            continue
         path = tombstones.path_for(str(row["memory_id"]))
         if path.exists():
             continue
@@ -237,14 +273,21 @@ async def _import_jobs(connection, root, counts: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------- 补发布
 
 
-async def _republish_completed(connection, commit: MemoryCommit, counts: dict[str, Any]) -> None:
+async def _republish_completed(
+    connection, root, commit: MemoryCommit, counts: dict[str, Any],
+) -> bool:
     """旧 `completed + committed` job 的 active 记录按内容补发布。
 
     只补 **ACTIVE** 记录：用户后来改过/删过的旧版本已经不是当前事实，补发布等于把
     历史版本重新写回权威面。`add` 对同内容条目去重，所以已发布过的不会重复追加。
+
+    D9：记录行缺失（旧库与内容面已经对不上）或发布被拒 ⇒ 该 operation 落
+    `NEED_RECONCILE` 回执，并让本次导入保持未收敛——不能写 marker 把问题永久盖住。
     """
     if not isinstance(commit.engine, MarkdownMemoryStore):  # pragma: no cover — 类型防线
-        return
+        return True
+    receipts = ReceiptStore(root)
+    converged = True
     seen: set[str] = set()
     for row in await _fetch(
         connection,
@@ -264,25 +307,58 @@ async def _republish_completed(connection, commit: MemoryCommit, counts: dict[st
                 "SELECT kind, tier, content, status FROM memory_v2_records WHERE memory_id=?",
                 (memory_id,),
             )
-            if record is None or record["status"] != "active":
+            operation_id = "legp_" + hashlib.sha256(
+                f"{row['job_id']}:{memory_id}".encode()).hexdigest()[:32]
+            if record is None:
+                _flag_needs_reconcile(
+                    receipts, operation_id, f"legacy record {memory_id} is missing",
+                    memory_id=memory_id,
+                )
+                counts["republish_needs_reconcile"] += 1
+                converged = False
+                continue
+            if record["status"] != "active":
                 continue
             target = target_for(record["kind"], record["tier"])
             if not commit.engine.target_enabled(target):
                 continue
-            operation_id = "legp_" + hashlib.sha256(
-                f"{row['job_id']}:{memory_id}".encode()).hexdigest()[:32]
             try:
                 response = await commit.add(
                     target, record["content"], operation_id=operation_id)
             except Exception as error:  # noqa: BLE001 — 导入不得因单条发布失败整体失败
                 logger.warning(
                     "legacy republish failed (%s): %s", type(error).__name__, memory_id)
+                _flag_needs_reconcile(
+                    receipts, operation_id,
+                    f"republish failed: {type(error).__name__}", memory_id=memory_id,
+                )
                 counts["republish_unreadable"] += 1
+                converged = False
                 continue
             if response.get("success"):
                 counts["republished"] += 1
             else:
+                _flag_needs_reconcile(
+                    receipts, operation_id, "legacy content rejected by markdown authority",
+                    memory_id=memory_id,
+                )
                 counts["republish_unreadable"] += 1
+                converged = False
+    return converged
+
+
+def _flag_needs_reconcile(
+    receipts: ReceiptStore, operation_id: str, reason: str, *, memory_id: str,
+) -> None:
+    """缺回执时先落 PREPARED 再置 NEED_RECONCILE；已有 COMMITTED 不回退。"""
+    receipt = receipts.load(operation_id)
+    if receipt is None:
+        receipt = receipts.prepare(
+            operation_id, origin="legacy_import", targets=[],
+            operations=[{"kind": "republish", "memory_id": memory_id}],
+        )
+    if receipt.state != ReceiptState.COMMITTED:
+        receipts.mark_needs_reconcile(operation_id, reason)
 
 
 # ---------------------------------------------------------------------- SQL 辅助

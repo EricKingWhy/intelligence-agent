@@ -76,7 +76,11 @@ from agent_harness.memory.v2.budget import (
     MemoryModelRole,
     next_attempt,
 )
-from agent_harness.memory.v2.capability import MemoryContentRejected
+from agent_harness.memory.v2.capability import (
+    MarkdownAuthorityError,
+    MemoryContentRejected,
+)
+from agent_harness.memory.v2.commit import MemoryCommitError
 from agent_harness.memory.v2.formation import (
     AdjudicatedContent,
     AdjudicationAction,
@@ -1282,13 +1286,14 @@ class MemoryJobExecutor:
                 raise _NothingToApply
             return tuple(records), tuple(superseded)
 
-        async def after_work(
+        async def before_commit(
             committed: tuple[tuple[MemoryRecordV2, ...], tuple[MemoryRecordV2, ...]],
         ) -> None:
-            """记录已提交、终态未写：markdown 权威面只能在这里补落。
+            """records 已写入但**未提交**：内容发布必须落在这里。
 
             `operation_prefix` 让每个 target 的追加/移除都是确定性回执：job 重跑
-            （崩溃在"已提交、终态未落"）时同一 operation id 回放，不重复追加。
+            （崩溃在"内容已发布、记录未提交"或"记录已提交、终态未落"）时同一 operation
+            id 回放，不重复追加。发布失败 ⇒ 事务回滚、job 不写终态（D8）。
             """
             records, superseded = committed
             await self._writer.mirror_committed(
@@ -1303,11 +1308,22 @@ class MemoryJobExecutor:
         try:
             committed = await self._jobs.commit_with_outcome(
                 job_id=job.job_id, worker_id=worker_id, outcome=MemoryJobOutcome.COMMITTED,
-                state=state.as_dict, work=_tagged(work), after_work=after_work)
+                state=state.as_dict, work=_tagged(work), before_commit=before_commit)
         except _NothingToApply:
             # 事务已回滚（零写入）⇒ 改记安静成功：没有任何变更，就不是 COMMITTED。
             return await self._complete_quietly(
                 job, worker_id=worker_id, reason=None, state=state, run_id=run_id, sink=sink)
+        except MemoryCommitError as error:
+            # 内容发布失败：记录事务已回滚，job 保持非终态；恢复扫描按同一批确定性 id /
+            # operation id 重跑。绝不把这一轮写成 COMMITTED（AC4）。
+            logger.warning(
+                "memory formation publish pending (operation %s): %s",
+                error.operation_id, type(error.reason).__name__,
+            )
+            return None
+        except MarkdownAuthorityError:
+            logger.warning("memory formation mirror rejected by markdown authority")
+            raise _Degraded(DegradedReason.APPLY_FAILED) from None
         except Exception:
             logger.exception("Memory V2 formation apply failed")
             raise _Degraded(DegradedReason.APPLY_FAILED) from None

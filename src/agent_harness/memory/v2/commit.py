@@ -20,7 +20,8 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
 - tool / service 每次逻辑写入生成一个 `mcf_<uuid>`；同一次逻辑写入被重试（审批重放、
   formation 恢复、CLI 补发布）必须复用同一个 id，从而「同 key 只一次逻辑更新」；
 - 固定形：`jobp_<job>`（formation apply）、`stgp_<staged>`（待审批准）、`blkp_<blocked>`
-  （被拦下写入的 promote）、`del_<memory>`（治理删除）、`legp_<job>_<memory>`（旧数据补发布）。
+  （被拦下写入的 promote）、`del_<memory>`（治理删除）、`legp_<job>_<memory>`（旧数据补发布）、
+  `mig_<memory>`（旧记录一次性迁移）。
 
 同一 id 已有 `COMMITTED` 回执 ⇒ 直接回放记录的结果，不再碰磁盘（不重复追加、不重复删除）。
 
@@ -41,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -99,12 +100,11 @@ class ReconcileReport:
     committed: list[str] = field(default_factory=list)
     needs_reconcile: list[tuple[str, str]] = field(default_factory=list)
     unreadable: list[tuple[str, str]] = field(default_factory=list)
-    handler_failures: list[tuple[str, str]] = field(default_factory=list)
     examined: int = 0
 
     @property
     def ok(self) -> bool:
-        return not (self.needs_reconcile or self.unreadable or self.handler_failures)
+        return not (self.needs_reconcile or self.unreadable)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -112,7 +112,6 @@ class ReconcileReport:
             "committed": list(self.committed),
             "needs_reconcile": [list(item) for item in self.needs_reconcile],
             "unreadable": [list(item) for item in self.unreadable],
-            "handler_failures": [list(item) for item in self.handler_failures],
             "ok": self.ok,
         }
 
@@ -208,19 +207,24 @@ class MemoryCommit:
 
     async def remove(
         self, target: str, old_text: str, matched_entry: str | None = None, *,
-        operation_id: str | None = None, origin: str | None = None,
-        payload: dict[str, Any] | None = None,
+        missing_ok: bool = False, operation_id: str | None = None,
+        origin: str | None = None, payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """删除一条；``missing_ok`` 只给系统镜像重放用（目标已不在 = 已经删过）。"""
         return await asyncio.to_thread(
             self._perform,
             {
                 "target": target, "action": "remove", "old_text": old_text,
-                "matched_entry": matched_entry,
+                "matched_entry": matched_entry, "missing_ok": bool(missing_ok),
             },
             operation_id=operation_id or new_operation_id(),
             origin=origin or origin_module.current_origin(),
             payload=payload,
         )
+
+    def content_error(self, content: str) -> str | None:
+        """内容校验（delimiter / threat）。系统镜像在碰盘前用它做一次全量预检。"""
+        return self._write_guard(normalize_entry(content))
 
     async def apply_batch(
         self, target: str, operations: list[dict[str, Any]], *, trusted_pins: bool = False,
@@ -312,8 +316,17 @@ class MemoryCommit:
         if outcome.drift_backup:
             response["drift_backup"] = outcome.drift_backup
         if prepared["done"]:
-            self._receipts.mark_target_published(operation_id, target)
-            self._receipts.finish(operation_id, result=_result_for_replay(response))
+            try:
+                self._receipts.mark_target_published(operation_id, target)
+                self._receipts.finish(operation_id, result=_result_for_replay(response))
+            except (OSError, RuntimeError) as error:
+                # 文件已经替换成功，但终态回执没写下去：内容已发布、回执停在 PREPARED。
+                # 必须当成「已发布、待对账」上报，不能返回成功，也不能让裸 OSError
+                # 丢掉 operation id（启动 reconcile 会按 digest 收尾）。
+                raise MemoryCommitError(
+                    operation_id, target,
+                    f"content published but receipt update failed: {error}",
+                ) from error
         return response
 
     def _replay_if_committed(self, operation_id: str) -> dict[str, Any] | None:
@@ -324,6 +337,10 @@ class MemoryCommit:
         recorded.setdefault("success", True)
         recorded["operation_id"] = operation_id
         recorded["replayed"] = True
+        if receipt.result is None:
+            # 终态是事实，但旧回执/对账收尾没有留下可回放的结果字段。不要用
+            # success=True 冒充「拿到了完整原始响应」——调用方需要知道哪些读数缺失。
+            recorded["result_unknown"] = True
         return recorded
 
     def _conflict_if_uncertain(self, operation_id: str, target: str) -> dict[str, Any] | None:
@@ -344,13 +361,24 @@ class MemoryCommit:
             return self._needs_reconcile_response(receipt, "target file is unreadable")
         digest = entries_digest(disk)
         if digest == plan.after_digest:
-            self._receipts.mark_target_published(operation_id, target)
-            self._receipts.finish(operation_id, result=receipt.result)
+            try:
+                self._receipts.mark_target_published(operation_id, target)
+                self._receipts.finish(operation_id, result=receipt.result)
+            except (OSError, RuntimeError) as error:
+                # 内容已经是目标态，只是回执没写完：按「已发布、待对账」上报。
+                raise MemoryCommitError(
+                    operation_id, target,
+                    f"content already published but receipt update failed: {error}",
+                ) from error
             return self._replay_if_committed(operation_id)
         if digest == plan.before_digest:
             return None
-        self._receipts.mark_needs_reconcile(
-            operation_id, f"{target}: disk matches neither before nor after")
+        try:
+            self._receipts.mark_needs_reconcile(
+                operation_id, f"{target}: disk matches neither before nor after")
+        except (OSError, RuntimeError) as error:
+            raise MemoryCommitError(
+                operation_id, target, f"receipt update failed: {error}") from error
         return self._needs_reconcile_response(
             self._receipts.load(operation_id) or receipt)
 
@@ -388,16 +416,29 @@ class MemoryCommit:
                 {"target": target, "action": "remove_by_digest", "digests": sorted(wanted)}
                 for target in targets
             ]
-            self._receipts.prepare(
-                operation_id, origin=origin, targets=list(targets),
-                operations=specs, payload=payload,
-            )
+            try:
+                self._receipts.prepare(
+                    operation_id, origin=origin, targets=list(targets),
+                    operations=specs, payload=payload,
+                )
+            except (OSError, RuntimeError) as error:
+                # 还没碰文件：回执写不进去就不发布（零落盘）。
+                raise MemoryCommitError(
+                    operation_id, "memory+user", f"receipt prepare failed: {error}") from error
             cleaned: list[str] = []
             for index, spec in enumerate(specs):
                 cleaned.extend(
                     self._publish_digest_target(
                         spec, operation_id, remaining=index < len(specs) - 1))
-            self._receipts.finish(operation_id, result={"cleaned": list(cleaned), "success": True})
+            try:
+                self._receipts.finish(
+                    operation_id, result={"cleaned": list(cleaned), "success": True})
+            except (OSError, RuntimeError) as error:
+                # 内容已经清理，终态回执没写下去：不能报 committed（AC4）。
+                raise MemoryCommitError(
+                    operation_id, "memory+user",
+                    f"content removed but receipt update failed: {error}",
+                ) from error
             return cleaned
 
     def _publish_digest_target(
@@ -434,20 +475,26 @@ class MemoryCommit:
         if outcome.response is not None and not outcome.response.get("success"):
             raise MemoryCommitError(operation_id, target, outcome.response.get("error"))
         if prepared["removed"]:
-            self._receipts.mark_target_published(operation_id, target)
-            cleaned.append(self._engine.path_for(target).name)
-            if remaining:
-                self._receipts.mark_partial(operation_id)
+            try:
+                self._receipts.mark_target_published(operation_id, target)
+                cleaned.append(self._engine.path_for(target).name)
+                if remaining:
+                    self._receipts.mark_partial(operation_id)
+            except (OSError, RuntimeError) as error:
+                raise MemoryCommitError(
+                    operation_id, target,
+                    f"content removed but receipt update failed: {error}",
+                ) from error
         return cleaned
 
     # ------------------------------------------------------------------ 对账
 
-    async def reconcile(
-        self, *, handlers: Sequence[
-            tuple[str, Callable[[CommitReceipt], Awaitable[None]]]
-        ] = (),
-    ) -> ReconcileReport:
-        """对账全部未终态回执（幂等、可重入）；启动与 `memory reconcile` 共用。"""
+    async def reconcile(self) -> ReconcileReport:
+        """对账全部未终态回执（幂等、可重入）；启动与 `memory reconcile` 共用。
+
+        ADR-0058 D10：没有 handler 注册表——回执只描述内容发布是否落地，后置处理
+        由各入口自己按 operation id 回放，不在对账里按前缀猜测职责。
+        """
         await self._receipts.initialize()
         report = ReconcileReport()
         for receipt in self._receipts.list_pending():
@@ -462,18 +509,6 @@ class MemoryCommit:
                     (finished.operation_id, finished.reason or "needs reconcile"))
                 continue
             report.committed.append(finished.operation_id)
-            for prefix, handler in handlers:
-                if not finished.operation_id.startswith(prefix):
-                    continue
-                try:
-                    await handler(finished)
-                except Exception as error:  # noqa: BLE001 — 一个 handler 失败不能挡住其它回执
-                    logger.warning(
-                        "receipt handler failed (%s): %s",
-                        finished.operation_id, type(error).__name__,
-                    )
-                    report.handler_failures.append(
-                        (finished.operation_id, type(error).__name__))
         return report
 
     def _reconcile_one(self, operation_id: str) -> CommitReceipt | None:
@@ -700,7 +735,27 @@ class MemoryCommit:
         old_text = normalize_entry(str(spec.get("old_text") or ""))
         if not old_text:
             return error_response("old_text cannot be empty.")
-        located = self._locate(entries, old_text, "remove", spec.get("matched_entry"))
+        matched_entry = spec.get("matched_entry")
+        missing_ok = bool(spec.get("missing_ok"))
+        if missing_ok:
+            if matched_entry is not None:
+                if pinned_index(entries, matched_entry) is None:
+                    return self._engine.success_response(
+                        target, entries, "Entry already absent (no-op).", already_absent=True)
+            else:
+                idx, ambiguous = find_unique_match(entries, old_text)
+                if ambiguous:
+                    return error_response(
+                        f"Multiple entries matched '{old_text}'. Be more specific.",
+                        matches=[
+                            e[:80] + ("..." if len(e) > 80 else "")
+                            for e in entries if old_text in e
+                        ],
+                    )
+                if idx is None:
+                    return self._engine.success_response(
+                        target, entries, "Entry already absent (no-op).", already_absent=True)
+        located = self._locate(entries, old_text, "remove", matched_entry)
         if isinstance(located, dict):
             return located
         return entries[:located] + entries[located + 1:], "Entry removed.", {
@@ -851,11 +906,6 @@ class MemoryCommit:
                 "split it into multiple add operations."
             )
         return None
-
-    @staticmethod
-    def _scan_error(content: str) -> str | None:
-        """命中注入/外泄模式时的错误文案。strict scope：记忆进系统提示，污染会跨会话留存。"""
-        return first_threat_message(content, scope="strict")
 
 
 def _result_for_replay(response: dict[str, Any]) -> dict[str, Any]:

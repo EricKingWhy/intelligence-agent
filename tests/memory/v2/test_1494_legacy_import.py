@@ -185,7 +185,7 @@ async def test_legacy_state_is_imported_once_and_unpublished_content_is_republis
     # settings：四个键全部按旧表的显式值导入（fallback 的 0 不能被默认值吞掉）
     settings = read_json(workspace.state.settings_path)
     assert settings is not None
-    assert settings["settings"] == {
+    assert settings["values"] == {
         "extraction_enabled": True, "recall_enabled": True,
         "fallback_enabled": False, "write_approval": True,
     }
@@ -291,3 +291,87 @@ async def test_jobs_are_read_from_files_after_import(tmp_path: Path) -> None:
         legacy_rows = connection.execute(
             "SELECT COUNT(*) FROM memory_v2_jobs").fetchone()[0]
     assert legacy_rows == 2, "导入只读旧表，不删除（销毁未授权）"
+
+
+@pytest.mark.asyncio
+async def test_settings_conflict_is_not_folded_and_blocks_the_marker(tmp_path: Path) -> None:
+    """D9：多行设置不一致时不导入、不折叠，落冲突产物并保持未收敛。"""
+    workspace = await _workspace(tmp_path)
+    _insert(workspace.database, "memory_v2_settings", {
+        "tenant_id": "other", "user_id": "other",
+        "extraction_enabled": 0, "recall_enabled": 1,
+        "fallback_enabled": 0, "write_approval": 1,
+        "updated_at": (NOW - timedelta(days=1)).isoformat(),
+    })
+
+    counts = await _import(workspace)
+
+    assert counts["settings"] == 0
+    assert counts["settings_conflicts"] == 1
+    assert counts["converged"] is False
+    assert not workspace.state.settings_path.exists(), "冲突时不得凭猜测写一份设置"
+    conflict = read_json(workspace.state.base / "settings-conflict.json")
+    assert conflict is not None
+    assert conflict["distinct_values"]["extraction_enabled"] == [False, True]
+    assert not workspace.state.legacy_marker_path.exists(), "未收敛不得写完成标记"
+
+
+@pytest.mark.asyncio
+async def test_existing_settings_file_wins_over_legacy_rows(tmp_path: Path) -> None:
+    """崩溃重跑/用户已在窗口内改过：已有 settings.json 不被旧表覆盖。"""
+    workspace = await _workspace(tmp_path)
+    workspace.state.ensure()
+    workspace.state.settings_path.write_text(
+        json.dumps({"schema": 1, "values": {"extraction_enabled": False}}),
+        encoding="utf-8")
+
+    counts = await _import(workspace)
+
+    assert counts["settings"] == 0 and counts["settings_existing"] == 1
+    settings = read_json(workspace.state.settings_path)
+    assert settings["values"] == {"extraction_enabled": False}
+    assert workspace.state.legacy_marker_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_missing_legacy_record_becomes_needs_reconcile_and_blocks_marker(
+    tmp_path: Path,
+) -> None:
+    """D9：旧 job 指向的记录已不可查 ⇒ NEED_RECONCILE，不编造内容、不写完成标记。"""
+    workspace = await _workspace(tmp_path)
+    with sqlite3.connect(workspace.database) as connection:
+        connection.execute("DELETE FROM memory_v2_jobs")
+        connection.commit()
+    _seed_legacy_jobs(workspace.database, "mem-does-not-exist", "mem-never-existed")
+
+    counts = await _import(workspace)
+
+    assert counts["republish_needs_reconcile"] == 2
+    assert counts["converged"] is False
+    assert not workspace.state.legacy_marker_path.exists()
+    receipts = [
+        read_json(path) for path in workspace.state.receipts_dir.glob("legp_*.json")
+    ]
+    assert len(receipts) == 2
+    assert {item["state"] for item in receipts} == {"NEED_RECONCILE"}
+
+
+@pytest.mark.asyncio
+async def test_expired_legacy_tombstone_is_not_imported(tmp_path: Path) -> None:
+    """D9：过期墓碑按既有保留策略失效，导入它等于凭空续期删除抑制。"""
+    workspace = await _workspace(tmp_path)
+    _insert(workspace.database, "memory_v2_tombstones", {
+        "memory_id": "mem-expired", "root_id": "mem-expired",
+        "tenant_id": LOCAL.tenant_id, "user_id": LOCAL.user_id,
+        "scope": "user_global", "project_id": None, "version": 1,
+        "deleted_at": (NOW - timedelta(days=40)).isoformat(),
+        "expires_at": (NOW - timedelta(days=10)).isoformat(),
+        "deletion_reason": "user_request",
+        "content_hashes": json.dumps(["hash-expired"]),
+        "source_hashes": json.dumps([]),
+    })
+
+    counts = await _import(workspace)
+
+    assert counts["tombstones_expired"] == 1
+    assert not (workspace.state.tombstones_dir / "mem-expired.json").exists()

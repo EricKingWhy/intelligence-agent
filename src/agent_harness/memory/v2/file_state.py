@@ -51,16 +51,27 @@ def utc_stamp() -> str:
     return datetime.now(UTC).isoformat()
 
 
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "con", "prn", "aux", "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+})
+
+
 def safe_id(value: str, *, what: str = "id") -> str:
     """文件名级 id：只允许 ``[A-Za-z0-9._-]``；其余一律拒绝。
 
     五类状态都用一个 id 命名文件，id 又可能来自调用方（memory_id / job_id / 测试）。
-    在这里挡住路径分隔符与 ``..``，比在每个 store 里各写一遍校验少一处漏点。
+    在这里挡住路径分隔符、``..``、Windows 保留设备名（``CON`` / ``NUL`` / ``COM1``…
+    即使带扩展名也保留）与结尾点（Windows 会静默去掉），比在每个 store 里各写一遍
+    校验少一处漏点。
     """
     if (
         not value
         or set(value) == {"."}  # "." / ".." / "..." —— 直接用作目录项会越出状态根
         or not all(character.isalnum() or character in "._-" for character in value)
+        or value.endswith(".")
+        or value.split(".", 1)[0].lower() in _WINDOWS_RESERVED_NAMES
     ):
         raise ValueError(f"unsafe {what} for a state file name: {value!r}")
     return value

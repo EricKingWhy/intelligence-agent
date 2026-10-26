@@ -100,7 +100,9 @@ async def build_memory_v2_service(settings: Settings) -> MemoryV2Service:
     await store.initialize()
     await store.purge_expired_tombstones()
     # #1494 AC3：旧 SQLite 五类操作状态一次性导入，旧 completed-but-unpublished 按记录补发布。
-    await import_legacy_state(store, commit)
+    import_report = await import_legacy_state(store, commit)
+    if import_report.get("converged") is False:
+        logger.warning("memory legacy import not converged: %s", import_report)
     # 启动对账：上次进程在发布中途被杀时，回执决定「补发布 / 已发布 / 冲突」。
     report = await commit.reconcile()
     if not report.ok:
@@ -111,6 +113,7 @@ async def build_memory_v2_service(settings: Settings) -> MemoryV2Service:
     await staged.initialize()
     # #1437：审批重放的写入也投影进派生层（与工具直写同一入口）。
     service = MemoryV2Service(store, index, relay=relay, commit=commit, staged=staged)
+    service.record_legacy_import(import_report)
     # #1461：被审批门拦下的后台写入。writer 就是本 service——promote 用 executor 那套
     # `*_in` 在它自己的事务里重放。
     blocked = BlockedWriteStore(state_root, service, commit, store)

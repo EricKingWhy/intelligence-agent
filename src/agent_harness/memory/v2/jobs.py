@@ -381,7 +381,7 @@ class MemoryV2JobStore:
         state: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
         reason: str | None = None, now: datetime | None = None,
         stage: MemoryJobStage = MemoryJobStage.COMPLETED,
-        after_work: Callable[[T], Awaitable[None]] | None = None,
+        before_commit: Callable[[T], Awaitable[None]] | None = None,
     ) -> T | None:
         """执行 `work(connection)`（记录层事务），随后写下成功终态。
 
@@ -391,10 +391,10 @@ class MemoryV2JobStore:
         顺序与保证见模块 docstring。`work` 里必须只用**确定性 id** 写派生层，
         这样"记录已提交、终态未落"的窗口重跑不会产生第二条逻辑记忆。
 
-        `after_work`（#1494）在记录事务**已提交**、终态**未写**之间执行：markdown
-        权威面的补落只能落在这个窗口（它不能参与 SQLite 事务）。它抛异常时终态不写，
-        job 仍是未终结 ⇒ 恢复扫描重跑；重跑用同一批确定性 id / operation id，不会
-        产生第二次逻辑写入。这正是"替换后、回执前"kill 窗口的可对账形态。
+        `before_commit`（#1494）在 `work` 之后、**SQLite 事务提交之前**执行：内容发布
+        落在记录层尚未提交的窗口里；发布失败 ⇒ 记录事务回滚、job 不写终态。这就是
+        ADR-0058 D8 的「内容 → records → 终态」；重跑用同一批确定性 id / operation id，
+        不会产生第二次逻辑写入。
         """
         now_stamp = stamp(now)
         async with async_file_lock(self._lock_path(job_id)):
@@ -408,11 +408,11 @@ class MemoryV2JobStore:
                     latest = await self._try_read_async(job_id)
                     if latest is None or not self._owned_and_live(latest, worker_id, now_stamp):
                         raise _LeaseLost
+                    if before_commit is not None:
+                        await before_commit(result)
             except _LeaseLost:
                 logger.warning("memory job %s lost its lease during apply; rolled back", job_id)
                 return None
-            if after_work is not None:
-                await after_work(result)
             final_state = state() if callable(state) else state
             terminal = _advanced(
                 latest, stage=stage, state=final_state, outcome=outcome, reason=reason)

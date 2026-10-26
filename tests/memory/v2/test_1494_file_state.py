@@ -31,7 +31,8 @@ from agent_harness.memory.v2.jobs import MemoryV2JobStore, job_id_for
 from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER
 from agent_harness.memory.v2.receipts import ReceiptState, ReceiptStore
 from agent_harness.memory.v2.tombstones import FileTombstoneStore
-from agent_harness.memory.v2.types import TrustedMemoryIdentity
+from agent_harness.memory.v2.types import MemoryScope, TrustedMemoryIdentity
+from agent_harness.memory.v2.write_approval import _identity
 from tests.memory.v2._records import make_draft
 
 USER_A = TrustedMemoryIdentity(tenant_id="tenant-a", user_id="user-a")
@@ -105,6 +106,60 @@ def test_state_file_ids_cannot_escape_the_state_directory() -> None:
             safe_id(bad, what="memory id")
 
 
+def test_state_file_ids_reject_windows_device_names_and_trailing_dot() -> None:
+    """跨平台同一份状态文件：Windows 保留设备名/结尾点会被文件系统静默改写。"""
+    for bad in ("CON", "nul.json", "COM1", "lpt9.memory", "mem."):
+        with pytest.raises(ValueError):
+            safe_id(bad, what="memory id")
+
+
+@pytest.mark.asyncio
+async def test_corrupt_settings_file_is_an_error_not_silent_defaults(
+    workspace: Workspace,
+) -> None:
+    from agent_harness.memory.v2.settings_store import FileMemorySettingsStore
+
+    workspace.root.ensure()
+    workspace.root.settings_path.write_text(
+        '{"schema": 1, "values": {"write_approval": "yes"}}', encoding="utf-8")
+    with pytest.raises(CorruptStateFile):
+        await FileMemorySettingsStore(workspace.root).get()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_staged_and_blocked_files_do_not_break_the_queues(
+    workspace: Workspace,
+) -> None:
+    workspace.root.ensure()
+    (workspace.root.staged_dir / "stg_corrupt.json").write_text("{not json", encoding="utf-8")
+    (workspace.root.blocked_dir / "blk_corrupt.json").write_text("{not json", encoding="utf-8")
+    staged = await workspace.service.staged.stage(
+        {"target": "memory", "action": "add", "content": "队列里唯一可读的待审"}, None, USER_A)
+    blocked_id = await workspace.service.blocked.insert(
+        job_id="job-corrupt-neighbour", identity=_identity(USER_A), project_id=None,
+        payload={"actions": []},
+    )
+
+    assert [item.id for item in await workspace.service.staged.pending(USER_A)] == [staged.id]
+    assert [item.id for item in await workspace.service.blocked.list_for(
+        USER_A.tenant_id, USER_A.user_id)] == [blocked_id]
+
+
+def test_corrupt_tombstone_refuses_replay_instead_of_allowing_it(
+    workspace: Workspace,
+) -> None:
+    workspace.root.ensure()
+    (workspace.root.tombstones_dir / "mem_corrupt.json").write_text(
+        "{not json", encoding="utf-8")
+
+    tombstone = FileTombstoneStore(workspace.root)
+    blocked = tombstone.blocks_replay(
+        USER_A, scope=MemoryScope.USER_GLOBAL, project_id=None,
+        content="任何正文", source_event_ids=[],
+    )
+    assert blocked is True, "读不出墓碑就不能证明没删过：必须按拒绝处理"
+
+
 def test_atomic_write_leaves_no_temporary_files(tmp_path: Path) -> None:
     target = tmp_path / "state" / "one.json"
     atomic_write_text(target, '{"a": 1}\n')
@@ -124,7 +179,7 @@ async def test_settings_owner_is_one_file_with_only_explicit_keys(workspace: Wor
 
     payload = read_json(workspace.root.settings_path)
     assert payload is not None
-    assert payload["settings"] == {"write_approval": True}, "只写显式设置的键"
+    assert payload["values"] == {"write_approval": True}, "只写显式设置的键"
 
     restarted = await workspace.restart()
     settings = await restarted.get_settings(USER_A)

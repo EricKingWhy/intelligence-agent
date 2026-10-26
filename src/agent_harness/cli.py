@@ -3779,17 +3779,34 @@ async def _memory_command(
             lines.append(f"    {operation_id}")
         if report.needs_reconcile:
             lines.append(f"  待人工裁决: {len(report.needs_reconcile)}")
-            for operation_id, target in report.needs_reconcile:
-                lines.append(f"    {operation_id}  target={target}")
+            for operation_id, reason in report.needs_reconcile:
+                lines.append(f"    {operation_id}  reason={reason}")
         if report.unreadable:
             lines.append(f"  回执不可读: {len(report.unreadable)}")
             for name, error in report.unreadable:
                 lines.append(f"    {name}: {error}")
-        if report.handler_failures:
-            lines.append(f"  后置处理失败: {len(report.handler_failures)}")
-            for operation_id, error in report.handler_failures:
-                lines.append(f"    {operation_id}: {error}")
-        return "\n".join(lines), not report.ok
+        import_report = service.legacy_import_report
+        import_failed = False
+        if import_report and not import_report.get("skipped"):
+            import_failed = import_report.get("converged") is False
+            lines.append(
+                "旧状态导入："
+                f"settings={import_report.get('settings', 0)}"
+                f"（冲突 {import_report.get('settings_conflicts', 0)}）"
+                f" tombstone={import_report.get('tombstones', 0)}"
+                f" staged={import_report.get('staged', 0)}"
+                f" blocked={import_report.get('blocked', 0)}"
+                f" jobs={import_report.get('jobs', 0)}"
+                f" 补发布={import_report.get('republished', 0)}"
+                f"（不可读 {import_report.get('republish_unreadable', 0)}）"
+            )
+            if import_failed:
+                lines.append(
+                    "  导入未收敛：存在 settings 冲突或补发布不可读；"
+                    "见 memory-state/settings-conflict.json 与 NEED_RECONCILE 回执，"
+                    "处理后才会写完成标记。"
+                )
+        return "\n".join(lines), not report.ok or import_failed
     if args.command == "reproject":
         # #1482 Finding 二甲案：给降级 warning 指的那句运维指令接一个真实入口。
         # 与 migrate 分支不同——reproject 必须读活账本与派生层，所以走 `build_memory_v2_service`

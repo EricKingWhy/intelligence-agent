@@ -62,13 +62,15 @@ job」，不需要按用户分锁）；回执侧另加 `receipts/locks/<operatio
 
 ```python
 class MemoryCommit:
-    async def add(self, target, content, *, operation_id=None, origin=Origin.FOREGROUND, payload=None) -> CommitResult
-    async def replace(self, target, old_text, content, *, matched_entry=None, fallback_add=False, ...) -> CommitResult
-    async def remove(self, target, old_text, *, matched_entry=None, ...) -> CommitResult
-    async def apply_batch(self, target, operations, *, trusted_pins=None, dry_run=False, ...) -> CommitResult
-    async def remove_by_digest(self, digests, *, ...) -> CommitResult
-    async def execute(self, targets_ops..., operation_id, ...) -> CommitResult   # 显式多目标
-    async def reconcile(self, *, handlers=()) -> ReconcileReport
+    async def add(self, target, content, *, operation_id=None, origin=None, payload=None) -> dict
+    async def replace(self, target, old_text, new_content, matched_entry=None, *, fallback_add=False, operation_id=None, origin=None, payload=None) -> dict
+    async def remove(self, target, old_text, matched_entry=None, *, missing_ok=False, operation_id=None, origin=None, payload=None) -> dict
+    async def apply_batch(self, target, operations, *, trusted_pins=False, operation_id=None, origin=None, payload=None) -> dict
+    async def remove_by_digest(self, digests, *, operation_id=None, origin=None, payload=None) -> list[str]
+    def content_error(self, content) -> str | None            # 系统镜像的碰盘前全量预检
+    async def resolve_entry(self, target, old_text, verb) -> dict
+    async def resolve_batch_entries(self, target, operations) -> dict
+    async def reconcile(self) -> ReconcileReport
 ```
 
 要点：
@@ -82,7 +84,7 @@ class MemoryCommit:
   同一 op 处于 NEED_RECONCILE ⇒ 原样返回待对账，不重试。
 - **markdown_store 降为文件引擎**：只保留只读 API（`render_snapshot` / `disk_entries` /
   `resolve_entry` / `resolve_batch_entries` / `target_for` / `entry_digest` / `load_from_disk` /
-  上限与启用开关）与一个 `mutate(target, mutator)` 临界区（锁 + 重读 + 漂移备份 + 原子写）；
+  上限与启用开关）与一个 `mutate_now(target, mutator)` 临界区（锁 + 重读 + 漂移备份 + 原子写）；
   `add/replace/remove/apply_batch/remove_by_digest` 的**实现**整体迁入 `commit.py`。
   静态与运行时两路证明唯一写者（D12）。
 
@@ -98,8 +100,10 @@ class MemoryCommit:
 | `NEED_RECONCILE` | 某目标磁盘内容**既非 before 也非 after**（外部编辑或未知），不盲重跑 |
 
 回执字段：`schema` / `operation_id` / `state` / `origin` / `created_at` / `updated_at` /
-`targets{<name>: {before_digest, after_digest, published}}` / `operations[]`（可重放的意图） /
-`payload`（调用方元数据，如 formation 的 apply 计划） / `reason` / `error`。
+`targets{<name>: {before_digest, after_digest, planned, published}}` / `operations[]`（可重放的意图） /
+`payload`（调用方元数据，如 formation 的 apply 计划） / `result`（成功响应的可回放快照） / `reason`。
+终态回执把 `operations` / `payload` 中的正文替换为 `<field>_digest` + `<field>_chars`：
+重放只读 `result`，回执不必长期复制一份记忆正文（未终态回执保持原样供补发布）。
 
 摘要口径：`digest = sha256("\n§\n".join(entries))`——对**解析后的条目序列**取摘要（不是原始字节），
 与 `entry_digest` 同一族，行尾归一化不影响判定。
@@ -115,7 +119,7 @@ class MemoryCommit:
 
 **对账判定**（`reconcile()`，启动期与 CLI 共用）：对每个未终态回执，逐目标比对磁盘摘要 ——
 
-- 全部命中 `after`（或该目标本来无事可做）⇒ 标 `COMMITTED`，派发 handler（D10）；
+- 全部命中 `after`（或该目标本来无事可做）⇒ 标 `COMMITTED`；
 - 全部命中 `before` ⇒ 尚未发布：按回执里的 `operations` 在锁内**重放**（确定性：before 相同 ⇒
   mutator 输出相同），完成发布后标 `COMMITTED`；
 - 部分 `after`、部分 `before` ⇒ 「两文件部分发布」窗口：补发布未完成的 `before` 目标并标 `COMMITTED`；
@@ -127,8 +131,10 @@ class MemoryCommit:
 
 一 job 一文件，文件即幂等键：
 
-- `job_id = "job_" + sha256(idempotency_key)[:32]`——**确定性派生**，`enqueue` 用 `O_CREAT|O_EXCL`
-  创建；已存在（含终态）⇒ 原样返回既有记录。同一 key 物理上不可能产生第二个 job。
+- `job_id = "job_" + sha256(idempotency_key)[:32]`——**确定性派生**。`enqueue` 在全局
+  `jobs/enqueue.lock`（与 claim 同一把锁）内先查同 id 文件、再原子写：已存在（含终态）⇒
+  原样返回既有记录。同一 key 物理上不可能产生第二个 job；不用 `O_CREAT|O_EXCL` 是因为
+  先写临时文件再 `os.replace` 才是本仓统一的崩溃安全形状。
 - 字段沿用现有语义与取值：`MemoryJobStage`（`queued/forming/adjudicating/applying/completed/degraded`）、
   `MemoryJobOutcome`（`committed/no_write/blocked`）、`lease_owner` / `lease_expires_at`（默认 300s，
   语义与现值一致）、protected-fact 三列、`state` / `reason`。
@@ -201,17 +207,17 @@ created/update/invalidate/edit 原为 Markdown 先，只需把「Markdown 直写
 
 | 旧载体 | 导入规则 |
 |---|---|
-| `memory_v2_settings` | 恰一行 ⇒ 原值导入；多行且四值全同 ⇒ 导入（值等价，记日志）；多行且有差异 ⇒ **不导入**、不折叠，写入回执 `settings_conflict` 供人工裁决 |
+| `memory_v2_settings` | 恰一行 ⇒ 原值导入；多行且四值全同 ⇒ 导入（值等价，记日志）；多行且有差异 ⇒ **不导入**、不折叠，写 `memory-state/settings-conflict.json` 供人工裁决并保持 marker 未完成。`settings.json` 已存在 ⇒ 不覆盖（崩溃重跑时先写的那份是证据） |
 | `memory_v2_tombstones` | 未过期者按 `memory_id` 逐条落到文件；已过期者不导入 |
-| `memory_v2_staged` | `PENDING` 原样导入；`APPROVING` 且过期 ⇒ 回 `PENDING`（假 lease 不迁移）；`APPROVED/REJECTED` 只留旧库历史 |
-| `memory_v2_blocked` | `BLOCKED` 原样导入；已处置者不再导入 |
-| `memory_v2_jobs` | **非终态** job 按 idempotency key 导入（续跑）；终态不进运行路径 |
+| `memory_v2_staged` | 全部状态按原值导入：`PENDING` 可被 approve；`APPROVING` 读时按租约回收；`APPROVED/REJECTED` 保留终态，使并发审批看到「已处理」而不是重新执行 |
+| `memory_v2_blocked` | 全部状态按确定性 id 导入（含已处置）：`insert` 的查重不分 status，保留终态才不会把同一个决定重新问一遍；只有 `BLOCKED` 出现在待处置列表 |
+| `memory_v2_jobs` | 全部 job 按幂等键导入：非终态可被 claim 续跑；终态保留使同一 key 的 `enqueue` 回放既有结果，而不是新建第二个 job |
 
 **旧 completed-but-unpublished 对账**：终态 `completed` 且 `outcome=committed` 的旧 job，按其
 `state.memory_ids` 回查 records 的 `content`，对 `target_for(kind, tier)` 的目标文件逐条核验；
-文件里没有 ⇒ 经 `MemoryCommit` 补发布（`operation_id = "legp_<jobhex>_<memhex>"`，内容去重幂等）；
-records 行已不可查 ⇒ 记为 `NEED_RECONCILE` 条目，不编造内容。导入回执落 `legacy-import.json`
-（计数 + 旧库指纹）；有未收敛项时不写完成标记，下次启动重试。
+文件里没有 ⇒ 经 `MemoryCommit` 补发布（`operation_id = "legp_" + sha256("<job_id>:<memory_id>")[:32]`，
+内容去重幂等）；records 行已不可查 ⇒ 写 `NEED_RECONCILE` 回执，不编造内容。导入回执落
+`legacy-import.json`（计数 + 旧库指纹）；有未收敛项时不写完成标记，下次启动重试。
 
 ### D10 恢复入口
 
@@ -223,8 +229,8 @@ records 行已不可查 ⇒ 记为 `NEED_RECONCILE` 条目，不编造内容。�
    在下一次动作里前进（staged 重试 approve ⇒ `stgp_` 回放后置 approved；blocked 重试
    promote ⇒ `blkp_` 回放后置 promoted；job 被重新 claim ⇒ `jobp_` 回放后写终态）。
    这些 owner 本来就有幂等重试入口，再维护一份启动期 handler 表会形成第二套状态推进路径，
-   违背 ADR-0056 §3 的单一 owner。`mcf_` / `del_` / `legp_` 无状态机需要收尾——内容已是
-   真相，派生收敛走 `memory reproject`。
+  违背 ADR-0056 §3 的单一 owner。`mcf_` / `del_` / `legp_` / `mig_` 无状态机需要收尾——
+  内容已是真相，派生收敛走 `memory reproject`。
 
 ### D11 并发原语（理由与边界）
 
@@ -235,7 +241,7 @@ claim 路径：**claim 锁 → job 锁**。反向获取一律不写进代码。
 
 ### D12 唯一写者的机器化证明
 
-- **静态**：`mutate` 的调用者只允许 `commit.py`；测试遍历 `src/agent_harness/**/*.py`，
+- **静态**：`mutate_now` 的调用者只允许 `commit.py`；测试遍历 `src/agent_harness/**/*.py`，
   断言除 `markdown_store.py` 自身与 `commit.py` 外没有任何模块调用它，也没有第二个模块打开
   `memories/` 下的写入句柄。
 - **运行时**：同一测试驱动真实入口（`memory` 工具、service create/update/invalidate、edit、

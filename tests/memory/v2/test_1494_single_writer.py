@@ -26,11 +26,12 @@ from agent_harness.memory.v2 import assembly
 from agent_harness.memory.v2.markdown_store import (
     MarkdownMemoryStore,
     entries_digest,
+    entry_digest,
 )
 from agent_harness.memory.v2.memory_tool import MemoryTool, _MemoryArgs
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.memory.v2.write_approval import _identity
-from tests.memory.v2._records import make_draft
+from tests.memory.v2._records import make_draft, make_record
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SOURCE_ROOT = REPO_ROOT / "src" / "agent_harness"
@@ -149,6 +150,15 @@ async def test_every_runtime_write_is_paired_with_a_committed_receipt(tmp_path: 
     assert (await tool.execute(
         _MemoryArgs(action="add", target="memory", content="工具写入"))).ok is True
 
+    # formation 的提交前发布（executor 走的就是这个入口，确定性 jobp_ 前缀）
+    await service.mirror_committed(
+        [make_record(memory_id="mem-formation-writer", content="formation 写入")],
+        operation_prefix="jobp_single_writer",
+    )
+    # 双目标按 digest 清理（治理删除的墓碑-only 分支）
+    await service.commit.remove_by_digest(
+        [entry_digest("工具写入")], operation_id="del_single_writer_digest")
+
     staged = service.staged
     record = await staged.stage(
         {"target": "memory", "action": "add", "content": "审批写入"}, None, LOCAL)
@@ -170,12 +180,19 @@ async def test_every_runtime_write_is_paired_with_a_committed_receipt(tmp_path: 
     assert writes, "本用例必须真的发生内容落盘"
 
     planned: set[tuple[str, str]] = set()
+    prefixes: set[str] = set()
     for path in service.state_root.receipts_dir.glob("*.json"):
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["state"] == "COMMITTED", path.name
+        prefixes.add(payload["operation_id"].split("_", 1)[0] + "_")
         for target, plan in payload["targets"].items():
-            if plan.get("planned") and plan.get("after_digest"):
+            if (
+                plan.get("planned")
+                and plan.get("after_digest")
+                and plan["after_digest"] != plan.get("before_digest")
+            ):
                 planned.add((target, plan["after_digest"]))
+    assert {"mcf_", "del_", "stgp_", "blkp_", "jobp_"} <= prefixes
 
     unpaired = [item for item in writes if item not in planned]
     assert unpaired == [], f"这些落盘没有回执计划（说明绕过了 commit）：{unpaired}"

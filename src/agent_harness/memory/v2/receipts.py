@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -45,13 +46,15 @@ from agent_harness.memory.v2.file_state import (
 
 logger = logging.getLogger(__name__)
 
-#: 回执文件名前缀 → 提交者职责。用于对账后派发 handler（ADR-0058 D10）。
+#: 回执文件名前缀 → 提交者职责。前缀只用于观测/审计与测试配对；
+#: ADR-0058 D10 明确没有 handler 注册表，对账不按前缀派发。
 OP_PREFIX_TOOL = "mcf_"          # memory 工具 / capability service 的单目标写入
 OP_PREFIX_JOB = "jobp_"          # formation apply
 OP_PREFIX_STAGED = "stgp_"       # 待审写入批准后的重放
 OP_PREFIX_BLOCKED = "blkp_"      # 被拦下写入的 promote
 OP_PREFIX_DELETE = "del_"        # 治理删除的内容侧
 OP_PREFIX_LEGACY = "legp_"       # 旧 completed-but-unpublished 补发布
+OP_PREFIX_MIGRATION = "mig_"     # 旧记录一次性迁移（memory migration / identity mapping）
 
 
 class ReceiptState:
@@ -250,6 +253,10 @@ class ReceiptStore:
 
         ``result`` 是成功响应的可回放快照：同 operation id 的重试直接回放它，
         不再碰文件、也不再跑一遍 mutator（AC4「同 key 只一次逻辑更新」）。
+
+        终态后正文不再有重放价值：``operations``/``payload`` 里的正文换成 sha256 +
+        长度（保留审计与「是不是同一份意图」的可核对性），避免每条回执长期复制一份
+        记忆正文。未终态回执不动——对账补发布还要用它。
         """
         receipt = self._require(operation_id)
         if receipt.state != ReceiptState.NEED_RECONCILE:
@@ -257,6 +264,8 @@ class ReceiptStore:
             receipt.reason = None
             if result is not None:
                 receipt.result = dict(result)
+            receipt.operations = _scrub_bodies(receipt.operations)
+            receipt.payload = _scrub_bodies(receipt.payload)
             self._write(receipt)
         return receipt
 
@@ -275,11 +284,28 @@ class ReceiptStore:
         return receipt
 
 
+def _scrub_bodies(value: Any) -> Any:
+    """递归把正文类字段替换成 ``<field>_digest`` + ``<field>_chars``（只用于终态回执）。"""
+    if isinstance(value, dict):
+        scrubbed: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"content", "old_text", "matched_entry"} and isinstance(item, str) and item:
+                scrubbed[f"{key}_digest"] = hashlib.sha256(item.encode("utf-8")).hexdigest()
+                scrubbed[f"{key}_chars"] = len(item)
+            else:
+                scrubbed[key] = _scrub_bodies(item)
+        return scrubbed
+    if isinstance(value, list):
+        return [_scrub_bodies(item) for item in value]
+    return value
+
+
 __all__ = [
     "OP_PREFIX_BLOCKED",
     "OP_PREFIX_DELETE",
     "OP_PREFIX_JOB",
     "OP_PREFIX_LEGACY",
+    "OP_PREFIX_MIGRATION",
     "OP_PREFIX_STAGED",
     "OP_PREFIX_TOOL",
     "CommitReceipt",

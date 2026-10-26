@@ -175,7 +175,7 @@ class FileTombstoneStore:
 
     # ------------------------------------------------------------------ 读
 
-    def _scan(self) -> list[dict[str, Any]]:
+    def _scan(self, *, fail_closed: bool = False) -> list[dict[str, Any]]:
         directory = self.root.tombstones_dir
         if not directory.exists():
             return []
@@ -184,6 +184,10 @@ class FileTombstoneStore:
             try:
                 payload = read_json(path)
             except CorruptStateFile:
+                if fail_closed:
+                    # 重放判定不能跳过坏文件：读不出内容就无法证明「这条没被删过」，
+                    # 放行等于让一次删除抑制静默失效。交给调用方按拒绝处理。
+                    raise
                 logger.warning("unreadable tombstone skipped: %s", path.name)
                 continue
             if payload is not None:
@@ -303,7 +307,12 @@ class FileTombstoneStore:
         now_stamp = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
         content_digest = entry_digest(content)
         sources = {entry_digest(value) for value in source_event_ids}
-        for payload in self._scan():
+        try:
+            payloads = self._scan(fail_closed=True)
+        except CorruptStateFile as error:
+            logger.warning("tombstone unreadable; refusing replay (fail-closed): %s", error)
+            return True
+        for payload in payloads:
             if not (
                 payload.get("tenant_id") == trusted.tenant_id
                 and payload.get("user_id") == trusted.user_id

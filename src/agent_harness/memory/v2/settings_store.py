@@ -49,6 +49,10 @@ class FileMemorySettingsStore:
     def __init__(self, root: MemoryStateRoot) -> None:
         self.root = root
 
+    @property
+    def path(self):
+        return self.root.settings_path
+
     async def initialize(self) -> None:
         await asyncio.to_thread(self.root.ensure)
 
@@ -58,11 +62,16 @@ class FileMemorySettingsStore:
         payload = read_json(self.root.settings_path)
         if payload is None:
             return {}
-        settings = payload.get("settings")
+        settings = payload.get("values")
         if not isinstance(settings, dict):
-            raise CorruptStateFile("settings.json has no object under 'settings'")
+            raise CorruptStateFile("settings.json has no object under 'values'")
+        for key in SETTING_KEYS:
+            if key in settings and not isinstance(settings[key], bool):
+                # "false" / 0 这类字符串/数字不能 bool() 强转：写错一位就会把审批门
+                # 从关变开。坏值按损坏文件处理，不静默取真值。
+                raise CorruptStateFile(f"settings.json value {key!r} is not a boolean")
         return {
-            key: bool(settings[key]) for key in SETTING_KEYS if key in settings
+            key: settings[key] for key in SETTING_KEYS if key in settings
         }
 
     async def explicit(self) -> dict[str, bool]:
@@ -87,7 +96,7 @@ class FileMemorySettingsStore:
             current.update(changes)
             write_json(self.root.settings_path, {
                 "schema": SCHEMA_VERSION,
-                "settings": current,
+                "values": current,
                 "updated_at": utc_stamp(),
             })
             return current

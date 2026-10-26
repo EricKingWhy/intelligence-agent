@@ -114,7 +114,17 @@ class MemoryV2Service:
         #: #1461：后台 formation 被拦下的写入（第二段处置通道）。executor 的 gate 开路径
         #: 往里落行，CLI/Web 从里面 promote/discard。
         self._blocked = blocked
+        #: #1494 D9：最近一次旧状态导入读数。未收敛（settings 冲突 / 补发布不可读）时
+        #: CLI `memory reconcile` 要能看见并计入退出码，不能只留在启动日志。
+        self._legacy_import_report: dict[str, Any] | None = None
         self._tombstone_purger: asyncio.Task | None = None
+
+    @property
+    def legacy_import_report(self) -> dict[str, Any] | None:
+        return self._legacy_import_report
+
+    def record_legacy_import(self, report: dict[str, Any]) -> None:
+        self._legacy_import_report = dict(report)
 
     def start_tombstone_purger(self, *, interval_seconds: float = 3600) -> None:
         """Purge expired tombstones hourly for long-lived processes."""
@@ -230,7 +240,8 @@ class MemoryV2Service:
     # 权威面就永远缺这条事实，而派生层看起来一切正常。
     #
     # 事务内写（`*_in`）**不做** markdown 镜像：它们跑在 formation job 的事务里，markdown
-    # 写无法参与那笔提交；由执行器在提交成功后调用 `mirror_committed` 补落（见 executor）。
+    # 写无法参与那笔提交；执行器把 `mirror_committed` 挂在 `commit_with_outcome` 的
+    # `before_commit` 上——发布失败则记录事务回滚、job 不写终态（ADR-0058 D8）。
 
     @property
     def markdown(self) -> MarkdownMemoryStore | None:
@@ -292,6 +303,10 @@ class MemoryV2Service:
         if response.get("success"):
             return
         message = str(response.get("error") or "unknown error")
+        operation_id = response.get("operation_id")
+        if operation_id:
+            # 失败也要能追到回执：用户/CLI 用这个 id 跑 `memory reconcile`。
+            message += f"（operation {operation_id}）"
         entries = response.get("current_entries")
         # `usage` 只由预算类失败携带（`_failure_with_entries` / `_batch_failure`）；
         # 零命中之类的可自纠失败带 `current_entries` 但不带 `usage`，不能报成预算耗尽。
@@ -371,11 +386,10 @@ class MemoryV2Service:
     async def _mirror_deleted(
         self, memories: Sequence[MemoryRecordV2], *, digests: Sequence[str] = (),
     ) -> None:
-        """硬删（delete / bulk_delete）后把条目从 markdown 移除。
+        """硬删（delete / bulk_delete）把条目从 markdown 移除；失败即上抛。
 
-        这是派生投影：SQLite 的删除已提交，markdown 失败不回滚，只留告警（含记录 id，
-        不含条目内容）。``digests`` 只在墓碑-only 删除时给出——那时记录行已经不在，
-        只能按正文哈希清理（见 `store.MemoryDeletionReceiptV2`）。
+        调用方（#1494）把本方法放在 records 删除**之前**：markdown 不成功时记录仍在，
+        重试同一次删除是幂等的，不会出现"记录已删、权威面还在"的分叉。
         """
         commit = self._commit
         if commit is None:
@@ -385,85 +399,57 @@ class MemoryV2Service:
             target = self.markdown_target(memory)
             if not engine.target_enabled(target):
                 continue
-            try:
-                response = await commit.remove(
-                    target, memory.content, matched_entry=memory.content,
-                    operation_id=f"del_{memory.memory_id}",
-                )
-            except Exception as error:  # noqa: BLE001 — 见 docstring
-                logger.warning(
-                    "markdown 删除投影失败（%s），SQLite 已提交：%s",
-                    type(error).__name__, memory.memory_id,
-                )
-                continue
-            if not response.get("success"):
-                logger.warning("markdown 删除投影未生效，SQLite 已提交：%s", memory.memory_id)
+            response = await commit.remove(
+                target, memory.content, matched_entry=memory.content, missing_ok=True,
+                operation_id=f"del_{memory.memory_id}",
+            )
+            self._require_markdown_success(response, "remove")
         if digests:
-            try:
-                cleaned = await commit.remove_by_digest(
-                    digests, operation_id=_digest_operation_id(digests))
-            except Exception as error:  # noqa: BLE001 — 同上，派生投影失败只留痕
-                logger.warning("markdown 墓碑清理失败（%s）", type(error).__name__)
-            else:
-                if cleaned:
-                    # 补偿路径成功：删掉的正是墓碑声明已失效的残留条目，不是故障。
-                    logger.info("markdown 按墓碑哈希清理了残留条目：%s", ", ".join(cleaned))
+            # 墓碑-only 删除：记录行已不在，只能按正文哈希清理。零命中就是已经清理过。
+            await commit.remove_by_digest(
+                digests, operation_id=_digest_operation_id(digests))
 
     async def mirror_committed(
         self, records: Sequence[MemoryRecordV2], *, invalidated: Sequence[MemoryRecordV2] = (),
         operation_prefix: str | None = None,
     ) -> None:
-        """事务内写（formation job）**提交之后**补落 markdown。
+        """formation job 的内容发布：**在 records 事务提交前**执行（ADR-0058 D8）。
 
-        formation 的写入走 `create_in/update_in/invalidate_in`，它们与 job 终态在同一笔
-        SQLite 事务里；markdown 写不可能参与那笔提交，所以只能在这里补。补写失败**不回滚**
-        已提交的 SQLite（事实已经成立），只记一条告警：markdown 下一次读取/投影会收敛，
-        而把已提交的事实回滚掉才是真的丢数据。
+        发布失败必须上抛：`commit_with_outcome` 会回滚记录事务、不写终态，恢复扫描
+        用同一批确定性 id / `jobp_` 回执重跑。这里绝不把失败降成 warning——那会让
+        job 以 COMMITTED 收尾而权威面没有内容（AC4）。
 
-        失败同样有两种形态：异常，以及 `success=False`（预算/扫描）——两者都必须留痕。
-        顺序是**先删旧、再加新**：后台 update 的新旧版本内容可能重合，反序会在删除时
-        把刚写进去的新条目一起删掉。
+        先做一次全量内容预检（delimiter / threat），任何一条不合格都在碰盘前失败，
+        避免"前几条已发布、后一条被拒"的半批状态。
         """
         commit = self._commit
         if commit is None:
             return
         engine = commit.engine
+        planned = [
+            (record, self.markdown_target(record)) for record in records
+            if engine.target_enabled(self.markdown_target(record))
+        ]
+        for record, _target in planned:
+            if error := commit.content_error(record.content):
+                raise MarkdownAuthorityError(f"markdown mirror rejected content: {error}")
 
         def _op(kind: str, memory_id: str) -> str | None:
             return f"{operation_prefix}_{kind}_{memory_id}" if operation_prefix else None
 
+        # 先删旧、再加新：后台 update 的新旧内容可能重合，反序会把刚写的新条目删掉。
         for record in invalidated:
             target = self.markdown_target(record)
             if not engine.target_enabled(target):
                 continue
-            try:
-                response = await commit.remove(
-                    target, record.content, matched_entry=record.content,
-                    operation_id=_op("rm", record.id),
-                )
-            except Exception as error:  # noqa: BLE001 — 见 docstring
-                logger.warning(
-                    "markdown 撤回投影失败（%s），SQLite 已提交：%s",
-                    type(error).__name__, record.id,
-                )
-                continue
-            if not response.get("success"):
-                logger.warning("markdown 撤回投影未生效，SQLite 已提交：%s", record.id)
-        for record in records:
-            target = self.markdown_target(record)
-            if not engine.target_enabled(target):
-                continue
-            try:
-                response = await commit.add(
-                    target, record.content, operation_id=_op("add", record.id),
-                )
-            except Exception as error:  # noqa: BLE001 — 见 docstring
-                logger.warning(
-                    "markdown 投影失败（%s），SQLite 已提交：%s", type(error).__name__, record.id,
-                )
-                continue
-            if not response.get("success"):
-                logger.warning("markdown 投影未生效，SQLite 已提交：%s", record.id)
+            self._require_markdown_success(await commit.remove(
+                target, record.content, matched_entry=record.content, missing_ok=True,
+                operation_id=_op("rm", record.id),
+            ), "remove")
+        for record, target in planned:
+            self._require_markdown_success(await commit.add(
+                target, record.content, operation_id=_op("add", record.id),
+            ), "add")
 
     async def list_records(
         self, trusted: TrustedMemoryIdentity, *, query: str | None = None,
@@ -525,8 +511,19 @@ class MemoryV2Service:
     async def delete(
         self, memory_id: str, trusted: TrustedMemoryIdentity,
     ) -> MemoryDeletionReceiptV2:
+        # D7/D8：墓碑 → 内容 → records。内容清理失败时记录仍在，重试删除是幂等的。
+        prepared = await self._store.prepare_tombstones(trusted, memory_id=memory_id)
+        await self._mirror_deleted(prepared)
         receipt = await self._store.delete(memory_id, trusted)
-        await self._mirror_deleted(receipt.memories, digests=receipt.content_hashes)
+        if not receipt.memories:
+            # 记录行早已不在（墓碑-only）：只剩按正文哈希清理残留条目。
+            await self._mirror_deleted((), digests=receipt.content_hashes)
+        else:
+            mirrored = {memory.memory_id for memory in prepared}
+            # 竞态窗口里新建/更新的行未被 prepare 看到：按内容再清一次（不在 prepared 集内）。
+            await self._mirror_deleted(
+                tuple(memory for memory in receipt.memories
+                      if memory.memory_id not in mirrored))
         if receipt.memories:
             try:
                 await self._delete_vectors(receipt.memories)
@@ -539,12 +536,15 @@ class MemoryV2Service:
     async def bulk_delete(
         self, trusted: TrustedMemoryIdentity, *, kind: MemoryKind | None,
     ) -> list[MemoryDeletionReceiptV2]:
+        prepared = await self._store.prepare_tombstones(
+            trusted, kind=kind, reason="bulk_delete")
+        await self._mirror_deleted(prepared)
         receipts = await self._store.bulk_delete(trusted, kind=kind)
         memories = tuple(memory for receipt in receipts for memory in receipt.memories)
-        await self._mirror_deleted(
-            memories,
-            digests=tuple(d for receipt in receipts for d in receipt.content_hashes),
-        )
+        mirrored = {memory.memory_id for memory in prepared}
+        extra = tuple(memory for memory in memories if memory.memory_id not in mirrored)
+        if extra:
+            await self._mirror_deleted(extra)
         if memories:
             try:
                 await self._delete_vectors(memories)

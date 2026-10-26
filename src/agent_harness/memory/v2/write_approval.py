@@ -52,8 +52,9 @@ import aiosqlite
 
 from agent_harness.memory.v2 import reprojection
 from agent_harness.memory.v2._sqlite import stamp, write_connection
-from agent_harness.memory.v2.commit import MemoryCommit
+from agent_harness.memory.v2.commit import MemoryCommit, MemoryCommitError
 from agent_harness.memory.v2.file_state import (
+    CorruptStateFile,
     MemoryStateRoot,
     async_file_lock,
     read_json,
@@ -182,7 +183,12 @@ class StagedWriteStore:
         return self.root.staged_dir / safe_id(staged_id, what="staged id")
 
     def _read(self, staged_id: str) -> dict[str, Any] | None:
-        return read_json(self.path_for(staged_id))
+        try:
+            return read_json(self.path_for(staged_id))
+        except CorruptStateFile as error:
+            # 坏文件不参与审批：抛出去会让整个待审列表不可用；当「读不到」处理并留证据。
+            logger.warning("staged write unreadable (%s): %s", staged_id, error)
+            return None
 
     @staticmethod
     def _to_staged(payload: dict[str, Any]) -> StagedWrite:
@@ -210,7 +216,11 @@ class StagedWriteStore:
             return []
         found: list[dict[str, Any]] = []
         for path in sorted(directory.glob("*.json")):
-            payload = read_json(path)
+            try:
+                payload = read_json(path)
+            except CorruptStateFile as error:
+                logger.warning("unreadable staged write skipped (%s): %s", path.name, error)
+                continue
             if payload is None:
                 continue
             payload = {**payload, "status": self._effective_status(payload, now=moment)}
@@ -498,7 +508,11 @@ class BlockedWriteStore:
         return self.root.blocked_dir / safe_id(blocked_id, what="blocked id")
 
     def _read(self, blocked_id: str) -> dict[str, Any] | None:
-        return read_json(self.path_for(blocked_id))
+        try:
+            return read_json(self.path_for(blocked_id))
+        except CorruptStateFile as error:
+            logger.warning("blocked write unreadable (%s): %s", blocked_id, error)
+            return None
 
     @staticmethod
     def _to_blocked(payload: dict[str, Any]) -> BlockedWrite:
@@ -564,7 +578,11 @@ class BlockedWriteStore:
             return []
         found: list[dict[str, Any]] = []
         for path in sorted(directory.glob("*.json")):
-            payload = read_json(path)
+            try:
+                payload = read_json(path)
+            except CorruptStateFile as error:
+                logger.warning("unreadable blocked write skipped (%s): %s", path.name, error)
+                continue
             if payload is not None:
                 found.append(payload)
         return found
@@ -596,8 +614,9 @@ class BlockedWriteStore:
     ) -> BlockedDecision:
         """按 payload 重放一条被拦下的写入。
 
-        顺序（ADR-0058 D8）：pin 复核 → 记录事务（确定性 id）→ 内容镜像（`blkp_`
-        回执）→ 文件转 promoted。文件锁在整段期间持有；任一 pin 失配 ⇒ 整条拒绝
+        顺序（ADR-0058 D8）：pin 复核 → records（未提交）→ 内容发布（`blkp_` 回执）→
+        SQLite 提交 → 文件转 promoted。内容发布失败 ⇒ 记录事务回滚、文件保持 blocked，
+        绝不宣称"已放行并落盘"。文件锁在整段期间持有；任一 pin 失配 ⇒ 整条拒绝
         （不逐条跳过：payload 是一组同 identity 的动作，只放行一部分会造出 block 时
         从未存在过的混合状态）。
         """
@@ -612,19 +631,27 @@ class BlockedWriteStore:
                 return BlockedDecision(
                     applied=False, reason=f"这条写入已被处置（{payload.get('status')}）。")
             actions = list((payload.get("payload") or {}).get("actions") or [])
-            async with write_connection(self.store.database_path) as connection:
-                drift = await _pin_drift(connection, actions)
-                if drift is not None:
-                    await asyncio.to_thread(
-                        self._set_note, blocked_id, payload, f"{DRIFT_PREFIX}{drift}")
-                    return BlockedDecision(
-                        applied=False,
-                        reason=f"目标已漂移（{drift}），整条拒绝；记录保持 blocked。")
-                records, superseded, invalidated = await self._replay_in(
-                    connection, actions, owner, blocked_id=blocked_id)
-            # 记录已提交；内容镜像失败只留痕（与 executor 的 `_apply` 同一语义）。
-            await self._mirror(records, invalidated=(*invalidated, *superseded),
-                               blocked_id=blocked_id)
+            try:
+                async with write_connection(self.store.database_path) as connection:
+                    drift = await _pin_drift(connection, actions)
+                    if drift is not None:
+                        await asyncio.to_thread(
+                            self._set_note, blocked_id, payload, f"{DRIFT_PREFIX}{drift}")
+                        return BlockedDecision(
+                            applied=False,
+                            reason=f"目标已漂移（{drift}），整条拒绝；记录保持 blocked。")
+                    records, superseded, invalidated = await self._replay_in(
+                        connection, actions, owner, blocked_id=blocked_id)
+                    # 内容在 records 事务**提交前**发布：失败 ⇒ 整个事务回滚。
+                    await self._mirror(records, invalidated=(*invalidated, *superseded),
+                                       blocked_id=blocked_id)
+            except (MemoryCommitError, ValueError) as error:
+                logger.warning(
+                    "blocked promote publish failed (%s): %s",
+                    type(error).__name__, blocked_id)
+                return BlockedDecision(
+                    applied=False,
+                    reason="内容发布失败，记录已回滚；这条写入仍保持 blocked，可重试。")
             await asyncio.to_thread(write_json, self.path_for(blocked_id), {
                 **payload, "status": PROMOTED, "disposition_note": None,
                 "disposed_at": stamp(),
@@ -657,35 +684,40 @@ class BlockedWriteStore:
     async def _mirror(
         self, records: tuple[Any, ...], *, invalidated: tuple[Any, ...], blocked_id: str,
     ) -> None:
-        """把已提交记录投影到 markdown（确定性 `blkp_` operation id，可回执回放）。"""
+        """把记录投影到 markdown（确定性 `blkp_` operation id，可回执回放）。
+
+        调用点在 records 事务提交前；失败必须上抛让事务回滚。内容不合规先整体预检，
+        避免半批发布后才被拒。
+        """
+        commit = self.commit
+        for record in (*records, *invalidated):
+            target = self.writer.markdown_target(record)
+            if not self.commit.engine.target_enabled(target):
+                continue
+            if (
+                record.status is MemoryStatus.ACTIVE
+                and (error := commit.content_error(record.content))
+            ):
+                raise ValueError(f"markdown publish rejected content: {error}")
         for index, record in enumerate(invalidated, 1):
             target = self.writer.markdown_target(record)
             if not self.commit.engine.target_enabled(target):
                 continue
-            try:
-                await self.commit.remove(
-                    target, record.content, matched_entry=record.content,
-                    operation_id=f"blkp_{blocked_id}_rm_{index}")
-            except Exception as error:  # noqa: BLE001 — 派生投影失败不回滚记录
-                logger.warning(
-                    "blocked promote mirror failed (%s): %s",
-                    type(error).__name__, record.id)
+            response = await self.commit.remove(
+                target, record.content, matched_entry=record.content, missing_ok=True,
+                operation_id=f"blkp_{blocked_id}_rm_{index}")
+            if not response.get("success"):
+                raise ValueError(str(response.get("error") or "markdown remove failed"))
         for index, record in enumerate(records, 1):
             if record.status is not MemoryStatus.ACTIVE:
                 continue
             target = self.writer.markdown_target(record)
             if not self.commit.engine.target_enabled(target):
                 continue
-            try:
-                response = await self.commit.add(
-                    target, record.content, operation_id=f"blkp_{blocked_id}_add_{index}")
-            except Exception as error:  # noqa: BLE001
-                logger.warning(
-                    "blocked promote mirror failed (%s): %s",
-                    type(error).__name__, record.id)
-                continue
+            response = await self.commit.add(
+                target, record.content, operation_id=f"blkp_{blocked_id}_add_{index}")
             if not response.get("success"):
-                logger.warning("blocked promote mirror not applied: %s", record.id)
+                raise ValueError(str(response.get("error") or "markdown add failed"))
 
     async def _replay_in(
         self, connection: aiosqlite.Connection, actions: list[dict[str, Any]],

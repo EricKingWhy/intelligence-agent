@@ -32,12 +32,12 @@ from agent_harness.memory.v2.file_state import (
     atomic_write_text,
     read_json,
 )
-from agent_harness.memory.v2.jobs import MemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryJobStage, MemoryV2JobStore
 from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER
 from agent_harness.memory.v2.memory_tool import MemoryTool, _MemoryArgs
 from agent_harness.memory.v2.receipts import ReceiptState, ReceiptStore
 from agent_harness.memory.v2.roles import MemoryModelRoles
-from agent_harness.memory.v2.types import TrustedMemoryIdentity
+from agent_harness.memory.v2.types import MemoryScope, TrustedMemoryIdentity
 from agent_harness.memory.v2.write_approval import _identity
 from agent_harness.model.config import ModelConfig
 from agent_harness.session import MODEL_COMPLETED, RUN_STARTED, USER_MESSAGE, Session
@@ -106,6 +106,12 @@ async def seam(tmp_path: Path) -> Seam:
 
 
 async def _formation(seam: Seam) -> str:
+    job_id, result = await _formation_run(seam)
+    assert result is not None
+    return job_id
+
+
+async def _formation_run(seam: Seam):
     session_id, run_id = "seam-session", "seam-run"
     session = Session.start(seam.sessions, session_id=session_id)
     session.append(USER_MESSAGE, {"content": "请以后都用 pnpm 装依赖"})
@@ -129,8 +135,7 @@ async def _formation(seam: Seam) -> str:
         run_events=seam.sessions.read_events(session_id), roles=_ROLES,
         write_approval=False,
     )
-    assert result is not None
-    return claimed.job_id
+    return claimed.job_id, result
 
 
 @pytest.mark.asyncio
@@ -319,6 +324,100 @@ async def test_file_refusal_is_not_reported_as_committed(seam: Seam) -> None:
     assert receipt["operation_id"] == caught.value.operation_id
     assert receipt["state"] == ReceiptState.PREPARED, "拒写不得被记成 committed"
     assert not seam.memory_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_formation_publish_failure_rolls_back_records_and_keeps_the_job_recoverable(
+    seam: Seam,
+) -> None:
+    """P1-1 回归：formation 的内容发布失败不能以 COMMITTED 收尾。
+
+    records 与 job 终态在同一个 SQLite 事务里；`mirror_committed` 跑在事务提交前，
+    文件拒写 ⇒ 事务回滚、job 停在非终态，恢复扫描可以用同一批 `jobp_` 回执重跑。
+    """
+
+    def _refuse(path: Path, entries: list[str]) -> None:
+        raise OSError("disk full")
+
+    seam.commit.engine._write_file = _refuse  # type: ignore[method-assign]
+    job_id, result = await _formation_run(seam)
+
+    assert result is None
+    job = await seam.jobs.get(job_id)
+    assert job.stage not in {
+        MemoryJobStage.COMPLETED, MemoryJobStage.DEGRADED,
+    }, "发布失败不得写成终态"
+    assert job.outcome is None and job.reason is None
+    active = await seam.service.list_active(
+        LOCAL, scope=MemoryScope.USER_GLOBAL, limit=10)
+    assert active == [], "内容没发布成功时 records 必须随事务一起回滚"
+    jobp_receipts = [
+        item for item in seam.receipts() if item["operation_id"].startswith("jobp_")
+    ]
+    assert jobp_receipts and {item["state"] for item in jobp_receipts} == {
+        ReceiptState.PREPARED}, "回执停在 PREPARED，等待重启对账"
+
+
+@pytest.mark.asyncio
+async def test_delete_publish_failure_keeps_the_record_and_tombstone_for_retry(
+    seam: Seam,
+) -> None:
+    """P1-2 回归：内容删除失败不能返回 deleted=True；墓碑先落，重试可收敛。"""
+    created = await seam.service.create(
+        make_draft(content="删除发布失败也要可重试", source_event_ids=["event-del-fail"]),
+        LOCAL)
+    inserted = seam.memory_file.read_text(encoding="utf-8")
+    assert "删除发布失败也要可重试" in inserted
+
+    def _refuse(path: Path, entries: list[str]) -> None:
+        raise OSError("disk full")
+
+    seam.commit.engine._write_file = _refuse  # type: ignore[method-assign]
+
+    with pytest.raises(MemoryCommitError) as caught:
+        await seam.service.delete(created.id, LOCAL)
+
+    assert caught.value.operation_id == f"del_{created.id}"
+    assert (await seam.service.read(created.id, LOCAL)).content == "删除发布失败也要可重试"
+    assert "删除发布失败也要可重试" in seam.memory_file.read_text(encoding="utf-8")
+    tombstone = seam.service.state_root.tombstones_dir / f"{created.id}.json"
+    assert tombstone.exists(), "墓碑先于内容删除落盘；重试同一操作是幂等的"
+    receipt = read_json(ReceiptStore(seam.root).path_for(f"del_{created.id}"))
+    assert receipt is not None and receipt["state"] == ReceiptState.PREPARED
+
+
+@pytest.mark.asyncio
+async def test_blocked_promote_publish_failure_stays_blocked_and_not_applied(
+    seam: Seam,
+) -> None:
+    """P1-3 回归：promote 的内容发布失败 ⇒ applied=False，blocked 仍是待处置。"""
+    blocked_id = await seam.service.blocked.insert(
+        job_id="job-promote-failure", identity=_identity(LOCAL), project_id=None,
+        payload={"actions": [{
+            "action": "add", "scope": "user_global",
+            "draft": make_draft(
+                content="放行失败也不能报成功",
+                source_event_ids=["event-promote-failure"],
+            ).model_dump(mode="json"),
+            "pin": None,
+        }]},
+    )
+    assert blocked_id is not None
+
+    def _refuse(path: Path, entries: list[str]) -> None:
+        raise OSError("disk full")
+
+    seam.commit.engine._write_file = _refuse  # type: ignore[method-assign]
+
+    decision = await seam.service.blocked.promote(blocked_id, LOCAL)
+
+    assert decision.applied is False
+    assert "内容发布失败" in decision.reason
+    blocked = await seam.service.blocked.get(blocked_id)
+    assert blocked is not None and blocked.status == "blocked"
+    assert not seam.memory_file.exists()
+    assert (await seam.service.list_active(
+        LOCAL, scope=MemoryScope.USER_GLOBAL, limit=10)) == []
 
 
 # --------------------------------------------------------------------------------------
