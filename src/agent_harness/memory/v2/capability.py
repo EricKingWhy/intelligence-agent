@@ -17,7 +17,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from enum import Enum
 from typing import Any, Protocol
 
@@ -123,10 +124,18 @@ class MemoryV2Service:
         self._legacy_import_report: dict[str, Any] | None = None
         self._tombstone_purger: asyncio.Task | None = None
         #: #1494 review P3-2/P3-3：delete 的 prepare→remove→records 三步不能被并发的
-        #: create/update 插入（否则删除按旧快照清理正文、新记录却已指向它）。删除是
-        #: 低频动作，进程内一把锁串行化全部内容写入即可；跨进程仍由墓碑重入收敛
-        #: （单机单用户部署，不为它引入分布式租约）。
+        #: service 写（create/update/invalidate）或工具面「内容发布 + 派生投影」插入，
+        #: 否则删除按旧快照清理正文、新记录却已指向它。覆盖范围是**服务入口**与
+        #: `MemoryTool`；formation 的 `mirror_committed` 在 SQLite 写事务内发布，
+        #: 反向加这把锁会与 delete（持锁后开 SQLite）形成锁序反转，故不进入本临界区。
+        #: 跨进程仍由墓碑重入收敛（单机单用户部署，不为它引入分布式租约）。
         self._content_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def content_write_scope(self) -> AsyncIterator[None]:
+        """工具面把「内容发布 + 派生投影」放进同一 content 临界区（锁序见字段注释）。"""
+        async with self._content_lock:
+            yield
 
     @property
     def legacy_import_report(self) -> dict[str, Any] | None:

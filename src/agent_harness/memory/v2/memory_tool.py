@@ -24,6 +24,7 @@ batch 由 ``operations`` 数组表达（票面文字写作 ``action ∈ {…, ba
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any, Literal
 
@@ -252,40 +253,46 @@ class MemoryTool(Tool):
                 message="user memory 范围未获授权",
                 error_code=ErrorCode.PERMISSION_DENIED,
             )
-        try:
-            if args.operations is not None:
-                response = await self._commit.apply_batch(
-                    target, args.operations_payload())
-            elif args.action == "add":
-                response = await self._commit.add(target, args.content_or_alias())
-            elif args.action == "replace":
-                response = await self._commit.replace(
-                    target, args.old_text or "", args.content_or_alias(),
+        # #1494 review P3-3：工具面把「内容发布 + 派生投影」放进 service 的 content
+        # 临界区，避免 delete 在两者之间按旧快照清理正文。`service` 缺席（静态对账 /
+        # 只接 commit 的测试）时没有共享锁，保持原行为。
+        scope_factory = getattr(self._service, "content_write_scope", None)
+        scope = scope_factory() if callable(scope_factory) else contextlib.nullcontext()
+        async with scope:
+            try:
+                if args.operations is not None:
+                    response = await self._commit.apply_batch(
+                        target, args.operations_payload())
+                elif args.action == "add":
+                    response = await self._commit.add(target, args.content_or_alias())
+                elif args.action == "replace":
+                    response = await self._commit.replace(
+                        target, args.old_text or "", args.content_or_alias(),
+                    )
+                else:
+                    response = await self._commit.remove(target, args.old_text or "")
+            except MemoryCommitError as error:
+                # AC5：发布失败的回执停在 PREPARED（未 committed），operation id 是唯一能
+                # 把这次失败与盘上回执对上的键，必须进工具结果给模型/用户做 reconcile。
+                logger.warning(
+                    "memory tool commit failed (%s, operation %s)",
+                    type(error).__name__, error.operation_id,
                 )
-            else:
-                response = await self._commit.remove(target, args.old_text or "")
-        except MemoryCommitError as error:
-            # AC5：发布失败的回执停在 PREPARED（未 committed），operation id 是唯一能
-            # 把这次失败与盘上回执对上的键，必须进工具结果给模型/用户做 reconcile。
-            logger.warning(
-                "memory tool commit failed (%s, operation %s)",
-                type(error).__name__, error.operation_id,
-            )
-            return ToolResult.failure(
-                message=(
-                    f"记忆写入失败（{type(error).__name__}），操作 {error.operation_id} "
-                    "可能未落盘；请用 reconcile 核对，不要盲目重发。"
-                ),
-                error_code=ErrorCode.TRANSIENT_ERROR,
-                metadata={"operation_id": error.operation_id, "target": target},
-            )
-        except Exception as error:  # noqa: BLE001 — 不记内容，只记类型
-            logger.warning("memory tool failed (%s)", type(error).__name__)
-            return ToolResult.failure(
-                message=f"记忆写入失败（{type(error).__name__}）；存储可能未改变。",
-                error_code=ErrorCode.TRANSIENT_ERROR,
-            )
-        projection = await self._project(args, response)
+                return ToolResult.failure(
+                    message=(
+                        f"记忆写入失败（{type(error).__name__}），操作 {error.operation_id} "
+                        "可能未落盘；请用 reconcile 核对，不要盲目重发。"
+                    ),
+                    error_code=ErrorCode.TRANSIENT_ERROR,
+                    metadata={"operation_id": error.operation_id, "target": target},
+                )
+            except Exception as error:  # noqa: BLE001 — 不记内容，只记类型
+                logger.warning("memory tool failed (%s)", type(error).__name__)
+                return ToolResult.failure(
+                    message=f"记忆写入失败（{type(error).__name__}）；存储可能未改变。",
+                    error_code=ErrorCode.TRANSIENT_ERROR,
+                )
+            projection = await self._project(args, response)
         return _result(response, target, projection)
 
     async def _gate(self, payload: dict[str, Any]) -> ToolResult | None:

@@ -302,8 +302,12 @@ class MemoryCommit:
 
         与逐个 `apply_batch` 的区别是回执先于第一次写入、且覆盖所有目标。跨文件
         替换本身不可能原子（ADR-0058 D1）；后一个目标失败时，已发布目标的事实
-        留在同一份 PREPARED 回执里，job / blocked 的重试与启动对账都能按 before/after
+        留在同一份 PUBLISHED 回执里，job / blocked 的重试与启动对账都能按 before/after
         继续，不会出现「内容已进 Markdown、却没有任何回执可查」的孤儿（review P1-1/P1-2）。
+
+        重试按回执里已有的 verdict 续跑：磁盘 == after 的目标跳过 mutator（不重复追加），
+        磁盘 == before 的目标重新预检但必须得到同一 after；既非 before 也非 after、
+        或意图/预检结果变了 ⇒ NEED_RECONCILE，不盲重跑（review P3-1/P3-4）。
 
         预检失败抛 `MemoryBatchRejected`（磁盘未动）；已经开始发布后的失败抛
         `MemoryCommitError`（回执已落盘、可对账）。
@@ -318,6 +322,16 @@ class MemoryCommit:
             origin=origin or origin_module.current_origin(),
             payload=payload,
         )
+
+    def _mark_target_reconcile(
+        self, operation_id: str, target: str, reason: str,
+    ) -> None:
+        """把回执钉在 NEED_RECONCILE；写不进去也必须带 operation id 上抛。"""
+        try:
+            self._receipts.mark_needs_reconcile(operation_id, f"{target}: {reason}")
+        except (OSError, RuntimeError) as error:
+            raise MemoryCommitError(
+                operation_id, target, f"receipt update failed: {error}") from error
 
     def _apply_batch_many_sync(
         self, plans: list[tuple[str, list[dict[str, Any]]]], *, trusted_pins: bool,
@@ -337,31 +351,102 @@ class MemoryCommit:
                 raise MemoryCommitError(
                     operation_id, label, f"needs reconcile: {existing.reason}")
 
-            prepared: list[tuple[dict[str, Any], str, str]] = []
+            prepared: list[tuple[dict[str, Any], str, str, bool, bool]] = []
             for target, operations in plans:
                 spec = self._batch_spec(
                     target, operations, trusted_pins=trusted_pins,
                     allow_empty=allow_empty)
+                recorded = (
+                    existing.targets.get(target) if existing is not None else None)
+                if recorded is not None and recorded.planned:
+                    recorded_spec = next(
+                        (item for item in existing.operations
+                         if str(item.get("target")) == target),
+                        None,
+                    )
+                    if recorded_spec != spec:
+                        self._mark_target_reconcile(
+                            operation_id, target,
+                            "retry intent differs from the recorded receipt")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            "needs reconcile: retry intent differs from the recorded receipt")
+                    if recorded.before_digest is None or recorded.after_digest is None:
+                        self._mark_target_reconcile(
+                            operation_id, target, "receipt has an incomplete target plan")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            "needs reconcile: receipt has an incomplete target plan")
+                    disk = self._engine.disk_entries(target)
+                    if disk is None:
+                        self._mark_target_reconcile(
+                            operation_id, target, "target file unreadable during retry")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            "needs reconcile: target file is unreadable")
+                    current = entries_digest(disk)
+                    if current == recorded.after_digest:
+                        # 上一次已经写到目标态：跳过 mutator，避免重试再追加/再删除一次。
+                        prepared.append(
+                            (spec, recorded.before_digest, recorded.after_digest, True, False))
+                        continue
+                    if current != recorded.before_digest:
+                        self._mark_target_reconcile(
+                            operation_id, target,
+                            "disk matches neither before nor after")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            "needs reconcile: disk matches neither before nor after")
+                    error, _before, after = self._preview_batch(spec)
+                    if error is not None:
+                        detail = error.get("error") or error
+                        self._mark_target_reconcile(
+                            operation_id, target, f"intent no longer applies ({detail})")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            f"needs reconcile: intent no longer applies: {detail}")
+                    assert after is not None
+                    if after != recorded.after_digest:
+                        self._mark_target_reconcile(
+                            operation_id, target,
+                            "preflight now produces a different after digest")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            "needs reconcile: preflight produces a different after digest")
+                    prepared.append(
+                        (spec, recorded.before_digest, recorded.after_digest, False, False))
+                    continue
+
                 error, before, after = self._preview_batch(spec)
                 if error is not None:
+                    detail = error.get("error") or error
+                    if existing is not None:
+                        # 回执已存在，可能已有目标发布：此时既不能说“零落盘拒绝”，
+                        # 也不能把新目标拼进旧回执。交给对账判定。
+                        self._mark_target_reconcile(
+                            operation_id, target, f"retry preflight failed ({detail})")
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            f"needs reconcile: retry preflight failed: {detail}")
                     # 还没有碰任何文件/回执：整批拒绝，records 事务可以安全回滚。
-                    raise MemoryBatchRejected(
-                        operation_id, target, error.get("error") or error)
+                    raise MemoryBatchRejected(operation_id, target, detail)
                 assert before is not None and after is not None
-                prepared.append((spec, before, after))
+                prepared.append((spec, before, after, False, True))
 
             if existing is None:
                 try:
                     self._receipts.prepare(
                         operation_id, origin=origin, targets=targets,
-                        operations=[spec for spec, _, _ in prepared],
+                        operations=[spec for spec, _, _, _, _ in prepared],
                         payload=payload,
                     )
                 except (OSError, RuntimeError) as error:
                     raise MemoryCommitError(
                         operation_id, label, f"receipt prepare failed: {error}") from error
 
-            for spec, before, after in prepared:
+            for spec, before, after, _already, needs_plan in prepared:
+                if not needs_plan:
+                    continue
                 try:
                     self._receipts.record_target_plan(
                         operation_id, str(spec["target"]),
@@ -373,8 +458,19 @@ class MemoryCommit:
                         f"receipt plan failed: {error}") from error
 
             published: list[str] = []
-            for spec, _before, after in prepared:
+            for spec, _before, after, already_published, _needs_plan in prepared:
                 target = str(spec["target"])
+                if already_published:
+                    try:
+                        self._receipts.mark_target_published(operation_id, target)
+                        self._receipts.mark_partial(operation_id)
+                    except (OSError, RuntimeError) as error:
+                        raise MemoryCommitError(
+                            operation_id, target,
+                            f"content already published but receipt update failed: {error}",
+                        ) from error
+                    published.append(self._engine.path_for(target).name)
+                    continue
                 mutator = self._mutator_for(spec)
 
                 def _guarded(
@@ -400,11 +496,13 @@ class MemoryCommit:
                 except (OSError, RuntimeError) as error:
                     raise MemoryCommitError(operation_id, target, error) from error
                 if outcome.response is not None:
-                    raise MemoryCommitError(
-                        operation_id, target,
-                        outcome.response.get("error") or "markdown batch apply failed")
+                    reason = outcome.response.get("error") or "markdown batch apply failed"
+                    if outcome.response.get("needs_reconcile"):
+                        self._mark_target_reconcile(operation_id, target, str(reason))
+                    raise MemoryCommitError(operation_id, target, reason)
                 try:
                     self._receipts.mark_target_published(operation_id, target)
+                    self._receipts.mark_partial(operation_id)
                 except (OSError, RuntimeError) as error:
                     raise MemoryCommitError(
                         operation_id, target,

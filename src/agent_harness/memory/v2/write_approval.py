@@ -60,6 +60,7 @@ from agent_harness.memory.v2.commit import (
 from agent_harness.memory.v2.file_state import (
     CorruptStateFile,
     MemoryStateRoot,
+    StateFileError,
     async_file_lock,
     read_json,
     safe_id,
@@ -189,7 +190,7 @@ class StagedWriteStore:
     def _read(self, staged_id: str) -> dict[str, Any] | None:
         try:
             payload = read_json(self.path_for(staged_id))
-        except CorruptStateFile as error:
+        except (CorruptStateFile, StateFileError) as error:
             # 坏文件不参与审批：抛出去会让整个待审列表不可用；当「读不到」处理并留证据。
             logger.warning("staged write unreadable (%s): %s", staged_id, error)
             return None
@@ -253,7 +254,7 @@ class StagedWriteStore:
         for path in sorted(directory.glob("*.json")):
             try:
                 payload = read_json(path)
-            except CorruptStateFile as error:
+            except (CorruptStateFile, StateFileError) as error:
                 logger.warning("unreadable staged write skipped (%s): %s", path.name, error)
                 continue
             if payload is None:
@@ -595,7 +596,7 @@ class BlockedWriteStore:
     def _read(self, blocked_id: str) -> dict[str, Any] | None:
         try:
             payload = read_json(self.path_for(blocked_id))
-        except CorruptStateFile as error:
+        except (CorruptStateFile, StateFileError) as error:
             logger.warning("blocked write unreadable (%s): %s", blocked_id, error)
             return None
         if payload is None:
@@ -626,14 +627,20 @@ class BlockedWriteStore:
             if kind not in {"add", "update", "invalidate"}:
                 raise ValueError(
                     f"blocked write {blocked_id} has unknown action {kind!r}")
+            pin = action.get("pin")
+            if pin is not None:
+                # `_pin_drift` / `_replay_in` 按这四个键直接索引 pin；形状只校验到
+                # `dict` 会让 `{}` 在 promote 阶段变成未捕获的 KeyError（500），
+                # 而不是「这条被拦写入不可重放，跳过」。字段校验必须在这里完成。
+                _require_pin_shape(pin, blocked_id)
             if kind == "invalidate":
-                if not isinstance(action.get("pin"), dict):
+                if pin is None:
                     raise ValueError(
                         f"blocked write {blocked_id} invalidate action has no pin")
                 continue
             if not isinstance(action.get("draft"), dict):
                 raise TypeError(f"blocked write {blocked_id} action has no draft")
-            if kind == "update" and not isinstance(action.get("pin"), dict):
+            if kind == "update" and pin is None:
                 raise TypeError(
                     f"blocked write {blocked_id} update action has no pin")
         return BlockedWrite(
@@ -700,7 +707,7 @@ class BlockedWriteStore:
         for path in sorted(directory.glob("*.json")):
             try:
                 payload = read_json(path)
-            except CorruptStateFile as error:
+            except (CorruptStateFile, StateFileError) as error:
                 logger.warning("unreadable blocked write skipped (%s): %s", path.name, error)
                 continue
             if payload is not None:
@@ -779,7 +786,7 @@ class BlockedWriteStore:
                     # 内容在 records 事务**提交前**发布：失败 ⇒ 整个事务回滚。
                     await self._mirror(records, invalidated=(*invalidated, *superseded),
                                        blocked_id=blocked_id)
-            except (MemoryCommitError, ValueError) as error:
+            except (MemoryCommitError, ValueError, KeyError, TypeError) as error:
                 logger.warning(
                     "blocked promote publish failed (%s): %s",
                     type(error).__name__, blocked_id)
@@ -922,6 +929,21 @@ async def _current_row(connection: aiosqlite.Connection, memory_id: str) -> Any 
     async with connection.execute(
         "SELECT * FROM memory_v2_records WHERE memory_id=?", (memory_id,)) as cursor:
         return await cursor.fetchone()
+
+
+def _require_pin_shape(pin: Any, blocked_id: str) -> None:
+    """校验 pin 的**可重放形状**（`_pin_drift` / `_replay_in` 的直接索引面）。"""
+    if not isinstance(pin, dict):
+        raise TypeError(f"blocked write {blocked_id} pin is not an object")
+    for field in ("memory_id", "root_id", "updated_at"):
+        value = pin.get(field)
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"blocked write {blocked_id} pin has invalid {field}: {value!r}")
+    version = pin.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise TypeError(
+            f"blocked write {blocked_id} pin has invalid version: {version!r}")
 
 
 def _canonical_payload(payload: dict[str, Any]) -> str:

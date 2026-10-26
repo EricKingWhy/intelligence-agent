@@ -179,7 +179,7 @@ class MemoryCommit:
   `stgp_` operation id 直接回放回执（幂等、不重复写内容），随后写 `approved`。
   不需要启动扫描专门修 staged：pending 记录只在一次新的裁决动作里前进，回执回放
   保证重复裁决不会二次落盘。
-- promote 同样改为「内容（`blkp_<blocked_id>`）→ records → 状态 promoted」；被拦下的输入在
+- promote 同样改为「内容（`blkp_<blocked_id>_apply`）→ records → 状态 promoted」；被拦下的输入在
   终态前不消失，`insert_in` 的去重键 `(identity, content_hash)` 保留，重复插入返回既有行（同 job 且
   仍 `blocked` 时）而不是静默丢弃。
 
@@ -211,7 +211,8 @@ deleted_at, expires_at, deletion_reason, content_hashes[], source_hashes[]}`。
 
 多记录系统镜像（formation apply、blocked promote）的 ① 是 `apply_batch_many` 内的**跨目标全量预检**
 （`_preview_batch`：内容扫描 / pin / 最终预算；不合格抛 `MemoryBatchRejected`、不写回执），
-② 是同一份 PREPARED 回执下逐目标一次原子替换（`jobp_`/`blkp_` 回执覆盖全部目标）。
+② 是在同一份回执下逐目标一次原子替换：首个目标发布后回执转 `PUBLISHED`，全部落地转
+`COMMITTED`（`jobp_<job>_apply` / `blkp_<blocked_id>_apply` 覆盖全部目标）。
 这样「第二条超限」在写第一条之前就被拒；跨文件仍不原子，IO 失败的半批由回执对账补齐（D3），
 不会出现「records 回滚了、内容却已发布且无人可对账」的孤儿。
 
