@@ -4,6 +4,11 @@
   "recorded_at": "2026-10-25T18:31:57+00:00",
   "sha": "1696353d8800972d4b937c4d8330a1a93e65b535",
   "tree": "9ab84f1e0dafd28ac85d57b873f2111802816d65",
+  "source_object_verification": {
+    "status": "UNVERIFIABLE_HISTORICAL",
+    "checked_at": "2026-10-27",
+    "reason_code": "source_absent_in_checked_local_and_github_repositories"
+  },
   "argv": [],
   "result": "PASS",
   "passed": 7,
