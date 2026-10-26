@@ -98,6 +98,7 @@ class ReconcileReport:
     """`reconcile()` 的读数（CLI 与启动日志共用）。"""
 
     committed: list[str] = field(default_factory=list)
+    republished: list[str] = field(default_factory=list)
     needs_reconcile: list[tuple[str, str]] = field(default_factory=list)
     unreadable: list[tuple[str, str]] = field(default_factory=list)
     examined: int = 0
@@ -110,6 +111,7 @@ class ReconcileReport:
         return {
             "examined": self.examined,
             "committed": list(self.committed),
+            "republished": list(self.republished),
             "needs_reconcile": [list(item) for item in self.needs_reconcile],
             "unreadable": [list(item) for item in self.unreadable],
             "ok": self.ok,
@@ -228,20 +230,48 @@ class MemoryCommit:
 
     async def apply_batch(
         self, target: str, operations: list[dict[str, Any]], *, trusted_pins: bool = False,
-        operation_id: str | None = None, origin: str | None = None,
-        payload: dict[str, Any] | None = None,
+        allow_empty: bool = False, operation_id: str | None = None,
+        origin: str | None = None, payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """``trusted_pins=True`` 只给审批重放用：它携带 stage 时从磁盘钉住的条目全文。
 
         其余调用方（含模型工具面）的 ``matched_entry`` 一律剥掉，按 ``old_text`` 重新定位。
+        ``allow_empty=True`` 只给系统镜像用：它可能有意清空一个文件（例如全部撤回），
+        模型工具面的 batch 仍拒绝「一次删空」。
         """
-        spec = self._batch_spec(target, operations, trusted_pins=trusted_pins)
+        spec = self._batch_spec(
+            target, operations, trusted_pins=trusted_pins, allow_empty=allow_empty)
         return await asyncio.to_thread(
             self._perform, spec,
             operation_id=operation_id or new_operation_id(),
             origin=origin or origin_module.current_origin(),
             payload=payload,
         )
+
+    def validate_batch(
+        self, target: str, operations: list[dict[str, Any]], *, trusted_pins: bool = False,
+        allow_empty: bool = False,
+    ) -> dict[str, Any] | None:
+        """在**不碰盘**的前提下跑一遍 batch 判定；返回错误响应或 ``None``。
+
+        系统镜像（formation / blocked promote）一次要发布多条记录，必须先对所有目标做
+        全量预检：任何一条内容/匹配/预算不合格都在写第一条之前失败，否则会出现
+        「前一条已进 Markdown、后一条被拒、records 回滚」的半批孤儿内容。
+        这里复用与 `apply_batch` 相同的 mutator；只把 consolidation 计数按原值还原——
+        预检不是一次模型尝试，不能消耗它的自纠额度。
+        """
+        spec = self._batch_spec(
+            target, operations, trusted_pins=trusted_pins, allow_empty=allow_empty)
+        entries = self._engine.disk_entries(target)
+        if entries is None:
+            return error_response(
+                f"{self._engine.path_for(target).name} is unreadable; refusing to write.")
+        failures = self._engine.consolidation_failures
+        try:
+            result = self._mutator_for(spec)(list(entries), self._engine.char_limit(target))
+        finally:
+            self._engine.consolidation_failures = failures
+        return result if isinstance(result, dict) else None
 
     async def remove_by_digest(
         self, digests: Sequence[str], *, operation_id: str | None = None,
@@ -499,11 +529,22 @@ class MemoryCommit:
         report = ReconcileReport()
         for receipt in self._receipts.list_pending():
             report.examined += 1
-            finished = await asyncio.to_thread(self._reconcile_one, receipt.operation_id)
+            try:
+                finished, republished = await asyncio.to_thread(
+                    self._reconcile_one, receipt.operation_id)
+            except (OSError, RuntimeError) as error:
+                # 单条回执写不进去（磁盘满/只读）不能阻断整轮对账，也不能丢掉归因：
+                # operation id 进 unreadable，CLI 与启动日志都能定位到同一份文件。
+                report.unreadable.append(
+                    (receipt.operation_id,
+                     f"reconcile failed: {type(error).__name__}: {error}"))
+                continue
             if finished is None:
                 report.unreadable.append(
                     (receipt.operation_id, "target file unreadable; will retry"))
                 continue
+            if republished:
+                report.republished.append(finished.operation_id)
             if finished.state == ReceiptState.NEED_RECONCILE:
                 report.needs_reconcile.append(
                     (finished.operation_id, finished.reason or "needs reconcile"))
@@ -511,27 +552,31 @@ class MemoryCommit:
             report.committed.append(finished.operation_id)
         return report
 
-    def _reconcile_one(self, operation_id: str) -> CommitReceipt | None:
+    def _reconcile_one(self, operation_id: str) -> tuple[CommitReceipt | None, bool]:
         with self._receipts.lock(operation_id):
             receipt = self._receipts.load(operation_id)
             if receipt is None or receipt.state in (
                 ReceiptState.COMMITTED, ReceiptState.NEED_RECONCILE,
             ):
-                return receipt
-            verdict = self._resolve_receipt(receipt)
-            return None if verdict == "unreadable" else self._receipts.load(operation_id)
+                return receipt, False
+            verdict, republished = self._resolve_receipt(receipt)
+            return (
+                None if verdict == "unreadable" else self._receipts.load(operation_id),
+                republished,
+            )
 
-    def _resolve_receipt(self, receipt: CommitReceipt) -> str:
-        """返回 ``committed`` / ``needs_reconcile`` / ``unreadable``。"""
+    def _resolve_receipt(self, receipt: CommitReceipt) -> tuple[str, bool]:
+        """返回 ``(committed|needs_reconcile|unreadable, 本轮是否补发布过)``。"""
         if not receipt.targets:
             self._receipts.finish(receipt.operation_id)
-            return "committed"
+            return "committed", False
+        republished = False
         for target, plan in receipt.targets.items():
             disk = self._engine.disk_entries(target)
             if disk is None:
                 logger.warning("reconcile skipped (%s): %s is unreadable",
                                receipt.operation_id, target)
-                return "unreadable"
+                return "unreadable", republished
             digest = entries_digest(disk)
             if plan.planned and digest == plan.after_digest:
                 continue
@@ -540,16 +585,21 @@ class MemoryCommit:
                     receipt.operation_id,
                     f"{target}: disk matches neither before nor after",
                 )
-                return "needs_reconcile"
-            if not self._republish_target(receipt, target, digest):
-                return "needs_reconcile"
+                return "needs_reconcile", republished
+            verdict = self._republish_target(receipt, target, digest)
+            if verdict == "failed":
+                return "needs_reconcile", republished
+            republished = republished or verdict == "published"
         self._receipts.finish(receipt.operation_id, result=receipt.result)
-        return "committed"
+        return "committed", republished
 
-    def _republish_target(self, receipt: CommitReceipt, target: str, before_digest: str) -> bool:
+    def _republish_target(
+        self, receipt: CommitReceipt, target: str, before_digest: str,
+    ) -> str:
         """按回执里记录的意图补发布一个目标（确定性：磁盘仍等于 before）。
 
-        返回 False ⇒ 意图不再可重放（mutator 现在返回失败），置 NEED_RECONCILE。
+        返回 ``published`` / ``noop`` / ``failed``；``failed`` ⇒ 意图不再可重放
+        （mutator 现在返回失败），置 NEED_RECONCILE。
         """
         specs = [op for op in receipt.operations if str(op.get("target")) == target]
         if not specs:
@@ -558,11 +608,11 @@ class MemoryCommit:
                 receipt.operation_id, target, before_digest=before_digest,
                 after_digest=before_digest,
             )
-            return True
+            return "noop"
         if len(specs) != 1:
             self._receipts.mark_needs_reconcile(
                 receipt.operation_id, f"{target}: receipt has {len(specs)} specs")
-            return False
+            return "failed"
         spec = specs[0]
         mutator = self._mutator_for(spec)
         published = {"done": False}
@@ -586,7 +636,7 @@ class MemoryCommit:
                 "reconcile republish failed (%s/%s): %s",
                 receipt.operation_id, target, type(error).__name__,
             )
-            return False
+            return "failed"
         if outcome.response is not None:
             if outcome.response.get("success"):
                 # 幂等空操作（例如重复 add）：按 after 计划收尾。
@@ -594,20 +644,22 @@ class MemoryCommit:
                     receipt.operation_id, target,
                     before_digest=before_digest, after_digest=before_digest,
                 )
-                return True
+                return "noop"
             self._receipts.mark_needs_reconcile(
                 receipt.operation_id,
                 f"{target}: intent no longer applies ({outcome.response.get('error')})",
             )
-            return False
+            return "failed"
         if published["done"]:
             self._receipts.mark_target_published(receipt.operation_id, target)
-        return True
+            return "published"
+        return "noop"
 
     # ------------------------------------------------------------------ 意图 → mutator
 
     def _batch_spec(
         self, target: str, operations: list[dict[str, Any]], *, trusted_pins: bool,
+        allow_empty: bool = False,
     ) -> dict[str, Any]:
         if not operations:
             raise ValueError("operations list is empty")
@@ -620,10 +672,16 @@ class MemoryCommit:
                 # 系统 pin：只有审批重放能携带（模型直填等于绕过 old_text 改任意条目）。
                 "matched_entry": (
                     (operation or {}).get("matched_entry") if trusted_pins else None),
+                # 系统镜像重放要幂等：条目已经不在了 = 这次撤回已经完成，不是失败。
+                # 只给带系统 pin 的内部调用；模型直填 missing_ok 等于把「未命中」变成成功。
+                "missing_ok": bool(trusted_pins and (operation or {}).get("missing_ok")),
             }
             for operation in operations
         ]
-        return {"target": target, "action": "batch", "operations": ops}
+        return {
+            "target": target, "action": "batch", "operations": ops,
+            "allow_empty": allow_empty,
+        }
 
     def _mutator_for(self, spec: dict[str, Any]) -> Callable[[list[str], int], Any]:
         action = str(spec.get("action"))
@@ -786,6 +844,7 @@ class MemoryCommit:
                 str(operation.get("old_text") or ""),
                 f"Operation {index} ({action or 'unknown'})",
                 operation.get("matched_entry"),
+                missing_ok=bool(operation.get("missing_ok")),
             )
             if message:
                 return self._engine.batch_failure(target, entries, message)
@@ -793,7 +852,7 @@ class MemoryCommit:
         if spec.get("dry_run"):
             # 只读解析（审批 stage 用）：只回答「old_text 命中哪条」，不判预算、不落盘。
             return {"success": True, "matched_entries": list(matched)}
-        if entries and not working:
+        if entries and not working and not spec.get("allow_empty"):
             # #103419：把最后一条删掉的 consolidation batch 会提交一个空文件当成功。
             # 拒绝；单条 remove() 才是有意清空的路径。
             label = self._engine.path_for(target).name
@@ -843,7 +902,7 @@ class MemoryCommit:
     @staticmethod
     def _apply_batch_op(
         working: list[str], action: str, content: str, old_text: str, position: str,
-        matched_entry: str | None = None,
+        matched_entry: str | None = None, *, missing_ok: bool = False,
     ) -> tuple[str | None, str | None]:
         """把一个 batch op 应用到 *working*；返回 ``(错误消息, 被替换/删除的原条目)``。"""
         if action == "add":
@@ -861,12 +920,16 @@ class MemoryCommit:
         if matched_entry is not None:
             index = pinned_index(working, matched_entry)
             if index is None:
+                if missing_ok and action == "remove":
+                    return None, None
                 return f"{position}: {stale_entry_message(matched_entry)}", None
         else:
             index, ambiguous = find_unique_match(working, old_text)
             if ambiguous:
                 return f"{position}: '{old_text}' matched multiple distinct entries -- be more specific.", None
             if index is None:
+                if missing_ok and action == "remove":
+                    return None, None
                 return f"{position}: no entry matched '{old_text}'.", None
         previous_content = working[index]
         working[index:index + 1] = [content] if action == "replace" else []

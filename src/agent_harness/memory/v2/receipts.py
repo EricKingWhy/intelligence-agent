@@ -182,7 +182,19 @@ class ReceiptStore:
                 operation_id=operation_id, state=ReceiptState.NEED_RECONCILE,
                 origin="", created_at="", updated_at="", reason=f"corrupt: {error}",
             )
-        return None if payload is None else CommitReceipt.from_dict(payload)
+        if payload is None:
+            return None
+        try:
+            return CommitReceipt.from_dict(payload)
+        except (CorruptStateFile, KeyError, TypeError, ValueError, AttributeError) as error:
+            # 合法 JSON 但结构坏（state 未知 / targets 不是对象 / 条目缺字段）同样是
+            # 「有回执但不认识」：既不能当不存在（会重复发布），也不能让一条坏文件
+            # 把整个 reconcile / 启动装配打崩。语义与坏 JSON 一致：NEED_RECONCILE。
+            logger.warning("receipt unreadable (%s): %s", operation_id, error)
+            return CommitReceipt(
+                operation_id=operation_id, state=ReceiptState.NEED_RECONCILE,
+                origin="", created_at="", updated_at="", reason=f"corrupt: {error}",
+            )
 
     def list_pending(self) -> list[CommitReceipt]:
         """非终态回执（含 NEED_RECONCILE）。扫描即读盘，坏文件计入并按待对账返回。"""
@@ -254,9 +266,10 @@ class ReceiptStore:
         ``result`` 是成功响应的可回放快照：同 operation id 的重试直接回放它，
         不再碰文件、也不再跑一遍 mutator（AC4「同 key 只一次逻辑更新」）。
 
-        终态后正文不再有重放价值：``operations``/``payload`` 里的正文换成 sha256 +
-        长度（保留审计与「是不是同一份意图」的可核对性），避免每条回执长期复制一份
-        记忆正文。未终态回执不动——对账补发布还要用它。
+        终态后正文不再有重放价值：``operations``/``payload``/``result`` 里的正文换成
+        sha256 + 长度（保留审计与「是不是同一份意图」的可核对性），避免每条回执长期
+        复制一份记忆正文——删除回执尤其不能把已删正文留在 receipts/ 里。
+        未终态回执不动——对账补发布还要用它。
         """
         receipt = self._require(operation_id)
         if receipt.state != ReceiptState.NEED_RECONCILE:
@@ -266,6 +279,7 @@ class ReceiptStore:
                 receipt.result = dict(result)
             receipt.operations = _scrub_bodies(receipt.operations)
             receipt.payload = _scrub_bodies(receipt.payload)
+            receipt.result = _scrub_bodies(receipt.result)
             self._write(receipt)
         return receipt
 
@@ -284,20 +298,57 @@ class ReceiptStore:
         return receipt
 
 
+_BODY_KEYS = frozenset({
+    "content", "old_text", "matched_entry", "current_entries",
+    "replaced_entry", "removed_entry", "replaced_entries", "removed_entries",
+})
+
+
 def _scrub_bodies(value: Any) -> Any:
-    """递归把正文类字段替换成 ``<field>_digest`` + ``<field>_chars``（只用于终态回执）。"""
+    """递归把正文类字段替换成摘要 + 长度（只用于终态回执）。
+
+    覆盖三种形状：单条正文（str）、条目列表（`current_entries`）、以及
+    `replaced_entries` / `removed_entries` 这种 ``{序号: 正文}`` 映射。摘要保持
+    「是不是同一份意图」可核对，正文不再长期留在回执里。
+    """
     if isinstance(value, dict):
         scrubbed: dict[str, Any] = {}
         for key, item in value.items():
-            if key in {"content", "old_text", "matched_entry"} and isinstance(item, str) and item:
-                scrubbed[f"{key}_digest"] = hashlib.sha256(item.encode("utf-8")).hexdigest()
-                scrubbed[f"{key}_chars"] = len(item)
+            if key in _BODY_KEYS:
+                scrubbed.update(_scrub_body_field(key, item))
             else:
                 scrubbed[key] = _scrub_bodies(item)
         return scrubbed
     if isinstance(value, list):
         return [_scrub_bodies(item) for item in value]
     return value
+
+
+def _scrub_body_field(key: str, item: Any) -> dict[str, Any]:
+    if isinstance(item, str):
+        if not item:
+            return {key: item}
+        return {
+            f"{key}_digest": hashlib.sha256(item.encode("utf-8")).hexdigest(),
+            f"{key}_chars": len(item),
+        }
+    if isinstance(item, (list, tuple)) and all(isinstance(entry, str) for entry in item):
+        return {
+            f"{key}_digests": [
+                hashlib.sha256(entry.encode("utf-8")).hexdigest() for entry in item
+            ],
+            f"{key}_chars": sum(len(entry) for entry in item),
+        }
+    if isinstance(item, dict):
+        texts = {str(name): str(entry) for name, entry in item.items()}
+        return {
+            f"{key}_digests": {
+                name: hashlib.sha256(entry.encode("utf-8")).hexdigest()
+                for name, entry in texts.items()
+            },
+            f"{key}_chars": sum(len(entry) for entry in texts.values()),
+        }
+    return {key: _scrub_bodies(item)}
 
 
 __all__ = [

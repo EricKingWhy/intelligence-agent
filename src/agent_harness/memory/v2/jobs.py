@@ -46,6 +46,7 @@ from agent_harness.memory.v2.file_state import (
     MEMORY_STATE_DIRECTORY_NAME,
     CorruptStateFile,
     MemoryStateRoot,
+    StateFileError,
     async_file_lock,
     file_lock,
     read_json,
@@ -205,6 +206,11 @@ class MemoryV2JobStore:
             return self._read(job_id)
         except KeyError:
             return None
+        except (CorruptStateFile, StateFileError) as error:
+            # 损坏文件对恢复扫描等价于「这个 job 现在不可读」：跳过并告警，不能让
+            # 一条坏文件把 claim/list_recoverable/runner.recover 全部打崩（review P2-1）。
+            logger.warning("unreadable job file skipped (%s): %s", job_id, error)
+            return None
 
     def _write(self, job: MemoryFormationJob, *, updated_at: str) -> MemoryFormationJob:
         payload = _to_payload(job, updated_at=updated_at)
@@ -235,12 +241,12 @@ class MemoryV2JobStore:
             return []
         jobs: list[MemoryFormationJob] = []
         for path in sorted(directory.glob("*.json")):
-            payload = read_json(path)
-            if payload is None:
-                continue
             try:
+                payload = read_json(path)
+                if payload is None:
+                    continue
                 jobs.append(_to_job(payload))
-            except (CorruptStateFile, KeyError, ValueError) as error:
+            except (CorruptStateFile, StateFileError, KeyError, ValueError) as error:
                 logger.warning("unreadable job file skipped (%s): %s", path.name, error)
         return jobs
 

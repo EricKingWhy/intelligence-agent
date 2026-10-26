@@ -334,6 +334,26 @@ async def test_existing_settings_file_wins_over_legacy_rows(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_corrupt_existing_settings_file_blocks_marker_instead_of_overwriting(
+    tmp_path: Path,
+) -> None:
+    """review P3-3：坏 settings 不是"已存在可跳过"，不得写 marker 把下次启动也挡掉。"""
+    workspace = await _workspace(tmp_path)
+    workspace.state.ensure()
+    workspace.state.settings_path.write_text("{not json", encoding="utf-8")
+
+    counts = await _import(workspace)
+
+    assert counts["settings"] == 0
+    assert counts["settings_existing"] == 0
+    assert counts["settings_unreadable"] == 1
+    assert counts["converged"] is False
+    assert workspace.state.settings_path.read_text(
+        encoding="utf-8") == "{not json", "坏文件是证据，不得覆盖"
+    assert not workspace.state.legacy_marker_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_missing_legacy_record_becomes_needs_reconcile_and_blocks_marker(
     tmp_path: Path,
 ) -> None:

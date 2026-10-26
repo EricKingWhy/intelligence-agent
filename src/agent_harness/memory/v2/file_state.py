@@ -228,6 +228,11 @@ class MemoryStateRoot:
     def legacy_marker_path(self) -> Path:
         return self.base / "legacy-import.json"
 
+    @property
+    def settings_conflict_path(self) -> Path:
+        """D9 旧 settings 多行冲突的人工裁决标记；存在即表示运行时必须 fail-closed。"""
+        return self.base / "settings-conflict.json"
+
     # ---------------------------------------------------------------- 目录
 
     @property

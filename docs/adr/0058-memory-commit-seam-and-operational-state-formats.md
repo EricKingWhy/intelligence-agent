@@ -65,9 +65,10 @@ class MemoryCommit:
     async def add(self, target, content, *, operation_id=None, origin=None, payload=None) -> dict
     async def replace(self, target, old_text, new_content, matched_entry=None, *, fallback_add=False, operation_id=None, origin=None, payload=None) -> dict
     async def remove(self, target, old_text, matched_entry=None, *, missing_ok=False, operation_id=None, origin=None, payload=None) -> dict
-    async def apply_batch(self, target, operations, *, trusted_pins=False, operation_id=None, origin=None, payload=None) -> dict
+    async def apply_batch(self, target, operations, *, trusted_pins=False, allow_empty=False, operation_id=None, origin=None, payload=None) -> dict
     async def remove_by_digest(self, digests, *, operation_id=None, origin=None, payload=None) -> list[str]
     def content_error(self, content) -> str | None            # 系统镜像的碰盘前全量预检
+    def validate_batch(self, target, operations, *, trusted_pins=False, allow_empty=False) -> dict | None
     async def resolve_entry(self, target, old_text, verb) -> dict
     async def resolve_batch_entries(self, target, operations) -> dict
     async def reconcile(self) -> ReconcileReport
@@ -82,6 +83,10 @@ class MemoryCommit:
   不符，全部在**写回执之前**判定（回执也不算内容落盘，但拒绝路径连回执都不写）——AC4。
 - **幂等键 = operation id**：同一 op 已有 COMMITTED 回执 ⇒ 直接回放当时的结果，不再碰磁盘；
   同一 op 处于 NEED_RECONCILE ⇒ 原样返回待对账，不重试。
+- **系统镜像的写前预检**：formation / blocked promote 一次发布多条记录时，先对每个目标调
+  `validate_batch`（同一 mutator，扫描/匹配/最终预算全判），任何一条不合格就在写第一条之前失败；
+  预检通过后每个目标一次 `apply_batch`（一次原子替换、一份回执）。`allow_empty` 只给系统镜像
+  （全部撤回是有意清空），模型工具面的 batch 仍拒绝一次删空。
 - **markdown_store 降为文件引擎**：只保留只读 API（`render_snapshot` / `disk_entries` /
   `resolve_entry` / `resolve_batch_entries` / `target_for` / `entry_digest` / `load_from_disk` /
   上限与启用开关）与一个 `mutate_now(target, mutator)` 临界区（锁 + 重读 + 漂移备份 + 原子写）；
@@ -102,8 +107,12 @@ class MemoryCommit:
 回执字段：`schema` / `operation_id` / `state` / `origin` / `created_at` / `updated_at` /
 `targets{<name>: {before_digest, after_digest, planned, published}}` / `operations[]`（可重放的意图） /
 `payload`（调用方元数据，如 formation 的 apply 计划） / `result`（成功响应的可回放快照） / `reason`。
-终态回执把 `operations` / `payload` 中的正文替换为 `<field>_digest` + `<field>_chars`：
-重放只读 `result`，回执不必长期复制一份记忆正文（未终态回执保持原样供补发布）。
+终态回执把 `operations` / `payload` / `result` 中的正文（含 `current_entries`、
+`replaced_entries`、`removed_entries` 等）替换为 `<field>_digest(s)` + `<field>_chars`：
+回执保留「是不是同一份意图」的可核对性，但不长期复制一份记忆正文——删除回执尤其不能把
+已删正文留在 `receipts/` 里（未终态回执保持原样供补发布）。
+`result` 仍是可回放快照；净化后的条目字段只保留摘要与长度，需要原文的调用方必须从
+内容面/记录层取，不能把回执当第二份真相。
 
 摘要口径：`digest = sha256("\n§\n".join(entries))`——对**解析后的条目序列**取摘要（不是原始字节），
 与 `entry_digest` 同一族，行尾归一化不影响判定。
@@ -196,6 +205,12 @@ deleted_at, expires_at, deletion_reason, content_hashes[], source_hashes[]}`。
 所有写者统一为：**① 计划与校验（纯计算，拒绝零落盘）→ ② 内容发布（`MemoryCommit`，权威）
 → ③ 派生态投影（records / outbox / FTS）→ ④ 操作终态（job / 审批 / 被拦下状态）**。
 
+多记录系统镜像（formation apply、blocked promote）的 ① 是**跨目标的全量预检**
+（`validate_batch`：内容扫描 / pin / 最终预算），② 是每个目标一次 `apply_batch`
+（一次原子替换、一份 `jobp_`/`blkp_` 回执）。这样「第二条超限」在写第一条之前就被拒；
+跨文件仍不原子，IO 失败的半批由回执对账补齐（D3），不会出现「records 回滚了、内容却
+已发布且无人可对账」的孤儿。
+
 被翻转的路径：formation apply（原 SQLite 先、Markdown 后仅警告）、blocked promote、
 `delete` / `bulk_delete`（原 SQLite 先、墓碑同事务、Markdown 后仅警告）。
 created/update/invalidate/edit 原为 Markdown 先，只需把「Markdown 直写」换成「经 commit」。
@@ -207,7 +222,7 @@ created/update/invalidate/edit 原为 Markdown 先，只需把「Markdown 直写
 
 | 旧载体 | 导入规则 |
 |---|---|
-| `memory_v2_settings` | 恰一行 ⇒ 原值导入；多行且四值全同 ⇒ 导入（值等价，记日志）；多行且有差异 ⇒ **不导入**、不折叠，写 `memory-state/settings-conflict.json` 供人工裁决并保持 marker 未完成。`settings.json` 已存在 ⇒ 不覆盖（崩溃重跑时先写的那份是证据） |
+| `memory_v2_settings` | 恰一行 ⇒ 原值导入；多行且四值全同 ⇒ 导入（值等价，记日志）；多行且有差异 ⇒ **不导入**、不折叠，写 `memory-state/settings-conflict.json` 供人工裁决并保持 marker 未完成；该文件存在而 `settings.json` 缺失时，settings store 抛损坏状态（runner fail-closed：审批门按开处理），不把冲突静默成默认值。`settings.json` 已存在 ⇒ 先校验可读，坏文件不写完成标记；可读则不覆盖（崩溃重跑时先写的那份是证据） |
 | `memory_v2_tombstones` | 未过期者按 `memory_id` 逐条落到文件；已过期者不导入 |
 | `memory_v2_staged` | 全部状态按原值导入：`PENDING` 可被 approve；`APPROVING` 读时按租约回收；`APPROVED/REJECTED` 保留终态，使并发审批看到「已处理」而不是重新执行 |
 | `memory_v2_blocked` | 全部状态按确定性 id 导入（含已处置）：`insert` 的查重不分 status，保留终态才不会把同一个决定重新问一遍；只有 `BLOCKED` 出现在待处置列表 |
@@ -245,9 +260,11 @@ claim 路径：**claim 锁 → job 锁**。反向获取一律不写进代码。
   断言除 `markdown_store.py` 自身与 `commit.py` 外没有任何模块调用它，也没有第二个模块打开
   `memories/` 下的写入句柄。
 - **运行时**：同一测试驱动真实入口（`memory` 工具、service create/update/invalidate、edit、
-  delete/bulk、staged approve、formation apply、migration / identity apply、blocked promote），
-  对每次内容变化断言**恰好一条**回执、且 op 前缀与入口对应；任何未走 seam 的写入都会
-  绕开回执而被断言抓住。
+  delete/bulk、staged approve、formation apply、blocked promote），对每次内容变化断言
+  **恰好一条**回执、且 op 前缀与入口对应；任何未走 seam 的写入都会绕开回执而被断言抓住。
+  `mig_`（migration / identity apply）与 `legp_`（旧 state 补发布）不在该用例的驱动面上，
+  由 `test_1493_identity_mapping.py` 与 `test_1494_legacy_import.py` 覆盖；两者同样只经
+  `MemoryCommit` 入口，静态图（本节第一条）已排除第二写者。
 
 ## 3. 方案依据（AGENTS §6.1 / 协议 §1.3）
 

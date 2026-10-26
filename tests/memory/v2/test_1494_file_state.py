@@ -11,6 +11,7 @@ AC2 的判据是"每个操作状态 owner 有非 SQLite 持久实现与重启验
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from hashlib import sha256
 from pathlib import Path
@@ -124,6 +125,24 @@ async def test_corrupt_settings_file_is_an_error_not_silent_defaults(
         '{"schema": 1, "values": {"write_approval": "yes"}}', encoding="utf-8")
     with pytest.raises(CorruptStateFile):
         await FileMemorySettingsStore(workspace.root).get()
+
+
+@pytest.mark.asyncio
+async def test_settings_conflict_without_settings_file_fails_closed(
+    workspace: Workspace,
+) -> None:
+    """review P2-3：冲突文件在、settings 缺失时不得按默认值（write_approval=False）读。"""
+    workspace.root.ensure()
+    atomic_write_text(
+        workspace.root.settings_conflict_path,
+        json.dumps({
+            "schema": 1,
+            "distinct_values": {"write_approval": [False, True]},
+        }),
+    )
+
+    with pytest.raises(CorruptStateFile):
+        await workspace.service.get_settings(USER_A)
 
 
 @pytest.mark.asyncio

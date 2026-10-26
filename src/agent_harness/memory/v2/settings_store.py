@@ -61,6 +61,13 @@ class FileMemorySettingsStore:
     def _read_sync(self) -> dict[str, bool]:
         payload = read_json(self.root.settings_path)
         if payload is None:
+            if self.root.settings_conflict_path.exists():
+                # D9：旧库多行 settings 冲突时没有可折叠的「正确值」。缺文件不能按
+                # 默认值读——write_approval 默认关，会把这个冲突静默变成审批门放行。
+                # 抛损坏状态让 runner 走 fail-closed（审批门按开处理），并保留人工裁决入口。
+                raise CorruptStateFile(
+                    "settings.json is missing while settings-conflict.json exists; "
+                    "resolve the conflict before serving memory settings")
             return {}
         settings = payload.get("values")
         if not isinstance(settings, dict):

@@ -810,6 +810,25 @@ class SqliteMemoryV2Store:
         return await self._tombstones.versions_async(root_id, trusted)
 
     @retry_on_busy
+    async def active_contents_excluding(self, *, exclude_ids: set[str]) -> set[str]:
+        """仍被**其它 active 记录**引用的正文（删除前判共享，避免跨 root 误删）。
+
+        Markdown 对同一正文只有一条；两个 root 恰好同正文时，删其中一个不能把另一个
+        的唯一副本也清掉。这里返回所有 active 正文，由调用方排除本次要删的 id 后比对。
+        """
+        async with (
+            connect(self.database_path) as connection,
+            connection.execute(
+                "SELECT memory_id, content FROM memory_v2_records WHERE status='active'",
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        return {
+            str(row["content"]) for row in rows
+            if str(row["memory_id"]) not in exclude_ids
+        }
+
+    @retry_on_busy
     async def prepare_tombstones(
         self, trusted: TrustedMemoryIdentity, *, memory_id: str | None = None,
         kind: MemoryKind | None = None, reason: str = "user_request",

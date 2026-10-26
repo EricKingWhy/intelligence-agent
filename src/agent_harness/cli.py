@@ -3777,6 +3777,10 @@ async def _memory_command(
         ]
         for operation_id in report.committed:
             lines.append(f"    {operation_id}")
+        if report.republished:
+            lines.append(f"  本轮补发布: {len(report.republished)}")
+            for operation_id in report.republished:
+                lines.append(f"    {operation_id}")
         if report.needs_reconcile:
             lines.append(f"  待人工裁决: {len(report.needs_reconcile)}")
             for operation_id, reason in report.needs_reconcile:
@@ -3792,7 +3796,8 @@ async def _memory_command(
             lines.append(
                 "旧状态导入："
                 f"settings={import_report.get('settings', 0)}"
-                f"（冲突 {import_report.get('settings_conflicts', 0)}）"
+                f"（冲突 {import_report.get('settings_conflicts', 0)}"
+                f"/不可读 {import_report.get('settings_unreadable', 0)}）"
                 f" tombstone={import_report.get('tombstones', 0)}"
                 f" staged={import_report.get('staged', 0)}"
                 f" blocked={import_report.get('blocked', 0)}"

@@ -184,11 +184,20 @@ class StagedWriteStore:
 
     def _read(self, staged_id: str) -> dict[str, Any] | None:
         try:
-            return read_json(self.path_for(staged_id))
+            payload = read_json(self.path_for(staged_id))
         except CorruptStateFile as error:
             # 坏文件不参与审批：抛出去会让整个待审列表不可用；当「读不到」处理并留证据。
             logger.warning("staged write unreadable (%s): %s", staged_id, error)
             return None
+        if payload is None:
+            return None
+        try:
+            self._to_staged(payload)
+        except (KeyError, TypeError, ValueError) as error:
+            # 合法 JSON 但结构坏（缺 id/status）：与坏 JSON 同语义，跳过而不是打崩审批面。
+            logger.warning("staged write malformed (%s): %s", staged_id, error)
+            return None
+        return payload
 
     @staticmethod
     def _to_staged(payload: dict[str, Any]) -> StagedWrite:
@@ -224,6 +233,12 @@ class StagedWriteStore:
             if payload is None:
                 continue
             payload = {**payload, "status": self._effective_status(payload, now=moment)}
+            try:
+                self._to_staged(payload)
+            except (KeyError, TypeError, ValueError) as error:
+                logger.warning(
+                    "malformed staged write skipped (%s): %s", path.name, error)
+                continue
             found.append(payload)
         return found
 
@@ -509,10 +524,18 @@ class BlockedWriteStore:
 
     def _read(self, blocked_id: str) -> dict[str, Any] | None:
         try:
-            return read_json(self.path_for(blocked_id))
+            payload = read_json(self.path_for(blocked_id))
         except CorruptStateFile as error:
             logger.warning("blocked write unreadable (%s): %s", blocked_id, error)
             return None
+        if payload is None:
+            return None
+        try:
+            self._to_blocked(payload)
+        except (KeyError, TypeError, ValueError) as error:
+            logger.warning("blocked write malformed (%s): %s", blocked_id, error)
+            return None
+        return payload
 
     @staticmethod
     def _to_blocked(payload: dict[str, Any]) -> BlockedWrite:
@@ -584,6 +607,12 @@ class BlockedWriteStore:
                 logger.warning("unreadable blocked write skipped (%s): %s", path.name, error)
                 continue
             if payload is not None:
+                try:
+                    self._to_blocked(payload)
+                except (KeyError, TypeError, ValueError) as error:
+                    logger.warning(
+                        "malformed blocked write skipped (%s): %s", path.name, error)
+                    continue
                 found.append(payload)
         return found
 
@@ -594,7 +623,11 @@ class BlockedWriteStore:
         rows = await asyncio.to_thread(self._scan)
         wanted: list[BlockedWrite] = []
         for payload in rows:
-            owner = _identity_trusted(str(payload["identity"]))
+            try:
+                owner = _identity_trusted(str(payload["identity"]))
+            except (KeyError, TypeError, ValueError) as error:
+                logger.warning("blocked write has bad identity, skipped: %s", error)
+                continue
             if (owner.tenant_id, owner.user_id) != (tenant_id, user_id):
                 continue
             if project_id is not None and payload.get("project_id") != project_id:
@@ -686,38 +719,40 @@ class BlockedWriteStore:
     ) -> None:
         """把记录投影到 markdown（确定性 `blkp_` operation id，可回执回放）。
 
-        调用点在 records 事务提交前；失败必须上抛让事务回滚。内容不合规先整体预检，
-        避免半批发布后才被拒。
+        调用点在 records 事务提交前；失败必须上抛让事务回滚。每个目标一次
+        `apply_batch`，且**先对全部目标做写前预检**：逐条 add 时第二条超限会在
+        第一条已发布后失败，records 回滚、blocked 仍待处置，却留下无记录的孤儿内容
+        （review P1-2）。
         """
         commit = self.commit
-        for record in (*records, *invalidated):
+        operations: dict[str, list[dict[str, Any]]] = {"memory": [], "user": []}
+        for record in invalidated:
             target = self.writer.markdown_target(record)
-            if not self.commit.engine.target_enabled(target):
-                continue
-            if (
-                record.status is MemoryStatus.ACTIVE
-                and (error := commit.content_error(record.content))
-            ):
-                raise ValueError(f"markdown publish rejected content: {error}")
-        for index, record in enumerate(invalidated, 1):
-            target = self.writer.markdown_target(record)
-            if not self.commit.engine.target_enabled(target):
-                continue
-            response = await self.commit.remove(
-                target, record.content, matched_entry=record.content, missing_ok=True,
-                operation_id=f"blkp_{blocked_id}_rm_{index}")
-            if not response.get("success"):
-                raise ValueError(str(response.get("error") or "markdown remove failed"))
-        for index, record in enumerate(records, 1):
+            if commit.engine.target_enabled(target):
+                operations[target].append({
+                    "action": "remove", "old_text": record.content,
+                    "matched_entry": record.content, "missing_ok": True,
+                })
+        for record in records:
             if record.status is not MemoryStatus.ACTIVE:
                 continue
             target = self.writer.markdown_target(record)
-            if not self.commit.engine.target_enabled(target):
-                continue
-            response = await self.commit.add(
-                target, record.content, operation_id=f"blkp_{blocked_id}_add_{index}")
+            if commit.engine.target_enabled(target):
+                operations[target].append({"action": "add", "content": record.content})
+        plans = [(target, ops) for target, ops in operations.items() if ops]
+        for target, ops in plans:
+            error = commit.validate_batch(
+                target, ops, trusted_pins=True, allow_empty=True)
+            if error is not None:
+                raise ValueError(
+                    f"markdown {target} preflight rejected: "
+                    f"{error.get('error') or 'batch rejected'}")
+        for target, ops in plans:
+            response = await commit.apply_batch(
+                target, ops, trusted_pins=True, allow_empty=True,
+                operation_id=f"blkp_{blocked_id}_apply_{target}")
             if not response.get("success"):
-                raise ValueError(str(response.get("error") or "markdown add failed"))
+                raise ValueError(str(response.get("error") or "markdown apply failed"))
 
     async def _replay_in(
         self, connection: aiosqlite.Connection, actions: list[dict[str, Any]],

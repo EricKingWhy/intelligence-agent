@@ -32,7 +32,13 @@ from typing import Any
 
 from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.commit import MemoryCommit
-from agent_harness.memory.v2.file_state import safe_id, utc_stamp, write_json
+from agent_harness.memory.v2.file_state import (
+    CorruptStateFile,
+    StateFileError,
+    safe_id,
+    utc_stamp,
+    write_json,
+)
 from agent_harness.memory.v2.jobs import job_id_for
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
 from agent_harness.memory.v2.receipts import ReceiptState, ReceiptStore
@@ -68,7 +74,7 @@ async def import_legacy_state(
 
     counts: dict[str, Any] = {
         "settings": 0, "settings_rows": 0, "settings_conflicts": 0,
-        "settings_existing": 0,
+        "settings_existing": 0, "settings_unreadable": 0,
         "tombstones": 0, "tombstones_expired": 0,
         "staged": 0, "staged_existing": 0,
         "blocked": 0, "blocked_existing": 0, "jobs": 0, "jobs_existing": 0,
@@ -109,6 +115,14 @@ async def _import_settings(connection, root, counts: dict[str, Any]) -> bool:
     store = FileMemorySettingsStore(root)
     if store.path.exists():
         # 已经写过的文件是证据：崩溃重跑不能覆盖用户在窗口内改过的设置。
+        # 但"存在"不等于"可读"：坏文件不能计为收敛并写完成标记，否则旧库 settings
+        # 永远不会再导入，运行时却一直 fail-closed（review P3-3）。
+        try:
+            await store.explicit()
+        except (CorruptStateFile, StateFileError) as error:
+            counts["settings_unreadable"] += 1
+            logger.warning("existing memory settings are unreadable: %s", error)
+            return False
         counts["settings_existing"] += 1
         return True
     latest = rows[0]
@@ -129,7 +143,7 @@ async def _import_settings(connection, root, counts: dict[str, Any]) -> bool:
     if counts["settings_conflicts"]:
         # D9：多行且有差异 ⇒ 不导入、不折叠；落一个可见的冲突文件供人工裁决，
         # 并让 marker 保持未完成（下次启动仍能看到）。
-        write_json(root.base / "settings-conflict.json", {
+        write_json(root.settings_conflict_path, {
             "schema": 1,
             "detected_at": utc_stamp(),
             "keys": list(keys),

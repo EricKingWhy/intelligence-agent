@@ -363,6 +363,19 @@ class MarkdownMemoryStore:
     def _char_limit(self, target: str) -> int:
         return self.user_char_limit if target == "user" else self.memory_char_limit
 
+    def char_limit(self, target: str) -> int:
+        """目标文件的字符上限（系统镜像的写前预检用；正常写入仍是 mutator 的 limit 参数）。"""
+        return self._char_limit(target)
+
+    @property
+    def consolidation_failures(self) -> int:
+        return self._consolidation_failures
+
+    @consolidation_failures.setter
+    def consolidation_failures(self, value: int) -> None:
+        """只给 `MemoryCommit.validate_batch` 的写前预检还原计数用：预检不是模型尝试。"""
+        self._consolidation_failures = value
+
     def _usage(self, target: str) -> str:
         return f"{self._char_count(target):,}/{self._char_limit(target):,}"
 
