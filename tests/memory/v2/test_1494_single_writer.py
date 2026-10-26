@@ -855,6 +855,24 @@ def test_static_scan_catches_class_body_path_attributes() -> None:
     assert _scan_tree("src/fake.py", ast.parse(source)) == [5]
 
 
+def test_static_scan_catches_direct_self_attribute_writes() -> None:
+    """review R11-P4-2：直接对 `self.<attr>` 落笔、类级属性与属性局部别名都要抓住。"""
+    source = (
+        "engine = object()\n"                                    # 1
+        "class Store:\n"                                         # 2
+        "    PATH = engine.path_for('user')\n"                   # 3
+        "    def __init__(self):\n"                              # 4
+        "        self.path = engine.path_for('memory')\n"        # 5
+        "    def write(self):\n"                                 # 6
+        "        self.path.write_text('x')\n"                    # 7
+        "        self.PATH.unlink()\n"                           # 8
+        "        p = self.path\n"                                # 9
+        "        p.touch()\n"                                    # 10
+    )
+
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [7, 8, 10]
+
+
 def test_static_scan_catches_module_alias_returned_by_a_wrapper() -> None:
     """review R11-P4-3：模块级别名经函数包装返回，也要追到落笔点。"""
     source = (

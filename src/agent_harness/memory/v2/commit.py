@@ -29,8 +29,9 @@ ADR-0056 §3.1 把「当前内容与 revision 的唯一可变事实入口」判�
 
 同一 id 已有 `COMMITTED` 回执 ⇒ **本次意图与记录一致时**回放记录的结果，不再碰磁盘
 （不重复追加、不重复删除）；意图不同 ⇒ `MemoryReconcileRequired`，绝不把旧内容当成本次
-结果返回。非终态回执的目标集被缩表重试丢掉时：已发布目标算无事可做，未发布目标标
-`NEED_RECONCILE` 后同样抛 `MemoryReconcileRequired`——确定性冲突不能让 formation 无限重跑。
+结果返回。非终态回执的目标集被缩表重试丢掉时：已发布、或磁盘已经等于 after 的目标算
+无事可做；其余未发布目标标 `NEED_RECONCILE` 后同样抛 `MemoryReconcileRequired`——
+确定性冲突不能让 formation 无限重跑。
 
 # 顺序（ADR-0058 D8）
 
@@ -1248,11 +1249,8 @@ class MemoryCommit:
     def _resolve_receipt(self, receipt: CommitReceipt) -> tuple[str, bool]:
         """返回 ``(committed|needs_reconcile|unreadable, 本轮是否补发布过)``。"""
         if not receipt.targets:
-            if receipt.operations:
-                # targets 为空却有意图：无法判定发布目标，不能 finish 成成功。
-                self._receipts.mark_needs_reconcile(
-                    receipt.operation_id, "receipt has operations but no targets")
-                return "needs_reconcile", False
+            # operations 非空而 targets 为空的回执在 from_dict 就被判 corrupt，
+            # 到不了这里（load 会返回 synthetic NEED_RECONCILE 并被上游跳过）。
             if receipt.origin == "legacy_import":
                 # legacy import 的空/空回执是“这条旧状态没法自动接走”的标记，
                 # 不是一次 no-op 提交。旧版本先 prepare 后 mark 的中间态被 kill

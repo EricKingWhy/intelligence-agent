@@ -411,6 +411,7 @@ async def test_flag_needs_reconcile_takes_the_operation_lock_and_writes_a_valid_
     receipts = ReceiptStore(MemoryStateRoot(tmp_path / "memory-state"))
     entered: list[str] = []
     lock_threads: list[threading.Thread] = []
+    inside = {"locked": False}
     real_lock = receipts.lock
 
     @contextmanager
@@ -418,9 +419,20 @@ async def test_flag_needs_reconcile_takes_the_operation_lock_and_writes_a_valid_
         entered.append(operation_id)
         lock_threads.append(threading.current_thread())
         with real_lock(operation_id):
-            yield
+            inside["locked"] = True
+            try:
+                yield
+            finally:
+                inside["locked"] = False
+
+    real_flag = receipts.flag_needs_reconcile
+
+    def _flag_inside(*args, **kwargs):
+        assert inside["locked"] is True, "receipt write must happen inside the op lock"
+        return real_flag(*args, **kwargs)
 
     monkeypatch.setattr(receipts, "lock", _tracked)
+    monkeypatch.setattr(receipts, "flag_needs_reconcile", _flag_inside)
 
     await _flag_needs_reconcile(
         receipts, "legp_lock", "legacy record is missing", memory_id="mem-lock")
