@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from agent_harness.config import Settings
 from agent_harness.memory.v2.identity_mapping import (
     MANIFEST_NAME,
@@ -64,6 +66,13 @@ def test_cli_plan_is_read_only_and_apply_requires_every_item(tmp_path, monkeypat
     code, out = _memory_cli(monkeypatch, settings, ["identity", "list"], capsys)
     assert code == 0 and "entry:memory:" in out, out
 
+    staged = next(item for item in load_manifest(workspace / MANIFEST_NAME)["items"]
+                  if item["kind"] == "staged_archive")
+    code, out = _memory_cli(
+        monkeypatch, settings, ["identity", "show", staged["id"]], capsys)
+    assert code == 0, out
+    assert "identity={'tenant_id': 'tenant-a', 'user_id': 'user-a', 'project_id': 'proj-1'}" in out
+
     code, out = _memory_cli(monkeypatch, settings, ["identity", "apply"], capsys)
     assert code == 0, out
     assert "旧数据销毁：not_authorized" in out, out
@@ -117,3 +126,35 @@ def test_cli_accepts_a_lower_budget_flag_and_records_the_deployment_ceiling(
     assert manifest["limits"]["memory"] == 900
     assert manifest["deployment_limits"]["memory"] == settings.memory_char_limit
     assert manifest["deployment_limits"]["user"] == settings.user_char_limit
+
+@pytest.mark.parametrize("action", ["list", "show", "apply"])
+def test_cli_missing_manifest_returns_readable_error(tmp_path, monkeypatch, capsys, action) -> None:
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path / "workspace"), model_api_key="sk-test",
+    )
+    argv = ["identity", action]
+    if action == "show":
+        argv.append("missing-item")
+
+    code, out = _memory_cli(monkeypatch, settings, argv, capsys)
+
+    assert code == 2
+    assert "先运行 memory identity plan" in out
+    assert "Traceback" not in out
+
+
+@pytest.mark.parametrize("option", ["--memory-limit", "--user-limit"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_cli_rejects_nonpositive_budget_limits(
+    tmp_path, monkeypatch, capsys, option, value,
+) -> None:
+    workspace, _ = asyncio.run(_seed(tmp_path))
+    settings = Settings(_env_file=None, workspace_dir=str(workspace), model_api_key="sk-test")
+
+    code, out = _memory_cli(
+        monkeypatch, settings, ["identity", "plan", f"{option}={value}"], capsys,
+    )
+
+    assert code == 2, out
+    assert "必须大于 0" in out
+    assert not (workspace / MANIFEST_NAME).exists()
