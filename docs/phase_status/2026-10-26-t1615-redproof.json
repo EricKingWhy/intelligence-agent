@@ -1,0 +1,197 @@
+{
+  "base": "ca4234d91bbb5a1d6546086dbe02a8d2de81b83c",
+  "tip": "a9e9ba071fb9a7142fffb83cbeba125d07d05b58",
+  "python": "C:\\Users\\王浩宇\\.codex\\worktrees\\issue-1525-deepening\\intelligence-agent\\.venv\\Scripts\\python.exe",
+  "isolated_root": "C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\repo",
+  "import_probe": "C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\repo\\src\\agent_harness\\__init__.py",
+  "baseline": {
+    "name": "baseline-red",
+    "command": [
+      "C:\\Users\\王浩宇\\.codex\\worktrees\\issue-1525-deepening\\intelligence-agent\\.venv\\Scripts\\python.exe",
+      "-m",
+      "pytest",
+      "tests/memory/v2/test_1493_identity_mapping.py",
+      "tests/memory/v2/test_1493_identity_mapping_cli.py",
+      "-q",
+      "-p",
+      "no:randomly",
+      "--tb=short",
+      "--junitxml=C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\baseline-red.xml"
+    ],
+    "returncode": 1,
+    "testcases": 51,
+    "failures": [
+      {
+        "name": "test_plan_partitions_every_source_row_and_hashes_are_recomputable",
+        "message": "AssertionError: memory_v2_jobs/job-done 行 hash 对不上\nassert '9394da173e90...d327702c5a468' == 'ca79bbe93afd...2bc23ead7e1a5'\n  \n  - ca79bbe93afda388da4cbba21671cccf2b6df30005460f528742bc23ead7e1a5\n  + 9394da173e9069f141f896189373d91f2ebff33bd4f08c4256ed327702c5a468",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:344: in test_plan_partitions_every_source_row_and_hashes_are_recomputable\n    assert source[\"row_hash\"] == expected, f\"{source['table']}/{source['id']} 行 hash 对不上\"\nE   AssertionError: memory_v2_jobs/job-done 行 hash 对不上\nE   assert '9394da173e90...d327702c5a468' == 'ca79bbe93afd...2bc23ead7e1a5'\nE     \nE     - ca79bbe93afda388da4cbba21671cccf2b6df30005460f528742bc23ead7e1a5\nE     + 9394da173e9069f141f896189373d91f2ebff33bd4f08c4256ed327702c5a468"
+      },
+      {
+        "name": "test_conflict_groups_reject_reused_source_ids_before_writing_manifest[groups0]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:847: in test_conflict_groups_reject_reused_source_ids_before_writing_manifest\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_conflict_groups_reject_reused_source_ids_before_writing_manifest[groups1]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:847: in test_conflict_groups_reject_reused_source_ids_before_writing_manifest\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_conflict_groups_reject_reused_source_ids_before_writing_manifest[groups2]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:847: in test_conflict_groups_reject_reused_source_ids_before_writing_manifest\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_apply_rechecks_tampered_deployment_budget_before_writing",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:893: in test_apply_rechecks_tampered_deployment_budget_before_writing\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_apply_rescans_live_leases_created_after_plan[job]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:927: in test_apply_rescans_live_leases_created_after_plan\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_apply_rescans_live_leases_created_after_plan[staged]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:927: in test_apply_rescans_live_leases_created_after_plan\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_apply_refreshes_expired_lease_snapshots[job]",
+        "message": "agent_harness.memory.v2.identity_mapping.MappingBlocked: archive:memory_v2_jobs:job-expiring 仍有活 lease：先等它结终态或过期再切",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:973: in test_apply_refreshes_expired_lease_snapshots\n    receipt = await apply_identity_mapping(manifest_path, now=apply_time)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsrc\\agent_harness\\memory\\v2\\identity_mapping.py:859: in apply_identity_mapping\n    raise MappingBlocked(reasons)\nE   agent_harness.memory.v2.identity_mapping.MappingBlocked: archive:memory_v2_jobs:job-expiring 仍有活 lease：先等它结终态或过期再切"
+      },
+      {
+        "name": "test_apply_refreshes_expired_lease_snapshots[staged]",
+        "message": "agent_harness.memory.v2.identity_mapping.MappingBlocked: archive:memory_v2_staged:stg-expiring 仍有活 lease：先等它结终态或过期再切",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:973: in test_apply_refreshes_expired_lease_snapshots\n    receipt = await apply_identity_mapping(manifest_path, now=apply_time)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsrc\\agent_harness\\memory\\v2\\identity_mapping.py:859: in apply_identity_mapping\n    raise MappingBlocked(reasons)\nE   agent_harness.memory.v2.identity_mapping.MappingBlocked: archive:memory_v2_staged:stg-expiring 仍有活 lease：先等它结终态或过期再切"
+      },
+      {
+        "name": "test_apply_blocks_drift_in_non_entry_sources[mutation0]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1040: in test_apply_blocks_drift_in_non_entry_sources\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_apply_blocks_drift_in_non_entry_sources[mutation1]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1040: in test_apply_blocks_drift_in_non_entry_sources\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_apply_blocks_drift_in_non_entry_sources[mutation2]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1040: in test_apply_blocks_drift_in_non_entry_sources\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_apply_blocks_drift_in_non_entry_sources[mutation3]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1040: in test_apply_blocks_drift_in_non_entry_sources\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_apply_blocks_drift_in_non_entry_sources[mutation4]",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1040: in test_apply_blocks_drift_in_non_entry_sources\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_empty_rejection_can_be_archived_and_receipt_counts_record_rows",
+        "message": "agent_harness.memory.v2.identity_mapping.MappingBlocked: empty_rejected:memory_v2_records:empty-1 的 kind=empty_rejected 不支持裁决",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1054: in test_empty_rejection_can_be_archived_and_receipt_counts_record_rows\n    resolved = await resolve_conflict(manifest_path, empty[\"id\"], archive_all=True, now=CLOCK)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsrc\\agent_harness\\memory\\v2\\identity_mapping.py:767: in resolve_conflict\n    raise MappingBlocked([f\"{item_id} 的 kind={kind} 不支持裁决\"])\nE   agent_harness.memory.v2.identity_mapping.MappingBlocked: empty_rejected:memory_v2_records:empty-1 的 kind=empty_rejected 不支持裁决"
+      },
+      {
+        "name": "test_staged_only_identity_adds_settings_variant",
+        "message": "AssertionError: 清单里没有 conflict:settings；现有 ['settings', 'archive:memory_v2_staged:stg-pending', 'archive:memory_v2_staged:stg-approving', 'archive:memory_v2_staged:stg-tenant-z', 'archive:memory_v2_jobs:job-done', 'archive:memory_v2_jobs:job-lost', 'archive:memory_v2_tombstones:tomb-1']",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1088: in test_staged_only_identity_adds_settings_variant\n    settings = _item(manifest, \"conflict:settings\")\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests\\memory\\v2\\test_1493_identity_mapping.py:232: in _item\n    raise AssertionError(f\"清单里没有 {item_id}；现有 {[i['id'] for i in manifest['items']]}\")\nE   AssertionError: 清单里没有 conflict:settings；现有 ['settings', 'archive:memory_v2_staged:stg-pending', 'archive:memory_v2_staged:stg-approving', 'archive:memory_v2_staged:stg-tenant-z', 'archive:memory_v2_jobs:job-done', 'archive:memory_v2_jobs:job-lost', 'archive:memory_v2_tombstones:tomb-1']"
+      },
+      {
+        "name": "test_apply_persists_a_job_lease_that_became_live_after_plan",
+        "message": "Failed: DID NOT RAISE MappingBlocked",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1159: in test_apply_persists_a_job_lease_that_became_live_after_plan\n    with pytest.raises(MappingBlocked) as blocked:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE MappingBlocked"
+      },
+      {
+        "name": "test_cli_plan_is_read_only_and_apply_requires_every_item",
+        "message": "assert \"identity={'tenant_id': 'tenant-a', 'user_id': 'user-a', 'project_id': 'proj-1'}\" in \"archive:memory_v2_staged:stg-pending：staged_archive / archive\\n  status = pending\\n  payload_hash = 9be5f3968dff6991c...13badeed806b identity={'tenant_id': None, 'user_id': None, 'project_id': None}\\n  正文不在清单里：按上面的 memory_id 回库查看，确认后再裁决\\n\"",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping_cli.py:74: in test_cli_plan_is_read_only_and_apply_requires_every_item\n    assert \"identity={'tenant_id': 'tenant-a', 'user_id': 'user-a', 'project_id': 'proj-1'}\" in out\nE   assert \"identity={'tenant_id': 'tenant-a', 'user_id': 'user-a', 'project_id': 'proj-1'}\" in \"archive:memory_v2_staged:stg-pending：staged_archive / archive\\n  status = pending\\n  payload_hash = 9be5f3968dff6991c...13badeed806b identity={'tenant_id': None, 'user_id': None, 'project_id': None}\\n  正文不在清单里：按上面的 memory_id 回库查看，确认后再裁决\\n\""
+      },
+      {
+        "name": "test_cli_missing_manifest_returns_readable_error[list]",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'C:\\\\Users\\\\王浩宇\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-王浩宇\\\\pytest-159\\\\test_cli_missing_manifest_retu0\\\\workspace\\\\memory-migration-mapping.json'",
+        "assertion": "^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\asyncio\\runners.py:195: in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\asyncio\\runners.py:118: in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\asyncio\\base_events.py:725: in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\nsrc\\agent_harness\\cli.py:3710: in _memory_command\n    manifest = mapping.load_manifest(manifest_path)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsrc\\agent_harness\\memory\\v2\\identity_mapping.py:169: in load_manifest\n    return json.loads(Path(path).read_text(encoding=\"utf-8\"))\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_local.py:546: in read_text\n    return PathBase.read_text(self, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_abc.py:632: in read_text\n    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_local.py:537: in open\n    return io.open(self, mode, buffering, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   FileNotFoundError: [Errno 2] No such file or directory: 'C:\\\\Users\\\\王浩宇\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-王浩宇\\\\pytest-159\\\\test_cli_missing_manifest_retu0\\\\workspace\\\\memory-migration-mapping.json'"
+      },
+      {
+        "name": "test_cli_missing_manifest_returns_readable_error[show]",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'C:\\\\Users\\\\王浩宇\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-王浩宇\\\\pytest-159\\\\test_cli_missing_manifest_retu1\\\\workspace\\\\memory-migration-mapping.json'",
+        "assertion": "^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\asyncio\\runners.py:195: in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\asyncio\\runners.py:118: in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\asyncio\\base_events.py:725: in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\nsrc\\agent_harness\\cli.py:3710: in _memory_command\n    manifest = mapping.load_manifest(manifest_path)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsrc\\agent_harness\\memory\\v2\\identity_mapping.py:169: in load_manifest\n    return json.loads(Path(path).read_text(encoding=\"utf-8\"))\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_local.py:546: in read_text\n    return PathBase.read_text(self, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_abc.py:632: in read_text\n    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_local.py:537: in open\n    return io.open(self, mode, buffering, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   FileNotFoundError: [Errno 2] No such file or directory: 'C:\\\\Users\\\\王浩宇\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-王浩宇\\\\pytest-159\\\\test_cli_missing_manifest_retu1\\\\workspace\\\\memory-migration-mapping.json'"
+      },
+      {
+        "name": "test_cli_missing_manifest_returns_readable_error[apply]",
+        "message": "FileNotFoundError: [Errno 2] No such file or directory: 'C:\\\\Users\\\\王浩宇\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-王浩宇\\\\pytest-159\\\\test_cli_missing_manifest_retu2\\\\workspace\\\\memory-migration-mapping.json'",
+        "assertion": "\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\asyncio\\runners.py:118: in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\asyncio\\base_events.py:725: in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\nsrc\\agent_harness\\cli.py:3689: in _memory_command\n    receipt = await mapping.apply_identity_mapping(manifest_path)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsrc\\agent_harness\\memory\\v2\\identity_mapping.py:846: in apply_identity_mapping\n    manifest = load_manifest(path)\n               ^^^^^^^^^^^^^^^^^^^\nsrc\\agent_harness\\memory\\v2\\identity_mapping.py:169: in load_manifest\n    return json.loads(Path(path).read_text(encoding=\"utf-8\"))\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_local.py:546: in read_text\n    return PathBase.read_text(self, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_abc.py:632: in read_text\n    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n..\\..\\..\\..\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\\Lib\\pathlib\\_local.py:537: in open\n    return io.open(self, mode, buffering, encoding, errors, newline)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   FileNotFoundError: [Errno 2] No such file or directory: 'C:\\\\Users\\\\王浩宇\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-王浩宇\\\\pytest-159\\\\test_cli_missing_manifest_retu2\\\\workspace\\\\memory-migration-mapping.json'"
+      },
+      {
+        "name": "test_cli_rejects_nonpositive_budget_limits[0---memory-limit]",
+        "message": "AssertionError: 映射清单已生成：条目 12 项 / 源行 14（映射 7、档案 7、冲突 0）\n  待逐项批准：5 项\n  待人工裁决的冲突：0 项\n  \nassert 0 == 2",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping_cli.py:158: in test_cli_rejects_nonpositive_budget_limits\n    assert code == 2, out\nE   AssertionError: 映射清单已生成：条目 12 项 / 源行 14（映射 7、档案 7、冲突 0）\nE     待逐项批准：5 项\nE     待人工裁决的冲突：0 项\nE     \nE   assert 0 == 2"
+      },
+      {
+        "name": "test_cli_rejects_nonpositive_budget_limits[0---user-limit]",
+        "message": "AssertionError: 映射清单已生成：条目 12 项 / 源行 14（映射 7、档案 7、冲突 0）\n  待逐项批准：5 项\n  待人工裁决的冲突：0 项\n  \nassert 0 == 2",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping_cli.py:158: in test_cli_rejects_nonpositive_budget_limits\n    assert code == 2, out\nE   AssertionError: 映射清单已生成：条目 12 项 / 源行 14（映射 7、档案 7、冲突 0）\nE     待逐项批准：5 项\nE     待人工裁决的冲突：0 项\nE     \nE   assert 0 == 2"
+      },
+      {
+        "name": "test_cli_rejects_nonpositive_budget_limits[-1---memory-limit]",
+        "message": "AssertionError: 映射清单已生成：条目 13 项 / 源行 14（映射 7、档案 7、冲突 0）\n  待逐项批准：5 项\n  待人工裁决的冲突：1 项（budget:memory）\n  \nassert 0 == 2",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping_cli.py:158: in test_cli_rejects_nonpositive_budget_limits\n    assert code == 2, out\nE   AssertionError: 映射清单已生成：条目 13 项 / 源行 14（映射 7、档案 7、冲突 0）\nE     待逐项批准：5 项\nE     待人工裁决的冲突：1 项（budget:memory）\nE     \nE   assert 0 == 2"
+      },
+      {
+        "name": "test_cli_rejects_nonpositive_budget_limits[-1---user-limit]",
+        "message": "AssertionError: 映射清单已生成：条目 13 项 / 源行 14（映射 7、档案 7、冲突 0）\n  待逐项批准：5 项\n  待人工裁决的冲突：1 项（budget:user）\n  \nassert 0 == 2",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping_cli.py:158: in test_cli_rejects_nonpositive_budget_limits\n    assert code == 2, out\nE   AssertionError: 映射清单已生成：条目 13 项 / 源行 14（映射 7、档案 7、冲突 0）\nE     待逐项批准：5 项\nE     待人工裁决的冲突：1 项（budget:user）\nE     \nE   assert 0 == 2"
+      }
+    ],
+    "errors": 0,
+    "tail": "493_identity_mapping.py::test_conflict_groups_reject_reused_source_ids_before_writing_manifest[groups2]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_rechecks_tampered_deployment_budget_before_writing\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_rescans_live_leases_created_after_plan[job]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_rescans_live_leases_created_after_plan[staged]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_refreshes_expired_lease_snapshots[job]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_refreshes_expired_lease_snapshots[staged]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_blocks_drift_in_non_entry_sources[mutation0]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_blocks_drift_in_non_entry_sources[mutation1]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_blocks_drift_in_non_entry_sources[mutation2]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_blocks_drift_in_non_entry_sources[mutation3]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_blocks_drift_in_non_entry_sources[mutation4]\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_empty_rejection_can_be_archived_and_receipt_counts_record_rows\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_staged_only_identity_adds_settings_variant\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_apply_persists_a_job_lease_that_became_live_after_plan\nFAILED tests/memory/v2/test_1493_identity_mapping_cli.py::test_cli_plan_is_read_only_and_apply_requires_every_item\nFAILED tests/memory/v2/test_1493_identity_mapping_cli.py::test_cli_missing_manifest_returns_readable_error[list]\nFAILED tests/memory/v2/test_1493_identity_mapping_cli.py::test_cli_missing_manifest_returns_readable_error[show]\nFAILED tests/memory/v2/test_1493_identity_mapping_cli.py::test_cli_missing_manifest_returns_readable_error[apply]\nFAILED tests/memory/v2/test_1493_identity_mapping_cli.py::test_cli_rejects_nonpositive_budget_limits[0---memory-limit]\nFAILED tests/memory/v2/test_1493_identity_mapping_cli.py::test_cli_rejects_nonpositive_budget_limits[0---user-limit]\nFAILED tests/memory/v2/test_1493_identity_mapping_cli.py::test_cli_rejects_nonpositive_budget_limits[-1---memory-limit]\nFAILED tests/memory/v2/test_1493_identity_mapping_cli.py::test_cli_rejects_nonpositive_budget_limits[-1---user-limit]\n25 failed, 26 passed in 45.88s\n"
+  },
+  "receipt_mutation": {
+    "name": "receipt-count-mutation-red",
+    "command": [
+      "C:\\Users\\王浩宇\\.codex\\worktrees\\issue-1525-deepening\\intelligence-agent\\.venv\\Scripts\\python.exe",
+      "-m",
+      "pytest",
+      "tests/memory/v2/test_1493_identity_mapping.py::test_empty_rejection_can_be_archived_and_receipt_counts_record_rows",
+      "-q",
+      "-p",
+      "no:randomly",
+      "--tb=short",
+      "--junitxml=C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\receipt-count-mutation-red.xml"
+    ],
+    "returncode": 1,
+    "testcases": 1,
+    "failures": [
+      {
+        "name": "test_empty_rejection_can_be_archived_and_receipt_counts_record_rows",
+        "message": "assert 0 == 1",
+        "assertion": "tests\\memory\\v2\\test_1493_identity_mapping.py:1069: in test_empty_rejection_can_be_archived_and_receipt_counts_record_rows\n    assert receipt[\"archive\"][\"records\"] == record_rows == 1\nE   assert 0 == 1"
+      }
+    ],
+    "errors": 0,
+    "tail": "F                                                                        [100%]\n================================== FAILURES ===================================\n_____ test_empty_rejection_can_be_archived_and_receipt_counts_record_rows _____\ntests\\memory\\v2\\test_1493_identity_mapping.py:1069: in test_empty_rejection_can_be_archived_and_receipt_counts_record_rows\n    assert receipt[\"archive\"][\"records\"] == record_rows == 1\nE   assert 0 == 1\n=========================== short test summary info ===========================\nFAILED tests/memory/v2/test_1493_identity_mapping.py::test_empty_rejection_can_be_archived_and_receipt_counts_record_rows\n1 failed in 14.90s\n"
+  },
+  "restored": {
+    "name": "receipt-count-restored-green",
+    "command": [
+      "C:\\Users\\王浩宇\\.codex\\worktrees\\issue-1525-deepening\\intelligence-agent\\.venv\\Scripts\\python.exe",
+      "-m",
+      "pytest",
+      "tests/memory/v2/test_1493_identity_mapping.py::test_empty_rejection_can_be_archived_and_receipt_counts_record_rows",
+      "-q",
+      "-p",
+      "no:randomly",
+      "--tb=short",
+      "--junitxml=C:\\Users\\王浩宇\\AppData\\Local\\Temp\\codex-1615-redproof-s4_4_y4p\\receipt-count-restored-green.xml"
+    ],
+    "returncode": 0,
+    "testcases": 1,
+    "failures": [],
+    "errors": 0,
+    "tail": ".                                                                        [100%]\n1 passed in 11.18s\n"
+  }
+}
