@@ -449,17 +449,49 @@ async def test_flag_needs_reconcile_takes_the_operation_lock_and_writes_a_valid_
 async def test_flag_needs_reconcile_writes_the_marker_in_one_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """review R11-P4-1：标记一次落盘；prepare 的中间态会让 kill 后 reconcile 误判成功。"""
+    """review R11-P4-1/R12：标记只落盘一次；prepare 的中间态会让 kill 后 reconcile 误判成功。"""
     receipts = ReceiptStore(MemoryStateRoot(tmp_path / "memory-state"))
+    writes: list[str] = []
+    real_write = receipts._write
 
     def _forbidden(*_args, **_kwargs):
         raise AssertionError("legacy marker must not go through prepare")
 
+    def _counted(receipt):
+        writes.append(receipt.state)
+        return real_write(receipt)
+
     monkeypatch.setattr(receipts, "prepare", _forbidden)
+    monkeypatch.setattr(receipts, "_write", _counted)
 
     await _flag_needs_reconcile(
         receipts, "legp_atomic", "legacy record is missing", memory_id="mem-atomic")
 
+    assert writes == [ReceiptState.NEED_RECONCILE]
     receipt = receipts.load("legp_atomic")
     assert receipt is not None and receipt.state == ReceiptState.NEED_RECONCILE
     assert receipt.origin == "legacy_import"
+
+
+@pytest.mark.asyncio
+async def test_flag_needs_reconcile_advances_prepared_but_keeps_committed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """review R12：已有 PREPARED 推进到对账；COMMITTED 绝不回退（终态证据保留）。"""
+    receipts = ReceiptStore(MemoryStateRoot(tmp_path / "memory-state"))
+    receipts.prepare(
+        "legp_prepared", origin="legacy_import", targets=[], operations=[])
+    receipts.prepare(
+        "legp_committed", origin="legacy_import", targets=[], operations=[])
+    receipts.finish("legp_committed")
+
+    await _flag_needs_reconcile(
+        receipts, "legp_prepared", "legacy record is missing", memory_id="mem-1")
+    await _flag_needs_reconcile(
+        receipts, "legp_committed", "legacy record is missing", memory_id="mem-2")
+
+    prepared = receipts.load("legp_prepared")
+    assert prepared is not None and prepared.state == ReceiptState.NEED_RECONCILE
+    committed = receipts.load("legp_committed")
+    assert committed is not None and committed.state == ReceiptState.COMMITTED
+    assert committed.reason is None
