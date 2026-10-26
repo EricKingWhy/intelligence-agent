@@ -297,18 +297,26 @@ def _content_path_functions(
     return names
 
 
-def _class_scope_assignments(node: ast.AST):
-    """类作用域内的赋值，穿过 `if`/`try`/`for`/`with`，但不进方法体与嵌套类。
+def _class_scope_bindings(node: ast.AST):
+    """类作用域内的 `(targets, value)` 绑定，穿过控制流但不进方法体与嵌套类。
 
-    类体里的路径常量可以写在控制流块里（`if TYPE_CHECKING: PATH = ...`）；
-    只看 `class_node.body` 的直接赋值会漏掉这些形状（review R12-P4-1）。
+    覆盖赋值，以及 `for PATH in [...]` / `with ... as PATH` 这类隐式绑定：
+    只看 `class_node.body` 的直接赋值会漏掉它们（review R12/R13-P4）。
     """
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        if isinstance(child, (ast.Assign, ast.AnnAssign)):
-            yield child
-        yield from _class_scope_assignments(child)
+        if isinstance(child, ast.Assign):
+            yield child.targets, child.value
+        elif isinstance(child, ast.AnnAssign):
+            yield [child.target], child.value
+        elif isinstance(child, (ast.For, ast.AsyncFor)):
+            yield [child.target], child.iter
+        elif isinstance(child, (ast.With, ast.AsyncWith)):
+            for item in child.items:
+                if item.optional_vars is not None:
+                    yield [item.optional_vars], item.context_expr
+        yield from _class_scope_bindings(child)
 
 
 def _content_path_methods(
@@ -335,16 +343,12 @@ def _content_path_methods(
         for class_node in ast.walk(tree):
             if not isinstance(class_node, ast.ClassDef):
                 continue
-            for statement in _class_scope_assignments(class_node):
-                if (
-                    isinstance(statement, (ast.Assign, ast.AnnAssign))
-                    and statement.value is not None
-                    and _references_content(
-                        statement.value, set(known_paths), aliases,
-                        path_functions, names | attr_names,
-                    )
+            for targets, value in _class_scope_bindings(class_node):
+                if value is not None and _references_content(
+                    value, set(known_paths), aliases, path_functions,
+                    names | attr_names,
                 ):
-                    for target in _assign_targets(statement):
+                    for target in targets:
                         if (
                             isinstance(target, ast.Name)
                             and target.id not in attr_names
@@ -888,7 +892,7 @@ def test_static_scan_catches_direct_self_attribute_writes() -> None:
 
 
 def test_static_scan_catches_class_body_attributes_inside_control_flow() -> None:
-    """review R12-P4-1/R13-P4-1：类体 if/try/for/with 里的路径属性都要登记。"""
+    """review R12/R13-P4：类体 if/try/for/with 的路径绑定都要登记。"""
     source = (
         "engine = object()\n"                                    # 1
         "class Store:\n"                                         # 2
@@ -902,22 +906,25 @@ def test_static_scan_catches_class_body_attributes_inside_control_flow() -> None
         "        GUARDED = None\n"                               # 10
         "    for _name in ():\n"                                 # 11
         "        LOOPED = engine.path_for('memory')\n"           # 12
-        "    with context():\n"                                  # 13
-        "        SCOPED = engine.path_for('user')\n"             # 14
-        "    def __init__(self):\n"                              # 15
-        "        try:\n"                                         # 16
-        "            self.path = engine.path_for('user')\n"      # 17
-        "        except Exception:\n"                            # 18
-        "            self.path = None\n"                         # 19
-        "store = Store()\n"                                      # 20
-        "store.PATH.write_text('x')\n"                           # 21
-        "store.GUARDED.write_text('x')\n"                        # 22
-        "store.LOOPED.write_text('x')\n"                         # 23
-        "store.SCOPED.write_text('x')\n"                         # 24
-        "store.path.unlink()\n"                                  # 25
+        "    for ELEMENT in [engine.path_for('user')]:\n"        # 13
+        "        pass\n"                                         # 14
+        "    with engine.path_for('memory') as ENTERED:\n"       # 15
+        "        pass\n"                                         # 16
+        "    def __init__(self):\n"                              # 17
+        "        try:\n"                                         # 18
+        "            self.path = engine.path_for('user')\n"      # 19
+        "        except Exception:\n"                            # 20
+        "            self.path = None\n"                         # 21
+        "store = Store()\n"                                      # 22
+        "store.PATH.write_text('x')\n"                           # 23
+        "store.GUARDED.write_text('x')\n"                        # 24
+        "store.LOOPED.write_text('x')\n"                         # 25
+        "store.ELEMENT.write_text('x')\n"                        # 26
+        "store.ENTERED.write_text('x')\n"                        # 27
+        "store.path.unlink()\n"                                  # 28
     )
 
-    assert _scan_tree("src/fake.py", ast.parse(source)) == [21, 22, 23, 24, 25]
+    assert _scan_tree("src/fake.py", ast.parse(source)) == [23, 24, 25, 26, 27, 28]
 
 
 def test_static_scan_catches_module_alias_returned_by_a_wrapper() -> None:
