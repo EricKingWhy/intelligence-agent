@@ -47,6 +47,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CJK_SOURCE = REPO_ROOT / "native" / "fts5_cjk" / "fts5_cjk.c"
 CJK_VENDOR = REPO_ROOT / "native" / "fts5_cjk" / "vendor"
 
+# 全量长跑（数十分钟、数百失败用例）时 5s 会让 worker 就绪等待假红；这里判的是
+# handle 曲线而不是时延，给足等待时间不放松断言。
+_WORKER_WAIT_SECONDS = 60
+
 
 # ---------------------------------------------------------------- fixtures --
 
@@ -1050,20 +1054,20 @@ class TestStoreObserverWiring:
                         f"worker-{index}", source="interactive", started_at=time.time(),
                     )
                     _ready[index].set()
-                    _release.wait(timeout=5)
+                    _release.wait(timeout=_WORKER_WAIT_SECONDS)
                 except BaseException as exc:  # noqa: BLE001 - test must expose leaks
                     _errors.append(exc)
 
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
             for thread in threads:
                 thread.start()
-            assert all(event.wait(timeout=5) for event in ready)
+            assert all(event.wait(timeout=_WORKER_WAIT_SECONDS) for event in ready)
             after_workers = handle_count()
             archive.close()
             after_close = handle_count()
             release.set()
             for thread in threads:
-                thread.join(timeout=5)
+                thread.join(timeout=_WORKER_WAIT_SECONDS)
             assert all(not thread.is_alive() for thread in threads)
             assert errors == []
             curves.append({
@@ -1109,20 +1113,20 @@ class TestStoreObserverWiring:
                         f"worker-{index}", source="interactive", started_at=time.time(),
                     )
                     _ready[index].set()
-                    _release.wait(timeout=5)
+                    _release.wait(timeout=_WORKER_WAIT_SECONDS)
                 except BaseException as exc:  # noqa: BLE001 - test must expose leaks
                     _errors.append(exc)
 
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
             for thread in threads:
                 thread.start()
-            assert all(event.wait(timeout=5) for event in ready)
+            assert all(event.wait(timeout=_WORKER_WAIT_SECONDS) for event in ready)
             after_workers = _posix_archive_fds(db_path)
             archive.close()
             after_close = _posix_archive_fds(db_path)
             release.set()
             for thread in threads:
-                thread.join(timeout=5)
+                thread.join(timeout=_WORKER_WAIT_SECONDS)
             assert all(not thread.is_alive() for thread in threads)
             assert errors == []
             curves.append({
