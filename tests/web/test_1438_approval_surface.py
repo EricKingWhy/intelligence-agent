@@ -10,12 +10,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from agent_harness.memory.v2._sqlite import connect, stamp
+from agent_harness.memory.v2._sqlite import stamp
+from agent_harness.memory.v2.file_state import write_json
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.memory.v2.write_approval import PENDING, _identity
 from tests.web import test_memory_api as _shared
@@ -139,15 +139,19 @@ async def test_legacy_record_without_pin_is_refused_not_reresolved(memory_app):
     payload = {"target": "memory", "action": "replace",
                "content": "用户喜欢冰美式", "old_text": "手冲咖啡"}
     staged = await _staged_store(client)
-    async with connect(staged.database_path) as connection:
-        await connection.execute(
-            "INSERT INTO memory_v2_staged "
-            "(id, identity, payload, pinned_entry, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("stg_legacy", _identity(_TRUSTED), json.dumps(payload, ensure_ascii=False),
-             None, PENDING, stamp()),
-        )
-        await connection.commit()
+    # #1494 / ADR-0058 D5：待审记录在 `memory-state/staged/<id>.json`；直接写一条
+    # 没有 pin 的 legacy 形状（旧 SQLite 行经 D9 导入后也是这个形状）。
+    write_json(staged.path_for("stg_legacy"), {
+        "schema": 1,
+        "id": "stg_legacy",
+        "identity": _identity(_TRUSTED),
+        "project_id": _TRUSTED.project_id,
+        "payload": payload,
+        "pinned_entry": None,
+        "status": PENDING,
+        "claimed_at": None,
+        "created_at": stamp(),
+    })
 
     response = client.post("/api/memory-pending/stg_legacy/approve", headers=_auth(_ALICE))
 

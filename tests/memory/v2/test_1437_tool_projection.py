@@ -21,6 +21,7 @@ from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.v2 import origin, reprojection
 from agent_harness.memory.v2 import store as store_module
 from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.commit import build_markdown_commit
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, entry_digest
 from agent_harness.memory.v2.memory_tool import MemoryTool, _MemoryArgs
@@ -38,6 +39,7 @@ from agent_harness.memory.v2.types import (
     TrustedMemoryIdentity,
 )
 from agent_harness.memory.v2.write_approval import StagedWriteStore
+from tests.memory.v2._markdown_memory_1353 import AuthorityHarness
 
 pytestmark = pytest.mark.asyncio
 
@@ -48,9 +50,11 @@ async def build(tmp_path: Path):
     """与金集 `:150-156` 同形的装配（避免第二套装配语义）。"""
     store = SqliteMemoryV2Store(tmp_path / "memory-v2.db")
     await store.initialize()
-    markdown = MarkdownMemoryStore(tmp_path / "memories")
-    markdown.load_from_disk()
-    service = MemoryV2Service(store, InMemoryMemoryV2Index(), markdown=markdown)
+    engine = MarkdownMemoryStore(tmp_path / "memories")
+    engine.load_from_disk()
+    commit = build_markdown_commit(engine, tmp_path)
+    markdown = AuthorityHarness(engine, commit)
+    service = MemoryV2Service(store, InMemoryMemoryV2Index(), commit=commit)
     return store, markdown, service
 
 
@@ -69,13 +73,14 @@ def _projection_columns(db_path) -> list[tuple]:
         ).fetchall()
 
 
-def _tombstone_hashes(db_path) -> list[str]:
-    with sqlite3.connect(db_path) as connection:
-        return [
-            value
-            for (raw,) in connection.execute("SELECT content_hashes FROM memory_v2_tombstones")
-            for value in json.loads(raw)
-        ]
+def _tombstone_hashes(store) -> list[str]:
+    # #1494 / ADR-0058 D7：墓碑已从 SQLite 移到 memory-state/tombstones/*.json。
+    directory = store.state_root.tombstones_dir
+    return [
+        value
+        for path in sorted(directory.glob("*.json"))
+        for value in json.loads(path.read_text(encoding="utf-8"))["content_hashes"]
+    ]
 
 
 def _index_names(db_path) -> dict[str, bool]:
@@ -125,7 +130,7 @@ def _flaky_delete(store: SqliteMemoryV2Store, state: dict, error_type=sqlite3.Op
 async def test_add_target_memory_is_retrievable(tmp_path) -> None:
     """AC1 端到端：`memory` 工具写入 → `retrieve_memory` 工具能搜到（审查 Corr P4-2）。"""
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
 
     result = await tool.execute(_MemoryArgs(
         action="add", target="memory", content="用户习惯清晨喝冷萃咖啡",
@@ -146,7 +151,7 @@ async def test_add_target_memory_is_retrievable(tmp_path) -> None:
 
 async def test_add_target_user_is_retrievable(tmp_path) -> None:
     _, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
 
     result = await tool.execute(_MemoryArgs(
         action="add", target="user", content="用户养了一只叫芝麻的黑猫",
@@ -161,7 +166,7 @@ async def test_add_target_user_is_retrievable(tmp_path) -> None:
 
 async def test_add_record_shape_matches_the_mapping(tmp_path) -> None:
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
 
     await tool.execute(_MemoryArgs(action="add", target="user", content="用户偏好简洁的回答"))
 
@@ -184,7 +189,7 @@ async def test_add_record_shape_matches_the_mapping(tmp_path) -> None:
 async def test_markdown_entry_survives_a_failed_projection(tmp_path, monkeypatch) -> None:
     store, markdown, service = await build(tmp_path)
     monkeypatch.setattr(store, "create", _flaky_create(store, {"fail": True}))
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
 
     result = await tool.execute(_MemoryArgs(action="add", target="memory", content="投影会失败"))
 
@@ -199,7 +204,7 @@ async def test_markdown_entry_survives_a_failed_projection(tmp_path, monkeypatch
 async def test_projection_failure_leaves_a_durable_pending_row(tmp_path, monkeypatch) -> None:
     store, markdown, service = await build(tmp_path)
     monkeypatch.setattr(store, "create", _flaky_create(store, {"fail": True}))
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
 
     await tool.execute(_MemoryArgs(action="add", target="memory", content="待重试的条目"))
 
@@ -217,7 +222,7 @@ async def test_retry_converges_without_losing_the_entry(tmp_path, monkeypatch) -
     store, markdown, service = await build(tmp_path)
     state = {"fail": True}
     monkeypatch.setattr(store, "create", _flaky_create(store, state))
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     await tool.execute(_MemoryArgs(action="add", target="memory", content="重试后必须能搜到"))
 
     state["fail"] = False
@@ -237,7 +242,7 @@ async def test_retry_converges_without_losing_the_entry(tmp_path, monkeypatch) -
 async def test_pending_row_is_dropped_when_markdown_no_longer_has_it(tmp_path, monkeypatch) -> None:
     store, markdown, service = await build(tmp_path)
     monkeypatch.setattr(store, "create", _flaky_create(store, {"fail": True}))
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     await tool.execute(_MemoryArgs(action="add", target="memory", content="用户会手删这条"))
     assert len(_pending_rows(store.database_path)) == 1
 
@@ -254,7 +259,7 @@ async def test_pending_row_is_dropped_when_markdown_no_longer_has_it(tmp_path, m
 
 
 async def _add_two(store, markdown, service) -> MemoryTool:
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     for content in ("alpha entry", "beta entry"):
         assert (await tool.execute(_MemoryArgs(
             action="add", target="memory", content=content))).ok is True
@@ -291,7 +296,7 @@ async def test_vanished_entries_get_tombstones(tmp_path) -> None:
     assert result.ok is True, result
     assert result.data.get("drift_backup")
     assert await _active_tool_digests(store, "memory") == _digests(markdown, "memory")
-    assert entry_digest("beta entry") in _tombstone_hashes(store.database_path)
+    assert entry_digest("beta entry") in _tombstone_hashes(store)
 
 
 async def test_reprojection_is_idempotent(tmp_path) -> None:
@@ -348,7 +353,7 @@ async def test_reprojection_dedups_identical_text_across_targets(tmp_path) -> No
 
 async def test_remove_then_add_same_content_is_not_blocked_by_tombstone(tmp_path) -> None:
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     assert (await tool.execute(_MemoryArgs(
         action="add", target="memory", content="会被删掉再加回"))).ok is True
     assert (await tool.execute(_MemoryArgs(
@@ -366,7 +371,7 @@ async def test_remove_then_add_same_content_is_not_blocked_by_tombstone(tmp_path
 async def test_remove_keeps_the_row_while_the_other_file_still_has_it(tmp_path) -> None:
     """审查 Corr P2-1 回归：同一文本在两个文件里时，删一个文件不得删掉共享的派生行。"""
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     assert (await tool.execute(_MemoryArgs(
         action="add", target="memory", content="两个文件都有这句话"))).ok is True
     await markdown.add("user", "两个文件都有这句话")
@@ -439,7 +444,7 @@ async def test_failed_retraction_leaves_a_pending_row_that_drains_to_deletion(
 ) -> None:
     """审查 Std P2-3 回归：删除失败也要落账本；drain 之后该条目不再可检索。"""
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     assert (await tool.execute(_MemoryArgs(
         action="add", target="memory", content="先写进去再删不掉"))).ok is True
     state = {"fail": True}
@@ -465,7 +470,7 @@ async def test_failed_retraction_leaves_a_pending_row_that_drains_to_deletion(
         "删不掉", TRUSTED, scopes=[MemoryScope.USER_GLOBAL], limit=5,
     )
     assert hits == []
-    assert entry_digest("先写进去再删不掉") in _tombstone_hashes(store.database_path)
+    assert entry_digest("先写进去再删不掉") in _tombstone_hashes(store)
 
 
 async def test_session_read_failure_still_projects(tmp_path, monkeypatch) -> None:
@@ -476,7 +481,7 @@ async def test_session_read_failure_still_projects(tmp_path, monkeypatch) -> Non
         def read_events(self, session_id):
             raise OSError("session store unavailable")
 
-    tool = MemoryTool(markdown, service=service, sessions=BrokenSessions())
+    tool = MemoryTool(markdown.commit, service=service, sessions=BrokenSessions())
     token = memory_session_var.set("session-1")
     # 后台来源不跑 add 软校验（它自己也读会话），这里只隔离投影路径的会话读取。
     origin_token = origin.set_origin(origin.BACKGROUND_REVIEW)
@@ -497,7 +502,7 @@ async def test_session_read_failure_still_projects(tmp_path, monkeypatch) -> Non
 
 async def test_replace_and_remove_propagate_to_the_derived_layer(tmp_path) -> None:
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     await tool.execute(_MemoryArgs(action="add", target="memory", content="old fact"))
     old_root = (await store.list_active(TRUSTED, limit=10))[0].root_id
 
@@ -507,17 +512,17 @@ async def test_replace_and_remove_propagate_to_the_derived_layer(tmp_path) -> No
     assert [record.content for record in records] == ["new fact"]
     # 门审条件 ④：工具行的 replace 是「删旧行 + 建新 root」，不是同一 root 的 v2。
     assert (records[0].version, records[0].root_id != old_root) == (1, True)
-    assert entry_digest("old fact") in _tombstone_hashes(store.database_path)
+    assert entry_digest("old fact") in _tombstone_hashes(store)
 
     assert (await tool.execute(_MemoryArgs(
         action="remove", target="memory", old_text="new fact"))).ok is True
     assert await store.list_active(TRUSTED, limit=10) == []
-    assert entry_digest("new fact") in _tombstone_hashes(store.database_path)
+    assert entry_digest("new fact") in _tombstone_hashes(store)
 
 
 async def test_batch_propagates_replaced_and_removed_entries(tmp_path) -> None:
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     for content in ("keep me", "replace me", "remove me"):
         assert (await tool.execute(_MemoryArgs(
             action="add", target="memory", content=content))).ok is True
@@ -536,7 +541,7 @@ async def test_batch_propagates_replaced_and_removed_entries(tmp_path) -> None:
 
 async def test_oversized_entry_is_skipped_not_truncated(tmp_path) -> None:
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     oversized = "长" * 501
 
     result = await tool.execute(_MemoryArgs(action="add", target="memory", content=oversized))
@@ -550,7 +555,7 @@ async def test_oversized_entry_is_skipped_not_truncated(tmp_path) -> None:
 
 async def test_tool_without_service_stays_markdown_only(tmp_path) -> None:
     store, markdown, _service = await build(tmp_path)
-    tool = MemoryTool(markdown)
+    tool = MemoryTool(markdown.commit)
 
     result = await tool.execute(_MemoryArgs(action="add", target="memory", content="纯 markdown"))
 
@@ -565,10 +570,10 @@ async def test_tool_without_service_stays_markdown_only(tmp_path) -> None:
 async def test_approved_write_reaches_the_derived_layer(tmp_path) -> None:
     """stage → approve → 派生层可见（门审条件 ② 的端到端用例）。"""
     store, markdown, service = await build(tmp_path)
-    staged = StagedWriteStore(store.database_path, markdown, store=store)
+    staged = StagedWriteStore(service.state_root, markdown.commit, store=store)
     await staged.initialize()
     await service.update_settings(TRUSTED, write_approval=True)
-    tool = MemoryTool(markdown, service=service, staged=staged)
+    tool = MemoryTool(markdown.commit, service=service, staged=staged)
 
     staged_result = await tool.execute(_MemoryArgs(
         action="add", target="memory", content="审批通过后才落盘"))
@@ -589,10 +594,10 @@ async def test_approved_write_reaches_the_derived_layer(tmp_path) -> None:
 async def test_projection_failure_does_not_block_approval(tmp_path, monkeypatch) -> None:
     """投影失败不得回滚已批准的写入（markdown 是权威）。"""
     store, markdown, service = await build(tmp_path)
-    staged = StagedWriteStore(store.database_path, markdown, store=store)
+    staged = StagedWriteStore(service.state_root, markdown.commit, store=store)
     await staged.initialize()
     await service.update_settings(TRUSTED, write_approval=True)
-    tool = MemoryTool(markdown, service=service, staged=staged)
+    tool = MemoryTool(markdown.commit, service=service, staged=staged)
     pending = await tool.execute(_MemoryArgs(action="add", target="memory", content="投影失败也批准"))
     monkeypatch.setattr(store, "create", _flaky_create(store, {"fail": True}))
 
@@ -682,7 +687,7 @@ async def test_service_row_with_the_same_text_does_not_duplicate_the_projection(
         evidence=[EvidenceItem(role="user", excerpt="乌龙茶", hash="0" * 64)],
     ), TRUSTED)
 
-    result = await MemoryTool(markdown, service=service).execute(_MemoryArgs(
+    result = await MemoryTool(markdown.commit, service=service).execute(_MemoryArgs(
         action="add", target="user", content="用户喜欢喝乌龙茶"))
 
     assert result.ok is True, result
@@ -711,7 +716,7 @@ async def test_profile_service_row_does_not_suppress_the_projection(tmp_path) ->
         evidence=[EvidenceItem(role="user", excerpt="深色主题", hash="0" * 64)],
     ), TRUSTED)
 
-    result = await MemoryTool(markdown, service=service).execute(_MemoryArgs(
+    result = await MemoryTool(markdown.commit, service=service).execute(_MemoryArgs(
         action="add", target="user", content="用户偏好深色主题"))
 
     assert result.ok is True, result
@@ -727,12 +732,13 @@ async def test_profile_service_row_does_not_suppress_the_projection(tmp_path) ->
 async def test_retraction_reads_the_other_file_from_disk_not_the_stale_snapshot(tmp_path) -> None:
     """审查 Corr N3 回归：另一进程写进另一个文件的同文本，本会话撤回时不得被误删。"""
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     assert (await tool.execute(_MemoryArgs(
         action="add", target="memory", content="两个进程都写了这句"))).ok is True
     # 另一个进程直接写 USER.md：本进程的快照里没有它。
-    other = MarkdownMemoryStore(markdown.directory)
-    await other.add("user", "两个进程都写了这句")
+    await build_markdown_commit(
+        MarkdownMemoryStore(markdown.directory), markdown.directory,
+    ).add("user", "两个进程都写了这句")
     assert markdown.entries("user") == []
 
     assert (await tool.execute(_MemoryArgs(
@@ -755,11 +761,12 @@ async def test_unreadable_other_file_blocks_retraction_instead_of_trusting_the_s
     另一个进程刚写进去的文本，方向与"宁可少删"相反。
     """
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     assert (await tool.execute(_MemoryArgs(
         action="add", target="memory", content="不可读时的句子"))).ok is True
-    other = MarkdownMemoryStore(markdown.directory)
-    await other.add("user", "不可读时的句子")
+    await build_markdown_commit(
+        MarkdownMemoryStore(markdown.directory), markdown.directory,
+    ).add("user", "不可读时的句子")
     assert markdown.entries("user") == []  # 本会话快照里没有（另一进程写的）
 
     user_path = markdown.path_for("user")
@@ -806,15 +813,16 @@ async def test_reproject_kept_does_not_clear_the_pending_row(tmp_path) -> None:
 async def test_kept_retraction_keeps_the_pending_row(tmp_path, monkeypatch) -> None:
     """审查 Corr N4 回归：`kept` 只说明"这次别删"，不得清掉仍待收敛的账本行。"""
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     monkeypatch.setattr(store, "create", _flaky_create(store, {"fail": True}))
     assert (await tool.execute(_MemoryArgs(
         action="add", target="memory", content="双文件条目"))).ok is True
     monkeypatch.undo()
     assert [row[0] for row in _pending_rows(store.database_path)] == ["memory"]
     # 同文本也出现在 USER.md（另一个进程写的，本进程快照里没有）。
-    other = MarkdownMemoryStore(markdown.directory)
-    await other.add("user", "双文件条目")
+    await build_markdown_commit(
+        MarkdownMemoryStore(markdown.directory), markdown.directory,
+    ).add("user", "双文件条目")
 
     assert (await tool.execute(_MemoryArgs(
         action="remove", target="memory", old_text="双文件条目"))).ok is True
@@ -857,11 +865,12 @@ def _unreadable(path: Path):
 async def _seed_shared_entry_with_unreadable_user(tmp_path, monkeypatch):
     """造法同 :746：另一进程把同一句写进 USER.md，再把 USER.md 钉成不可读。"""
     store, markdown, service = await build(tmp_path)
-    tool = MemoryTool(markdown, service=service)
+    tool = MemoryTool(markdown.commit, service=service)
     assert (await tool.execute(_MemoryArgs(
         action="add", target="memory", content="瞬时不可读句"))).ok is True
-    other = MarkdownMemoryStore(markdown.directory)
-    await other.add("user", "瞬时不可读句")
+    await build_markdown_commit(
+        MarkdownMemoryStore(markdown.directory), markdown.directory,
+    ).add("user", "瞬时不可读句")
     monkeypatch.setattr(
         MarkdownMemoryStore, "read_raw_checked",
         _unreadable(markdown.path_for("user")),

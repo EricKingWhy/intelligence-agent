@@ -35,8 +35,8 @@ from agent_harness.memory.v2.commands import (
     current_user_message,
     trusted_identity_for_session,
 )
+from agent_harness.memory.v2.commit import MemoryCommit, MemoryCommitError
 from agent_harness.memory.v2.guidance import MEMORY_GUIDANCE
-from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.write_approval import evaluate_gate
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
@@ -184,11 +184,13 @@ class MemoryTool(Tool):
     """`memory`：MEMORY.md / USER.md 的 add / replace / remove / batch 写入面。"""
 
     def __init__(
-        self, store: MarkdownMemoryStore, sessions: Any | None = None, *,
+        self, commit: MemoryCommit, sessions: Any | None = None, *,
         service: Any | None = None, staged: Any | None = None,
         workspace_index: Any | None = None,
     ) -> None:
-        self._store = store
+        #: #1494：唯一内容写者。工具面只决定「写什么」，匹配/校验/回执/发布都在 commit 内。
+        #: 构造器只存依赖（工具面静态对账会用 None 实例化），`commit.engine` 在执行期再取。
+        self._commit = commit
         self._sessions = sessions
         #: M6：`service` 读 `write_approval` 开关，`staged` 是门开时的待审区。两者缺席
         #: （纯 markdown 部署 / 直调）时门恒关——没有开关就没有可开的东西。
@@ -230,7 +232,7 @@ class MemoryTool(Tool):
 
     async def execute(self, args: _MemoryArgs) -> ToolResult:
         target = args.target
-        if not self._store.target_enabled(target):
+        if not self._commit.engine.target_enabled(target):
             label = "USER.md" if target == "user" else "MEMORY.md"
             return ToolResult.failure(
                 message=f"内置 {label} 写入已在 memory 配置中关闭。",
@@ -252,15 +254,31 @@ class MemoryTool(Tool):
             )
         try:
             if args.operations is not None:
-                response = await self._store.apply_batch(target, args.operations_payload())
+                response = await self._commit.apply_batch(
+                    target, args.operations_payload())
             elif args.action == "add":
-                response = await self._store.add(target, args.content_or_alias())
+                response = await self._commit.add(target, args.content_or_alias())
             elif args.action == "replace":
-                response = await self._store.replace(
+                response = await self._commit.replace(
                     target, args.old_text or "", args.content_or_alias(),
                 )
             else:
-                response = await self._store.remove(target, args.old_text or "")
+                response = await self._commit.remove(target, args.old_text or "")
+        except MemoryCommitError as error:
+            # AC5：发布失败的回执停在 PREPARED（未 committed），operation id 是唯一能
+            # 把这次失败与盘上回执对上的键，必须进工具结果给模型/用户做 reconcile。
+            logger.warning(
+                "memory tool commit failed (%s, operation %s)",
+                type(error).__name__, error.operation_id,
+            )
+            return ToolResult.failure(
+                message=(
+                    f"记忆写入失败（{type(error).__name__}），操作 {error.operation_id} "
+                    "可能未落盘；请用 reconcile 核对，不要盲目重发。"
+                ),
+                error_code=ErrorCode.TRANSIENT_ERROR,
+                metadata={"operation_id": error.operation_id, "target": target},
+            )
         except Exception as error:  # noqa: BLE001 — 不记内容，只记类型
             logger.warning("memory tool failed (%s)", type(error).__name__)
             return ToolResult.failure(

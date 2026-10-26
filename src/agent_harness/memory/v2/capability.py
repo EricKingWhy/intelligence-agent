@@ -24,6 +24,7 @@ from typing import Any, Protocol
 import aiosqlite
 
 from agent_harness.memory.v2 import reprojection
+from agent_harness.memory.v2.commit import MemoryCommit
 from agent_harness.memory.v2.index import MemoryV2IndexRelay, MemoryV2VectorIndex
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
 from agent_harness.memory.v2.policy import find_secret
@@ -96,16 +97,17 @@ class MemoryV2Service:
     def __init__(
         self, store: SqliteMemoryV2Store, index: MemoryV2VectorIndex,
         *, relay: MemoryV2IndexRelay | None = None,
-        markdown: MarkdownMemoryStore | None = None,
+        commit: MemoryCommit | None = None,
         staged: StagedWriteStore | None = None,
         blocked: BlockedWriteStore | None = None,
     ) -> None:
         self._store = store
         self._index = index
         self._relay = relay
-        #: #1353：markdown 权威面。为 `None` 时退化为纯 SQLite（既有测试与旧部署路径），
-        #: 装配层注入后 create/update/invalidate 先落 markdown 再投影 SQLite。
-        self._markdown = markdown
+        #: #1494 / ADR-0058 D2：当前内容的**唯一**可变入口。为 `None` 时退化为纯 SQLite
+        #: （既有测试与旧部署路径），装配层注入后 create/update/invalidate 先经 commit
+        #: 落 markdown，再投影 SQLite。没有任何一条写路径能绕过它直接改文件。
+        self._commit = commit
         #: #1353 M6：`write_approval` 门开时的待审区。跟着 markdown 走——没有权威面就没有
         #: 可审批的写入，工具也不会注册。
         self._staged = staged
@@ -177,7 +179,7 @@ class MemoryV2Service:
         健康的，之前积压的行可以在同一轮收敛。本次写入自己失败时跳过——那时派生层正
         不可用，重试只会再失败一次并抬高 `attempts`。
         """
-        markdown = self._markdown
+        markdown = self.markdown
         if markdown is None:
             return {
                 "desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False,
@@ -201,7 +203,7 @@ class MemoryV2Service:
         **文件**，来自 `reproject_target`）与 `remaining`（对账**之后**该 target 仍在账本里的
         行数——服务层没有其它可读面，不透传的话"账本有积压"在入口侧不可见）。
         """
-        markdown = self._markdown
+        markdown = self.markdown
         if markdown is None:
             return {
                 "desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False,
@@ -232,7 +234,17 @@ class MemoryV2Service:
 
     @property
     def markdown(self) -> MarkdownMemoryStore | None:
-        return self._markdown
+        """只读的权威面引擎（供 recall/reprojection 读取）；**写**必须经 `commit`。"""
+        return self._commit.engine if self._commit is not None else None
+
+    @property
+    def commit(self) -> MemoryCommit | None:
+        return self._commit
+
+    @property
+    def state_root(self):
+        """操作状态根（#1494）：job/staged/blocked/receipt 与记录同生共死。"""
+        return self._store.state_root
 
     @property
     def staged(self) -> StagedWriteStore | None:
@@ -299,20 +311,24 @@ class MemoryV2Service:
 
         顺序是 markdown 先、SQLite 后：权威面写不成时 SQLite 尚未落盘，抛出即整体失败，
         两侧仍然一致。`mirror_committed` 不同——它跑在 SQLite 已提交之后，只能留痕。
+
+        唯一写入口是 `MemoryCommit`（#1494 AC1）：本方法只决定**写什么**，
+        匹配/校验/回执/发布都在 commit 内完成。
         """
-        store = self._markdown
-        if store is None:
+        commit = self._commit
+        if commit is None:
             return
+        engine = commit.engine
 
         async def _add(target: str, content: str) -> None:
-            if store.target_enabled(target):
-                self._require_markdown_success(await store.add(target, content), "add")
+            if engine.target_enabled(target):
+                self._require_markdown_success(await commit.add(target, content), "add")
 
         async def _remove(record: MemoryRecordV2) -> None:
             target = self.markdown_target(record)
-            if store.target_enabled(target):
+            if engine.target_enabled(target):
                 self._require_markdown_success(
-                    await store.remove(target, record.content, matched_entry=record.content),
+                    await commit.remove(target, record.content, matched_entry=record.content),
                     "remove",
                 )
 
@@ -320,9 +336,9 @@ class MemoryV2Service:
             # `matched_entry` 钉住**审阅时的那条原文**：并发手改后条目已变，replace 会以
             # stale 失败而不是改到另一条上。stale 时退回 add（新内容仍应被记住）；
             # 预算/扫描失败时 add 同样失败，交给 `_add` 抛出。目标未启用则无事可做。
-            if not store.target_enabled(target):
+            if not engine.target_enabled(target):
                 return
-            response = await store.replace(
+            response = await commit.replace(
                 target, record.content, content, matched_entry=record.content,
             )
             if not response.get("success"):
@@ -361,16 +377,18 @@ class MemoryV2Service:
         不含条目内容）。``digests`` 只在墓碑-only 删除时给出——那时记录行已经不在，
         只能按正文哈希清理（见 `store.MemoryDeletionReceiptV2`）。
         """
-        store = self._markdown
-        if store is None:
+        commit = self._commit
+        if commit is None:
             return
+        engine = commit.engine
         for memory in memories:
             target = self.markdown_target(memory)
-            if not store.target_enabled(target):
+            if not engine.target_enabled(target):
                 continue
             try:
-                response = await store.remove(
+                response = await commit.remove(
                     target, memory.content, matched_entry=memory.content,
+                    operation_id=f"del_{memory.memory_id}",
                 )
             except Exception as error:  # noqa: BLE001 — 见 docstring
                 logger.warning(
@@ -382,7 +400,8 @@ class MemoryV2Service:
                 logger.warning("markdown 删除投影未生效，SQLite 已提交：%s", memory.memory_id)
         if digests:
             try:
-                cleaned = await store.remove_by_digest(digests)
+                cleaned = await commit.remove_by_digest(
+                    digests, operation_id=_digest_operation_id(digests))
             except Exception as error:  # noqa: BLE001 — 同上，派生投影失败只留痕
                 logger.warning("markdown 墓碑清理失败（%s）", type(error).__name__)
             else:
@@ -392,6 +411,7 @@ class MemoryV2Service:
 
     async def mirror_committed(
         self, records: Sequence[MemoryRecordV2], *, invalidated: Sequence[MemoryRecordV2] = (),
+        operation_prefix: str | None = None,
     ) -> None:
         """事务内写（formation job）**提交之后**补落 markdown。
 
@@ -404,16 +424,22 @@ class MemoryV2Service:
         顺序是**先删旧、再加新**：后台 update 的新旧版本内容可能重合，反序会在删除时
         把刚写进去的新条目一起删掉。
         """
-        store = self._markdown
-        if store is None:
+        commit = self._commit
+        if commit is None:
             return
+        engine = commit.engine
+
+        def _op(kind: str, memory_id: str) -> str | None:
+            return f"{operation_prefix}_{kind}_{memory_id}" if operation_prefix else None
+
         for record in invalidated:
             target = self.markdown_target(record)
-            if not store.target_enabled(target):
+            if not engine.target_enabled(target):
                 continue
             try:
-                response = await store.remove(
+                response = await commit.remove(
                     target, record.content, matched_entry=record.content,
+                    operation_id=_op("rm", record.id),
                 )
             except Exception as error:  # noqa: BLE001 — 见 docstring
                 logger.warning(
@@ -425,10 +451,12 @@ class MemoryV2Service:
                 logger.warning("markdown 撤回投影未生效，SQLite 已提交：%s", record.id)
         for record in records:
             target = self.markdown_target(record)
-            if not store.target_enabled(target):
+            if not engine.target_enabled(target):
                 continue
             try:
-                response = await store.add(target, record.content)
+                response = await commit.add(
+                    target, record.content, operation_id=_op("add", record.id),
+                )
             except Exception as error:  # noqa: BLE001 — 见 docstring
                 logger.warning(
                     "markdown 投影失败（%s），SQLite 已提交：%s", type(error).__name__, record.id,
@@ -560,20 +588,24 @@ class MemoryV2Service:
     # 上面七个方法是"一次调用一个事务"。执行器需要的边界更宽：一批裁决动作要与
     # **记忆记录 + outbox + formation job 终态**一起落地（AC6 / AC7）。
     # "为什么必须同一次提交"的完整论证只在
-    # `jobs.SqliteMemoryV2JobStore.commit_with_outcome` 一处（§16.1）。
+    # `jobs.MemoryV2JobStore.commit_with_outcome` 一处（§16.1）。
     #
     # 它们**不是**新的 provider 契约：`MemoryV2Capability` 仍然冻结在七个方法上，
     # 这三个是"在别人的事务里干活"的额外面，只有组合实现（本类）需要提供。
 
     async def create_in(self, connection: aiosqlite.Connection, draft: MemoryDraftV2,
-                        trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
+                        trusted: TrustedMemoryIdentity, *,
+                        memory_id: str | None = None) -> MemoryRecordV2:
         self._reject_secret(draft)
-        return await self._store.create(draft, trusted, connection=connection)
+        return await self._store.create(
+            draft, trusted, connection=connection, memory_id=memory_id)
 
     async def update_in(self, connection: aiosqlite.Connection, previous_id: str,
-                        draft: MemoryDraftV2, trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
+                        draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
+                        new_memory_id: str | None = None) -> MemoryRecordV2:
         self._reject_secret(draft)
-        return await self._store.update(previous_id, draft, trusted, connection=connection)
+        return await self._store.update(
+            previous_id, draft, trusted, connection=connection, new_memory_id=new_memory_id)
 
     async def invalidate_in(self, connection: aiosqlite.Connection, memory_id: str,
                             trusted: TrustedMemoryIdentity) -> MemoryRecordV2:
@@ -659,6 +691,12 @@ class MemoryV2Service:
                 )
 
 
+def _digest_operation_id(digests: Sequence[str]) -> str:
+    """同一批墓碑哈希 ⇒ 同一个 operation id（重试回放，不重复清理）。"""
+    joined = "\x00".join(sorted(str(digest) for digest in digests))
+    return "del_dg_" + hashlib.sha256(joined.encode()).hexdigest()[:32]
+
+
 class MemoryRejectionReason(str, Enum):
     """内容被拒的稳定归因码（进 `MemoryContentRejected.reason_code`）。
 
@@ -708,7 +746,7 @@ class StaleMemoryVersion(ValueError):
 
 
 class MemoryIndexDeletePending(RuntimeError):
-    """SQLite tombstone committed but immediate derived-index deletion failed."""
+    """Tombstone committed but immediate derived-index deletion failed."""
 
     def __init__(self, memory_ids: tuple[str, ...], *, affected_count: int) -> None:
         self.memory_ids = memory_ids

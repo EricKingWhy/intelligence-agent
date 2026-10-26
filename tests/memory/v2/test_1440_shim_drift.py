@@ -21,6 +21,7 @@ from agent_harness.identity import (
 )
 from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.commit import build_markdown_commit
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRelay
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
@@ -45,6 +46,7 @@ from agent_harness.session.context import current_session_var
 from agent_harness.tooling.result import ErrorCode
 from tests.conftest import make_session
 from tests.memory.v2._markdown_memory_1353 import (
+    AuthorityHarness,
     build_store,
     call,
     path_of,
@@ -352,8 +354,9 @@ async def test_drift_backup_emits_content_free_notification(tmp_path):
 @pytest.mark.asyncio
 async def test_drift_notification_respects_the_off_mode(tmp_path):
     """#1440 P3-3：`memory_notification_mode="off"` 时漂移不发通知（写入照常成功）。"""
-    store = MarkdownMemoryStore(memory_dir=tmp_path / "memories", notification_mode="off")
-    store.load_from_disk()
+    engine = MarkdownMemoryStore(memory_dir=tmp_path / "memories", notification_mode="off")
+    engine.load_from_disk()
+    store = AuthorityHarness(engine, build_markdown_commit(engine, tmp_path))
     assert (await call(store.add, "memory", "tool entry"))["success"] is True
     path = path_of(store, "memory")
     path.write_text("tool entry   \n§\nhand-written fact", encoding="utf-8")
@@ -459,10 +462,11 @@ async def test_budget_overrun_returns_budget_exhausted_with_three_part_message(t
     relay = MemoryV2IndexRelay(store, index)
     markdown = MarkdownMemoryStore(memory_dir=tmp_path / "memories", memory_char_limit=200)
     markdown.load_from_disk()
-    service = MemoryV2Service(store, index, relay=relay, markdown=markdown)
+    commit = build_markdown_commit(markdown, tmp_path)
+    service = MemoryV2Service(store, index, relay=relay, commit=commit)
 
     fill = "y" * 190
-    assert (await markdown.add("memory", fill))["success"] is True
+    assert (await commit.add("memory", fill))["success"] is True
 
     sessions = JsonlSessionStore(root=tmp_path / "sessions")
     tool = RememberMemoryV2Tool(service, sessions)

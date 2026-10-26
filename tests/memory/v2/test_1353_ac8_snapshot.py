@@ -108,7 +108,9 @@ async def test_wiring_activates_the_markdown_snapshot_path(tmp_path) -> None:
     没有 `_provider` / `_markdown` 这类私有属性，装配对象内部怎么套都不影响本断言。
     """
     marked = MarkdownMemoryStore(memory_dir=tmp_path / MEMORIES_DIRECTORY_NAME)
-    assert (await call(marked.add, "memory", "wired snapshot fact"))["success"] is True
+    from agent_harness.memory.v2.commit import build_markdown_commit
+    assert (await build_markdown_commit(marked, tmp_path).add(
+        "memory", "wired snapshot fact"))["success"] is True
 
     settings = Settings(
         _env_file=None,

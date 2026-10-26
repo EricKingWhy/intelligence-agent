@@ -3571,6 +3571,10 @@ def _main_memory(argv: list[str]) -> None:
         "--target", choices=("memory", "user"), default=None,
         help="只对账一个文件；缺省两个都跑",
     )
+    subcommands.add_parser(
+        "reconcile",
+        help="按 MemoryCommit 回执对账内容发布（补发布 / 已发布 / 冲突待人工）",
+    )
     args = parser.parse_args(argv)
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
@@ -3760,6 +3764,32 @@ async def _memory_command(
     service = await build_memory_v2_service(settings)
     staged = service.staged
     trusted = trusted_identity_for_session("", None)
+    if args.command == "reconcile":
+        # #1494 AC3：对账是**显式**运维入口。启动时也跑一次，但这里要输出读数与退出码：
+        # 需要人工裁决的回执（NEED_RECONCILE）不能只留在日志里。
+        commit = service.commit
+        if commit is None:
+            return "reconcile 失败：本部署未装配 markdown 权威面（memories/*.md）。", True
+        report = await commit.reconcile()
+        lines = [
+            f"记忆提交对账：检查 {report.examined} 条回执",
+            f"  已提交（回放或无待发布）: {len(report.committed)}",
+        ]
+        for operation_id in report.committed:
+            lines.append(f"    {operation_id}")
+        if report.needs_reconcile:
+            lines.append(f"  待人工裁决: {len(report.needs_reconcile)}")
+            for operation_id, target in report.needs_reconcile:
+                lines.append(f"    {operation_id}  target={target}")
+        if report.unreadable:
+            lines.append(f"  回执不可读: {len(report.unreadable)}")
+            for name, error in report.unreadable:
+                lines.append(f"    {name}: {error}")
+        if report.handler_failures:
+            lines.append(f"  后置处理失败: {len(report.handler_failures)}")
+            for operation_id, error in report.handler_failures:
+                lines.append(f"    {operation_id}: {error}")
+        return "\n".join(lines), not report.ok
     if args.command == "reproject":
         # #1482 Finding 二甲案：给降级 warning 指的那句运维指令接一个真实入口。
         # 与 migrate 分支不同——reproject 必须读活账本与派生层，所以走 `build_memory_v2_service`

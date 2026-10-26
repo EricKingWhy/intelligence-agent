@@ -1,6 +1,6 @@
 """#298 / MEM-V2-2 的 durable formation job 存储契约测试。
 
-Seam：`SqliteMemoryV2JobStore` 的公开方法（§8.1 第 2 个 approved seam 的持久化半边）。
+Seam：`MemoryV2JobStore` 的公开方法（§8.1 第 2 个 approved seam 的持久化半边）。
 按垂直切片推进：一片测试 → 一片实现 → 下一片；每一片先红后绿。
 
 本片只钉住 AC6 四个 kill 窗口能恢复所依赖的四件事：
@@ -21,7 +21,7 @@ from agent_harness.memory.v2 import MemoryScope, TrustedMemoryIdentity
 from agent_harness.memory.v2.jobs import (
     MemoryJobOutcome,
     MemoryJobStage,
-    SqliteMemoryV2JobStore,
+    MemoryV2JobStore,
 )
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from tests.memory.v2._records import make_draft
@@ -35,13 +35,13 @@ T0 = datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest_asyncio.fixture
-async def jobs(tmp_path) -> SqliteMemoryV2JobStore:
-    instance = SqliteMemoryV2JobStore(tmp_path / "memory-v2.db")
+async def jobs(tmp_path) -> MemoryV2JobStore:
+    instance = MemoryV2JobStore(tmp_path / "memory-v2.db")
     await instance.initialize()
     return instance
 
 
-async def _enqueue(store: SqliteMemoryV2JobStore, key: str = "session-1",
+async def _enqueue(store: MemoryV2JobStore, key: str = "session-1",
                    trusted: TrustedMemoryIdentity = USER_A):
     return await store.enqueue(idempotency_key=key, trusted=trusted, session_id=key)
 
@@ -53,7 +53,7 @@ async def _enqueue(store: SqliteMemoryV2JobStore, key: str = "session-1",
 
 @pytest.mark.asyncio
 async def test_enqueue_persists_a_queued_job_with_no_owner(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     job = await _enqueue(jobs, "session-1")
 
@@ -103,22 +103,34 @@ async def test_existing_job_table_migrates_protected_extraction_columns_in_place
     finally:
         connection.close()
 
-    migrated = SqliteMemoryV2JobStore(path)
-    await migrated.initialize()
+    # #1494 / ADR-0058 D4+D9：旧 job 行由一次性导入搬进 memory-state/jobs/，
+    # 旧 schema 缺的列（run_id / protected_fact_*）按默认读，不能因此拒绝导入。
+    from agent_harness.memory.v2.commit import build_markdown_commit
+    from agent_harness.memory.v2.jobs import job_id_for
+    from agent_harness.memory.v2.legacy_import import import_legacy_state
+    from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 
-    job = await migrated.get("legacy-job")
+    store = SqliteMemoryV2Store(path)
+    await store.initialize()
+    commit = build_markdown_commit(MarkdownMemoryStore(tmp_path / "memories"), tmp_path)
+    imported = await import_legacy_state(store, commit)
+    assert imported["jobs"] == 1
+
+    migrated = MemoryV2JobStore(path)
+    await migrated.initialize()
+    job = await migrated.get(job_id_for("legacy-key"))
     assert job.run_id is None
     assert job.protected_fact_token_budget is None
     assert job.protected_fact_extraction_state.value == "pending"
     assert job.protected_fact_extraction_candidates is None
 
     await migrated.initialize()
-    assert await migrated.get("legacy-job") == job
+    assert await migrated.get(job_id_for("legacy-key")) == job
 
 
 @pytest.mark.asyncio
 async def test_protected_extraction_state_and_candidates_are_durable_and_scrubbed(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     job = await _enqueue(jobs, "session-extraction-state")
     await jobs.claim(worker_id="worker-1", now=T0)
@@ -153,7 +165,7 @@ async def test_protected_extraction_state_and_candidates_are_durable_and_scrubbe
 
 @pytest.mark.asyncio
 async def test_a_project_scoped_run_keeps_its_trusted_project(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """项目 id 只能来自可信身份——入队方给不了，也给不错。"""
     job = await jobs.enqueue(idempotency_key="s", trusted=PROJECT_X, session_id="s")
@@ -163,7 +175,7 @@ async def test_a_project_scoped_run_keeps_its_trusted_project(
 
 
 @pytest.mark.asyncio
-async def test_get_raises_for_an_unknown_job(jobs: SqliteMemoryV2JobStore) -> None:
+async def test_get_raises_for_an_unknown_job(jobs: MemoryV2JobStore) -> None:
     with pytest.raises(KeyError):
         await jobs.get("no-such-job")
 
@@ -175,7 +187,7 @@ async def test_get_raises_for_an_unknown_job(jobs: SqliteMemoryV2JobStore) -> No
 
 @pytest.mark.asyncio
 async def test_enqueue_twice_on_one_key_yields_one_job(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     first = await _enqueue(jobs, "session-1")
     second = await _enqueue(jobs, "session-1")
@@ -186,11 +198,11 @@ async def test_enqueue_twice_on_one_key_yields_one_job(
 
 @pytest.mark.asyncio
 async def test_enqueue_on_the_same_key_from_a_restarted_store_reuses_the_job(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """重复终结的第二个来源是"进程重启后重放终结路径"——幂等键必须跨实例成立。"""
     first = await _enqueue(jobs, "session-1")
-    restarted = SqliteMemoryV2JobStore(jobs.database_path)
+    restarted = MemoryV2JobStore(jobs.database_path)
     await restarted.initialize()
 
     assert (await _enqueue(restarted, "session-1")).job_id == first.job_id
@@ -198,7 +210,7 @@ async def test_enqueue_on_the_same_key_from_a_restarted_store_reuses_the_job(
 
 @pytest.mark.asyncio
 async def test_a_terminal_job_is_never_re_enqueued(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """R1：一条 eligible run 恒映射到同一个 job——已经终结的也不能被"重开"。"""
     job = await _enqueue(jobs, "session-1")
@@ -223,7 +235,7 @@ async def test_a_terminal_job_is_never_re_enqueued(
 
 @pytest.mark.asyncio
 async def test_claim_grants_exclusive_ownership_while_the_lease_is_live(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     job = await _enqueue(jobs, "session-1")
 
@@ -238,7 +250,7 @@ async def test_claim_grants_exclusive_ownership_while_the_lease_is_live(
 
 @pytest.mark.asyncio
 async def test_an_expired_lease_is_reclaimable_by_another_worker(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """崩溃恢复的机制半边：属主消失 → lease 到期 → 另一个 worker 接手。"""
     job = await _enqueue(jobs, "session-1")
@@ -253,7 +265,7 @@ async def test_an_expired_lease_is_reclaimable_by_another_worker(
 
 @pytest.mark.asyncio
 async def test_a_sub_second_lease_is_still_honoured(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """到期判断是在 SQL 里做的字符串比较 ⇒ 同一秒内的先后也必须排在正确的一侧。
 
@@ -273,7 +285,7 @@ async def test_a_sub_second_lease_is_still_honoured(
 
 
 @pytest.mark.asyncio
-async def test_claim_skips_terminal_jobs(jobs: SqliteMemoryV2JobStore) -> None:
+async def test_claim_skips_terminal_jobs(jobs: MemoryV2JobStore) -> None:
     job = await _enqueue(jobs, "session-1")
     await jobs.claim(worker_id="w1", lease_seconds=3600, now=T0)
     await jobs.transition(
@@ -285,7 +297,7 @@ async def test_claim_skips_terminal_jobs(jobs: SqliteMemoryV2JobStore) -> None:
 
 @pytest.mark.asyncio
 async def test_jobs_serialize_per_user_while_other_users_proceed(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """R11：同一用户的 job 串行；不同用户互不阻塞。"""
     await _enqueue(jobs, "a-1", USER_A)
@@ -303,7 +315,7 @@ async def test_jobs_serialize_per_user_while_other_users_proceed(
 
 @pytest.mark.asyncio
 async def test_concurrent_claims_have_exactly_one_winner(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """单属主是数据库 CAS 的保证，不是进程内纪律：并发认领只能有一个成功。"""
     await _enqueue(jobs, "session-1")
@@ -323,7 +335,7 @@ async def test_concurrent_claims_have_exactly_one_winner(
 
 @pytest.mark.asyncio
 async def test_transition_is_owner_only_and_persists_stage_and_state(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     job = await _enqueue(jobs, "session-1")
     await jobs.claim(worker_id="w1", lease_seconds=3600, now=T0)
@@ -342,7 +354,7 @@ async def test_transition_is_owner_only_and_persists_stage_and_state(
 
 @pytest.mark.asyncio
 async def test_a_lapsed_lease_may_not_transition(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """僵尸 worker 的迟到写入必须被拒——否则会把已回收的 job 改坏。"""
     job = await _enqueue(jobs, "session-1")
@@ -355,7 +367,7 @@ async def test_a_lapsed_lease_may_not_transition(
 
 @pytest.mark.asyncio
 async def test_completing_a_job_records_its_outcome_and_releases_the_lease(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     job = await _enqueue(jobs, "session-1")
     await jobs.claim(worker_id="w1", lease_seconds=3600, now=T0)
@@ -372,7 +384,7 @@ async def test_completing_a_job_records_its_outcome_and_releases_the_lease(
 
 @pytest.mark.asyncio
 async def test_a_crashed_job_resumes_from_its_persisted_stage(
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
 ) -> None:
     """AC6 的"Formation 完成后被杀"窗口：重启后必须从持久化阶段续跑，而不是从零重来。"""
     job = await _enqueue(jobs, "session-1")
@@ -381,7 +393,7 @@ async def test_a_crashed_job_resumes_from_its_persisted_stage(
         job_id=job.job_id, worker_id="w1", stage=MemoryJobStage.ADJUDICATING,
         state={"calls_used": 2, "formation": {"decision": "CANDIDATES"}}, now=T0)
 
-    restarted = SqliteMemoryV2JobStore(jobs.database_path)
+    restarted = MemoryV2JobStore(jobs.database_path)
     await restarted.initialize()
     later = T0 + timedelta(seconds=120)
 
@@ -405,7 +417,7 @@ async def test_the_job_table_coexists_with_record_writes_in_one_database(
     path = tmp_path / "memory-v2.db"
     records = SqliteMemoryV2Store(path)
     await records.initialize()
-    job_store = SqliteMemoryV2JobStore(path)
+    job_store = MemoryV2JobStore(path)
     await job_store.initialize()
 
     record = await records.create(make_draft(), USER_A)
@@ -426,7 +438,7 @@ async def _claimed_pair(tmp_path):
     path = tmp_path / "memory-v2.db"
     records = SqliteMemoryV2Store(path)
     await records.initialize()
-    job_store = SqliteMemoryV2JobStore(path)
+    job_store = MemoryV2JobStore(path)
     await job_store.initialize()
     enqueued = await _enqueue(job_store, "session-1")
     claimed = await job_store.claim(worker_id="w1")

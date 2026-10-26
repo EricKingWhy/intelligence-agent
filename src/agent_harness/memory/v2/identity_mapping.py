@@ -55,6 +55,7 @@ from agent_harness.memory.v2.assembly import (
     MEMORIES_DIRECTORY_NAME,
     MEMORY_V2_DATABASE_NAME,
 )
+from agent_harness.memory.v2.commit import build_markdown_commit
 from agent_harness.memory.v2.markdown_store import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
@@ -866,6 +867,9 @@ async def apply_identity_mapping(
         user_char_limit=manifest["limits"]["user"],
     )
     store.load_from_disk()
+    # #1494：映射的"只追加"写入同样经唯一内容写者；每项的 operation id 由旧行 id 派生，
+    # 同一份清单重跑回放同一条回执，不会追加第二遍。
+    commit = build_markdown_commit(store, workspace)
 
     counts: dict[str, Any] = {
         "active": 0, "exported": 0, "deduplicated": 0,
@@ -880,9 +884,13 @@ async def apply_identity_mapping(
             continue
         content = contents[item["id"]]
         counts["active"] += 1
-        response = await store.add(item["target"], content)
+        response = await commit.add(
+            item["target"], content,
+            operation_id="mig_" + hashlib.sha256(item["id"].encode()).hexdigest()[:32])
         if response.get("success"):
-            counts["deduplicated" if response.get("deduplicated") else "exported"] += 1
+            # 回执重放（同一清单重跑）= 已经写过的条目：算 deduplicated，不算新导出。
+            already = response.get("deduplicated") or response.get("replayed")
+            counts["deduplicated" if already else "exported"] += 1
             counts[item["target"]] += 1
             if item.get("kind_defaulted"):
                 counts["kind_defaulted"] += 1

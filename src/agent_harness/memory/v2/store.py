@@ -1,4 +1,4 @@
-"""MEM-V2-1 的 SQLite 权威存储：记录、版本生命周期与派生索引意图。
+"""MEM-V2-1 的 SQLite 记录存储：记录、版本生命周期与派生索引意图。
 
 # 为什么是新表而不是扩 V1 的表
 
@@ -10,7 +10,9 @@ V1 继续可运行。新表让两条路径各自完整，cutover（MEM-V2-7）�
 
 # 权威性（PRD §6.6）
 
-SQLite 是记录、版本、状态与 outbox 的唯一权威；派生索引（进程内）可重建。
+SQLite 只保留 records / outbox / FTS 这类**可重建派生态**；操作状态（settings /
+tombstone / staged / blocked / jobs / receipt）由 `memory-state/` 下的文件 owner 承载
+（#1494 / ADR-0056 §3 / ADR-0058），不从 SQLite 重建。派生索引（进程内）同样可重建。
 写入一律"记录行 + outbox 意图"同事务提交，索引由 relay 异步收敛
 （见 `memory/v2/index.py`）——所以 `create/update/invalidate` 返回**不代表**
 检索已更新。
@@ -26,12 +28,13 @@ SQLite 是记录、版本、状态与 outbox 的唯一权威；派生索引（�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from uuid import uuid4
@@ -39,13 +42,20 @@ from uuid import uuid4
 import aiosqlite
 
 from agent_harness.memory.v2._sqlite import connect, write_connection
+from agent_harness.memory.v2.file_state import (
+    MEMORY_STATE_DIRECTORY_NAME,
+    MemoryStateRoot,
+)
 from agent_harness.memory.v2.markdown_store import entry_digest
+from agent_harness.memory.v2.settings_store import FileMemorySettingsStore
+from agent_harness.memory.v2.tombstones import FileTombstoneStore, TombstoneDraft
 from agent_harness.memory.v2.types import (
     EvidenceItem,
     MemoryDraftV2,
     MemoryKind,
     MemoryRecordV2,
     MemoryScope,
+    MemorySettingsV2,
     MemoryStatus,
     MemoryTier,
     MemoryTombstoneV2,
@@ -327,16 +337,6 @@ class MemoryDeletionReceiptV2:
     content_hashes: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class MemorySettingsV2:
-    extraction_enabled: bool = True
-    recall_enabled: bool = True
-    #: #1039 / PRD §5.3 第 4 条修订：主端点确定性 provider 类错误是否允许落一次备用。
-    fallback_enabled: bool = True
-    #: #1353 M6：`memory` 工具的写入是否需要人工审批（默认关 = 直接落盘）。
-    write_approval: bool = False
-
-
 async def _add_column_if_missing(
     connection, table: str, column: str, definition: str,
 ) -> None:
@@ -387,11 +387,24 @@ async def _ensure_tool_projection_index(connection) -> None:
 
 
 class SqliteMemoryV2Store:
-    """V2 权威记录存储。所有写方法都是"记录行 + outbox 意图"单事务。"""
+    """V2 记录存储：SQLite 只保留可重建的派生态（records / outbox / FTS）。
 
-    def __init__(self, database_path: str | Path, *, clock=None) -> None:
+    #1494 / ADR-0058 D6+D7：操作状态（settings / tombstone）已迁到
+    ``<workspace>/memory-state/`` 的文件 owner。本类保留同名读方法作为 capability 的
+    最小适配面——它们只是转给 `FileMemorySettingsStore` / `FileTombstoneStore`，
+    不是第二份持久实现。
+    """
+
+    def __init__(
+        self, database_path: str | Path, *, clock=None,
+        state_root: MemoryStateRoot | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
         self._clock = clock or (lambda: datetime.now(UTC))
+        self.state_root = state_root or MemoryStateRoot(
+            self.database_path.parent / MEMORY_STATE_DIRECTORY_NAME)
+        self._settings = FileMemorySettingsStore(self.state_root)
+        self._tombstones = FileTombstoneStore(self.state_root)
 
     def _now(self) -> datetime:
         return self._clock().astimezone(UTC)
@@ -458,22 +471,29 @@ class SqliteMemoryV2Store:
         self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
         connection: aiosqlite.Connection | None = None,
         projection_source: str = "service", projection_target: str | None = None,
+        memory_id: str | None = None,
     ) -> MemoryRecordV2:
         """新建一条逻辑记忆（version=1，root_id=自己的 id）。
 
         ``projection_source``/``projection_target`` 是**存储层内部**的来源标记（#1437）：
         只在 SQLite 列上存在，不进 `MemoryRecordV2` 契约。工具写入传
         ``projection_source="tool"`` + 目标文件名，服务写入用默认值。
+
+        ``memory_id`` 是**调用方的幂等键**（#1494 AC4）：后台 apply / 审批重放把
+        ``(operation, action index)`` 派生出的确定性 id 传进来，重跑时命中已有行就
+        原样返回它——于是"记录已提交、job 终态未落"的窗口不会写出第二条逻辑记忆。
         """
         _require_projection_target(projection_target)
         return await self._insert(
             draft, trusted, root_id=None, version=1, previous=None, connection=connection,
-            projection_source=projection_source, projection_target=projection_target)
+            projection_source=projection_source, projection_target=projection_target,
+            memory_id=memory_id)
 
     @retry_on_busy
     async def update(
         self, previous_id: str, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
         connection: aiosqlite.Connection | None = None,
+        new_memory_id: str | None = None,
     ) -> MemoryRecordV2:
         """基于 `previous_id` 派生下一版：新 active 版本 + 旧版本置 superseded。
 
@@ -486,6 +506,10 @@ class SqliteMemoryV2Store:
         数据库层、不在调用方纪律——也不让一个更长的事务放大锁等待。
         借用路径下调用方的事务已经在跑，读自然落在里面（`connection` 透传）。
         """
+        if new_memory_id is not None:
+            replay = await self._existing_in(new_memory_id, trusted, connection)
+            if replay is not None:
+                return replay
         previous = await self._authorized_row(previous_id, trusted, connection=connection)
         self._require_active(previous, action="update")
         if (previous["source_type"] == SourceType.USER_EDIT.value
@@ -497,7 +521,7 @@ class SqliteMemoryV2Store:
             raise ValueError("update must keep the logical memory's scope and project")
         return await self._insert(
             draft, trusted, root_id=previous["root_id"], version=previous["version"] + 1,
-            previous=previous, connection=connection,
+            previous=previous, connection=connection, memory_id=new_memory_id,
         )
 
     @retry_on_busy
@@ -505,8 +529,15 @@ class SqliteMemoryV2Store:
         self, memory_id: str, trusted: TrustedMemoryIdentity, *,
         connection: aiosqlite.Connection | None = None,
     ) -> MemoryRecordV2:
-        """把 active 记录置为 invalidated（内容保留，§5.4.2）。"""
+        """把 active 记录置为 invalidated（内容保留，§5.4.2）。
+
+        **幂等**（#1494）：已经 invalidated 的行原样返回，而不是抛
+        "no longer active"。后台 apply / 审批重放可能重跑同一条撤回动作；
+        把"已经撤回"当成失败会让整批重放降级，也违背"同 key 只一次逻辑更新"。
+        """
         row = await self._authorized_row(memory_id, trusted, connection=connection)
+        if row["status"] == MemoryStatus.INVALIDATED.value:
+            return _to_record(row)
         self._require_active(row, action="invalidate")
         if row["source_type"] == SourceType.USER_EDIT.value:
             raise PermissionError("user-edited memory cannot be invalidated by automatic evidence")
@@ -530,9 +561,10 @@ class SqliteMemoryV2Store:
         root_id: str | None, version: int, previous: aiosqlite.Row | None,
         connection: aiosqlite.Connection | None = None,
         projection_source: str = "service", projection_target: str | None = None,
+        memory_id: str | None = None,
     ) -> MemoryRecordV2:
         """插入一条新的 active 版本；`previous` 非空时同事务把它置为 superseded。"""
-        memory_id = str(uuid4())
+        memory_id = memory_id or str(uuid4())
         now = self._now().isoformat()
         record = MemoryRecordV2(
             **draft.model_dump(),
@@ -549,8 +581,14 @@ class SqliteMemoryV2Store:
         # 把 A 项目的事实标成 B 项目就是一次越权的跨项目写入，必须在落盘前拒绝。
         assert_trusted_identity(record, trusted)
         async with write_connection(self.database_path, connection) as conn:
+            replay = await _row_in(conn, memory_id)
+            if replay is not None:
+                # 幂等键命中：这条逻辑写入已经成功过（上一次 apply 的终态没落成）。
+                if not self._visible(replay, trusted):
+                    raise KeyError(memory_id)
+                return _to_record(replay)
             if draft.source_type is SourceType.AUTOMATIC and await self._is_tombstoned_replay(
-                conn, draft, trusted,
+                draft, trusted,
             ):
                 raise ValueError("automatic memory matches a deleted source")
             if previous is not None:
@@ -595,6 +633,20 @@ class SqliteMemoryV2Store:
         """
         async with connect(self.database_path) as connection:
             return await self._read_in(connection, memory_id, trusted)
+
+    async def _existing_in(
+        self, memory_id: str, trusted: TrustedMemoryIdentity,
+        connection: aiosqlite.Connection | None = None,
+    ) -> MemoryRecordV2 | None:
+        """幂等键回放：该 id 已存在且可见 ⇒ 返回它，否则 None（#1494）。"""
+        if connection is not None:
+            row = await _row_in(connection, memory_id)
+        else:
+            async with connect(self.database_path) as own:
+                row = await _row_in(own, memory_id)
+        if row is None or not self._visible(row, trusted):
+            return None
+        return _to_record(row)
 
     async def _read_in(
         self, connection: aiosqlite.Connection, memory_id: str,
@@ -733,76 +785,28 @@ class SqliteMemoryV2Store:
         limit: int = 50, offset: int = 0,
     ) -> list[MemoryTombstoneV2]:
         """List only unexpired, authorized tombstone identifiers and deletion times."""
-        if project_id is not None and project_id != trusted.project_id:
-            raise PermissionError("project filter is not part of the trusted identity")
-        if scope is MemoryScope.PROJECT and trusted.project_id is None:
-            return []
-        clauses = [
-            "tenant_id=?", "user_id=?", "(scope <> 'project' OR project_id = ?)",
-            "expires_at > ?",
-        ]
-        values: list[object] = [
-            trusted.tenant_id, trusted.user_id, trusted.project_id, self._now().isoformat(),
-        ]
-        if scope is not None:
-            clauses.append("scope=?")
-            values.append(scope.value)
-        if project_id is not None:
-            clauses.append("scope='project' AND project_id=?")
-            values.append(project_id)
-        if query:
-            clauses.append(
-                "(instr(lower(memory_id), lower(?)) > 0 "
-                "OR instr(lower(root_id), lower(?)) > 0)"
-            )
-            values.extend((query, query))
-        values.extend((max(0, limit), max(0, offset)))
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                f"SELECT memory_id, root_id, scope, project_id, deleted_at "
-                f"FROM memory_v2_tombstones WHERE {' AND '.join(clauses)} "
-                "ORDER BY deleted_at DESC, memory_id DESC LIMIT ? OFFSET ?", values,
-            ) as cursor,
-        ):
-            return [_to_tombstone(row) for row in await cursor.fetchall()]
+        return await self._tombstones.list_for_async(
+            trusted, query=query, scope=scope, project_id=project_id,
+            limit=limit, offset=offset, now=self._now(),
+        )
 
     async def get_tombstone(
         self, memory_id: str, trusted: TrustedMemoryIdentity,
     ) -> MemoryTombstoneV2:
         """Read one unexpired tombstone without exposing hashes or deletion reason."""
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                "SELECT memory_id, root_id, tenant_id, user_id, scope, project_id, deleted_at "
-                "FROM memory_v2_tombstones WHERE memory_id=? AND expires_at > ?",
-                (memory_id, self._now().isoformat()),
-            ) as cursor,
+        payload = await self._tombstones.get_raw_async(memory_id)
+        now_stamp = self._now().isoformat()
+        if payload is None or not self._tombstones.visible_payload(
+            payload, trusted, now_stamp=now_stamp,
         ):
-            row = await cursor.fetchone()
-        if row is None or not self._tombstone_visible(row, trusted):
             raise KeyError(memory_id)
-        return _to_tombstone(row)
+        return self._tombstones.to_view(payload)
 
     async def list_tombstone_versions(
         self, root_id: str, trusted: TrustedMemoryIdentity,
     ) -> list[MemoryTombstoneV2]:
         """List the content-free deletion markers for one authorized logical memory."""
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                "SELECT memory_id, root_id, scope, project_id, deleted_at "
-                "FROM memory_v2_tombstones WHERE root_id=? AND tenant_id=? AND user_id=? "
-                "AND (scope <> 'project' OR project_id = ?) AND expires_at > ? "
-                "ORDER BY version DESC, deleted_at DESC, memory_id DESC",
-                (root_id, trusted.tenant_id, trusted.user_id, trusted.project_id,
-                 self._now().isoformat()),
-            ) as cursor,
-        ):
-            rows = await cursor.fetchall()
-        if not rows:
-            raise KeyError(root_id)
-        return [_to_tombstone(row) for row in rows]
+        return await self._tombstones.versions_async(root_id, trusted)
 
     @retry_on_busy
     async def delete(
@@ -814,8 +818,8 @@ class SqliteMemoryV2Store:
             await connection.execute("BEGIN IMMEDIATE")
             row = await _row_in(connection, memory_id)
             if row is None:
-                tombstone = await self._tombstone_in(connection, memory_id)
-                if tombstone is None or not self._tombstone_visible(tombstone, trusted):
+                visible = self._tombstones.visible(memory_id, trusted, now=self._now())
+                if visible is None:
                     await connection.rollback()
                     raise KeyError(memory_id)
                 await connection.commit()
@@ -823,7 +827,7 @@ class SqliteMemoryV2Store:
                 # 墓碑里的正文哈希（全版本）。不回传它，残留条目没有任何清理入口。
                 return MemoryDeletionReceiptV2(
                     deleted=False,
-                    content_hashes=tuple(json.loads(tombstone["content_hashes"])),
+                    content_hashes=tuple(visible.get("content_hashes") or ()),
                 )
             if not self._visible(row, trusted):
                 await connection.rollback()
@@ -868,6 +872,14 @@ class SqliteMemoryV2Store:
         trusted: TrustedMemoryIdentity, *, reason: str, now: datetime,
     ) -> MemoryDeletionReceiptV2:
         rows = await self._root_rows(connection, root_id, trusted)
+        # 墓碑先于记录删除落盘（ADR-0058 D8）：崩溃在它之后，旧输入已经不能重放。
+        # 这是几个小 JSON 的原子替换，随调用方事务一起完成；跨载体不原子，由删除
+        # 重入 + 墓碑（`del_` 回执对内容）收敛。
+        if rows:
+            self._tombstones.record(
+                [TombstoneDraft.from_record(item) for item in rows],
+                reason=reason, now=now,
+            )
         deleted: list[DeletedMemoryV2] = []
         for item in rows:
             deleted.append(DeletedMemoryV2(
@@ -880,18 +892,7 @@ class SqliteMemoryV2Store:
                 connection, item["memory_id"], MemoryOperationV2.DELETE,
                 item["tenant_id"], item["user_id"], item["scope"], item["project_id"],
             )
-            await connection.execute(
-                "INSERT OR REPLACE INTO memory_v2_tombstones "
-                "(memory_id, root_id, tenant_id, user_id, scope, project_id, version, deleted_at, "
-                "expires_at, deletion_reason, content_hashes, source_hashes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (item["memory_id"], item["root_id"], item["tenant_id"], item["user_id"],
-                 item["scope"], item["project_id"], item["version"], now.isoformat(),
-                 (now + timedelta(days=30)).isoformat(), reason,
-                 json.dumps([self._digest(item["content"])], separators=(",", ":")),
-                 json.dumps([self._digest(value) for value in json.loads(item["source_event_ids"])],
-                            separators=(",", ":")))
-            )
+
         await connection.execute(
             "DELETE FROM memory_v2_fts WHERE rowid IN "
             "(SELECT rowid FROM memory_v2_records WHERE root_id=?)", (root_id,))
@@ -899,77 +900,25 @@ class SqliteMemoryV2Store:
         return MemoryDeletionReceiptV2(deleted=bool(deleted), memories=tuple(deleted))
 
     async def get_settings(self, trusted: TrustedMemoryIdentity) -> MemorySettingsV2:
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                "SELECT extraction_enabled, recall_enabled, fallback_enabled, write_approval "
-                "FROM memory_v2_settings "
-                "WHERE tenant_id=? AND user_id=?", (trusted.tenant_id, trusted.user_id),
-            ) as cursor,
-        ):
-            row = await cursor.fetchone()
-        if row is None:
-            return MemorySettingsV2()
-        return MemorySettingsV2(
-            bool(row["extraction_enabled"]), bool(row["recall_enabled"]),
-            bool(row["fallback_enabled"]), bool(row["write_approval"]),
-        )
+        """四开关由文件 owner 承载（`memory-state/settings.json`，ADR-0058 D6）。
 
-    @retry_on_busy
+        身份参数保留只为让 capability 的调用面不变：本机设置没有身份路由（裁决 7）。
+        """
+        return await self._settings.get(trusted)
+
     async def update_settings(
         self, trusted: TrustedMemoryIdentity, *,
         extraction_enabled: bool | None = None, recall_enabled: bool | None = None,
         fallback_enabled: bool | None = None, write_approval: bool | None = None,
     ) -> MemorySettingsV2:
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            async with connection.execute(
-                "SELECT extraction_enabled, recall_enabled, fallback_enabled, write_approval "
-                "FROM memory_v2_settings "
-                "WHERE tenant_id=? AND user_id=?", (trusted.tenant_id, trusted.user_id),
-            ) as cursor:
-                row = await cursor.fetchone()
-            current = MemorySettingsV2() if row is None else MemorySettingsV2(
-                bool(row["extraction_enabled"]), bool(row["recall_enabled"]),
-                bool(row["fallback_enabled"]), bool(row["write_approval"]),
-            )
-            extraction = (
-                current.extraction_enabled if extraction_enabled is None else extraction_enabled
-            )
-            recall = current.recall_enabled if recall_enabled is None else recall_enabled
-            fallback = (
-                current.fallback_enabled if fallback_enabled is None else fallback_enabled
-            )
-            approval = (
-                current.write_approval if write_approval is None else write_approval
-            )
-            await connection.execute(
-                "INSERT INTO memory_v2_settings "
-                "(tenant_id, user_id, extraction_enabled, recall_enabled, "
-                "fallback_enabled, write_approval, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tenant_id, user_id) DO UPDATE SET "
-                "extraction_enabled=excluded.extraction_enabled, "
-                "recall_enabled=excluded.recall_enabled, "
-                "fallback_enabled=excluded.fallback_enabled, "
-                "write_approval=excluded.write_approval, updated_at=excluded.updated_at",
-                (trusted.tenant_id, trusted.user_id, int(extraction), int(recall),
-                 int(fallback), int(approval), self._now().isoformat()),
-            )
-            await connection.commit()
-        return MemorySettingsV2(extraction, recall, fallback, approval)
+        return await self._settings.update(
+            trusted, extraction_enabled=extraction_enabled, recall_enabled=recall_enabled,
+            fallback_enabled=fallback_enabled, write_approval=write_approval,
+        )
 
-    @retry_on_busy
     async def purge_expired_tombstones(self, *, now: datetime | None = None) -> int:
-        """Purge tombstone hashes after 30 days; ``now`` is an injectable test clock."""
-        cutoff = (now or self._now()).astimezone(UTC).isoformat()
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
-                "DELETE FROM memory_v2_tombstones WHERE expires_at <= ?", (cutoff,),
-            )
-            count = cursor.rowcount
-            await connection.commit()
-        return count
+        """Purge tombstone files after the 30-day retention; ``now`` is injectable."""
+        return await self._tombstones.purge_expired_async(now=now or self._now())
 
     # ----------------------------------------------------------------------------------
     # 投影对账（#1437 F-06 / F-06b）
@@ -1158,45 +1107,22 @@ class SqliteMemoryV2Store:
         return [item for item in rows if self._visible(item, trusted)]
 
     async def _is_tombstoned_replay(
-        self, connection: aiosqlite.Connection, draft: MemoryDraftV2,
-        trusted: TrustedMemoryIdentity,
+        self, draft: MemoryDraftV2, trusted: TrustedMemoryIdentity,
     ) -> bool:
-        now = self._now().isoformat()
-        async with connection.execute(
-            "SELECT content_hashes, source_hashes FROM memory_v2_tombstones "
-            "WHERE tenant_id=? AND user_id=? AND scope=? AND project_id IS ? AND expires_at > ?",
-            (trusted.tenant_id, trusted.user_id, draft.scope.value, draft.project_id, now),
-        ) as cursor:
-            rows = await cursor.fetchall()
-        sources = {self._digest(value) for value in draft.source_event_ids}
-        content_hash = self._digest(draft.content)
-        return any(
-            content_hash in json.loads(row["content_hashes"])
-            or bool(sources.intersection(json.loads(row["source_hashes"])))
-            for row in rows
+        """删除抑制：正文或任一来源事件命中未过期墓碑 ⇒ 拒绝重放（ADR-0056 §3.5）。
+
+        判据逐字保留旧 SQL 版本，载体换成墓碑文件（同步小文件扫描；保留期 30 天
+        把规模钳在常数级）。
+        """
+        return await asyncio.to_thread(
+            self._tombstones.blocks_replay, trusted,
+            scope=draft.scope, project_id=draft.project_id, content=draft.content,
+            source_event_ids=draft.source_event_ids, now=self._now(),
         )
 
     @staticmethod
     def _digest(value: str) -> str:
         return entry_digest(value)
-
-    @staticmethod
-    async def _tombstone_in(
-        connection: aiosqlite.Connection, memory_id: str,
-    ) -> aiosqlite.Row | None:
-        async with connection.execute(
-            "SELECT * FROM memory_v2_tombstones WHERE memory_id=?", (memory_id,),
-        ) as cursor:
-            return await cursor.fetchone()
-
-    @staticmethod
-    def _tombstone_visible(row: aiosqlite.Row, trusted: TrustedMemoryIdentity) -> bool:
-        return (
-            row["tenant_id"] == trusted.tenant_id
-            and row["user_id"] == trusted.user_id
-            and (row["scope"] != MemoryScope.PROJECT.value
-                 or row["project_id"] == trusted.project_id)
-        )
 
     async def list_versions(
         self, root_id: str, trusted: TrustedMemoryIdentity,

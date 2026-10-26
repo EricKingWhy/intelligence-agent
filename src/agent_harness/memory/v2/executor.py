@@ -59,6 +59,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, TypeVar
+from uuid import NAMESPACE_URL, uuid5
 
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field
@@ -91,8 +92,8 @@ from agent_harness.memory.v2.jobs import (
     MemoryFormationJob,
     MemoryJobOutcome,
     MemoryJobStage,
+    MemoryV2JobStore,
     ProtectedFactExtractionState,
-    SqliteMemoryV2JobStore,
 )
 from agent_harness.memory.v2.origin import BACKGROUND_REVIEW, reset_origin, set_origin
 from agent_harness.memory.v2.policy import select_candidates
@@ -472,11 +473,12 @@ class MemoryRecordWriter(Protocol):
     """
 
     async def create_in(self, connection: aiosqlite.Connection, draft: MemoryDraftV2,
-                        trusted: TrustedMemoryIdentity) -> MemoryRecordV2: ...
+                        trusted: TrustedMemoryIdentity, *,
+                        memory_id: str | None = None) -> MemoryRecordV2: ...
 
     async def update_in(self, connection: aiosqlite.Connection, previous_id: str,
-                        draft: MemoryDraftV2,
-                        trusted: TrustedMemoryIdentity) -> MemoryRecordV2: ...
+                        draft: MemoryDraftV2, trusted: TrustedMemoryIdentity, *,
+                        new_memory_id: str | None = None) -> MemoryRecordV2: ...
 
     async def invalidate_in(self, connection: aiosqlite.Connection, memory_id: str,
                             trusted: TrustedMemoryIdentity) -> MemoryRecordV2: ...
@@ -484,6 +486,7 @@ class MemoryRecordWriter(Protocol):
     async def mirror_committed(
         self, records: Sequence[MemoryRecordV2], *,
         invalidated: Sequence[MemoryRecordV2] = (),
+        operation_prefix: str | None = None,
     ) -> None: ...
 
 
@@ -634,7 +637,7 @@ class MemoryJobExecutor:
     """跑完一个已认领的 formation job，并保证终态与副作用一起落地。"""
 
     def __init__(
-        self, *, jobs: SqliteMemoryV2JobStore, writer: MemoryRecordWriter,
+        self, *, jobs: MemoryV2JobStore, writer: MemoryRecordWriter,
         searcher: MemorySearcher, invoker: MemoryModelInvoker,
         session_store: JsonlSessionStore | None = None,
         limits: MemoryBudgetLimits = DEFAULT_BUDGET_LIMITS,
@@ -1253,12 +1256,13 @@ class MemoryJobExecutor:
             records: list[MemoryRecordV2] = []
             superseded: list[MemoryRecordV2] = []
             written: dict[str, int] = {}
-            for verdict, candidate_scope in actions:
+            for index, (verdict, candidate_scope) in enumerate(actions):
                 try:
                     produced = await self._apply_one(
                         connection, verdict, job=job, refs=refs,
                         candidate_scope=candidate_scope,
-                        relevant_memories=relevant_memories)
+                        relevant_memories=relevant_memories,
+                        memory_id=_record_id_for(job.job_id, index))
                 except (PermissionError, KeyError, ValueError, _UnresolvedEvidence) as error:
                     # §6.3 末句：目标归属 / 版本 / 作用域由运行时校验；`_UnresolvedEvidence`
                     # 是同一档的第三种"这条动作不成立"（证据一个真实事件都指不到）。不合格的
@@ -1278,10 +1282,28 @@ class MemoryJobExecutor:
                 raise _NothingToApply
             return tuple(records), tuple(superseded)
 
+        async def after_work(
+            committed: tuple[tuple[MemoryRecordV2, ...], tuple[MemoryRecordV2, ...]],
+        ) -> None:
+            """记录已提交、终态未写：markdown 权威面只能在这里补落。
+
+            `operation_prefix` 让每个 target 的追加/移除都是确定性回执：job 重跑
+            （崩溃在"已提交、终态未落"）时同一 operation id 回放，不重复追加。
+            """
+            records, superseded = committed
+            await self._writer.mirror_committed(
+                tuple(record for record in records if record.status is MemoryStatus.ACTIVE),
+                invalidated=tuple(
+                    record for record in (*records, *superseded)
+                    if record.status in (MemoryStatus.INVALIDATED, MemoryStatus.SUPERSEDED)
+                ),
+                operation_prefix=f"jobp_{job.job_id}",
+            )
+
         try:
             committed = await self._jobs.commit_with_outcome(
                 job_id=job.job_id, worker_id=worker_id, outcome=MemoryJobOutcome.COMMITTED,
-                state=state.as_dict, work=_tagged(work))
+                state=state.as_dict, work=_tagged(work), after_work=after_work)
         except _NothingToApply:
             # 事务已回滚（零写入）⇒ 改记安静成功：没有任何变更，就不是 COMMITTED。
             return await self._complete_quietly(
@@ -1291,20 +1313,7 @@ class MemoryJobExecutor:
             raise _Degraded(DegradedReason.APPLY_FAILED) from None
         if committed is None:
             return await self._lost(job.job_id)
-        committed, superseded = committed
-        # #1353 §2：markdown 权威面在 SQLite 事务**提交之后**补落（它无法参与那笔提交）。
-        # 需要从文件里移除的是**所有非 ACTIVE 版本**：`invalidate_in` 给 INVALIDATED，
-        # `update_in` 给 SUPERSEDED（旧版本）。漏掉后者，每次后台 update 都在权威面留
-        # 一条被取代的僵尸事实，最终吃光字符预算。
-        # `superseded` 由 `_apply_one` 单独带出来：`update_in` 只返回新 ACTIVE 行，
-        # 旧行的 SUPERSEDED 只存在于存储里，不在这条返回链上。
-        await self._writer.mirror_committed(
-            tuple(record for record in committed if record.status is MemoryStatus.ACTIVE),
-            invalidated=tuple(
-                record for record in (*committed, *superseded)
-                if record.status in (MemoryStatus.INVALIDATED, MemoryStatus.SUPERSEDED)
-            ),
-        )
+        committed = committed[0]
         state.phase = MemoryJobStage.COMPLETED.value
         self._observe("apply", {
             "job_id": job.job_id, "session_id": job.session_id,
@@ -1354,7 +1363,7 @@ class MemoryJobExecutor:
             # 装配错误：gate 开着却没有 blocked 面。响亮失败，不静默落成"没拦住"。
             raise RuntimeError("write_approval is on but no BlockedWriteStore is wired")
 
-        async def work(connection: aiosqlite.Connection) -> tuple[str, ...]:
+        async def work(_connection: aiosqlite.Connection) -> tuple[str, ...]:
             surviving: list[dict[str, Any]] = []
             written: dict[str, int] = {}
             for verdict, candidate_scope in actions:
@@ -1373,8 +1382,8 @@ class MemoryJobExecutor:
                 # 与写路径同一出口：一条都不成立就不是"被拦下"，是没什么可写的（AC2）。
                 raise _NothingToApply
             for identity, project_id, group in _blocked_groups(job, surviving):
-                blocked_id = await blocked.insert_in(
-                    connection, job_id=job.job_id, identity=identity,
+                blocked_id = await blocked.insert(
+                    job_id=job.job_id, identity=identity,
                     project_id=project_id, payload={"actions": group})
                 if blocked_id is None:
                     # 同 identity 同内容已经有人处置过：不再问第二遍（票面 §4.3）。
@@ -1416,6 +1425,7 @@ class MemoryJobExecutor:
         self, connection: aiosqlite.Connection, verdict: AdjudicationResult, *,
         job: MemoryFormationJob, refs: Mapping[str, str],
         candidate_scope: MemoryScope, relevant_memories: Sequence[MemoryRecordV2],
+        memory_id: str,
     ) -> _AppliedAction:
         """把一条裁决变成一次存储写入；不合格的目标/内容让异常穿出去给调用方归因。
 
@@ -1438,13 +1448,15 @@ class MemoryJobExecutor:
         assert content is not None  # ADD / UPDATE 的契约保证，见 formation.AdjudicationResult
         draft = _draft_from(content, job, refs)
         if verdict.action is AdjudicationAction.ADD:
-            return _AppliedAction(await self._writer.create_in(connection, draft, job.trusted))
+            return _AppliedAction(await self._writer.create_in(
+                connection, draft, job.trusted, memory_id=memory_id))
         assert verdict.target_memory_id is not None
         _validate_adjudication_target(
             verdict.target_memory_id, candidate_scope=candidate_scope,
             trusted=job.trusted, relevant_memories=relevant_memories)
         record = await self._writer.update_in(
-            connection, verdict.target_memory_id, draft, job.trusted)
+            connection, verdict.target_memory_id, draft, job.trusted,
+            new_memory_id=memory_id)
         previous = next(
             memory for memory in relevant_memories
             if memory.id == verdict.target_memory_id)
@@ -1604,6 +1616,15 @@ def _draft_from(
             for item in content.evidence
         ],
     )
+
+
+def _record_id_for(job_id: str, index: int) -> str:
+    """formation apply 的确定性 record id（`(job, action index)` ⇒ 同一 id）。
+
+    job 重跑（记录已提交、终态未落）时，同一条动作命中已有行就原样返回，
+    不会写出第二条逻辑记忆（#1494 AC4）。
+    """
+    return str(uuid5(NAMESPACE_URL, f"memory-v2:{job_id}:{index}"))
 
 
 def _blocked_action(
