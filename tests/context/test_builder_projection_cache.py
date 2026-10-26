@@ -9,9 +9,11 @@
 2. **失效**：缓存键少一个维度就必须实测变红（键 = 会话对象 + 事件前缀 + 视觉口径）。
 3. **少做真实工作**：同夹具下 derive 调用次数下降，且缓存可丢弃、可从事件流重建。
 
-投影是纯函数（`derive.py` docstring），会话事件 append-only 且 `SessionEvent` 冻结
-——「同一事件前缀 + 同一视觉口径」两次派生必然逐字节相同，这是复用的证明前提，
-不是假设（见 builder `_derive_pairs` 注释）。
+投影是纯函数（`derive.py` docstring），会话事件 append-only 且 `session.mark()` 是
+长度版本——「同一事件前缀 + 同一视觉口径」两次派生必然逐条相同，这是复用的前提。
+`SessionEvent.data` 是浅冻结（`Session.append` 按引用存，不复制），故该前提还依赖
+「append 之后不再原地改 data」的既有约定（当前全仓无此用法，与 `_token_memo` 同一
+条约定）；详见 builder `_derive_pairs` 注释。
 """
 
 from __future__ import annotations
@@ -69,18 +71,81 @@ def _append_turn(session: Session, i: int, *, size: int = 400) -> int:
 
 
 def _counting(monkeypatch) -> dict[str, int]:
-    """把 builder 模块里的 derive seam 换成计数器（与 test_builder_token_cache 同法）。"""
+    """把 builder 模块的**两个** derive 接缝都换成计数器。
+
+    修复前 `usage_snapshot` / `_reproject` 调的是 `derive_messages`（另一个 import
+    名、另一个接缝），只包 `derive_messages_with_source_ranges` 会让这两处的派生
+    **不被计数**，断言因此在基线上也恒真（#1528 复核 S-1 / P2-1）。两个绑定都包上
+    后，任一处回退成 uncached 都会让计数变多。
+
+    `derive_messages` 内部查的是 `derive` 模块的全局名，不经过这里的绑定，故一次
+    底层派生只被计一次；修复后的树没有 `derive_messages` 绑定，那一支跳过。
+    """
     calls = {"n": 0}
     real_pairs = builder_module.derive_messages_with_source_ranges
+    real_messages = getattr(builder_module, "derive_messages", None)
 
-    def counting_pairs(events, *, supports_vision=False):
-        calls["n"] += 1
-        return real_pairs(events, supports_vision=supports_vision)
+    def _wrap(real_fn):
+        def counting(events, *, supports_vision=False):
+            calls["n"] += 1
+            return real_fn(events, supports_vision=supports_vision)
+
+        return counting
 
     monkeypatch.setattr(
-        builder_module, "derive_messages_with_source_ranges", counting_pairs,
+        builder_module, "derive_messages_with_source_ranges", _wrap(real_pairs),
     )
+    if real_messages is not None:
+        monkeypatch.setattr(builder_module, "derive_messages", _wrap(real_messages))
     return calls
+
+
+async def _pruner_ready(tmp_path) -> tuple[Session, ContextBuilder]:
+    """装配 pruner 的会话：三条溢出 tool 结果（与 `test_pruner_path_equivalent` 同形）。"""
+    from agent_harness.session import TOOL_CALL
+    from agent_harness.tooling.overflow import ArtifactOverflowHandler
+    from agent_harness.tooling.result import ToolResult
+
+    session = make_session(tmp_path)
+    store = FakeArtifactStore()
+    for i in range(3):
+        session.append(TOOL_CALL, {
+            "tool_call_id": f"c{i}", "tool_name": "read_file",
+            "args": {"path": "a.txt"},
+        })
+        handler = ArtifactOverflowHandler(store, 200, read_tool_name="read_artifact")
+        overflowed, deferred = await handler.maybe_overflow(
+            session, f"c{i}", "read_file",
+            ToolResult.success("file content", data={"output": "x\n" * 150}),
+        )
+        for event_type, data in deferred:
+            session.append(event_type, data)
+        session.append(TOOL_RESULT, {
+            "tool_call_id": f"c{i}",
+            "content": overflowed.model_dump_json(),
+        })
+    builder = ContextBuilder(
+        ScriptedModel([]), max_context_tokens=10_000_000,
+        artifact_store=store, artifact_read_tool_name="read_artifact",
+    )
+    return session, builder
+
+
+def _compaction_ready(tmp_path) -> tuple[Session, ContextBuilder]:
+    """自动压缩必命中的会话 + builder（三个事件、低阈值、带摘要脚本）。"""
+    session = make_session(tmp_path)
+    session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
+    session.append(MODEL_COMPLETED, {
+        "content": "历史分析" * 100,
+        "usage": {"prompt_tokens": 4000, "completion_tokens": 1,
+                  "total_tokens": 4001},
+    })
+    session.append(USER_MESSAGE, {"content": "next"})
+    builder = ContextBuilder(
+        ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
+        max_context_tokens=10000, auto_compact_threshold=0.3,
+    )
+    return session, builder
 
 
 class TestProjectionEquivalence:
@@ -100,18 +165,7 @@ class TestProjectionEquivalence:
 
     @pytest.mark.asyncio
     async def test_compaction_bracket_equivalent(self, tmp_path):
-        session = make_session(tmp_path)
-        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
-        session.append(MODEL_COMPLETED, {
-            "content": "历史分析" * 100,
-            "usage": {"prompt_tokens": 4000, "completion_tokens": 1,
-                      "total_tokens": 4001},
-        })
-        session.append(USER_MESSAGE, {"content": "next"})
-        builder = ContextBuilder(
-            ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
-            max_context_tokens=10000, auto_compact_threshold=0.3,
-        )
+        session, builder = _compaction_ready(tmp_path)
 
         await builder.build(session)
 
@@ -245,32 +299,7 @@ class TestProjectionEquivalence:
     @pytest.mark.asyncio
     async def test_pruner_path_equivalent(self, tmp_path):
         """pruner 装配时，复用后的 pairs 经同一 apply 必须与基线重放逐条相等。"""
-        from agent_harness.session import TOOL_CALL
-        from agent_harness.tooling.overflow import ArtifactOverflowHandler
-        from agent_harness.tooling.result import ToolResult
-
-        session = make_session(tmp_path)
-        store = FakeArtifactStore()
-        for i in range(3):
-            session.append(TOOL_CALL, {
-                "tool_call_id": f"c{i}", "tool_name": "read_file",
-                "args": {"path": "a.txt"},
-            })
-            handler = ArtifactOverflowHandler(store, 200, read_tool_name="read_artifact")
-            overflowed, deferred = await handler.maybe_overflow(
-                session, f"c{i}", "read_file",
-                ToolResult.success("file content", data={"output": "x\n" * 150}),
-            )
-            for event_type, data in deferred:
-                session.append(event_type, data)
-            session.append(TOOL_RESULT, {
-                "tool_call_id": f"c{i}",
-                "content": overflowed.model_dump_json(),
-            })
-        builder = ContextBuilder(
-            ScriptedModel([]), max_context_tokens=10_000_000,
-            artifact_store=store, artifact_read_tool_name="read_artifact",
-        )
+        session, builder = await _pruner_ready(tmp_path)
 
         await builder.build(session)
 
@@ -359,7 +388,12 @@ class TestInvalidationNegativeControls:
 
 
 class TestReducedWork:
-    """同夹具记录投影调用次数：证明少做了真实工作（不断言性能阈值）。"""
+    """同夹具记录投影调用次数：证明少做了真实工作（不断言性能阈值）。
+
+    计数接缝是 builder 模块的**两个** derive 绑定（见 `_counting`）：修复前
+    `usage_snapshot` / `_reproject` 走 `derive_messages`，只包另一个名字会让这两处
+    不计入，断言在基线上恒真。
+    """
 
     @pytest.mark.asyncio
     async def test_repeated_build_without_append_derives_once(self, tmp_path, monkeypatch):
@@ -389,29 +423,55 @@ class TestReducedWork:
         )
 
     @pytest.mark.asyncio
+    async def test_usage_snapshot_reuses_projection_with_pruner(self, tmp_path, monkeypatch):
+        """pruner 装配路径：usage_snapshot 走的是**另一条分支**，同样不得再派生。
+
+        缓存只存**未裁剪**的 derive 产物，裁剪决策每次仍由 pruner 重放；因此
+        pruner 分支的复用条件与无 pruner 分支完全相同。
+        """
+        session, builder = await _pruner_ready(tmp_path)
+        calls = _counting(monkeypatch)
+
+        await builder.build(session)
+        assert calls["n"] == 1, "首次 build 派生一次"
+
+        builder.usage_snapshot(session)
+        assert calls["n"] == 1, "pruner 分支的看板读同样复用 build 落下的投影"
+
+    @pytest.mark.asyncio
     async def test_compacting_build_does_not_derive_twice_for_same_mark(
         self, tmp_path, monkeypatch,
     ):
-        session = make_session(tmp_path)
-        session.append(USER_MESSAGE, {"content": "读取旧记录并继续。"})
-        session.append(MODEL_COMPLETED, {
-            "content": "历史分析" * 100,
-            "usage": {"prompt_tokens": 4000, "completion_tokens": 1,
-                      "total_tokens": 4001},
-        })
-        session.append(USER_MESSAGE, {"content": "next"})
-        builder = ContextBuilder(
-            ScriptedModel([AIMessage(content=MODEL_SECTIONS)]),
-            max_context_tokens=10000, auto_compact_threshold=0.3,
-        )
+        session, builder = _compaction_ready(tmp_path)
         calls = _counting(monkeypatch)
 
         await builder.build(session)
 
         assert any(e.type == "compaction/end" for e in session.events), "前置：必须已压缩"
-        # build 派生 1 次 + 落 bracket 后 _reproject 派生 1 次（mark 已变，合法重算）。
-        # 修复前是同 mark 的 3 次（build + compact_now + _reproject）。
+        # 修复后 2 次：build 首次派生（bracket 前 mark）+ compact_now 命中复用
+        # （同 mark，0 次）+ 落 bracket 后 `_reproject` 一次（mark 已变，合法重算）。
+        # 修复前同一口径实测 3 次：build + compact_now + `_reproject` 各自全量派生。
         assert calls["n"] == 2, f"压缩 build 的派生次数应为 2，实际 {calls['n']}"
+
+    @pytest.mark.asyncio
+    async def test_post_compaction_snapshot_derives_nothing(self, tmp_path, monkeypatch):
+        """`_reproject` 的复用证据：压缩 build 之后首次看板读为 0 派生。
+
+        `_reproject` 在 bracket 落盘后重派生，并把结果留在缓存里（mark = 新前缀）；
+        紧接着的 `usage_snapshot` 因此无需再派生。若 `_reproject` 回退成 uncached，
+        它不再刷新缓存 ⇒ 这次看板读会多出 1 次派生。
+        """
+        session, builder = _compaction_ready(tmp_path)
+        calls = _counting(monkeypatch)
+
+        await builder.build(session)
+        after_build = calls["n"]
+
+        builder.usage_snapshot(session)
+
+        assert calls["n"] == after_build, (
+            "压缩 build 之后的首次看板读必须命中 `_reproject` 留下的同一 mark 投影"
+        )
 
     @pytest.mark.asyncio
     async def test_build_never_appends_events(self, tmp_path):

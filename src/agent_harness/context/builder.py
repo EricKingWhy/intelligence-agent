@@ -682,18 +682,23 @@ class ContextBuilder:
         self._token_memo_session: Session | None = None
         # #1528：derive 复用——(会话对象, 事件前缀长度, 视觉口径) → 未裁剪的
         # `(message, source_range)` 列表。同一 mark 上 build / compact_now /
-        # `_reproject` / `usage_snapshot` 此前各自全量重派生（一次压缩 build 实测
-        # 同 mark 派生 3 次；看板每次轮询再加 1 次）。剖析归因：开销几乎全在构造
-        # langchain pydantic 消息（1600 事件 3 次派生 0.459s 中 ≈73%），不在扫描
-        # 事件——故**只复用已构造的不可变消息**，不做增量前缀计算（票面：不承诺
-        # 缺证据的增量框架）。
+        # `_reproject` / `usage_snapshot` 此前各自全量重派生：一次压缩 build 实测
+        # builder 侧派生 3 次（build 1 次、compact_now 与 build 同 mark 再 1 次、
+        # 落 bracket 后 `_reproject` mark 已变又 1 次），看板每次轮询再加 1 次。
+        # 剖析归因：#1528 修复轮沙箱实测（1601 事件夹具、单次派生取 7 次中位，tip 与
+        # base 两树共 18 次读数 ≈8–27 ms，随宿主负载抖动）开销几乎全在构造 langchain
+        # pydantic 消息——同一夹具上纯遍历事件 0.1–0.4 ms，构造占比 97.5–98.9%。故
+        # **只复用已构造的消息**，不做增量前缀计算（票面：不承诺缺证据的增量框架）。
         #
-        # 等价性前提（逐条可核）：`SessionEvent` 冻结、事件 append-only 且唯一追加
-        # 路径是 `Session._persist_event`（故 `session.mark()` 是精确的内容版本）；
+        # 等价性前提（逐条可核）：事件 append-only，唯一追加路径是
+        # `Session._persist_event`（故 `session.mark()` 是精确的**长度**版本）；
         # `derive_messages_with_source_ranges` 是纯函数；全仓唯一原地改消息对象的
-        # 位置是 compactor 对 `model_copy()` 副本的裁剪。这与 `_token_memo` 依赖的
-        # 同一条既有前提（「事件落盘后其投影消息内容在同一口径下终身不变」）一致，
-        # 不是新假设。因此「同一事件前缀 + 同一视觉口径」派生结果必然逐条相同。
+        # 位置是 compactor 对 `model_copy()` 副本的裁剪。`SessionEvent` 的
+        # `frozen=True` 只冻结字段绑定，`data` 是**按引用**存进事件的
+        # （`Session.append` 不复制，只有 `_mark_dangling` 分支才生成新 dict），
+        # 故「同一前缀内容不变」靠的是调用方在 append 之后不再原地改那个 `data`
+        # 的既有约定（当前全仓无此用法），不是冻结本身给的保证——`_token_memo`
+        # 依赖的是同一条约定。因此「同一事件前缀 + 同一视觉口径」派生结果逐条相同。
         # 键含会话**对象**（同 id 不同对象不同键，与 `_token_memo_session` 同纪律）；
         # 会话对象每次都比对，故不存在 `id()` 复用的悬垂键。
         # 纯缓存：可随时丢弃并从事件流重建，不产生第二份 Session 真相。
@@ -807,6 +812,11 @@ class ContextBuilder:
 
         键 = (会话对象, `session.mark()`, `_supports_vision`)。三者任一变化即重派生；
         事件 append-only 且投影是纯函数，故命中缓存与全量重算逐条相等。
+
+        返回的列表与其消息对象**归缓存所有**：调用方只读，不得原地修改。复用让同一
+        批消息对象被多次调用共享（修复前每次调用都新建），原地改一条会污染后续所有
+        读取，且污染会持续到下一次 append 改变 mark 为止。需要改写就用
+        `model_copy()` 造副本（仓内先例：compactor 对 `model_copy()` 副本裁剪）。
 
         只缓存 derive 的产物，**不缓存裁剪**：裁剪决策每次仍由 `ToolResultPruner`
         重放（决策与 memo 失效是它自己的合同，见 `_prune_projection`），本缓存因此
