@@ -23,6 +23,8 @@ from agent_harness.context import builder as builder_module
 from agent_harness.context.builder import ContextBuilder
 from agent_harness.session import (
     MODEL_COMPLETED,
+    RUN_COMPLETED,
+    RUN_STARTED,
     TOOL_RESULT,
     USER_MESSAGE,
     JsonlSessionStore,
@@ -30,7 +32,9 @@ from agent_harness.session import (
 )
 from agent_harness.session.derive import derive_messages_with_source_ranges
 from agent_harness.session.event import MESSAGE_SUPERSEDED
+from agent_harness.session.fork import fork_session
 from agent_harness.storage.artifact import FakeArtifactStore
+from agent_harness.storage.sqlite import SqliteSessionMetaStore
 from tests.conftest import make_session
 from tests.scripted_model import ScriptedModel
 
@@ -245,19 +249,43 @@ class TestProjectionEquivalence:
 
     @pytest.mark.asyncio
     async def test_fork_resume_from_store_equivalent(self, tmp_path):
-        """fork/resume：丢弃内存 Session，从同一 JSONL 重新 load 后必须等价。"""
-        session = make_session(tmp_path)
-        _append_turn(session, 0)
-        _append_turn(session, 1)
+        """A real fork boundary and a reloaded child retain projection equivalence."""
+        store = JsonlSessionStore(root=tmp_path)
+        session = Session.start(store, session_id="parent")
+        session.append(USER_MESSAGE, {"content": "seed user"})
+        session.append(RUN_STARTED, {})
+        session.append(MODEL_COMPLETED, {"content": "seed answer"})
+        session.append(RUN_COMPLETED, {})
+        boundary = session.append(USER_MESSAGE, {"content": "fork boundary"}).seq
         builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
         await builder.build(session)
-        before = list(builder._derive_pairs(session))
+        meta_store = SqliteSessionMetaStore(tmp_path / "harness.db")
+        await meta_store.initialize()
 
-        reloaded = Session.load(JsonlSessionStore(root=tmp_path), session.session_id)
+        child = await fork_session(
+            store,
+            meta_store,
+            session.session_id,
+            boundary_user_message_seq=boundary,
+            child_session_id="child",
+            with_tail_summary=False,
+        )
+        assert [
+            event.data["content"]
+            for event in child.events
+            if event.type == USER_MESSAGE
+        ] == ["seed user"]
+        await builder.build(child)
+        child_pairs = builder._derive_pairs(child)
+        assert child_pairs == _baseline(child)
+
+        reloaded = Session.load(store, child.session_id)
         await builder.build(reloaded)
 
         assert builder._derive_pairs(reloaded) == _baseline(reloaded)
-        assert [m for m, _ in builder._derive_pairs(reloaded)] == [m for m, _ in before]
+        assert [m for m, _ in builder._derive_pairs(reloaded)] == [
+            m for m, _ in child_pairs
+        ]
 
     @pytest.mark.asyncio
     async def test_vision_toggle_equivalent(self, tmp_path):
@@ -632,6 +660,29 @@ class TestProjectionCacheOwnership:
         second = builder._derive_pairs(session)
 
         assert second[0][0].tool_calls[0]["args"]["zero"].hex() == (-0.0).hex()
+
+    @pytest.mark.asyncio
+    async def test_tuple_snapshot_tracks_nested_payload_mutation(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(MODEL_COMPLETED, {
+            "content": "",
+            "tool_calls": [{
+                "id": "call-1",
+                "name": "read",
+                "args": {"nested": ({"value": "before"},)},
+            }],
+        })
+        builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
+
+        first = builder._derive_pairs(session)
+        nested = session.events[-1].data["tool_calls"][0]["args"]["nested"]
+        assert isinstance(nested, tuple)
+        assert first[0][0].tool_calls[0]["args"]["nested"][0]["value"] == "before"
+
+        nested[0]["value"] = "after"
+        second = builder._derive_pairs(session)
+
+        assert second[0][0].tool_calls[0]["args"]["nested"][0]["value"] == "after"
 
     @pytest.mark.asyncio
     async def test_in_place_event_payload_change_invalidates_projection(self, tmp_path):
