@@ -359,6 +359,32 @@ def test_backup_rejects_writer_proof_for_a_different_workspace(tmp_path: Path) -
     assert not output.exists()
 
 
+def test_backup_rejects_relative_writer_proof_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+    proof = json.loads((workspace / "writer-proof.json").read_text(encoding="utf-8"))
+    for entry in proof["writers"].values():
+        entry["scope"]["workspace"] = "relative/workspace"
+    proof_path = tmp_path / "relative-writer-proof.json"
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
+    output = offline_archive(tmp_path)
+
+    result = run_tool(
+        "backup",
+        "--workspace",
+        str(workspace),
+        "--output",
+        str(output),
+        "--writer-proof",
+        str(proof_path),
+        "--rehearsal-fixture",
+    )
+
+    assert result.returncode != 0
+    assert "scope workspace must be an absolute path" in result.stderr.lower()
+    assert not output.exists()
+
+
 def test_backup_rejects_synthetic_fixture_without_rehearsal_flag(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     assert run_tool("seed", "--workspace", str(workspace)).returncode == 0

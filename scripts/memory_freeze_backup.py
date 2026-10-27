@@ -472,7 +472,11 @@ def _validate_writer_proof(
 
 def _validate_writer_proof_workspace(proof: dict[str, Any], workspace: Path) -> None:
     for category, entry in proof["writers"].items():
-        scope_workspace = Path(entry["scope"]["workspace"]).expanduser()
+        scope_workspace = Path(entry["scope"]["workspace"])
+        if not scope_workspace.is_absolute():
+            raise BackupError(
+                f"writer {category!r} scope workspace must be an absolute path"
+            )
         try:
             resolved_scope = scope_workspace.resolve(strict=True)
         except (OSError, RuntimeError, ValueError) as error:
