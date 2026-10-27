@@ -20,7 +20,7 @@ dependencies = [
     "keyring>=24",
     "langchain-core>=1.6.5",
     "langchain-openai>=1.5.0",
-    "mcp>=2.1.1",
+    "mcp>=2.3.0",
     # #823 MM-02：图片归一化（EXIF 方向、alpha→WebP 否则 JPEG、限内缩放）需要
     # 真实解码/重编码，标准库做不到。归一化语义移植自 DeepSeek Harness
     # `attachment-local/src/normalization.ts`（MIT，commit 5badb150，上游用 sharp），
@@ -62,7 +62,7 @@ dev = [
     "cryptography>=42",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.17.1",
+    "ruff>=0.17.2",
     # demo/live_agent.py 用它做彩色终端渲染；不是运行时依赖。
     "rich>=13.7.0",
     "wsproto>=1.3.2",
