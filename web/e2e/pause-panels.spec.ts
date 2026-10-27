@@ -181,7 +181,7 @@ test('③ 预算恢复 409：请求体逐字、后端 detail 上屏、草稿与�
   });
 
   await page.goto('/');
-  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 100));
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 5000));
   await page.locator('.session-item').first().click();
   const panel = page.locator('.pause-panel');
   await expect(panel).toBeVisible({ timeout: 15_000 });

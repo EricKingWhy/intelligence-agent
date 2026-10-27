@@ -35,12 +35,14 @@ export function TipProvider({ children }: { children: ReactNode }) {
 interface TipProps {
   content: ReactNode;
   children: ReactElement;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
-export function Tip({ content, children }: TipProps) {
+export function Tip({ content, children, open, onOpenChange }: TipProps) {
   const inherited = useContext(TipScopeContext);
   const root = (
-    <TooltipPrimitive.Root>
+    <TooltipPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
       <TooltipPrimitive.Portal>
         <TooltipPrimitive.Content

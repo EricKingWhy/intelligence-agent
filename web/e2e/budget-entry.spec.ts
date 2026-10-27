@@ -211,15 +211,17 @@ test('#1444 已选会话：预算入口在场，选档随下一次 /messages 作
     { type: 'text/delta', data: { delta: '第二条完成。' }, seq: 9, session_id: SID, run_id: `${RUN}-2`, step_id: 1, time: T },
     { type: 'run/completed', data: {}, seq: 10, session_id: SID, run_id: `${RUN}-2`, time: T },
   ];
+  const durableLog = [...createFrames];
   let messagesBody: Record<string, unknown> | null = null;
 
   await routeApi(page, {
     onSessionPost: (route) => fulfillSse(route, createFrames),
     onMessagesPost: async (route) => {
       messagesBody = route.request().postDataJSON() as Record<string, unknown>;
+      durableLog.push(...followFrames);
       await fulfillSse(route, followFrames);
     },
-    events: createFrames,
+    events: durableLog,
   });
 
   await page.goto('/');
@@ -229,7 +231,8 @@ test('#1444 已选会话：预算入口在场，选档随下一次 /messages 作
   await page.getByLabel('轮数上限（留空用默认值）').fill('4');
   await page.keyboard.press('Escape');
   await submitTask(page, '第一条消息');
-  await expect(page.getByLabel('Agent 任务')).toBeEnabled({ timeout: 5000 });
+  await expect(page.locator('.model-output').last()).toContainText('第一条完成。');
+  await expect(page.locator('.composer-stop')).toBeHidden();
 
   // ② 已选会话态：入口仍在场、摘要带出草稿；选择器可打开（不是只有壳）。
   const trigger = page.locator('.composer-budget-trigger[aria-label="预算"]');

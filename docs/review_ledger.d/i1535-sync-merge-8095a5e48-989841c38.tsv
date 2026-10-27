@@ -1,0 +1,1 @@
+2026-10-27	机械归属（非内容审查主张）：#1535 先回后正 sync merge origin/main 3525f83a5。merge 989841c38，父一 8095a5e48（#1639 原 PR tip），父二 3525f83a（origin/main），merge-base 04c624fa0。ort 无冲突；父一差异 10 路径、父二差异 6 路径，交集 0。树：merge a12bdbe3、父一 a8db4393、父二 677f61e7，三树互异；相对父二保留 PR 线 6 路径。本行只归属本次 merge，不覆盖两侧内容审查。	8095a5e48f9d657e5eb11f244c2998ad7649c6cf..989841c3847850793352d4e54723bfca9cfd9102
