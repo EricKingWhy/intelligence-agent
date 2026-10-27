@@ -94,11 +94,17 @@ class ReceiptTarget:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ReceiptTarget:
+        if "planned" not in payload or "published" not in payload:
+            raise CorruptStateFile("receipt target is missing planned/published flags")
+        planned = payload["planned"]
+        published = payload["published"]
+        if not isinstance(planned, bool) or not isinstance(published, bool):
+            raise CorruptStateFile("receipt target planned/published flags must be booleans")
         return cls(
             before_digest=payload.get("before_digest"),
             after_digest=payload.get("after_digest"),
-            planned=bool(payload.get("planned")),
-            published=bool(payload.get("published")),
+            planned=planned,
+            published=published,
         )
 
 

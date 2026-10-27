@@ -14,6 +14,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
@@ -21,7 +24,7 @@ import pytest
 import pytest_asyncio
 
 from agent_harness.config import Settings
-from agent_harness.memory.v2 import assembly, file_state
+from agent_harness.memory.v2 import assembly, file_state, tombstones
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.file_state import (
     CorruptStateFile,
@@ -30,9 +33,9 @@ from agent_harness.memory.v2.file_state import (
     safe_id,
 )
 from agent_harness.memory.v2.jobs import MemoryV2JobStore, job_id_for
-from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER
+from agent_harness.memory.v2.markdown_store import ENTRY_DELIMITER, entry_digest
 from agent_harness.memory.v2.receipts import ReceiptState, ReceiptStore
-from agent_harness.memory.v2.tombstones import FileTombstoneStore
+from agent_harness.memory.v2.tombstones import FileTombstoneStore, TombstoneDraft
 from agent_harness.memory.v2.types import MemoryScope, TrustedMemoryIdentity
 from agent_harness.memory.v2.write_approval import _identity
 from tests.memory.v2._records import make_draft
@@ -341,6 +344,81 @@ async def test_tombstone_owner_survives_restart_and_still_blocks_replay(
     with pytest.raises(ValueError, match="deleted source"):
         await restarted.create(draft, USER_A)
     assert _table_rows(workspace.database, "memory_v2_tombstones") == 0
+
+
+@pytest.mark.asyncio
+async def test_purge_does_not_remove_a_refreshed_tombstone(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FileTombstoneStore(workspace.root)
+    draft = TombstoneDraft(
+        memory_id="mem-racing-delete",
+        root_id="root-racing-delete",
+        tenant_id=USER_A.tenant_id,
+        user_id=USER_A.user_id,
+        scope=MemoryScope.USER_GLOBAL,
+        project_id=None,
+        version=1,
+        content_hash=entry_digest("deleted content"),
+        source_hashes=(entry_digest("deleted event"),),
+    )
+    old_delete = datetime(2026, 1, 1, tzinfo=UTC)
+    purge_at = old_delete + timedelta(days=31)
+    store.record([draft], reason="first delete", now=old_delete)
+    tombstone_path = store.path_for(draft.memory_id)
+
+    purge_read_expired = threading.Event()
+    allow_purge_to_continue = threading.Event()
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    real_read_json = tombstones.read_json
+
+    def pause_after_reading_old_tombstone(path: Path) -> dict | None:
+        payload = real_read_json(path)
+        if (path == tombstone_path and payload is not None
+                and payload["expires_at"] <= purge_at.isoformat()):
+            purge_read_expired.set()
+            if not allow_purge_to_continue.wait(timeout=5):
+                raise TimeoutError("test did not release tombstone purge")
+        return payload
+
+    monkeypatch.setattr(tombstones, "read_json", pause_after_reading_old_tombstone)
+
+    def run_purge() -> int:
+        return store.purge_expired(now=purge_at)
+
+    def refresh_tombstone() -> int:
+        writer_started.set()
+        try:
+            return store.record([draft], reason="retry delete", now=purge_at)
+        finally:
+            writer_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        purge_future = executor.submit(run_purge)
+        writer_future = None
+        try:
+            assert purge_read_expired.wait(timeout=5)
+            writer_future = executor.submit(refresh_tombstone)
+            assert writer_started.wait(timeout=5)
+            # The writer must either publish before unlink (old race) or serialize after purge.
+            writer_finished.wait(timeout=2)
+        finally:
+            allow_purge_to_continue.set()
+        assert purge_future.result(timeout=5) == 1
+        assert writer_future is not None
+        assert writer_future.result(timeout=5) == 1
+
+    assert writer_finished.is_set()
+    assert tombstone_path.exists()
+    assert store.blocks_replay(
+        USER_A,
+        scope=MemoryScope.USER_GLOBAL,
+        project_id=None,
+        content="deleted content",
+        source_event_ids=["deleted event"],
+        now=purge_at + timedelta(seconds=1),
+    ) is True
 
 
 # --------------------------------------------------------------------------------------

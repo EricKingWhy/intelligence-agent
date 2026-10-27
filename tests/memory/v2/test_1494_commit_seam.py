@@ -358,6 +358,72 @@ async def test_file_refusal_is_not_reported_as_committed(seam: Seam) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_rejects_string_published_flag_in_receipt(
+    seam: Seam, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """损坏回执中的字符串 false 不得被宽松转为 True 并跳过未发布目标。"""
+    real_write = seam.commit.engine._write_file
+
+    def refuse_write(_path: Path, _entries: list[str]) -> None:
+        raise OSError("simulated crash before publishing")
+
+    monkeypatch.setattr(seam.commit.engine, "_write_file", refuse_write)
+    with pytest.raises(MemoryCommitError) as caught:
+        await seam.commit.add("memory", "回执必须严格解析布尔值")
+
+    operation_id = caught.value.operation_id
+    receipt_path = ReceiptStore(seam.root).path_for(operation_id)
+    payload = read_json(receipt_path)
+    assert payload is not None
+    assert payload["state"] == ReceiptState.PREPARED
+    assert payload["targets"]["memory"]["published"] is False
+    payload["targets"]["memory"]["published"] = "false"
+    atomic_write_text(receipt_path, json.dumps(payload))
+    monkeypatch.setattr(seam.commit.engine, "_write_file", real_write)
+
+    report = await seam.commit.reconcile()
+
+    assert operation_id in {item for item, _reason in report.needs_reconcile}
+    assert operation_id not in report.committed
+    assert not seam.memory_file.exists()
+    assert report.ok is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_rejects_missing_plan_flag_after_target_edit(
+    seam: Seam, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缺失 planned 位的回执不得把人工编辑误判为可重放的 before 状态。"""
+    mark_published = seam.commit._receipts.mark_target_published
+
+    def fail_after_content_publish(_operation_id: str, _target: str) -> None:
+        raise OSError("simulated crash before published flag")
+
+    monkeypatch.setattr(
+        seam.commit._receipts, "mark_target_published", fail_after_content_publish)
+    with pytest.raises(MemoryCommitError) as caught:
+        await seam.commit.add("memory", "不得复活的旧记忆")
+
+    operation_id = caught.value.operation_id
+    assert "不得复活的旧记忆" in seam.memory_file.read_text(encoding="utf-8")
+    seam.commit.engine._write_file(seam.memory_file, ["用户后来编辑的内容"])
+    payload = read_json(ReceiptStore(seam.root).path_for(operation_id))
+    assert payload is not None
+    assert payload["state"] == ReceiptState.PREPARED
+    payload["targets"]["memory"].pop("planned")
+    atomic_write_text(
+        ReceiptStore(seam.root).path_for(operation_id), json.dumps(payload))
+    monkeypatch.setattr(seam.commit._receipts, "mark_target_published", mark_published)
+
+    report = await seam.commit.reconcile()
+
+    assert operation_id in {item for item, _reason in report.needs_reconcile}
+    assert operation_id not in report.committed
+    assert seam.commit.engine.disk_entries("memory") == ["用户后来编辑的内容"]
+    assert report.ok is False
+
+
+@pytest.mark.asyncio
 async def test_formation_publish_failure_rolls_back_records_and_keeps_the_job_recoverable(
     seam: Seam,
 ) -> None:

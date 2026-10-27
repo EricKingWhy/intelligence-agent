@@ -41,6 +41,7 @@ from typing import Any
 from agent_harness.memory.v2.file_state import (
     CorruptStateFile,
     MemoryStateRoot,
+    file_lock,
     read_json,
     safe_id,
     write_json,
@@ -120,21 +121,23 @@ class FileTombstoneStore:
         moment = (now or datetime.now(UTC)).astimezone(UTC)
         count = 0
         for item in memories:
-            write_json(self.path_for(item.memory_id), {
-                "schema": SCHEMA_VERSION,
-                "memory_id": item.memory_id,
-                "root_id": item.root_id,
-                "tenant_id": item.tenant_id,
-                "user_id": item.user_id,
-                "scope": item.scope.value,
-                "project_id": item.project_id,
-                "version": item.version,
-                "deleted_at": moment.isoformat(),
-                "expires_at": (moment + RETENTION).isoformat(),
-                "deletion_reason": reason,
-                "content_hashes": [item.content_hash],
-                "source_hashes": list(dict.fromkeys(item.source_hashes)),
-            })
+            path = self.path_for(item.memory_id)
+            with file_lock(path):
+                write_json(path, {
+                    "schema": SCHEMA_VERSION,
+                    "memory_id": item.memory_id,
+                    "root_id": item.root_id,
+                    "tenant_id": item.tenant_id,
+                    "user_id": item.user_id,
+                    "scope": item.scope.value,
+                    "project_id": item.project_id,
+                    "version": item.version,
+                    "deleted_at": moment.isoformat(),
+                    "expires_at": (moment + RETENTION).isoformat(),
+                    "deletion_reason": reason,
+                    "content_hashes": [item.content_hash],
+                    "source_hashes": list(dict.fromkeys(item.source_hashes)),
+                })
             count += 1
         return count
 
@@ -153,21 +156,22 @@ class FileTombstoneStore:
             return 0
         for path in directory.glob("*.json"):
             try:
-                payload = read_json(path)
+                with file_lock(path):
+                    payload = read_json(path)
+                    if payload is None:
+                        continue
+                    if str(payload.get("expires_at") or "") > cutoff:
+                        continue
+                    path.unlink()
             except CorruptStateFile:
                 # 坏文件不删：它可能是"删除抑制"的唯一证据，留给人工。
                 logger.warning("unreadable tombstone left in place: %s", path.name)
                 continue
-            if payload is None:
+            except OSError as error:
+                logger.warning("could not purge tombstone %s (%s)",
+                               path.name, type(error).__name__)
                 continue
-            if str(payload.get("expires_at") or "") <= cutoff:
-                try:
-                    path.unlink()
-                except OSError as error:
-                    logger.warning("could not purge tombstone %s (%s)",
-                                   path.name, type(error).__name__)
-                    continue
-                removed += 1
+            removed += 1
         return removed
 
     async def purge_expired_async(self, *, now: datetime | None = None) -> int:
