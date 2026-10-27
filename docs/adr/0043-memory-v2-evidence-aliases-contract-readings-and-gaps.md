@@ -15,6 +15,17 @@
 - **Refines**: ADR-0042 §D1（信封）在「证据字段」这一层的读法
 - **Supersedes**: **无**
 
+**当前适用关系（2026-10-22，Issue #1490 / ADR-0056）**：
+
+- **被取代**：D13 的「项目作用域由 Runtime 绑定可信 `project_id`」中的**身份路由**部分，与 D15 的
+  「`project_fact` 必须使用项目作用域」中的**授权分片**部分。依据裁决 7（身份/scope 路由整体退役）。
+  项目事实仍可带真实来源与内容标签，但标签**不构成授权分片**；`project_available → scope` 的
+  硬规则随之退出。
+- **继续适用**：运行时别名机制本身（模型只拿别名、真 `event_id` 不投影）；真实事件别名与
+  provenance 校验；§5.7.2 的 9 类敏感授权；D14 的 R5 显式意图校验；本 ADR 登记的结构缺口与
+  契约读法。**不把"单人"当成"可以无证据自动写"**。
+- **后继规格**：ADR-0056 §3.7；施工落点 #1493（旧 project 键映射）、#1495（去路由）。
+
 ---
 
 ## 1. Context
@@ -179,6 +190,11 @@ AC3 的字面判据仍成立（它要求"未被授权的 sensitive"被拒，而"
 
 ### D13 — 项目作用域由 Runtime 绑定可信 ID
 
+> **部分重开（2026-10-22，Issue #1490 / ADR-0056）**：依据裁决 7。**被取代**：Runtime 注入
+> `TrustedMemoryIdentity.project_id` 作为归属/隔离维度的部分。**保留**：模型只拿
+> `project_available` 布尔值、不定义 `project_id` 字段、真实 ID 永不暴露给模型这一安全性质；
+> 项目目录分组作为**内容组织**独立保留。**新结论指向**：ADR-0056 §3.7；施工落点 #1493、#1495。
+
 Formation / Adjudication 的模型输入只包含 `trusted_context.project_available` 布尔值；模型响应
 不定义 `project_id` 字段。模型可在该值为 true 时提出 project scope，Runtime 再从持久 job 的
 `TrustedMemoryIdentity` 注入真实项目 ID。没有可信项目时，政策层拒绝 project 候选；最终
@@ -211,6 +227,13 @@ correction。单纯失败结果不证明成功或纠正，因此不能计数。�
 可复用规则。该字段和 Runtime 校验是本项目的 R5 契约，不复制上游实现。参考：[LangMem memory tools](https://langchain-ai.github.io/langmem/)、[dg-ai-notes G04 preload context](https://github.com/buchidonggua/dg-ai-notes/blob/main/skills/dg-piagent/references/scenarios/G04-preload-context.md)。
 
 ### D15 — `project_fact` 必须使用项目作用域
+
+> **部分重开（2026-10-22，Issue #1490 / ADR-0056）**：依据裁决 7。**被取代**：以
+> `user_global` / `project` 两种**归属作用域**表达该约束的部分——`project_fact` 与目录分组的
+> 绑定改为**内容分类**，不再作为跨项目可见性的授权依据。**保留**：`project_fact` 不得被写成
+> 全局事实、缺少可信项目上下文时显式写入失败且不落盘（fail closed）、所有调用入口（Formation /
+> 显式工具 / 编辑 API / 存储）共用同一校验。**新结论指向**：ADR-0056 §3.1、§3.7；施工落点
+> #1494（提交 seam 上的单一校验）、#1495。
 
 `project_fact` 不能写入 `user_global`。该约束在共享 draft/record 内容契约中校验，覆盖自动
 Formation、显式记忆工具、编辑 API 和存储调用方；缺少可信项目上下文时，显式 project-fact

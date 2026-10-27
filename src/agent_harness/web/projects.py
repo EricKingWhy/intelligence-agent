@@ -22,22 +22,22 @@ Project = {id, path, title, status, session_ids, created_at, updated_at}
 ## 来源闸（ADR-0025 D1 的 (b)）
 
 `create(path)` 接受**任意已存在目录**，这是本票新增的能力面；ADR-0025 D1 要求它在
-"未配置 `jwt_secret` 的本地信任模式 + CORS `*`"下也必须有一条防线。做法是在**所有
-项目端点（读 + 写）**上校验 `Origin`：浏览器一定会为跨源请求带上它，非本机 hostname
-→ 403。读端点也挂闸的理由是**答案本身是本地信息**——项目列表里全是用户的绝对路径，
-不能让任意网页枚举（CORS `*` 会把响应交给对方读）。
+未配置 `jwt_secret` 的本地信任模式 + 浏览器来源必须收紧下也必须有一条防线。现在由
+中央入口统一校验精确 `Host` / `Origin`，所有项目端点（读 + 写）继续共享这份策略：
+浏览器跨源请求带上非本机 hostname → 403。读端点也挂闸的理由是**答案本身是本地信息**——
+项目列表里全是用户的绝对路径，不能让任意网页枚举。
 
-无 `Origin` 的请求（CLI / curl / 服务端）不是浏览器发起，无法被第三方网页利用，放行；
+无 `Origin` 的请求（CLI / curl / 服务端）不是浏览器发起，仍须先通过精确 Host 闸后放行；
 配置了 `jwt_secret` 时整体跳过——那时请求已过认证层，跨源网页拿不到签名 token。
 放行 no-Origin 意味着**部署前提仍是"服务只绑 loopback"**（见 ADR-0025 D1 残留段）。
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
@@ -59,6 +59,119 @@ if TYPE_CHECKING:
 
 #: 视为"本机来源"的 hostname（Vite dev server 5173 / 直连 8000 / IPv6 回环）。
 _LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+_LOCAL_ORIGIN_SCHEMES = frozenset({"http", "https"})
+_TEST_ASGI_HOSTNAME = "testserver"
+
+# 只给 CORS 一个本机 hostname 的正则，而不是 ``*`` 或 ``*.localhost``：端口
+# 由 Vite / 临时测试服务器选择，hostname 仍必须是一个精确的 loopback 名称。
+LOCAL_CONTROL_PLANE_ORIGIN_REGEX = (
+    r"(?i)^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::[1-9][0-9]{0,4})?$"
+)
+
+
+def _valid_port(value: str) -> int | None:
+    if not value.isdigit():
+        return None
+    port = int(value)
+    return port if 1 <= port <= 65535 else None
+
+
+def _parse_host(value: str) -> tuple[str, str] | None:
+    """解析 Host 为 ``(hostname, canonical_host_header)``，失败即 None。"""
+    if not value or value != value.strip() or any(char.isspace() for char in value):
+        return None
+    if value.startswith("["):
+        closing = value.find("]")
+        if closing < 0:
+            return None
+        hostname = value[1:closing].lower()
+        suffix = value[closing + 1:]
+        if suffix:
+            if not suffix.startswith(":"):
+                return None
+            port = _valid_port(suffix[1:])
+            if port is None:
+                return None
+            suffix = f":{port}"
+        canonical = f"[{hostname}]" + suffix
+    else:
+        if value.count(":") > 1:
+            # IPv6 literals must use RFC 2732 brackets in Host.
+            return None
+        hostname, separator, raw_port = value.partition(":")
+        hostname = hostname.lower()
+        if separator:
+            port = _valid_port(raw_port)
+            if port is None:
+                return None
+            canonical = f"{hostname}:{port}"
+        else:
+            canonical = hostname
+    if not hostname or any(char in hostname for char in "/\\@"):
+        return None
+    return hostname, canonical
+
+
+def canonical_control_plane_origin(origin: str) -> str | None:
+    """返回一个严格的 HTTP(S) origin；路径、凭据与畸形端口一律失败。"""
+    if not origin or origin != origin.strip() or origin.casefold() == "null":
+        return None
+    try:
+        parsed = urlsplit(origin)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in _LOCAL_ORIGIN_SCHEMES
+        or not parsed.netloc
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and _valid_port(str(port)) is None)
+    ):
+        return None
+    # ``http://localhost:`` has no parsed port but is still malformed.
+    if not parsed.netloc.rsplit("@", 1)[-1].endswith("]") and parsed.netloc.endswith(":"):
+        return None
+    hostname = hostname.lower()
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 80 if parsed.scheme.lower() == "http" else 443
+    port_suffix = "" if port in (None, default_port) else f":{port}"
+    return f"{parsed.scheme.lower()}://{host}{port_suffix}"
+
+
+def configured_control_plane_origins(raw: str) -> frozenset[str]:
+    """解析显式额外来源；不接受 ``*``、``null`` 或带路径的伪 origin。"""
+    configured: set[str] = set()
+    for item in raw.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        canonical = canonical_control_plane_origin(value)
+        if canonical is None:
+            raise ValueError(f"invalid CONTROL_PLANE_ALLOWED_ORIGINS entry: {value!r}")
+        configured.add(canonical)
+    return frozenset(configured)
+
+
+def configured_control_plane_hosts(raw: str) -> frozenset[str]:
+    """解析显式 Host；拒绝含 ``*`` / ``null``，其余按完整 host[:port] 精确匹配。"""
+    configured: set[str] = set()
+    for item in raw.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        if "*" in value or value.casefold() == "null":
+            raise ValueError(f"invalid CONTROL_PLANE_ALLOWED_HOSTS entry: {value!r}")
+        parsed = _parse_host(value)
+        if parsed is None:
+            raise ValueError(f"invalid CONTROL_PLANE_ALLOWED_HOSTS entry: {value!r}")
+        configured.add(parsed[1])
+    return frozenset(configured)
 
 
 def origin_is_local(origin: str) -> bool:
@@ -74,11 +187,56 @@ def origin_is_local(origin: str) -> bool:
     下面的 `require_trusted_origin` 共用一份实现——两处各写一份必然漂移，
     而"WS 与 HTTP 同口径"正是 #890 的验收内容。
     """
+    canonical = canonical_control_plane_origin(origin)
+    if canonical is None:
+        return False
     try:
-        hostname = urlparse(origin).hostname
+        hostname = urlsplit(canonical).hostname
     except ValueError:
         return False
     return hostname is not None and hostname.lower() in _LOCAL_HOSTNAMES
+
+
+def check_trusted_host(
+    scope: object,
+    *,
+    allowed_hosts: Collection[str] = (),
+    allow_testserver: bool = False,
+) -> str | None:
+    """中央 Host 闸：精确 loopback / 显式 Host，拒绝 DNS rebinding 形状。
+
+    ``testserver`` is an explicit in-process test seam only; production callers leave
+    ``allow_testserver`` false, so the real socket path never trusts that hostname.
+    """
+    raw_scope = scope if isinstance(scope, dict) else {}
+    values = [
+        value.decode("latin-1") if isinstance(value, bytes) else str(value)
+        for name, value in raw_scope.get("headers", [])
+        if (name.decode("latin-1") if isinstance(name, bytes) else str(name)).lower()
+        == "host"
+    ]
+    raw_host = values[0] if len(values) == 1 else None
+    parsed = _parse_host(raw_host) if raw_host is not None else None
+    if parsed is None:
+        return f"拒绝请求：Host 必须是本机回环或显式配置的精确值（Host={raw_host!r}）。"
+    hostname, canonical = parsed
+    server = raw_scope.get("server")
+    server_hostname = (
+        str(server[0]).lower()
+        if isinstance(server, (tuple, list)) and server
+        else ""
+    )
+    if (
+        hostname not in _LOCAL_HOSTNAMES
+        and canonical not in allowed_hosts
+        and not (
+            allow_testserver
+            and hostname == _TEST_ASGI_HOSTNAME
+            and server_hostname in {"", _TEST_ASGI_HOSTNAME}
+        )
+    ):
+        return f"拒绝请求：Host 不是允许的本机值（Host={raw_host!r}）。"
+    return None
 
 
 def cross_origin_reason(origin: str) -> str:
@@ -92,12 +250,17 @@ def cross_origin_reason(origin: str) -> str:
     也会把 HTTP 的端点词带进 WS 日志。只写这条闸自身的口径，措辞与调用面无关。
     """
     return (
-        f"拒绝跨源访问：Origin={origin!r}。该接口只接受本机来源"
+        f"拒绝跨源访问：Origin={origin!r}。该接口只接受精确本机来源或显式配置来源"
         "（配置 JWT_SECRET 后由认证层接管）。"
     )
 
 
-def check_trusted_origin(origin: str | None, *, jwt_secret_configured: bool) -> str | None:
+def check_trusted_origin(
+    origin: str | None,
+    *,
+    jwt_secret_configured: bool,
+    allowed_origins: Collection[str] = (),
+) -> str | None:
     """来源闸的**策略本体**（HTTP 与 WS 共用一份，#890 P3-4）。
 
     返回 `None` = 放行；返回字符串 = 拒绝原因（即 `(ok, reason)` 里的 `reason`）。
@@ -106,14 +269,19 @@ def check_trusted_origin(origin: str | None, *, jwt_secret_configured: bool) -> 
     1. 配了 `jwt_secret` ⇒ 放行（认证层才是边界，见 `AuthSeamMiddleware`）；
     2. 无 `Origin` ⇒ 放行（非浏览器发起：第三方网页**无法**构造不带 Origin 的
        浏览器请求/握手，故这条不构成 drive-by 面）；
-    3. 否则只接受本机 hostname（`origin_is_local`）。
+    3. 否则只接受精确的本机 HTTP(S) origin，或显式配置的完整 origin。
 
     两侧只在**出口形状**上分叉：HTTP 把它转成 403 JSON，WS 把它转成握手前的
     `websocket.close`。策略与文案只有这一份（`WS_ORIGIN_DENIED_REASON` /
     `WS_CREDENTIAL_REJECTED_REASON` 是 WS 出口专有的**短 ASCII** close reason，
     ASGI 限 ≤123 字节，与这里的长文案用途不同，仍留在 `app.py` 各一份）。
     """
-    if jwt_secret_configured or origin is None or origin_is_local(origin):
+    if jwt_secret_configured or origin is None:
+        return None
+    canonical = canonical_control_plane_origin(origin)
+    if canonical is not None and (
+        origin_is_local(origin) or canonical in allowed_origins
+    ):
         return None
     return cross_origin_reason(origin)
 
@@ -121,7 +289,8 @@ def check_trusted_origin(origin: str | None, *, jwt_secret_configured: bool) -> 
 def require_trusted_origin(request: Request) -> None:
     """宿主侧端点的来源闸（ADR-0025 D1 的 (b)；ADR-0028 D2 起 `GET /api/host/dirs` 复用同一份）。
 
-    只在未配置 `jwt_secret`（本地信任模式）时生效；无 `Origin` 或本机 `Origin` 放行。
+    只在未配置 `jwt_secret`（本地信任模式）时生效；无 `Origin`、本机 `Origin` 或
+    显式配置的来源放行。
     `Origin: null`（sandboxed iframe / `file://`）没有 hostname → 拒绝。
     策略正文在 `check_trusted_origin`（与 WS 面共用），此处只做出口形状。
     """
@@ -129,6 +298,7 @@ def require_trusted_origin(request: Request) -> None:
     reason = check_trusted_origin(
         request.headers.get("origin"),
         jwt_secret_configured=bool(state.settings.jwt_secret),
+        allowed_origins=getattr(request.app.state, "allowed_origins", ()),
     )
     if reason is not None:
         raise HTTPException(status_code=403, detail=reason)

@@ -6,7 +6,7 @@
  * the events ARE the truth, this just projects them.
  */
 
-import type { AgentEvent, AskUserAnswer, AskUserQuestion, AskUserQuestionAnswer, ConstraintInputAnswer, ConstraintInputChoice, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PendingAskUserRequest, PendingConstraintInputRequest, PendingPlanApprovalRequest, PlanApprovalAnswer, PlanItem, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
+import type { AgentEvent, AskUserAnswer, AskUserQuestion, AskUserQuestionAnswer, ConstraintInputAnswer, ConstraintInputChoice, ConversationState, Delegation, EventTypeValue, ModelSegment, PendingApproval, PendingAskUserRequest, PendingConstraintInputRequest, PendingPlanApprovalRequest, PlanApprovalAnswer, ReasoningBlock, RunBudgetDimensionFacts, RunContinuation, RunLimitsFacts, RunPausedInfo, ToolCall, ToolOutputChunk, Turn, UndeliveredInput, UsageStats } from '../types';
 import { EventType } from '../types';
 import { addDecimalTexts } from './runBudget';
 import { isCancelledRunFailure } from './runCancel';
@@ -14,6 +14,8 @@ import { deadlineInstant, isDeadlinePause, toolDimensionName } from './runBudget
 import { interpretToolResult, parseArtifactMarker } from './toolShapes';
 import { quarantineRecord, validateEvent } from './eventValidate';
 import { parseImageRefs, type ImageAttachmentRef } from './attachmentRefs';
+// #1498：跨端共享的纯事件语义（唯一实现；见 tui/src/shared/event-semantics.ts 头注）。
+import { isShadowed, planItemsFromData, supersedeRanges } from '../../../tui/src/shared/event-semantics.ts';
 
 // 事件类型常量统一取 EventType（generated/event-types.ts，后端 event.py 生成物）。
 // 此前 reasoning / tool-output 两族以本地字面量先行（fixture 驱动，不硬阻塞后端），
@@ -24,52 +26,38 @@ const MAX_OUTPUT_CHUNKS = 512;
 
 // ── ADR-0030（#196）§4.2 / §5.4：supersede 区间（与后端 derive.py 同构）─────
 //
-// 被取代 seq 为 s。区间 = `[s, n)`，n = s 之后第一条**未被取代**的 user/message
-// 的 seq；没有就一直到底。判据只看 seq 与"该 seq 是否也被取代"，与事件到达顺序
-// 无关（纯函数性质）。前端与后端**同一区间定义、同一命名**——漂移由两端的
-// 测试各锁一条（后端单测 + 前端 e2e）。
+// #1498 起区间规则只有**一份实现**：`tui/src/shared/event-semantics.ts`
+// （落点由 TUI 的 `rootDir: "."` 决定，消融见 #1498 回报）。本文件只负责把
+// `state.events` 日志喂成入参、把结果写回轮次标记——保留这里是因为 Web 侧
+// 的写入形态是 COW 的 `superseded` 标记，与 TUI 的渲染期过滤不同形，不属可
+// 合并的纯语义。
 //
 // 被取代的整轮（问 + 答 + 工具）从**视图**移除；events 日志照旧保留（不变量
 // #3 append-only），只影响渲染。用户裁定（§4.5.1）：旧回答段直接删掉不显示，
 // 不加"已改写"标记。
 
-/** supersede 区间的端点：返回每个被取代 seq 的区间 `[start, end)`（end 独占）。
- *  与后端 `derive.py` 的区间计算同构（同一判据、同一"到下一条未被取代的
- *  user 消息"边界）。 */
-function supersedeRanges(events: readonly AgentEvent[]): Array<[number, number]> {
-  const supersededSeqs = new Set<number>();
+/** 把 supersede 区间应用到已渲染的 turns：区间内的轮整段置 `superseded`。
+ *  整体 reassign（与 pending_approvals 同款契约）；不删除 turns 数组元素——
+ *  渲染层按标记过滤，重放确定性更好（重复应用幂等）。 */
+function applySupersedeShadow(state: ConversationState): void {
+  const events = state.events;
+  const supersededSeqs: number[] = [];
   for (const event of events) {
     if (event.type !== EventType.MESSAGE_SUPERSEDED) continue;
     const raw = event.data.superseded_seq;
-    // 一行坏数据只损失该行（与后端 derive 同款容错）：非有限数就忽略。
-    if (typeof raw === 'number' && Number.isFinite(raw)) supersededSeqs.add(raw);
+    // 一行坏数据只损失该行：非有限数忽略（与后端 derive 同款容错）。
+    if (typeof raw === 'number' && Number.isFinite(raw)) supersededSeqs.push(raw);
   }
-  if (supersededSeqs.size === 0) return [];
   const userSeqs = events
     .filter((e) => e.type === EventType.USER_MESSAGE && e.seq !== null)
     .map((e) => e.seq as number);
   // reduce 而非 Math.max(...spread)（审查 P2）：超长会话（数万事件）下
   // spread 会把整个数组当函数参数展开 → RangeError，历史装载直接崩。
   const lastSeq = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
-  const ranges: Array<[number, number]> = [];
-  for (const seq of [...supersededSeqs].sort((a, b) => a - b)) {
-    const following = userSeqs.find((u) => u > seq && !supersededSeqs.has(u));
-    const end = following !== undefined ? following : lastSeq + 1;
-    if (end > seq) ranges.push([seq, end]);
-  }
-  return ranges;
-}
-
-/** 把 supersede 区间应用到已渲染的 turns：区间内的轮整段置 `superseded`。
- *  整体 reassign（与 pending_approvals 同款契约）；不删除 turns 数组元素——
- *  渲染层按标记过滤，重放确定性更好（重复应用幂等）。 */
-function applySupersedeShadow(state: ConversationState): void {
-  const ranges = supersedeRanges(state.events);
+  const ranges = supersedeRanges(supersededSeqs, userSeqs, lastSeq);
   if (ranges.length === 0) return;
-  const shadowed = (seq: number | null): boolean =>
-    seq !== null && ranges.some(([start, end]) => start <= seq && seq < end);
   state.turns = state.turns.map((turn) =>
-    shadowed(turn.user_message_seq) && !turn.superseded
+    isShadowed(turn.user_message_seq, ranges) && !turn.superseded
       ? { ...turn, superseded: true }
       : turn,
   );
@@ -810,6 +798,18 @@ function projectRunStarted(state: ConversationState, event: AgentEvent): void {
   // #1313 口径 B：新 run 的流式槽（R）归零；会话累计槽（S）**不清零**——
   // 顶栏口径是「会话内所有 run 累计、单调非减」，run 边界不改变已挣得的数字。
   state.run_usage_live = null;
+  // #1524：run 级槽 `usage_total` 也在 run 边界归零。它由本 run 的
+  // model/completed 累加、run/completed 以权威值覆盖——两条都只描述**本 run**；
+  // 此前不清零的后果是第二轮开跑后它仍带着上一轮的权威值，Inspector 的 RUN /
+  // MODEL 段于是显示「上一轮 + 本轮」的跨轮累计（#1313 的根因，本票修数据源
+  // 边界而不是改文案）。会话累计另有 S 槽（session_usage_total），不受影响。
+  state.usage_total = null;
+  // #1524：`cost_usd` 与 `usage_total` 同路数（run/completed 单点覆盖的 run 级事实），
+  // 不同步清零的话 MODEL 段会「本轮 tokens 是新的、成本是上一轮的」——同屏两个
+  // 生命周期对不上。清零后本轮未收口时显示「—」（本 run 还没有权威成本），
+  // 会话级成本另有顶栏「会话成本」指标卡（model/request 逐笔相加）。
+  // trace_id / trace_url 不清：它们是「最近一次可跳转的 trace」，不是本轮计数。
+  state.cost_usd = null;
   // T9 #139：RUN_STARTED.data.turn_index（1-based）——该 session 里第几个 run
   // （后端 session.begin_run 定义）。每次 run 各自携带自己的值，因此这是
   // per-turn 事实，必须落到当轮 turn 上——若只存会话级会被最新 run 覆盖，
@@ -1571,24 +1571,10 @@ function projectModelFallback(state: ConversationState, event: AgentEvent): void
 //     等违规原样进 state.plan，渲染端容错归 PlanList（票面）；
 //   * data.items 非数组 = 坏帧整个忽略（清单保持原值）；[] 是合法清空。
 function projectPlanUpdated(state: ConversationState, event: AgentEvent): void {
-  const rawItems = event.data.items;
-  if (!Array.isArray(rawItems)) return;
-  const items: PlanItem[] = [];
-  const seen = new Set<string>();
-  for (const raw of rawItems) {
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
-    const row = raw as Record<string, unknown>;
-    if (typeof row.id !== 'string' || row.id === '' || seen.has(row.id)) continue;
-    seen.add(row.id);
-    const content = typeof row.content === 'string' ? row.content : '';
-    items.push({
-      id: row.id,
-      content,
-      activeForm: typeof row.activeForm === 'string' && row.activeForm !== '' ? row.activeForm : content,
-      status: typeof row.status === 'string' ? row.status : '',
-      source: typeof row.source === 'string' ? row.source : '',
-    });
-  }
+  // #1498：解析规则（行级过滤 / 归一 / 去重 / 坏帧忽略）在共享纯函数里，
+  // 与 TUI 同一份实现；这里只剩「把结果写进 Web 自己的 state」。
+  const items = planItemsFromData(event.data as Record<string, unknown>);
+  if (items === null) return;
   state.plan = items;
 }
 
@@ -1690,8 +1676,10 @@ function summarizeModelCompleted(event: AgentEvent): string {
   const model = typeof d.model === 'string' && d.model ? d.model : null;
   // 逐维可空（C6）：total_tokens 未知 ⇒ 该维不展示（绝不打印 "null tok"）；
   // 模型与 tokens 全都拿不到时回落内容长度，避免产出空摘要。
+  // #1524：单位是 token，不是字符（中文 4 字可以是 12 token，反之亦然）。
+  // 回落分支（下面那行）才是字符数——两处单位不同名，读者才能分辨。
   const tokens =
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null;
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null;
   if (model || tokens) {
     return [model, tokens].filter((p): p is string => p !== null).join(' · ');
   }
@@ -1766,7 +1754,8 @@ function summarizeArtifactCreated(event: AgentEvent): string {
 
 function summarizeContextCompacted(event: AgentEvent): string {
   const d = event.data;
-  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} 字`;
+  // #1524：token_estimate 的估算单位是 token（估的是送进摘要的 token 数）。
+  return `${d.compacted_turn_count ?? '?'} 轮 · ${d.token_estimate ?? '?'} tok（估算）`;
 }
 
 function summarizeOperationReconcileRequired(event: AgentEvent): string {
@@ -1812,7 +1801,7 @@ function summarizeRunCompleted(event: AgentEvent): string {
   const d = event.data;
   const usage = parseUsage(d.usage_total);
   const parts = [
-    usage && usage.total_tokens !== null ? `${usage.total_tokens} 字` : null,
+    usage && usage.total_tokens !== null ? `${usage.total_tokens} tok` : null,
     typeof d.cost_usd === 'number' && Number.isFinite(d.cost_usd) ? `$${d.cost_usd}` : null,
   ].filter((p): p is string => p !== null);
   return parts.join(' · ');

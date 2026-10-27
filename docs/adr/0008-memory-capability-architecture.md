@@ -4,6 +4,18 @@
 **Date**: 2026-09-04  
 **Phase**: 6 (Memory Capability / Context Provider)
 
+## 当前适用关系（2026-10-22，Issue #1490 / ADR-0056）
+
+- **继续适用**：双层 `MemoryCapability + MemoryContextProvider`；Core 不绑定具体实现；
+  可选能力故障不拖垮 Core；「完整保存 ≠ 完整注入」。
+- **被取代**：子决策 1 的 `USER`/`SESSION` scope 交付边界、子决策 3 的「默认 LangMem + `[memory]`
+  extra」、子决策 4 的「SQLite 权威 + Milvus 索引 + outbox」存储组合。依据：所有者 2026-10-19
+  转向决定与 2026-10-22 裁决 1/2（Markdown 为记忆内容唯一权威；操作状态各自 owner，终态无
+  Memory-SQLite 例外）。
+- **未接线 fake / 回退承诺**：一并废除；extra 依赖按消费者核查后退役（#1491）。
+- **后继规格**：ADR-0056 §3（owner 点名表）、§7（处置索引）；施工落点 #1491（V1 退役）、
+  #1494（唯一提交 seam）、#1495（读侧切换）。
+
 ## Context
 
 规格 06 §6 冻结了三条硬约束：
