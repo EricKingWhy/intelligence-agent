@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,7 @@ logger = logging.getLogger("agent_harness.context")
 
 
 def _freeze_projection_value(value: Any) -> Any:
-    """Snapshot JSON containers while retaining immutable scalar values by reference."""
+    """Snapshot containers and retain scalar types so equality matches JSON semantics."""
     if isinstance(value, dict):
         return ("dict", tuple(
             (key, _freeze_projection_value(item))
@@ -79,12 +80,34 @@ def _freeze_projection_value(value: Any) -> Any:
         return ("list", tuple(_freeze_projection_value(item) for item in value))
     if isinstance(value, tuple):
         return ("tuple", tuple(_freeze_projection_value(item) for item in value))
-    return value
+    return (type(value), value)
 
 
 def _projection_source_snapshot(events: list[SessionEvent]) -> tuple[Any, ...]:
     """Capture event values for exact cache validation without copying payload strings."""
-    return tuple(_freeze_projection_value(event.to_dict()) for event in events)
+    return tuple(
+        (
+            event.event_id, event.seq, event.time, event.type, event.session_id,
+            event.run_id, event.agent_id, event.step_id, event.block_id,
+            _freeze_projection_value(event.data),
+            _freeze_projection_value(event.source_event_ids),
+            event.schema_version, event.capability,
+        )
+        for event in events
+    )
+
+
+def _copy_message_for_build(message: AnyMessage) -> AnyMessage:
+    """Detach mutable message fields while reusing immutable scalar content."""
+    updates: dict[str, Any] = {}
+    for key, value in vars(message).items():
+        if isinstance(value, dict):
+            updates[key] = deepcopy(value) if value else {}
+        elif isinstance(value, list):
+            updates[key] = deepcopy(value) if value else []
+        elif isinstance(value, tuple) and value:
+            updates[key] = deepcopy(value)
+    return message.model_copy(update=updates)
 
 
 def protected_facts_for_context(
@@ -739,9 +762,10 @@ class ContextBuilder:
         # (session_id, seq, supports_vision) → 该事件投影消息的 token 成本。同一事件
         # 在视觉/非视觉两种投影下内容不同（图片块 vs 占位符串）、成本不同，故键必须
         # 带视觉维度（#823 / MM-02 重审 P3：`set_supports_vision` 可 mid-run 变更）。
-        # 事件落盘后其投影消息内容在同一口径下终身不变，成本是常量——此前每步对全部
-        # 历史重新 model_dump_json + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步
-        # run 纯开销 2.2s）。
+        # 正常 append-only 事件的投影消息内容在同一口径下终身不变，成本是常量——此前
+        # 每步对全部历史重新 model_dump_json + BPE 编码，剖析实证占循环开销 88%
+        # （O(N²)：40 步 run 纯开销 2.2s）。同 mark 的 payload 原地改写会由
+        # `_derive_pairs` 的内容快照识别并清除此 memo。
         # memo 仅属于最近传入的 Session 对象；同 id 的独立对象切换时清空，避免
         # 把一个对象的 seq 成本用于另一个对象，同时保持单个对象内的增量缓存。
         self._token_memo: dict[tuple[str, int, bool], int] = {}
@@ -893,6 +917,16 @@ class ContextBuilder:
         events = session.events
         key = (len(events), self._supports_vision)
         source = _projection_source_snapshot(events)
+        previous_key = self._projection_cache_key
+        previous_source = self._projection_cache_source
+        if (self._projection_cache_session is session
+                and previous_key is not None
+                and previous_source is not None):
+            shared_count = min(previous_key[0], len(events))
+            source_changed = previous_source[:shared_count] != source[:shared_count]
+            if ((source_changed or len(events) < previous_key[0])
+                    and self._token_memo_session is session):
+                self._token_memo.clear()
         if (self._projection_cache_session is session
                 and self._projection_cache_key == key
                 and self._projection_cache_source == source):
@@ -924,7 +958,7 @@ class ContextBuilder:
         # that boundary; otherwise one caller mutation poisons later builds at the same
         # session mark.
         pairs = [
-            (message.model_copy(deep=True), source_range)
+            (_copy_message_for_build(message), source_range)
             for message, source_range in self._derive_pairs(session)
         ]
         if self._pruner is None:

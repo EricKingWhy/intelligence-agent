@@ -569,6 +569,37 @@ class TestReducedWork:
 
 class TestProjectionCacheOwnership:
     @pytest.mark.asyncio
+    async def test_in_place_payload_change_invalidates_token_memo(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "short"})
+        builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
+
+        await builder.build(session)
+        first_estimate = builder._token_estimate_total
+
+        session.events[-1].data["content"] = "long " * 5_000
+        await builder.build(session)
+
+        assert builder._token_estimate_total > first_estimate
+
+    @pytest.mark.asyncio
+    async def test_snapshot_distinguishes_bool_from_int(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(MODEL_COMPLETED, {
+            "content": "",
+            "tool_calls": [{"id": "call-1", "name": "read", "args": {"flag": 0}}],
+        })
+        builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
+
+        first = builder._derive_pairs(session)
+        assert first[0][0].tool_calls[0]["args"]["flag"] == 0
+
+        session.events[-1].data["tool_calls"][0]["args"]["flag"] = False
+        second = builder._derive_pairs(session)
+
+        assert second[0][0].tool_calls[0]["args"]["flag"] is False
+
+    @pytest.mark.asyncio
     async def test_in_place_event_payload_change_invalidates_projection(self, tmp_path):
         session = make_session(tmp_path)
         session.append(USER_MESSAGE, {"content": "before"})
@@ -599,6 +630,7 @@ class TestProjectionCacheOwnership:
         first = await builder.build(session)
         user_message = next(message for message in first if isinstance(message, HumanMessage))
         user_message.content[0]["text"] = "mutated by caller"
+        user_message.additional_kwargs["mutated"] = True
 
         second = await builder.build(session)
         rebuilt_user_message = next(
@@ -606,3 +638,4 @@ class TestProjectionCacheOwnership:
         )
 
         assert rebuilt_user_message.content == [{"type": "text", "text": "original"}]
+        assert rebuilt_user_message.additional_kwargs == {}
