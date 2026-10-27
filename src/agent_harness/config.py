@@ -325,17 +325,41 @@ class Settings(BaseSettings):
 
         为什么是 warning 而不是拒绝：见 `_RETIRED_KEYS` 上方注释——`extra="ignore"`
         的启动鲁棒性是既有政策，告警只提供可观察信号。
+
+        `raiseExceptions` 那一小段（#1535 X-P2-2(e)）：`setup_logging` 在构造 handler
+        时就把 `sys.stderr` 绑成当时的流，进程里换过/关过 stderr（pytest capsys 每轮
+        换一个，上一轮结束时关闭；部署里重定向到已关的管道同理）后 root handler 仍
+        指着死流。此时 emit 失败会让 stdlib `Handler.handleError` 往**当前** stderr 打
+        `--- Logging error --- Traceback …`——那是 logging 自身的错误，不是配置错误，
+        却会连坐调用方对 stderr 的断言。只在 root 上确有已关闭流时对**这一条** emit
+        关掉 `raiseExceptions`（stdlib 文档语义：False = 忽略 logging 自身异常）；活
+        handler（caplog / JSONL / 活 console）仍照收本记录，正常部署可观察性不变。
+
+        ponytail: `logging.raiseExceptions` 是模块级全局，这一小段不是线程安全的——
+        它只围住一次构造期 emit，且只在已检出死流时才短暂置 False。构造期是启动
+        单线程路径；若将来 `Settings()` 在并发路径上高频构造，改成自带
+        `handleError` 的 handler 子类（或在 `setup_logging` 侧剔除死 handler）。
         """
         present = {str(key).lower() for key in os.environ}
         if isinstance(data, Mapping):
             present.update(str(key).lower() for key in data)
-        for retired in _RETIRED_KEYS:
-            if retired.lower() in present:
-                logger.warning(
-                    "%s 已退役（#1535），该键被忽略：检索目标只由 KNOWLEDGE_COLLECTION"
-                    "（Settings.knowledge_collection）决定，请从部署配置中删除它。",
-                    retired,
-                )
+        dead_stream = any(
+            getattr(getattr(handler, "stream", None), "closed", False)
+            for handler in logging.getLogger().handlers
+        )
+        raise_exceptions = logging.raiseExceptions
+        if dead_stream:
+            logging.raiseExceptions = False
+        try:
+            for retired in _RETIRED_KEYS:
+                if retired.lower() in present:
+                    logger.warning(
+                        "%s 已退役（#1535），该键被忽略：检索目标只由 KNOWLEDGE_COLLECTION"
+                        "（Settings.knowledge_collection）决定，请从部署配置中删除它。",
+                        retired,
+                    )
+        finally:
+            logging.raiseExceptions = raise_exceptions
         return data
 
     @field_validator("max_context_tokens")
