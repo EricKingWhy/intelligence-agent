@@ -389,6 +389,44 @@ def test_store_persists_sidecar_and_returns_stable_projection(tmp_path: Path) ->
     assert sidecar.name == "board_state.json"
 
 
+def test_projection_validation_and_sidecar_write_share_delete_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(root=tmp_path)
+    session = Session.start(store)
+    projection_store = BoardProjectionStore(store)
+    session_lock = store._lock_for(session.session_id)
+    observations: list[tuple[str, bool]] = []
+    original_read_last_line = projection_store._read_last_line
+    original_write_sidecar = projection_store._write_sidecar
+
+    def lock_is_held(operation: str) -> None:
+        acquired = session_lock.acquire(blocking=False)
+        observations.append((operation, not acquired))
+        if acquired:
+            session_lock.release()
+
+    def observe_read_last_line(path: Path) -> bytes | None:
+        lock_is_held("event-tail-read")
+        return original_read_last_line(path)
+
+    def observe_write_sidecar(session_id: str, projection, stamp) -> None:
+        lock_is_held("sidecar-write")
+        original_write_sidecar(session_id, projection, stamp)
+
+    monkeypatch.setattr(projection_store, "_read_last_line", observe_read_last_line)
+    monkeypatch.setattr(projection_store, "_write_sidecar", observe_write_sidecar)
+    projection_store.update_from_events(
+        session.session_id, session.events, recompute=True,
+    )
+
+    assert observations == [("event-tail-read", True), ("sidecar-write", True)]
+    assert store.board_state_path(session.session_id).exists()
+
+    assert store.delete_session(session.session_id) is True
+    assert not (tmp_path / session.session_id).exists()
+
+
 def test_sidecar_is_only_a_cache_and_self_heals_after_deletion(tmp_path: Path) -> None:
     store, session = _session_with_task(tmp_path)
     first = BoardProjectionStore(store).get(session.session_id)

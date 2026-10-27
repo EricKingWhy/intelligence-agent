@@ -394,43 +394,66 @@ class BoardProjectionStore:
                 return cached[0]
 
             if stamp is not None:
-                sidecar = self._read_sidecar(session_id, stamp)
+                with self._store._lock_for(session_id):
+                    sidecar = self._read_sidecar(session_id, stamp)
                 if sidecar is not None:
                     self._remember(session_id, sidecar, stamp)
                     return sidecar
+            # 在释放会话锁前登记单飞；否则等待本锁的冷读会在 leader 登记前
+            # 先后穿过 sidecar miss，重复启动事件流重放。
+            cohort, leader = self._join_replay(session_id)
 
         # 重放不持会话锁：冷启动的整段重放是 O(事件数)，持锁会串行阻塞同一
         # 会话的 append 钩子（独立审查 P3）。单飞保证并发突发只重放一次。
-        projection, cacheable, events = self._replay_once(session_id)
+        try:
+            projection, cacheable, events = self._replay_once(
+                session_id, cohort, leader,
+            )
 
-        with self._lock_for(session_id):
-            if projection is None:
-                # 读路径同样不能留下旧缓存：下一次非触发 append 会用缓存重算并
-                # 推进水位，把这次失败时的旧状态钉住（独立审查第三轮 P3）。
-                self._forget(session_id)
-                return _empty(events)
-            if not cacheable:
-                # 注意力派生失败：投影照常返回，但既不落盘也不进缓存——否则
-                # 一次瞬时失败会把「无注意力」钉到下一个触发事件（独立审查 A-2）。
-                self._forget(session_id)
+            with self._lock_for(session_id):
+                if projection is None:
+                    # 读路径同样不能留下旧缓存：下一次非触发 append 会用缓存重算并
+                    # 推进水位，把这次失败时的旧状态钉住（独立审查第三轮 P3）。
+                    self._forget(session_id)
+                    return _empty(events)
+                if not cacheable:
+                    # 注意力派生失败：投影照常返回，但既不落盘也不进缓存——否则
+                    # 一次瞬时失败会把「无注意力」钉到下一个触发事件（独立审查 A-2）。
+                    self._forget(session_id)
+                    return projection
+                with self._store._lock_for(session_id):
+                    stamp_after = self._events_stamp(session_id)
+                    # 只有「读事件期间文件没变」且「本投影确实覆盖到盘上最后一行」才
+                    # 回填缓存；否则下一轮重放，避免把少一条事件的投影钉在更新的戳上。
+                    # 负水位（空/全坏日志）永远过不了读侧校验，直接跳过写盘（A-4/B-12）。
+                    # 落锁后再次核戳：期间同会话 append 不得被旧投影覆盖。
+                    if (
+                        stamp_after is not None
+                        and stamp_after == stamp
+                        and projection.projection_seq >= 0
+                        and projection.projection_seq == self._disk_tail_seq(session_id)
+                        and self._events_stamp(session_id) == stamp_after
+                    ):
+                        self._persist(session_id, projection, stamp_after)
                 return projection
-            stamp_after = self._events_stamp(session_id)
-            # 只有「读事件期间文件没变」且「本投影确实覆盖到盘上最后一行」才
-            # 回填缓存；否则下一轮重放，避免把少一条事件的投影钉在更新的戳上。
-            # 负水位（空/全坏日志）永远过不了读侧校验，直接跳过写盘（A-4/B-12）。
-            # 落锁后再次核戳：期间同会话 append 不得被旧投影覆盖。
-            if (
-                stamp_after is not None
-                and stamp_after == stamp
-                and projection.projection_seq >= 0
-                and projection.projection_seq == self._disk_tail_seq(session_id)
-                and self._events_stamp(session_id) == stamp_after
-            ):
-                self._persist(session_id, projection, stamp_after)
-            return projection
+        finally:
+            if leader:
+                # 让并发冷读共享结果，直到 leader 已完成缓存回填或决定不缓存。
+                cohort.done.set()
+                self._close_cohort(session_id, cohort)
+
+    def _join_replay(self, session_id: str) -> tuple[_ReplayCohort, bool]:
+        """登记或加入同一会话的冷启动重放（调用方持有会话 IO 锁）。"""
+        with self._state_lock:
+            cohort = self._inflight.get(session_id)
+            if cohort is None:
+                cohort = _ReplayCohort()
+                self._inflight[session_id] = cohort
+                return cohort, True
+            return cohort, False
 
     def _replay_once(
-        self, session_id: str
+        self, session_id: str, cohort: _ReplayCohort, leader: bool,
     ) -> tuple[BoardProjection | None, bool, list[SessionEvent]]:
         """冷启动 / 自愈重放的 per-session 单飞（``store._ScanGate`` 同型）。
 
@@ -439,14 +462,6 @@ class BoardProjectionStore:
         下游只读）。闸门只合并时间上重叠的调用，重放结束即清，不引入任何跨
         请求缓存。
         """
-        with self._state_lock:
-            cohort = self._inflight.get(session_id)
-            if cohort is None:
-                cohort = _ReplayCohort()
-                self._inflight[session_id] = cohort
-                leader = True
-            else:
-                leader = False
         if not leader:
             cohort.done.wait()
             if cohort.error is not None:
@@ -456,16 +471,13 @@ class BoardProjectionStore:
             return projection, cacheable, events
 
         try:
-            events = self._store.read_events(session_id)
+            with self._store._lock_for(session_id):
+                events = self._store.read_events(session_id)
             projection, cacheable = _derive(events)
         except BaseException as error:
             cohort.error = error
-            self._close_cohort(session_id, cohort)
-            cohort.done.set()
             raise
         cohort.result = (projection, cacheable, events)
-        self._close_cohort(session_id, cohort)
-        cohort.done.set()
         return projection, cacheable, events
 
     def _close_cohort(self, session_id: str, cohort: _ReplayCohort) -> None:
@@ -520,10 +532,12 @@ class BoardProjectionStore:
                 # O(1) 对账：本视图的最后一笔必须就是盘上最后一笔，且 seq 连续
                 # （连续 ⇒ 本视图没漏掉旁路写者插进来的事件）。不成立就不落盘、
                 # 不进缓存，让 get() 从盘上重放（独立审查 P2）。
-                if not self._view_matches_disk(session_id, events):
-                    self._forget(session_id)
-                    return
-                self._persist(session_id, projection, stamp)
+                # Store lock serializes event-file reads and sidecar writes with hard delete.
+                with self._store._lock_for(session_id):
+                    if not self._view_matches_disk(session_id, events):
+                        self._forget(session_id)
+                        return
+                    self._persist(session_id, projection, stamp)
         except Exception:
             logger.exception(
                 "看板投影更新失败（session=%s）；append 契约不受影响", session_id,
