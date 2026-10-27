@@ -20,7 +20,7 @@ import weakref
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, suppress
 from pathlib import Path, PurePosixPath
 from time import perf_counter, sleep
 from types import SimpleNamespace
@@ -158,7 +158,11 @@ def _open_within_pinned_parent(parent_fd: int, name: str, flags: int) -> int:
 
 
 def _add_pinned_leaf_member(
-    archive: tarfile.TarFile, parent_fd: int, name: str, member_name: str
+    archive: tarfile.TarFile,
+    parent_fd: int,
+    name: str,
+    member_name: str,
+    owner: tuple[int, int] | None = None,
 ) -> None:
     """symlink / fifo / 设备成员：不经路径打开，dir_fd 两次取稳定快照（#1301）。
 
@@ -188,8 +192,11 @@ def _add_pinned_leaf_member(
 
     member = tarfile.TarInfo(member_name)
     member.mode = first_stat.st_mode
-    member.uid = first_stat.st_uid
-    member.gid = first_stat.st_gid
+    if owner is not None:
+        member.uid, member.gid = owner
+    else:
+        member.uid = first_stat.st_uid
+        member.gid = first_stat.st_gid
     member.mtime = first_stat.st_mtime
     member.linkname = first_link
     if stat.S_ISLNK(first_stat.st_mode):
@@ -216,6 +223,7 @@ def _walk_fd_tree(
     parent_arc: str,
     dir_flags: int,
     file_flags: int,
+    owner: tuple[int, int] | None = None,
 ) -> None:
     """从已 pin 住的目录 fd 相对遍历并归档整棵子树（#1301）。
 
@@ -235,7 +243,9 @@ def _walk_fd_tree(
     for entry in entries:
         member_name = f"{parent_arc}/{entry.name}"
         if entry.is_symlink():
-            _add_pinned_leaf_member(archive, parent_fd, entry.name, member_name)
+            _add_pinned_leaf_member(
+                archive, parent_fd, entry.name, member_name, owner,
+            )
             continue
         entry_stat = entry.stat(follow_symlinks=False)
         if stat.S_ISDIR(entry_stat.st_mode):
@@ -247,8 +257,12 @@ def _walk_fd_tree(
                 )
                 if member is None or not member.isdir():
                     raise PermissionError("copy_in source changed during archive")
+                if owner is not None:
+                    member.uid, member.gid = owner
                 archive.addfile(member)
-                _walk_fd_tree(archive, dir_fd, member_name, dir_flags, file_flags)
+                _walk_fd_tree(
+                    archive, dir_fd, member_name, dir_flags, file_flags, owner,
+                )
             finally:
                 os.close(dir_fd)
         elif stat.S_ISREG(entry_stat.st_mode):
@@ -269,6 +283,8 @@ def _walk_fd_tree(
                 )
                 if member is None or not (member.isreg() or member.islnk()):
                     raise PermissionError("copy_in source changed during archive")
+                if owner is not None:
+                    member.uid, member.gid = owner
                 archive.addfile(member, stream)
             finally:
                 stream.close()
@@ -277,7 +293,10 @@ def _walk_fd_tree(
 
 
 def _archive_posix_tree_fd_relative(
-    archive: tarfile.TarFile, source: Path, root_name: str
+    archive: tarfile.TarFile,
+    source: Path,
+    root_name: str,
+    owner: tuple[int, int] | None = None,
 ) -> None:
     """copy_in 非 Windows 分支：fd 相对归档源树，不按路径二次遍历（#1301）。
 
@@ -342,8 +361,12 @@ def _archive_posix_tree_fd_relative(
             )
             if member is None or not member.isdir():
                 raise PermissionError("copy_in source changed during archive")
+            if owner is not None:
+                member.uid, member.gid = owner
             archive.addfile(member)
-            _walk_fd_tree(archive, root_fd, root_name, dir_flags, file_flags)
+            _walk_fd_tree(
+                archive, root_fd, root_name, dir_flags, file_flags, owner,
+            )
         elif stat.S_ISREG(root_stat.st_mode):
             stream = os.fdopen(root_fd, "rb")
             root_fd = -1  # 所有权转移给 stream
@@ -354,6 +377,8 @@ def _archive_posix_tree_fd_relative(
                 )
                 if member is None or not (member.isreg() or member.islnk()):
                     raise PermissionError("copy_in source changed during archive")
+                if owner is not None:
+                    member.uid, member.gid = owner
                 archive.addfile(member, stream)
             finally:
                 stream.close()
@@ -364,6 +389,105 @@ def _archive_posix_tree_fd_relative(
     finally:
         if root_fd >= 0:
             os.close(root_fd)
+
+
+#: #1486 基础降权档：容器用户 / 丢弃的能力 / 安全选项。
+#: - 非 root：默认 `python:3-slim`（及无 USER 的自定义镜像）按 uid 0 跑，
+#:   新容器一律显式落到该 uid:gid；自定义镜像已声明非 root USER 时尊重镜像
+#:   声明（见 `_resolve_container_user`），绝不静默跳过降权。
+#: - `cap_drop=ALL`：Docker 默认能力集（CHOWN / DAC_OVERRIDE / SETUID …）全部丢弃。
+#: - `no-new-privileges`：禁止 setuid/setgid 提权。
+#: 保留构建网络（不设 `network_mode`）与可写工作卷（业务要求）。
+DEFAULT_CONTAINER_USER = "1000:1000"
+HARDENED_CAP_DROP = ["ALL"]
+HARDENED_SECURITY_OPT = ["no-new-privileges:true"]
+
+#: 具名卷属主迁移容器：以 uid 0 起、只保留 chown/chmod 所需的能力，且
+#: `--network none`（迁移不需要网络）。工作区容器自身已 `cap_drop=ALL`，
+#: 不能借它 chown（#1486 探针实测：非 root + cap_drop=ALL 下 chown 报 EPERM）。
+_OWNERSHIP_HELPER_CAPS = ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+
+#: 迁移备份卷：`<workspace volume>-migration-backup`，挂在 helper 的 /backup。
+#: 备份 tar 留在**独立卷**里而不是 helper 的 /tmp/用户卷：helper 被硬杀时
+#: 备份仍在，重试可先恢复再迁移（可验证的恢复路径，AC2）。
+_BACKUP_MOUNT = "/backup"
+_BACKUP_SUFFIX = "-migration-backup"
+
+#: 属主迁移脚本（bash；默认 `python:3-slim` 自带）。步骤：
+#: 0) 备份卷里已有 `pre.tar` → 上次迁移没走完，先按备份整体恢复（幂等重试）；
+#: 1) 卷内已全部是目标属主 → 直接成功（重启/重开无副作用）；
+#: 2) 整树 tar 快照（numeric owner：模式/属主/符号链接/空目录/hard link）落
+#:    独立备份卷，并落一份「模式/类型/路径」索引；
+#: 3) `chown -R` 到目标 uid:gid；
+#: 4) 按快照恢复 chown 清掉的 setuid/setgid 位（迁移只改属主，不改权限）；
+#: 5) 复核：属主全部为目标，且「模式/类型/路径」逐条 NUL 记录比较不变。
+#: 任何一步失败 → 回滚到快照再响亮失败；回滚本身不可验证 → 再响亮一级
+#: （`MIGRATE_FATAL`）。路径可含空格/制表符/换行，故索引一律按 NUL 记录比较。
+_OWNER_MIGRATION_SCRIPT = r"""set -u
+cd /workspace || { printf 'MIGRATE_ERROR cannot enter /workspace\n'; exit 90; }
+BACKUP=$3
+U=$1
+G=$2
+D=/tmp/.harness-migration
+rm -rf "$D"
+mkdir -p "$D" "$BACKUP" || { printf 'MIGRATE_ERROR cannot create snapshot dir\n'; exit 91; }
+
+if [ -f "$BACKUP/pre.tar" ]; then
+  printf 'MIGRATE_RECOVER previous incomplete migration\n'
+  tar -xpf "$BACKUP/pre.tar" --numeric-owner -C /workspace \
+    || { printf 'MIGRATE_ERROR cannot restore backup\n'; exit 89; }
+  rm -f "$BACKUP/pre.tar"
+fi
+
+if [ -z "$(find . -xdev \( ! -uid "$U" -o ! -gid "$G" \) -print -quit)" ]; then
+  printf 'MIGRATE_OK records=0 target=%s:%s (already owned)\n' "$U" "$G"
+  exit 0
+fi
+
+tar -cpf "$BACKUP/pre.tar" --numeric-owner . || { printf 'MIGRATE_ERROR snapshot failed\n'; exit 92; }
+tar -tf "$BACKUP/pre.tar" > "$D/pre.list" || { printf 'MIGRATE_ERROR snapshot unreadable\n'; exit 93; }
+find . -xdev -printf '%U:%G\t%m\t%y\t%p\0' > "$D/pre.bin" || { printf 'MIGRATE_ERROR manifest failed\n'; exit 94; }
+find . -xdev -printf '%m\t%y\t%p\0' | LC_ALL=C sort -z > "$D/pre.rest" || { printf 'MIGRATE_ERROR manifest failed\n'; exit 94; }
+records=$(tr -cd '\000' < "$D/pre.bin" | wc -c)
+[ "$records" -ge 1 ] || { printf 'MIGRATE_ERROR manifest empty\n'; exit 95; }
+printf 'MIGRATE_SNAPSHOT records=%s bytes=%s\n' "$records" "$(wc -c < "$BACKUP/pre.tar")"
+
+rest_index() { find . -xdev -printf '%m\t%y\t%p\0' | LC_ALL=C sort -z > "$1"; }
+
+rollback() {
+  printf 'MIGRATE_ROLLBACK begin\n'
+  tar -xpf "$BACKUP/pre.tar" --numeric-owner -C /workspace || { printf 'MIGRATE_ROLLBACK_FAILED\n'; return 1; }
+  rest_index "$D/rb.rest" || { printf 'MIGRATE_ROLLBACK_FAILED\n'; return 1; }
+  cmp -s "$D/pre.rest" "$D/rb.rest" || { printf 'MIGRATE_ROLLBACK_FAILED\n'; return 1; }
+  rm -f "$BACKUP/pre.tar"
+  printf 'MIGRATE_ROLLBACK_OK\n'; return 0
+}
+abort_with_rollback() { printf '%s\n' "$1"; rollback || { printf 'MIGRATE_FATAL rollback failed\n'; exit 96; }; printf 'MIGRATE_ABORTED\n'; exit "$2"; }
+
+chown -R "$U:$G" /workspace || abort_with_rollback 'MIGRATE_ERROR chown failed' 97
+
+while IFS=$'\t' read -r -d '' owner mode kind path; do
+  [ -n "$path" ] || continue
+  [ "$kind" = "l" ] && continue
+  chmod "$mode" "$path" || abort_with_rollback "MIGRATE_ERROR chmod restore failed: $path" 98
+done < "$D/pre.bin"
+
+if [ "${FAIL_INJECT:-}" = "after-chown" ]; then abort_with_rollback 'MIGRATE_TEST_INJECTED after chown' 99; fi
+
+find . -xdev -printf '%U:%G\t%m\t%y\t%p\0' > "$D/post.bin" || abort_with_rollback 'MIGRATE_ERROR post manifest failed' 100
+if ! awk -v want="$U:$G" 'BEGIN{RS="\0"} { i=index($0, "\t"); if (i == 0 || substr($0,1,i-1) != want) { print "MIGRATE_MISMATCH " $0; bad=1 } } END { exit bad }' "$D/post.bin"; then
+  abort_with_rollback 'MIGRATE_ERROR ownership verification failed' 101
+fi
+rest_index "$D/post.rest" || abort_with_rollback 'MIGRATE_ERROR post manifest failed' 100
+cmp -s "$D/pre.rest" "$D/post.rest" || abort_with_rollback 'MIGRATE_ERROR content or mode changed' 102
+rm -rf "$D"
+rm -f "$BACKUP/pre.tar"
+printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
+"""
+
+
+class SandboxHardeningError(RuntimeError):
+    """容器未满足基础降权档，且无法在不破坏数据的前提下自动处置。"""
 
 
 class DockerSandbox(Sandbox):
@@ -390,6 +514,9 @@ class DockerSandbox(Sandbox):
         self._container_name = container_name or f"agent-harness-{suffix}"
         self._volume_name = volume_name or f"agent-harness-{suffix}"
         self._container = None
+        #: 当前容器用户的数字 uid/gid（put_archive 显式属主用）；随容器建立时缓存，
+        #: 不在每次文件写入上多打一次 daemon。
+        self._owner_uid_gid: tuple[int, int] | None = None
         self._workspace_restore_guard: Callable[
             [], AbstractContextManager[None]
         ] | None = None
@@ -435,24 +562,116 @@ class DockerSandbox(Sandbox):
 
         # 跨进程恢复：按确定性 container_name 查找已存在的容器。
         # 进程重启后 self._container 为 None，但容器可能还在（停止状态）。
-        # 如果找到，重启它；找不到才创建新容器。
+        # 如果找到，先**检验降权档**：合规才复用；历史未硬化容器保留其卷、
+        # 显式重建（#1486 AC1/AC3——绝不静默复用未硬化容器）。
         docker = importlib.import_module("docker")
         try:
             existing = self._client.containers.get(self._container_name)
         except docker.errors.NotFound:
             existing = None
         if existing is not None:
-            if existing.status != "running":
-                existing.start()
-            self._container = existing
-            return
+            existing.reload()
+            if self._is_hardened(existing.attrs):
+                if existing.status != "running":
+                    existing.start()
+                self._container = existing
+                self._owner_uid_gid = self._parse_owner(existing.attrs)
+                return
+            logger.warning(
+                "Replacing unhardened historical container %s "
+                "(user=%r cap_drop=%r security_opt=%r)",
+                self._container_name,
+                existing.attrs.get("Config", {}).get("User"),
+                existing.attrs.get("HostConfig", {}).get("CapDrop"),
+                existing.attrs.get("HostConfig", {}).get("SecurityOpt"),
+            )
+            existing.remove(force=True)
 
-        self._container = self._client.containers.run(
+        self._create_hardened_container()
+
+    # —— #1486 基础降权档 ——
+
+    @staticmethod
+    def _is_hardened(attrs: dict) -> bool:
+        """inspect attrs 是否满足降权档：非 root + cap_drop=ALL + no-new-privileges。"""
+        user = str((attrs.get("Config") or {}).get("User") or "")
+        if not user or user in ("root", "0", "0:0", "root:root"):
+            return False
+        host = attrs.get("HostConfig") or {}
+        cap_drop = [str(item).upper() for item in host.get("CapDrop") or []]
+        if "ALL" not in cap_drop:
+            return False
+        return any(
+            "no-new-privileges" in str(opt) for opt in host.get("SecurityOpt") or []
+        )
+
+    def _resolve_container_user(self) -> str:
+        """返回新容器要用的 `user`：尊重镜像已声明的非 root USER，否则降权档。
+
+        无 USER / USER=root 的自定义镜像一律落到 `DEFAULT_CONTAINER_USER`，
+        绝不因"镜像自己说是 root"就跳过降权。
+        """
+        try:
+            image_attrs = self._client.images.get(self._image).attrs or {}
+        except Exception as error:  # noqa: BLE001 — 读不到镜像属性按无声明处理
+            logger.warning("无法读取镜像 %s 的 USER 声明：%s", self._image, error)
+            return DEFAULT_CONTAINER_USER
+        declared = str((image_attrs.get("Config") or {}).get("User") or "").strip()
+        if not declared or declared.split(":", 1)[0] in ("root", "0"):
+            return DEFAULT_CONTAINER_USER
+        if ":" in declared:
+            # 镜像给全了 uid:gid，原样使用。
+            return declared
+        if declared.isdecimal():
+            # 只声明 uid 时 Docker 的组会落到 0（root 组）——显式补同名 gid，
+            # 不让降权档出现 root 组。
+            return f"{declared}:{declared}"
+        # 镜像只给用户名：用镜像自身解析出数字 uid/gid，保证挂载属主可预测。
+        resolved = self._resolve_image_uid_gid(declared)
+        if resolved is None:
+            raise SandboxHardeningError(
+                f"无法在镜像 {self._image} 内解析用户 {declared!r} 的 uid/gid，"
+                "无法保证挂载属主适配（拒绝以不确定属主启动）。"
+            )
+        return resolved
+
+    def _resolve_image_uid_gid(self, declared: str) -> str | None:
+        try:
+            output = self._client.containers.run(
+                self._image,
+                ["sh", "-c", f"id -u {shlex.quote(declared)}; id -g {shlex.quote(declared)}"],
+                remove=True,
+                entrypoint="",
+                user="0:0",
+                cap_drop=HARDENED_CAP_DROP,
+                security_opt=HARDENED_SECURITY_OPT,
+                network_mode="none",
+            )
+        except Exception as error:  # noqa: BLE001 — 解析失败退回镜像声明
+            logger.warning("镜像用户 %r 解析失败：%s", declared, error)
+            return None
+        parts = output.decode("utf-8", "replace").split()
+        if len(parts) == 2 and all(part.isdecimal() for part in parts):
+            return f"{parts[0]}:{parts[1]}"
+        return None
+
+    def _create_hardened_container(self) -> None:
+        user = self._resolve_container_user()
+        # 顺序是硬约束：`containers.create` 会**先用镜像里的 /workspace 填充空卷**
+        # （属主 root），所以必须先建容器、再做属主迁移、最后 start。反过来
+        # （先迁移后 run）会让 run 的卷填充把刚 chown 好的目录重新写回 root。
+        container = self._client.containers.create(
             self._image,
             ["sleep", "infinity"],
             name=self._container_name,
-            detach=True,
             working_dir=str(self.workspace_root),
+            user=user,
+            cap_drop=HARDENED_CAP_DROP,
+            security_opt=HARDENED_SECURITY_OPT,
+            init=True,
+            # 非 root 的 HOME 默认 "/" 不可写（pip 用户安装会 EACCES）；
+            # 放 /tmp 让工具链有可写家目录，不额外限制资源或网络（AC3）。
+            environment={"HOME": "/tmp"},
             volumes={
                 self._volume_name: {
                     "bind": str(self.workspace_root),
@@ -460,6 +679,104 @@ class DockerSandbox(Sandbox):
                 }
             },
         )
+        try:
+            self._migrate_volume_ownership(user)
+        except BaseException:
+            # 迁移失败不留半成品容器（下次按名字找回时会被当成"历史容器"再判一次，
+            # 但那会把失败原因埋在二次重建里）。显式移除，让错误就是错误。
+            with suppress(Exception):
+                container.remove(force=True)
+            raise
+        container.start()
+        self._container = container
+        # put_archive 由 daemon 以 root 解包；缓存数字属主，写文件时显式带上
+        # （否则非 root 容器用户改不了 harness 自己写进去的文件）。
+        self._owner_uid_gid = self._parse_owner({"Config": {"User": user}})
+
+    def _target_uid_gid(self, user: str) -> tuple[str, str]:
+        uid, _, gid = user.partition(":")
+        return uid, (gid or uid)
+
+    def _parse_owner(self, attrs: dict) -> tuple[int, int] | None:
+        declared = str((attrs.get("Config") or {}).get("User") or "")
+        uid, gid = self._target_uid_gid(declared)
+        if uid.isdecimal() and gid.isdecimal():
+            return int(uid), int(gid)
+        return None
+
+    def _container_owner(self) -> tuple[int, int] | None:
+        """当前容器用户的数字 uid/gid（put_archive 显式属主用）。
+
+        拿不到（未启动 / 用户是名字且无数字解析）就返回 None——退回镜像默认
+        行为，不猜。
+        """
+        return getattr(self, "_owner_uid_gid", None)
+
+    def _migrate_volume_ownership(self, user: str) -> None:
+        """把具名卷里的历史文件属主迁到容器用户；失败响亮、可重试、不毁数据。
+
+        - 只对**已存在的**卷做（新建空卷由 Docker 建出来就归 root，仍需一次迁移
+          让非 root 容器可写；空卷迁移是零风险的记录级操作）。
+        - 迁移在一次性 helper 容器里跑（uid 0 + 最小能力集 + `--network none`），
+          不进主容器的降权边界。
+        - 备份 tar 落在独立 `<volume>-migration-backup` 卷，迁移成功即删；
+          失败时保留备份并在 helper 里回滚到备份（AC2 的恢复路径）。
+        """
+        uid, gid = self._target_uid_gid(user)
+        backup_volume = f"{self._volume_name}{_BACKUP_SUFFIX}"
+        docker = importlib.import_module("docker")
+        try:
+            self._client.volumes.get(backup_volume)
+        except docker.errors.NotFound:
+            self._client.volumes.create(backup_volume)
+        try:
+            container = self._client.containers.run(
+                self._image,
+                [
+                    "bash", "-c", _OWNER_MIGRATION_SCRIPT, "--",
+                    uid, gid, _BACKUP_MOUNT,
+                ],
+                # 默认镜像没有 bash 时（极小自定义镜像）响亮失败，不静默跳过硬化。
+                entrypoint="",
+                user="0:0",
+                cap_drop=HARDENED_CAP_DROP,
+                cap_add=_OWNERSHIP_HELPER_CAPS,
+                security_opt=HARDENED_SECURITY_OPT,
+                network_mode="none",
+                working_dir=str(self.workspace_root),
+                volumes={
+                    self._volume_name: {
+                        "bind": str(self.workspace_root),
+                        "mode": "rw",
+                    },
+                    backup_volume: {"bind": _BACKUP_MOUNT, "mode": "rw"},
+                },
+                detach=True,
+            )
+        except Exception as error:
+            raise SandboxHardeningError(
+                f"无法启动卷属主迁移容器（{self._volume_name}）：{error}"
+            ) from error
+        try:
+            status = container.wait()
+            logs = container.logs(stdout=True, stderr=True).decode("utf-8", "replace")
+        finally:
+            with suppress(Exception):
+                container.remove(force=True)
+        exit_code = status.get("StatusCode")
+        if exit_code != 0 or "MIGRATE_OK" not in logs:
+            detail = " | ".join(
+                line for line in logs.splitlines() if line.startswith("MIGRATE")
+            )
+            raise SandboxHardeningError(
+                f"卷 {self._volume_name} 属主迁移失败（exit={exit_code}）："
+                f"{detail or logs.strip()[-500:]}"
+            )
+        # 迁移成功：清掉独立备份卷里的备份，只留一个有标记的空卷供下次重试。
+        try:
+            self._client.volumes.get(backup_volume).remove(force=True)
+        except Exception:
+            logger.debug("迁移备份卷清理失败：%s", backup_volume, exc_info=True)
 
     def code_worker(self):
         """Create an unstarted no-egress worker without the workspace volume."""
@@ -1272,11 +1589,16 @@ class DockerSandbox(Sandbox):
         # 位于 workspace 内**的 hard-link pair 会拆散链接，与宿主目录/POSIX 语义
         # 不一致（#1048 AC4/AC8：内部 pair 保持可用）。
         tmp_name = f".harness-write-{uuid4().hex}.tmp"
+        owner = self._container_owner()
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as archive:
             member = tarfile.TarInfo(name=tmp_name)
             member.size = len(payload)
             member.mode = 0o644
+            if owner is not None:
+                # #1486：daemon 以 root 解包；不显式写属主会把文件落成 root，
+                # 非 root 容器用户随后就改不了自己刚写的文件。
+                member.uid, member.gid = owner
             archive.addfile(member, io.BytesIO(payload))
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法写入 Workspace 文件 '{target}'")
@@ -1307,6 +1629,7 @@ class DockerSandbox(Sandbox):
         if mkdir_result.exit_code != 0:
             raise RuntimeError(f"无法创建 Workspace 目录 '{target.parent}'")
 
+        owner = self._container_owner()
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w", dereference=False) as archive:
             if os.name == "nt":
@@ -1340,6 +1663,8 @@ class DockerSandbox(Sandbox):
                                     raise PermissionError(
                                         "copy_in source changed during archive"
                                     )
+                                if owner is not None:
+                                    member.uid, member.gid = owner
                                 archive.addfile(member)
                             else:
                                 with os.fdopen(fd, "rb") as stream:
@@ -1356,13 +1681,17 @@ class DockerSandbox(Sandbox):
                                         raise PermissionError(
                                             "copy_in source changed during archive"
                                         )
+                                    if owner is not None:
+                                        member.uid, member.gid = owner
                                     archive.addfile(member, stream)
                         finally:
                             if fd is not None:
                                 os.close(fd)
             else:
                 # #1301：fd 相对归档，不按路径二次遍历（换链 TOCTOU 修补）。
-                _archive_posix_tree_fd_relative(archive, source, target.name)
+                _archive_posix_tree_fd_relative(
+                    archive, source, target.name, owner,
+                )
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法导入 Host 路径 '{source}'")
 
@@ -1548,6 +1877,11 @@ class DockerSandbox(Sandbox):
             self._client.volumes.get(self._volume_name).remove(force=True)
         except docker.errors.NotFound:
             pass
+        # #1486：迁移备份卷随工作卷一起删（否则重开同名会话会拿旧备份）。
+        with suppress(Exception):
+            self._client.volumes.get(
+                f"{self._volume_name}{_BACKUP_SUFFIX}"
+            ).remove(force=True)
         state = getattr(self, "_exec_state", None)
         if state is not None:
             cls = type(self)
