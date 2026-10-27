@@ -77,6 +77,8 @@ def _freeze_projection_value(value: Any) -> Any:
         ))
     if isinstance(value, list):
         return ("list", tuple(_freeze_projection_value(item) for item in value))
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_freeze_projection_value(item) for item in value))
     return value
 
 
