@@ -34,7 +34,7 @@ from agent_harness.memory.v2.jobs import (
     MemoryFormationJob,
     MemoryJobOutcome,
     MemoryJobStage,
-    SqliteMemoryV2JobStore,
+    MemoryV2JobStore,
 )
 from agent_harness.memory.v2.roles import MemoryModelRoles
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
@@ -278,7 +278,7 @@ class _Rejected(Exception):
 @dataclass
 class Env:
     store: SqliteMemoryV2Store
-    jobs: SqliteMemoryV2JobStore
+    jobs: MemoryV2JobStore
     index: InMemoryMemoryV2Index
     service: MemoryV2Service
 
@@ -288,7 +288,7 @@ async def env(tmp_path) -> Env:
     path = tmp_path / "memory-v2.db"
     store = SqliteMemoryV2Store(path)
     await store.initialize()
-    jobs = SqliteMemoryV2JobStore(path)
+    jobs = MemoryV2JobStore(path)
     await jobs.initialize()
     index = InMemoryMemoryV2Index()
     return Env(store=store, jobs=jobs, index=index, service=MemoryV2Service(store, index))
@@ -1216,7 +1216,7 @@ async def test_a_terminal_job_is_not_claimable_after_a_restart(env: Env) -> None
     _job, result, _sink = await _run(env, invoker)
     assert result is not None and result.outcome is MemoryJobOutcome.COMMITTED
 
-    restarted = SqliteMemoryV2JobStore(env.jobs.database_path)
+    restarted = MemoryV2JobStore(env.jobs.database_path)
     assert await restarted.claim(worker_id="worker-2", now=T0 + timedelta(hours=1)) is None
     assert len(await _active(env)) == 1
 

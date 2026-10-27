@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-import sqlite3
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -18,6 +18,8 @@ import pytest_asyncio
 
 from agent_harness.memory.v2 import write_approval
 from agent_harness.memory.v2._sqlite import stamp
+from agent_harness.memory.v2.commit import build_markdown_commit
+from agent_harness.memory.v2.file_state import write_json
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
 from agent_harness.memory.v2.write_approval import (
@@ -42,21 +44,19 @@ class _FrozenDatetime(datetime):
 @pytest_asyncio.fixture()
 async def approval(tmp_path):
     markdown = MarkdownMemoryStore(tmp_path / "memories")
-    assert (await markdown.add("memory", "alpha preference"))["success"]
-    staged = StagedWriteStore(tmp_path / "memory-v2.db", markdown)
+    commit = build_markdown_commit(markdown, tmp_path)
+    assert (await commit.add("memory", "alpha preference"))["success"]
+    staged = StagedWriteStore(commit.root, commit)
     await staged.initialize()
     return staged
 
 
 def _claim(staged: StagedWriteStore, record_id: str, claimed_at: datetime) -> None:
     """模拟被 SIGKILL 的 approve：抢到 `approving` 后把 `claimed_at` 写成指定值。"""
-    connection = sqlite3.connect(staged.database_path)
-    try:
-        connection.execute(
-            "UPDATE memory_v2_staged SET claimed_at=? WHERE id=?", (stamp(claimed_at), record_id))
-        connection.commit()
-    finally:
-        connection.close()
+    path = staged.path_for(record_id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["claimed_at"] = stamp(claimed_at)
+    write_json(path, payload)
 
 
 async def _staged_awaiting(staged: StagedWriteStore) -> str:
@@ -64,7 +64,11 @@ async def _staged_awaiting(staged: StagedWriteStore) -> str:
         {"target": "memory", "action": "replace",
          "old_text": "alpha preference", "content": "beta preference"},
         ["alpha preference"], LOCAL)
-    assert await staged._set_status(record.id, AWAITING, expected=PENDING)
+    path = staged.path_for(record.id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["status"] = AWAITING
+    payload["claimed_at"] = stamp(_FROZEN_NOW)
+    write_json(path, payload)
     return record.id
 
 

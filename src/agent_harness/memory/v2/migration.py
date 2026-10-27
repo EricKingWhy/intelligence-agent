@@ -20,6 +20,7 @@ from typing import Any
 
 from agent_harness.memory.v2._sqlite import connect
 from agent_harness.memory.v2.assembly import MEMORIES_DIRECTORY_NAME
+from agent_harness.memory.v2.commit import build_markdown_commit
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore, target_for
 from agent_harness.memory.v2.types import MemoryKind
 
@@ -77,6 +78,8 @@ async def migrate_active_records(
     }
     store = MarkdownMemoryStore(Path(workspace_dir) / MEMORIES_DIRECTORY_NAME, **limits)
     store.load_from_disk()
+    # #1494：迁移也是一次内容发布，与运行时同一个入口（回执可对账、重跑幂等）。
+    commit = build_markdown_commit(store, workspace_dir)
 
     rows: list[tuple[str, str, str, str]] = []
     if database.exists():
@@ -94,9 +97,12 @@ async def migrate_active_records(
     skipped: list[tuple[str, str]] = counts["skipped"]
     for memory_id, kind, tier, content in rows:
         target = target_for(kind, tier)
-        response = await store.add(target, content)
+        response = await commit.add(
+            target, content, operation_id=f"mig_{memory_id}")
         if response.get("success"):
-            counts["deduplicated" if response.get("deduplicated") else "exported"] += 1
+            # 回执重放（同一份导出重跑）= 已写过的条目：算去重，不算新导出。
+            already = response.get("deduplicated") or response.get("replayed")
+            counts["deduplicated" if already else "exported"] += 1
             counts[target] += 1
             if _kind_defaulted(kind, tier):
                 counts["kind_defaulted"] += 1
