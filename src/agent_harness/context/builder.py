@@ -80,6 +80,8 @@ def _freeze_projection_value(value: Any) -> Any:
         return ("list", tuple(_freeze_projection_value(item) for item in value))
     if isinstance(value, tuple):
         return ("tuple", tuple(_freeze_projection_value(item) for item in value))
+    if isinstance(value, float):
+        return (float, value.hex())
     return (type(value), value)
 
 
@@ -917,8 +919,16 @@ class ContextBuilder:
         events = session.events
         key = (len(events), self._supports_vision)
         source = _projection_source_snapshot(events)
+        previous_session = self._projection_cache_session
         previous_key = self._projection_cache_key
         previous_source = self._projection_cache_source
+        if (previous_session is not None
+                and previous_session is not session
+                and self._token_memo_session is previous_session):
+            # The source snapshot for the previous session is about to be evicted. Its
+            # token memo must go too, or a later same-session payload edit could no
+            # longer be detected before the memo is reused.
+            self._token_memo.clear()
         if (self._projection_cache_session is session
                 and previous_key is not None
                 and previous_source is not None):

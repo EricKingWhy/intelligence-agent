@@ -583,6 +583,23 @@ class TestProjectionCacheOwnership:
         assert builder._token_estimate_total > first_estimate
 
     @pytest.mark.asyncio
+    async def test_other_session_snapshot_evicts_prior_token_memo(self, tmp_path):
+        session_a = make_session(tmp_path / "a")
+        session_a.append(USER_MESSAGE, {"content": "short"})
+        session_b = make_session(tmp_path / "b")
+        session_b.append(USER_MESSAGE, {"content": "other session"})
+        builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
+
+        await builder.build(session_a)
+        first_estimate = builder._token_estimate_total
+        builder.usage_snapshot(session_b)
+
+        session_a.events[-1].data["content"] = "long " * 5_000
+        await builder.build(session_a)
+
+        assert builder._token_estimate_total > first_estimate
+
+    @pytest.mark.asyncio
     async def test_snapshot_distinguishes_bool_from_int(self, tmp_path):
         session = make_session(tmp_path)
         session.append(MODEL_COMPLETED, {
@@ -598,6 +615,23 @@ class TestProjectionCacheOwnership:
         second = builder._derive_pairs(session)
 
         assert second[0][0].tool_calls[0]["args"]["flag"] is False
+
+    @pytest.mark.asyncio
+    async def test_snapshot_distinguishes_positive_and_negative_zero(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(MODEL_COMPLETED, {
+            "content": "",
+            "tool_calls": [{"id": "call-1", "name": "read", "args": {"zero": 0.0}}],
+        })
+        builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
+
+        first = builder._derive_pairs(session)
+        assert first[0][0].tool_calls[0]["args"]["zero"].hex() == (0.0).hex()
+
+        session.events[-1].data["tool_calls"][0]["args"]["zero"] = -0.0
+        second = builder._derive_pairs(session)
+
+        assert second[0][0].tool_calls[0]["args"]["zero"].hex() == (-0.0).hex()
 
     @pytest.mark.asyncio
     async def test_in_place_event_payload_change_invalidates_projection(self, tmp_path):
