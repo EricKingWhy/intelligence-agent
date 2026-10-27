@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,6 @@ from agent_harness.session import Session
 from agent_harness.session.cwd import session_cwd
 from agent_harness.session.derive import (
     ProtectedFact,
-    derive_messages,
     derive_messages_with_source_ranges,
     derive_modified_file_paths,
     derive_protected_facts,
@@ -67,6 +67,49 @@ from agent_harness.session.progress import (
 from agent_harness.session.workflow import WorkflowMode, effective_workflow_mode
 
 logger = logging.getLogger("agent_harness.context")
+
+
+def _freeze_projection_value(value: Any) -> Any:
+    """Snapshot containers and retain scalar types so equality matches JSON semantics."""
+    if isinstance(value, dict):
+        return ("dict", tuple(
+            (key, _freeze_projection_value(item))
+            for key, item in value.items()
+        ))
+    if isinstance(value, list):
+        return ("list", tuple(_freeze_projection_value(item) for item in value))
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_freeze_projection_value(item) for item in value))
+    if isinstance(value, float):
+        return (float, value.hex())
+    return (type(value), value)
+
+
+def _projection_source_snapshot(events: list[SessionEvent]) -> tuple[Any, ...]:
+    """Capture event values for exact cache validation without copying payload strings."""
+    return tuple(
+        (
+            event.event_id, event.seq, event.time, event.type, event.session_id,
+            event.run_id, event.agent_id, event.step_id, event.block_id,
+            _freeze_projection_value(event.data),
+            _freeze_projection_value(event.source_event_ids),
+            event.schema_version, event.capability,
+        )
+        for event in events
+    )
+
+
+def _copy_message_for_build(message: AnyMessage) -> AnyMessage:
+    """Detach mutable message fields while reusing immutable scalar content."""
+    updates: dict[str, Any] = {}
+    for key, value in vars(message).items():
+        if isinstance(value, dict):
+            updates[key] = deepcopy(value) if value else {}
+        elif isinstance(value, list):
+            updates[key] = deepcopy(value) if value else []
+        elif isinstance(value, tuple) and value:
+            updates[key] = deepcopy(value)
+    return message.model_copy(update=updates)
 
 
 def protected_facts_for_context(
@@ -721,13 +764,42 @@ class ContextBuilder:
         # (session_id, seq, supports_vision) → 该事件投影消息的 token 成本。同一事件
         # 在视觉/非视觉两种投影下内容不同（图片块 vs 占位符串）、成本不同，故键必须
         # 带视觉维度（#823 / MM-02 重审 P3：`set_supports_vision` 可 mid-run 变更）。
-        # 事件落盘后其投影消息内容在同一口径下终身不变，成本是常量——此前每步对全部
-        # 历史重新 model_dump_json + BPE 编码，剖析实证占循环开销 88%（O(N²)：40 步
-        # run 纯开销 2.2s）。
+        # 正常 append-only 事件的投影消息内容在同一口径下终身不变，成本是常量——此前
+        # 每步对全部历史重新 model_dump_json + BPE 编码，剖析实证占循环开销 88%
+        # （O(N²)：40 步 run 纯开销 2.2s）。同 mark 的 payload 原地改写会由
+        # `_derive_pairs` 的内容快照识别并清除此 memo。
         # memo 仅属于最近传入的 Session 对象；同 id 的独立对象切换时清空，避免
         # 把一个对象的 seq 成本用于另一个对象，同时保持单个对象内的增量缓存。
         self._token_memo: dict[tuple[str, int, bool], int] = {}
         self._token_memo_session: Session | None = None
+        # #1528：derive 复用——(会话对象, 事件前缀长度, 视觉口径) → 未裁剪的
+        # `(message, source_range)` 列表。同一 mark 上 build / compact_now /
+        # `_reproject` / `usage_snapshot` 此前各自全量重派生：一次压缩 build 实测
+        # builder 侧派生 3 次（build 1 次、compact_now 与 build 同 mark 再 1 次、
+        # 落 bracket 后 `_reproject` mark 已变又 1 次），看板每次轮询再加 1 次。
+        # 剖析归因：#1528 沙箱实测（1601 事件夹具、单次派生取 7 次中位；含一轮
+        # 每核一个忙等进程的负载会话）开销几乎全在构造 langchain pydantic 消息：
+        # 派生中位 7–18 ms（同轮单次样本 7–45 ms），同一夹具上纯遍历事件中位
+        # 0.08–0.13 ms（单次样本 ≤0.26 ms），构造占比 98.3–99.5%。区间随宿主负载
+        # 浮动（静息会话中位 ≈7–10 ms，加载后 ≈16–18 ms），只作量级参考、不作
+        # 性能阈值。故**只复用已构造的消息**，不做增量前缀计算（票面：不承诺
+        # 缺证据的增量框架）。
+        #
+        # 等价性前提（逐条可核）：事件 append 只增长度 mark；
+        # `derive_messages_with_source_ranges` 是纯函数；全仓唯一原地改消息对象的
+        # 位置是 compactor 对 `model_copy()` 副本的裁剪。SessionEvent 的 `data`
+        # 虽然按 append-only 约定使用，但运行时仍是可变 dict；内容快照将该约定
+        # 落为可校验条件，避免同一 mark 下 payload 被原地改写时命中旧投影。
+        # 键含会话**对象**（同 id 不同对象不同键，与 `_token_memo_session` 同纪律）；
+        # 会话对象每次都比对，故不存在 `id()` 复用的悬垂键。
+        # 内容快照用于验证同一 mark 的事件内容未变；纯缓存可随时丢弃并从事件流
+        # 重建，不产生第二份 Session 真相。
+        self._projection_cache: (
+            list[tuple[AnyMessage, tuple[int, int] | None]] | None
+        ) = None
+        self._projection_cache_session: Session | None = None
+        self._projection_cache_key: tuple[int, bool] | None = None
+        self._projection_cache_source: tuple[Any, ...] | None = None
         # 最近一次 build 的估算总量——测试观察口（生产路径走参数传递）。
         # **只含投影 messages**（_estimate_tokens_cached 的返回值）；system_prompt
         # 与 provider 注入另行记账，见 _last_provider_tokens_by_name /
@@ -827,6 +899,59 @@ class ContextBuilder:
         text = _render_progress_block(doc, status=verification.status)
         return text, estimate_message_tokens([SystemMessage(content=text)])
 
+    def _derive_pairs(
+        self, session: Session,
+    ) -> list[tuple[AnyMessage, tuple[int, int] | None]]:
+        """派生（或复用）**未裁剪**的投影+source ranges（#1528）。
+
+        键 = (会话对象, `session.mark()`, `_supports_vision`, 事件内容快照)。
+        任一变化即重派生；快照覆盖浅冻结事件中的嵌套 payload。
+
+        返回的列表与其消息对象**归缓存所有**：调用方只读，不得原地修改。复用让同一
+        批消息对象被多次调用共享（修复前每次调用都新建），原地改一条会污染后续所有
+        读取，且污染会持续到下一次 append 改变 mark 为止。需要改写就用
+        `model_copy()` 造副本（仓内先例：compactor 对 `model_copy()` 副本裁剪）。
+
+        只缓存 derive 的产物，**不缓存裁剪**：裁剪决策每次仍由 `ToolResultPruner`
+        重放（决策与 memo 失效是它自己的合同，见 `_prune_projection`），本缓存因此
+        对 pruner 路径完全透明。
+        """
+        events = session.events
+        key = (len(events), self._supports_vision)
+        source = _projection_source_snapshot(events)
+        previous_session = self._projection_cache_session
+        previous_key = self._projection_cache_key
+        previous_source = self._projection_cache_source
+        if (previous_session is not None
+                and previous_session is not session
+                and self._token_memo_session is previous_session):
+            # The source snapshot for the previous session is about to be evicted. Its
+            # token memo must go too, or a later same-session payload edit could no
+            # longer be detected before the memo is reused.
+            self._token_memo.clear()
+        if (self._projection_cache_session is session
+                and previous_key is not None
+                and previous_source is not None):
+            shared_count = min(previous_key[0], len(events))
+            source_changed = previous_source[:shared_count] != source[:shared_count]
+            if ((source_changed or len(events) < previous_key[0])
+                    and self._token_memo_session is session):
+                self._token_memo.clear()
+        if (self._projection_cache_session is session
+                and self._projection_cache_key == key
+                and self._projection_cache_source == source):
+            cached = self._projection_cache
+            if cached is not None:
+                return cached
+        pairs = derive_messages_with_source_ranges(
+            events, supports_vision=self._supports_vision
+        )
+        self._projection_cache = pairs
+        self._projection_cache_session = session
+        self._projection_cache_key = key
+        self._projection_cache_source = source
+        return pairs
+
     async def build(self, session: Session) -> list[AnyMessage]:
         """不修改历史；估算包含 tool_calls 等结构字段的投影 token 数。"""
         # #1197 项 1：每轮从会话事件现派生窗口（per-session 挡位，改后下一轮生效）。
@@ -838,9 +963,14 @@ class ContextBuilder:
         self._last_pressure_warning_tokens = 0
         self._image_payloads = await self._load_image_payloads(session)
         source_ranges: list[tuple[int, int] | None] | None = None
-        pairs = derive_messages_with_source_ranges(
-            session.events, supports_vision=self._supports_vision
-        )
+        # The cached projection remains builder-owned. `build()` returns messages to
+        # adapters/callers, so detach nested mutable message content before it crosses
+        # that boundary; otherwise one caller mutation poisons later builds at the same
+        # session mark.
+        pairs = [
+            (_copy_message_for_build(message), source_range)
+            for message, source_range in self._derive_pairs(session)
+        ]
         if self._pruner is None:
             # 与 session.derive_messages() 同一投影；额外留下 source_ranges 供
             # #448 的真实 usage 锚做「事件 → 消息」定位（不传给压缩器，行为不变）。
@@ -1155,9 +1285,7 @@ class ContextBuilder:
         self._sync_session_context_window(session)
         # ── 投影（与 build 同一口径；裁剪路径存在时重放裁剪决策）──────────
         source_ranges: list[tuple[int, int] | None] | None = None
-        pairs = derive_messages_with_source_ranges(
-            session.events, supports_vision=self._supports_vision
-        )
+        pairs = self._derive_pairs(session)
         if self._pruner is None:
             messages = [message for message, _source_range in pairs]
             anchor_ranges = [source_range for _message, source_range in pairs]
@@ -1551,14 +1679,10 @@ class ContextBuilder:
         （占位符文本）不一致 ⇒ 误报 `CompactionPostWriteError`。
         """
         if self._pruner is None:
-            return derive_messages(
-                session.events, supports_vision=self._supports_vision
-            )
-        pairs = derive_messages_with_source_ranges(
-            session.events, supports_vision=self._supports_vision
-        )
+            return [message for message, _source_range in self._derive_pairs(session)]
         return self._pruner.apply(
-            pairs, self._prune_decisions.get(session.session_id, {}),
+            self._derive_pairs(session),
+            self._prune_decisions.get(session.session_id, {}),
         )
 
     async def _prune_projection(
@@ -1924,17 +2048,14 @@ class ContextBuilder:
             # #823 / MM-02（A6）：看板/tokens_before 读数必须与 build/compact 的
             # 视觉口径一致——带图会话下用 vision=False 的占位符文本估算会低估，
             # 与真实投影（图片块）口径漂移。传同一 `self._supports_vision`。
+            # #1528：复用 `build` 刚落下的同一 mark 投影，看板轮询不再全量重派生。
             messages_tokens = estimate_message_tokens(
-                derive_messages(
-                    session.events, supports_vision=self._supports_vision,
-                )
+                [message for message, _source_range in self._derive_pairs(session)]
             )
         else:
-            pairs = derive_messages_with_source_ranges(
-                session.events, supports_vision=self._supports_vision,
-            )
             messages = self._pruner.apply(
-                pairs, self._prune_decisions.get(session.session_id, {}),
+                self._derive_pairs(session),
+                self._prune_decisions.get(session.session_id, {}),
             )
             messages_tokens = estimate_message_tokens(messages)
         system_prompt_tokens = self._system_prompt_tokens or 0

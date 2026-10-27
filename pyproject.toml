@@ -48,7 +48,7 @@ memory = [
     "langmem>=0.0.30,<0.1",
 ]
 observability = [
-    "langfuse>=3",
+    "langfuse>=5.0.4",
 ]
 sandbox = [
     "docker>=7",

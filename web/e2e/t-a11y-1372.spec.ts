@@ -318,6 +318,22 @@ test('#1372 AC2：重放弹窗 Esc 后焦点回到行内 ⋯ 触发按钮', asyn
   await expect(trigger).toHaveAttribute('aria-label', /操作/);
 });
 
+test('#1372 回归：更多工具菜单打开时，Escape 一次关闭菜单', async ({ page }) => {
+  await openApp(page, false);
+  const trigger = page.locator('.appbar-more-trigger');
+  const tip = page.locator('.tip-content');
+  await trigger.hover();
+  await expect(tip).toContainText('更多工具');
+  await trigger.click();
+
+  const menu = page.locator('.appbar-more-menu');
+  await expect(menu).toBeVisible();
+  await expect(tip).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeHidden();
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+});
+
 test('#1372 AC3：tooltip 覆盖与顶栏入口可达性（顶栏只剩触发器 tooltip + 菜单项可达性 / rail / 会话行 / Inspector / composer / 会话名）', async ({ page }) => {
   test.setTimeout(60_000);
   // 新会话态：先把 5 个 composer chip 量全（#1444 后预算 chip 两态都在，这里取新建态）。

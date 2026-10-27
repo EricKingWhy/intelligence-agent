@@ -99,7 +99,11 @@ test('AC1/AC2：项目 → 会话层级按账本手工序渲染；未分组区�
   expect(await ungrouped(page).locator('.session-item-id').allTextContents()).toEqual(['free-1']);
 
   // AC2：未分组的会话可点开——历史重建出来
-  await ungrouped(page).locator('.session-item').click();
+  await ungrouped(page)
+    .locator('.session-row')
+    .filter({ has: page.locator('.session-item-id', { hasText: 'free-1' }) })
+    .locator('.session-item-id')
+    .click();
   await expect(page.locator('.model-output').last()).toContainText('未分组会话的历史回答。');
 
   // AC2：可**继续对话**——真的发出续聊请求（不是只打开看看）
@@ -117,7 +121,7 @@ test('AC3：新建项目输入绝对路径；路径不存在 → 就地给出清
   });
   await page.goto('/');
 
-  await page.getByLabel('新建项目').click();
+  await page.locator('.session-list-actions button[aria-label="新建项目"]').click();
   const dialog = page.locator('.project-dialog');
   await expect(dialog).toBeVisible();
 
@@ -393,7 +397,7 @@ test('UI-05：有会话或项目时回退 icon-only 按钮（aria-label 定位�
   await routeApi(page, { sessions: baseSessions(), projects: [P1] });
   await page.goto('/');
   await expect(page.locator('.rail-empty-btn-primary')).toHaveCount(0);
-  await expect(page.locator('button[aria-label="新建项目"]')).toBeVisible();
+  await expect(page.locator('.session-list-actions button[aria-label="新建项目"]')).toBeVisible();
   await expect(page.locator('.rail-empty-action')).toHaveCount(0);
 });
 
