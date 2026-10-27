@@ -37,7 +37,7 @@ def client(tmp_path):
         model_name="deepseek-chat",
         agent_models=_CATALOG_JSON,
     )
-    return TestClient(create_app(settings, enable_cors=False))
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
 def _seed(client, session_id: str = "sid-1") -> None:

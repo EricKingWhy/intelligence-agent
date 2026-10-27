@@ -1,0 +1,21 @@
+=== on-site self-check ===
+timestamp: 2026-10-23T12:30:34.9317956+08:00
+cwd: D:\ia-batch3-codex
+HEAD: dec9aa6973ad3c8e76ac8fb2c2b2dfb5357ee244
+git status:
+## main
+
+=== branch/worktree check ===
+timestamp: 2026-10-23T12:45:58.8053244+08:00
+clone: D:\ia-batch3-codex
+cwd: D:\ia-batch3-codex
+branch: codex/issue-1492-memory-freeze-backup
+HEAD: dec9aa6973ad3c8e76ac8fb2c2b2dfb5357ee244
+git status:
+## codex/issue-1492-memory-freeze-backup
+ M pyproject.toml
+ M uv.lock
+?? docs/runbooks/memory-freeze-backup.md
+?? scripts/memory_freeze_backup.py
+?? session.log
+?? tests/memory/v2/test_memory_freeze_backup.py

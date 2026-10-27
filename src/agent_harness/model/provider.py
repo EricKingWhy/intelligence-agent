@@ -1,6 +1,8 @@
 """ModelProvider：唯一的职责是把 ModelConfig 变成可用的 ChatModel。
 
-不写 HTTP Client、不做重试/缓存——这些都由 langchain-openai 和底层 openai SDK 负责。
+不做重试/缓存——这些由 langchain-openai 和底层 openai SDK 负责。**唯一**自建的
+HTTP 对象是 #1485 的守卫客户端（`guarded_clients`）：它只是给 SDK 默认 client 挂一个
+request hook，超时 / 连接池 / 重定向仍取 SDK 默认值。
 """
 
 import logging
@@ -14,8 +16,10 @@ from agent_harness.model.config import (
 )
 from agent_harness.model.config import (
     ConfigError,
+    ModelClientConstructionError,
     ModelConfig,
 )
+from agent_harness.model.endpoint_guard import guarded_clients
 
 logger = logging.getLogger("agent_harness.model")
 
@@ -54,15 +58,17 @@ class ReasoningChatOpenAI(ChatOpenAI):
         return generation_chunk
 
 
-class ModelClientConstructionError(RuntimeError):
-    """模型 client 构造失败（#517 BUG-05）。
-
-    `create_chat_model` 的构造是**纯本地操作**（字段校验 + SDK client 初始化），
-    此处的失败来自配置/环境而非网络调用——典型如 corporate/k8s 代理变量
-    （`NO_PROXY` 里的 `[::1]`）让 httpx 的代理映射解析在构造期抛 `InvalidURL`。
-    显式类型让 web 层按类型映射成结构化 503（环境/配置暂时不可用，可修好重试），
-    而不是把它当服务端 bug 打成裸 500。`__cause__` 保留原始异常。
-    """
+def _close_quietly(client: Any) -> None:
+    """构造失败路径的清理：关闭异常不能盖掉原本要上报的构造错误。"""
+    if client is None:
+        return
+    close = getattr(client, "close", None)
+    if close is None:
+        return  # 异步 client 只有 aclose()；未发过请求 ⇒ 没有连接要回收
+    try:
+        close()
+    except Exception:  # noqa: BLE001, S110 — 清理失败不改变失败结论
+        pass
 
 
 def create_chat_model(
@@ -91,6 +97,12 @@ def create_chat_model(
         "temperature": config.temperature,
         "request_timeout": request_timeout,
         "max_retries": 0,
+        # 显式关掉 langchain-openai 的 socket 选项注入：它只在**自建** transport 时
+        # 生效，而本函数总是自带 client（下面），那条路径根本不走。留着默认值会让
+        # `_warn_if_proxy_env_shadowed` 在设了代理变量的环境里每进程报一次
+        # "代理自动探测被禁用"——对本路径是**假警报**（我们的 client 是裸 httpx2，
+        # env 代理照常生效）。传 `()` = 显式声明"不要注入"，警告随之消失。
+        "http_socket_options": (),
     }
     if reasoning_effort is not None:
         capability = config.validate_reasoning_effort(reasoning_effort)
@@ -101,8 +113,23 @@ def create_chat_model(
             )
         kwargs["reasoning_effort"] = wire
     try:
+        # #1485 端点误配置守卫：注入带 request hook 的 httpx2 客户端。httpx2 在**每一跳**
+        # 重定向前都调 request hook（`_send_handling_redirects` 循环体首行），所以被拦
+        # 目标既收不到请求也收不到 Authorization 头。例外只来自所有者登记的
+        # `Settings.model_endpoint_allowlist`（经 ModelConfig 带到这里）。
+        # 放在 try 内：构造代理映射时可能抛 `InvalidURL`，那是同族的构造期失败，
+        # 必须仍包成 `ModelClientConstructionError`（web 端点据此回 503 而非裸 500）。
+        kwargs["http_client"], kwargs["http_async_client"] = guarded_clients(
+            base_url=config.base_url,
+            allow=config.endpoint_allowlist,
+        )
         return ReasoningChatOpenAI(**kwargs)
     except Exception as error:
+        # 已经建出来的客户端不归 SDK 管（`ReasoningChatOpenAI` 构造失败时它不会
+        # 接手关闭），显式释放连接池，别指望 `__del__`（异步那个在没有运行 loop
+        # 时会直接跳过）。
+        for client in (kwargs.get("http_client"), kwargs.get("http_async_client")):
+            _close_quietly(client)
         # 构造期失败（#517 BUG-05）：代理 URL 解析坏、key 形态非法等。稳定
         # outcome 让 JSONL 能按 outcome 直接捞出这条——与上面
         # reasoning_effort_not_injected 同一排障原则。

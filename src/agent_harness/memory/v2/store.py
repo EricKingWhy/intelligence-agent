@@ -377,7 +377,8 @@ async def _ensure_tool_projection_index(connection) -> None:
             "memory_v2_one_tool_projection could not be created (duplicate tool rows from "
             "an older build); falling back to a non-unique index. Uniqueness is NOT enforced "
             "until the duplicates are gone: remove the duplicated text from both markdown "
-            "files, then run a reprojection once per duplicate (each pass deletes one row); "
+            "files, then run `agent-harness memory reproject` once per duplicate (each pass "
+            "deletes one row); "
             "the unique index is restored on the next start after the last one is gone.")
 
 

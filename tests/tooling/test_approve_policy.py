@@ -38,12 +38,11 @@ from agent_harness.tooling.approve_policy import (
     ApprovePolicyRule,
     ApprovePolicyStore,
     PolicyGranularity,
+    default_control_root,
+    project_key,
 )
 from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
 from agent_harness.tools import BashTool
-
-_POLICY_FILE = Path(".agent-harness") / "approve-policy.json"
-
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -131,6 +130,15 @@ async def _wait_for_pending(queue: PendingApprovalQueue, tries: int = 200) -> No
     raise AssertionError("approval request never registered")
 
 
+@pytest.fixture(autouse=True)
+def _pin_control_root(tmp_path: Path, monkeypatch) -> None:
+    """#1487：控制目录钉 tmp_path 的兄弟目录——默认落 home（hermeticity）；也不
+    放 tmp_path 下：这些用例的项目根就是 tmp_path，控制文件必须不在项目树内。
+    兄弟目录随 pytest 的 run 根目录（pytest-<N>/）一起被 retention 清理。"""
+    control = tmp_path.parent / f"{tmp_path.name}-approve-policy-control"
+    monkeypatch.setenv("AGENT_HARNESS_APPROVE_POLICY_ROOT", str(control))
+
+
 @pytest.fixture
 def sandbox(tmp_path: Path) -> LocalSubprocessSandbox:
     return LocalSubprocessSandbox(workspace_root=tmp_path)
@@ -168,8 +176,14 @@ def test_approval_response_accepts_command_granularity() -> None:
 
 
 class TestStorePersistence:
-    def test_path_is_project_relative(self, tmp_path: Path) -> None:
-        assert ApprovePolicyStore(tmp_path).path == tmp_path / _POLICY_FILE
+    def test_path_lives_in_control_dir_outside_project(self, tmp_path: Path) -> None:
+        # #1487：控制文件在控制目录内、按项目根哈希命名，不在项目树下；
+        # 旧工作区路径只剩 legacy 语义（import_legacy 的读取源）。
+        store = ApprovePolicyStore(tmp_path)
+        assert store.path.parent == default_control_root()
+        assert store.path.name == f"{project_key(tmp_path)}.json"
+        assert tmp_path not in store.path.parents
+        assert store.legacy_path == tmp_path / ".agent-harness" / "approve-policy.json"
 
     def test_missing_file_loads_empty(self, tmp_path: Path) -> None:
         assert ApprovePolicyStore(tmp_path).load() == []
@@ -181,7 +195,7 @@ class TestStorePersistence:
 
     def test_corrupt_file_fails_closed(self, tmp_path: Path) -> None:
         # 坏配置不能臆造规则放行：读不动就当成没有规则（默认逐调用审批）。
-        target = tmp_path / _POLICY_FILE
+        target = ApprovePolicyStore(tmp_path).path
         target.parent.mkdir(parents=True)
         target.write_text("{ not json", encoding="utf-8")
         assert ApprovePolicyStore(tmp_path).load() == []
@@ -189,7 +203,7 @@ class TestStorePersistence:
     def test_invalid_utf8_fails_closed(self, tmp_path: Path) -> None:
         # P2-1：非 UTF-8 字节 → read_text 抛 UnicodeDecodeError（ValueError 子类，
         # 不是 OSError）。人工手改 / 编码损坏的文件不得把 run 顶崩，须 fail-closed。
-        target = tmp_path / _POLICY_FILE
+        target = ApprovePolicyStore(tmp_path).path
         target.parent.mkdir(parents=True)
         target.write_bytes(b"\xff\xfe{\"rules\": []}")
         assert ApprovePolicyStore(tmp_path).load() == []

@@ -1,0 +1,1 @@
+2026-10-26	机械归属（非内容审查主张）：#1611 gate0 diff-check 修复 5add996e8——仅删 tests/tooling/test_line_coverage_ratchet.py 文件末尾 2 个多余空行（blob 级收敛为单个换行符），零语义改动；随后 CI gate0 的 diff-check 车道由 FAIL 转 PASS（该轮 6/7，仅剩 coverage 因本归属行缺失而红）。范围仅覆盖该单提交，父 ff1c842d6 之前的范围由本线既有 t1499-* 行覆盖。	ff1c842d6a90cdf7bf84a9605feb6dc3ee857ac8..5add996e8b336dd2d68a36f930299fa3fd5d2ec5

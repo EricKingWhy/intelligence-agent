@@ -38,7 +38,7 @@ def _client(tmp_path: Path, **client_kwargs) -> TestClient:
     settings = Settings(
         _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test"
     )
-    return TestClient(create_app(settings, enable_cors=False), **client_kwargs)
+    return TestClient(create_app(settings, enable_cors=False, allow_testserver=True), **client_kwargs)
 
 
 # ── BUG-07：长度上限 ─────────────────────────────────────────────────

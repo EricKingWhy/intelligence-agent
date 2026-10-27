@@ -81,10 +81,15 @@ git -C <repo> diff --name-status <可见SHA-A>..<可见SHA-B>
 6. 门禁和 review 条件满足后，将来源集成到 D:\intelligence-agent 的本地 main，快进优先；异常复杂冲突转 §4。
 7. 按 §3.2 核对被集成树与已验证树；确认前后端集成行为。
 8. 先取得分支 push 的明确批准，再推集成分支并创建指向 main 的 PR。
-9. 等服务端 gate0 绿；strict 要求与 origin/main 同步时，返回施工分支同步、再验证新增 diff。
+9. 等服务端 gate0 绿；strict 要求与 origin/main 同步时，返回施工分支同步、再验证新增 diff。**施工分支上的每次 push 前同样跑第 5 步的覆盖检查**：空 `--cc` 的 sync merge（tree≠父）会被闸门 fail-closed，先落机械归属行再推（2026-10-25 三例：#1584 / #1578 / #1591 各白付一轮 CI 往返）。
 10. 单独取得 PR merge 批准，再按当前服务端允许的合并方式合并 PR。
 11. fetch origin，显式分析并将本地 main 同步到新的 origin/main；非快进或冲突不能强制对齐。
 12. 通知另一条施工线或用户回补；另一条线下次开工前按 §2 获取新基准。
+
+第 2、5、9 步的机械段（同步合并、docs 三件套并集、push 前强制覆盖检查、等 gate0）有仓库内脚本
+（#1597）：`scripts/integration/update-pr`（失败形态带显式提示：MANUAL-CONFLICT / CODE-IN-CC /
+COVERAGE-RED+机械归属行）与 `scripts/integration/poll-pr`（轮询 gate0 结论）。用法见各自
+`--help`；冒烟测试 `tests/tooling/test_integration_scripts.py`（临时 fixture 仓，不依赖真实 PR）。
 
 完成条件：每一步对应当前授权；集成树有可核对验证证据，发布有 CI 和批准，其他线已获回补通知。
 
@@ -143,6 +148,7 @@ gh api repos/EricKingWhy/intelligence-agent --jq '{allow_merge_commit,allow_squa
 - 完成交付且合入 main、门禁通过：直接关闭对应 issue，comment 给 commit 和验证证据。
 - 完成交付但未集成：按现行关单授权关闭，comment 明确分支、commit、集成负责人。
 - 部分交付：不关单；comment 记录已完成与剩余项。
+- 集成者完成一批合并后做**标签与状态对账**：仍带 `等待merge` 标签的开放 issue，有对应已合 PR 的核实后关单；无对应已合 PR 的报告孤儿标签待处置（不改标签，留给 owner/用户决定）；同时提醒各票 owner 回补 PHASE_STATUS / Tracker 里的「未合并」表述（2026-10-25 实测：#1553 / #1543 已合未关、#1154 孤儿标签）。
 
 交付按 AGENTS §11 报告改动、规格符合性、验证、剩余与风险；记录落点按 §16.1 与协议 §5/§8.5。
 执行关单使用结构化参数或 UTF-8 body 文件，避免把中文长文本放进 shell 命令行；写盘步骤按协议 §8.9。

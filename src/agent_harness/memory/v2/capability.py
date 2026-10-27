@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import Sequence
+from enum import Enum
 from typing import Any, Protocol
 
 import aiosqlite
@@ -178,7 +179,10 @@ class MemoryV2Service:
         """
         markdown = self._markdown
         if markdown is None:
-            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+            return {
+                "desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False,
+                "unreadable": [],
+            }
         summary = await reprojection.apply_write(
             self._store, markdown, target, response, trusted,
             operations=operations, content=content,
@@ -191,12 +195,28 @@ class MemoryV2Service:
     async def reproject(
         self, trusted: TrustedMemoryIdentity, target: str,
     ) -> dict[str, Any]:
-        """F-06b 运维/漂移入口：先把 pending 账本排空，再全量对账该 target。"""
+        """F-06b 运维/漂移入口：先把 pending 账本排空，再全量对账该 target。
+
+        返回 summary 额外带两项供 CLI 判失败（#1482 Finding 二）：`unreadable`（本轮没读到的
+        **文件**，来自 `reproject_target`）与 `remaining`（对账**之后**该 target 仍在账本里的
+        行数——服务层没有其它可读面，不透传的话"账本有积压"在入口侧不可见）。
+        """
         markdown = self._markdown
         if markdown is None:
-            return {"desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False}
+            return {
+                "desired": 0, "created": 0, "deleted": 0, "skipped": [], "pending": False,
+                "unreadable": [], "remaining": 0,
+            }
         await reprojection.drain_pending(self._store, markdown, trusted)
-        return await reprojection.reproject_target(self._store, markdown, trusted, target)
+        summary = await reprojection.reproject_target(self._store, markdown, trusted, target)
+        # 必须在对账**之后**回读，且只数本 target 的行：拿 drain 的快照会让一次已经收敛的
+        # 运行仍报「账本积压」并退 2，而那个计数是全 target 的，双 target 循环里会被重复
+        # 计入（#1482 F3）。
+        summary["remaining"] = sum(
+            1 for row in await self._store.pending_projections(trusted)
+            if str(row["target"]) == target
+        )
+        return summary
 
     # ----------------------------------------------------------------------------------
     # markdown 权威面（#1353 §2）
@@ -627,10 +647,33 @@ class MemoryV2Service:
         texts = [draft.content, draft.payload.model_dump_json()]
         texts.extend(item.excerpt for item in draft.evidence)
         if find_secret(*texts) is not None:
-            raise MemoryContentRejected("该内容匹配凭证或密钥规则，不能写入长期记忆。")
+            raise MemoryContentRejected(
+                SECRET_CONTENT_REJECTION,
+                MemoryRejectionReason.SECRET_CONTENT,
+            )
         for text in texts:
             if first_threat_message(text, scope="strict") is not None:
-                raise MemoryContentRejected("该内容匹配注入或外泄模式，不能写入长期记忆。")
+                raise MemoryContentRejected(
+                    "该内容匹配注入或外泄模式，不能写入长期记忆。",
+                    MemoryRejectionReason.THREAT_PATTERN,
+                )
+
+
+class MemoryRejectionReason(str, Enum):
+    """内容被拒的稳定归因码（进 `MemoryContentRejected.reason_code`）。
+
+    字面量是**观测契约**的一部分：金标判定与排障都按它对账，不随中文文案变动
+    （文案会为了可读性改写，码不会——#1440 C 案）。码值由
+    `tests/evaluation/test_memory_v2_gold_reason_contract.py` 的字面量断言钉住。
+    """
+
+    SECRET_CONTENT = "secret_content"
+    THREAT_PATTERN = "threat_pattern"
+
+
+#: 凭证拒绝的中文真因文案：入口 `_reject_secret` 与显式路径 `tools.py` 共用一份，
+#: 两处措辞才不会有第二份真源（#1440 C 案）。**文案可变、`reason_code` 不变**。
+SECRET_CONTENT_REJECTION = "该内容匹配凭证或密钥规则，不能写入长期记忆。"
 
 
 class MemoryContentRejected(PermissionError):
@@ -640,7 +683,16 @@ class MemoryContentRejected(PermissionError):
     `_MEMORY_ERROR_STATUS`，本类命中父类那一行（#1440 P2-1 之前是精确类型索引，子类
     会 KeyError 成 500）。垫片层先捕获本类、再捕获裸 `PermissionError`，真因才不会被
     "当前身份无权"吞掉。
+
+    `reason_code` 是机器可读的稳定归因（`MemoryRejectionReason`），随异常对象传播；
+    缺省 `None` 只用于构造兼容，判定方对缺失一律 fail-closed（#1440 C 案）。
     """
+
+    def __init__(
+        self, message: str, reason_code: MemoryRejectionReason | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 class MarkdownAuthorityError(RuntimeError):

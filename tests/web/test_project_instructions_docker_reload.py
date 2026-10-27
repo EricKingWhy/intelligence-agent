@@ -58,7 +58,7 @@ def test_docker_session_reload_reads_private_workspace_via_public_endpoint(
     settings = _settings(tmp_path)
 
     session_id: str | None = None
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings, allow_testserver=True)) as client:
         created = client.post(
             "/api/sessions",
             params={"launch": "false"},

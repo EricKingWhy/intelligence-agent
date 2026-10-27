@@ -39,12 +39,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: 检出
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # 全量历史：全量 pytest 含审查覆盖闸门用例，按 ledger 区间走 git 历史，浅克隆必 FAIL（gate0 检出同理）
         with:
           fetch-depth: 0
       - name: 装 Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: 装 uv 0.10.9（缓存 ~/.cache/uv）
@@ -68,8 +68,19 @@ jobs:
             --cov=src/agent_harness \
             --cov-report=term \
             --cov-report=xml:artifacts/coverage.xml
+      # #1499：覆盖率**基线留痕**（只记录，不判定）。写的是"这份报告跑在哪棵树上、哪个平台、
+      # 什么测量范围、排除了什么、原始报告 sha256" —— 判定面在 `coverage-ratchet` 工作流
+      # （变更行棘轮），本作业不设任何 fail_under。
+      - name: 覆盖率基线留痕（只记录，不判定）
+        # 测试红也留痕：报告只要产出了，就该有"它跑在哪棵树上"的记录（与下一行的 upload 同理）。
+        if: always()
+        run: |
+          uv run python scripts/check_line_coverage_ratchet.py baseline \
+            --report artifacts/coverage.xml \
+            --out artifacts/coverage-baseline.json \
+            --scope "pytest tests + --cov=src/agent_harness（ubuntu-latest / py3.13）"
       - name: 上传测试报告（失败也传）
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: nightly-backend-reports
@@ -82,7 +93,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: 检出
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: 装 pnpm 10.32.1
@@ -90,7 +101,7 @@ jobs:
         with:
           version: 10.32.1
       - name: 装 Node 22（pnpm store 缓存）
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: pnpm
@@ -107,7 +118,7 @@ jobs:
         working-directory: web
         run: pnpm build
       - name: 上传测试报告（失败也传）
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: nightly-frontend-reports
@@ -126,9 +137,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: 检出
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 装 Node 22（npm 缓存）
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: npm
@@ -146,7 +157,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: 检出
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: 装 pnpm 10.32.1
@@ -154,7 +165,7 @@ jobs:
         with:
           version: 10.32.1
       - name: 装 Node 22（pnpm store 缓存）
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: pnpm
@@ -163,7 +174,7 @@ jobs:
         working-directory: web
         run: pnpm install --frozen-lockfile
       - name: 缓存 playwright 浏览器
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: ms-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
@@ -174,7 +185,7 @@ jobs:
         working-directory: web
         run: node node_modules/@playwright/test/cli.js test --workers=2
       - name: 上传 e2e 产物（trace/截图，失败也传）
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: nightly-e2e-artifacts

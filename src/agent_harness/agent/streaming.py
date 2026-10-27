@@ -13,6 +13,10 @@ flush 无定时器：chunk 到达时惰性检查窗口到期（确定性、无�
 
 事件全部经 Session.append 持久化后由调用方镜像 yield；本类只 append 不 yield
 （取消臂的生成器关闭上下文禁止产出）。
+
+**同步 / 异步两套入口（#1489）**：`*_async` 系列语义与同步版逐字相同，只把
+durable 刷盘的等待从事件循环移出（`Session.append_async`）。`_drive` 的流式
+热路径走异步版；取消臂（生成器关闭上下文，不能 await）继续走同步版。
 """
 
 from __future__ import annotations
@@ -85,6 +89,27 @@ class BlockStreamer:
                                          self._flush_reasoning, step))
         return events
 
+    async def offer_reasoning_async(self, text: str, *, step: int) -> list[SessionEvent]:
+        """`offer_reasoning` 的异步入口（#1489）：刷盘等待不占事件循环。
+
+        状态机与缓冲语义逐字复用同步实现（:meth:`_take_reasoning` 取走缓冲），
+        只有"落盘走哪个入口"不同——这正是本票要移出事件循环的那一段。
+        """
+        events: list[SessionEvent] = []
+        if self._rsn_block is None:
+            self._block_counter += 1
+            self._rsn_block = f"rsn-{step}-{self._block_counter}"
+            events.append(await self._session.append_async(
+                REASONING_STARTED, {"source": "model"},
+                run_id=self._run_id, step_id=step, block_id=self._rsn_block,
+            ))
+        if not self._rsn_buf:
+            self._rsn_since = self._clock()
+        self._rsn_buf += text
+        if self._flush_due(len(self._rsn_buf), self._rsn_since):
+            events.extend(await self._flush_reasoning_async(step))
+        return events
+
     def offer_text(self, text: str, *, step: int) -> list[SessionEvent]:
         """文本 chunk：思考块让位（completed 转场），缓冲并按需 flush。"""
         events: list[SessionEvent] = []
@@ -97,12 +122,32 @@ class BlockStreamer:
                                          self._flush_text, step))
         return events
 
+    async def offer_text_async(self, text: str, *, step: int) -> list[SessionEvent]:
+        """`offer_text` 的异步入口（#1489）：同上，语义逐字一致。"""
+        events: list[SessionEvent] = []
+        if self._rsn_block is not None:
+            events.extend(await self._close_reasoning_async(step, interrupted=False))
+        if not self._text_buf:
+            self._text_since = self._clock()
+        self._text_buf += text
+        if self._flush_due(len(self._text_buf), self._text_since):
+            events.extend(await self._flush_text_async(step))
+        return events
+
     def end_step(self, *, step: int) -> list[SessionEvent]:
         """一次模型流结束：关思考块（completed）+ 落文本残余。"""
         events: list[SessionEvent] = []
         if self._rsn_block is not None:
             events.extend(self._close_reasoning(step, interrupted=False))
         events.extend(self._flush_text(step))
+        return events
+
+    async def end_step_async(self, *, step: int) -> list[SessionEvent]:
+        """`end_step` 的异步入口（#1489）：同上，语义逐字一致。"""
+        events: list[SessionEvent] = []
+        if self._rsn_block is not None:
+            events.extend(await self._close_reasoning_async(step, interrupted=False))
+        events.extend(await self._flush_text_async(step))
         return events
 
     def interrupt(self, *, step: int) -> list[SessionEvent]:
@@ -133,6 +178,46 @@ class BlockStreamer:
         if buf and (self._clock() - since >= self._window or len(buf) >= self._max_chars):
             return flush(step)
         return []
+
+    def _flush_due(self, length: int, since: float) -> bool:
+        """窗口/尺寸判定（同步与异步入口共用的唯一一份）。"""
+        return bool(length) and (
+            self._clock() - since >= self._window or length >= self._max_chars
+        )
+
+    async def _close_reasoning_async(
+        self, step: int, *, interrupted: bool,
+    ) -> list[SessionEvent]:
+        """`_close_reasoning` 的异步入口：残余先落盘，再补终态事件。"""
+        events = await self._flush_reasoning_async(step)
+        event_type = REASONING_INTERRUPTED if interrupted else REASONING_COMPLETED
+        events.append(await self._session.append_async(
+            event_type, {},
+            run_id=self._run_id, step_id=step, block_id=self._rsn_block,
+        ))
+        self._rsn_block = None
+        return events
+
+    async def _flush_reasoning_async(self, step: int) -> list[SessionEvent]:
+        if not self._rsn_buf:
+            return []
+        event = await self._session.append_async(
+            REASONING_DELTA,
+            {"delta": self._rsn_buf, "source": "model"},
+            run_id=self._run_id, step_id=step, block_id=self._rsn_block,
+        )
+        self._rsn_buf = ""
+        return [event]
+
+    async def _flush_text_async(self, step: int) -> list[SessionEvent]:
+        if not self._text_buf:
+            return []
+        event = await self._session.append_async(
+            TEXT_DELTA, {"delta": self._text_buf},
+            run_id=self._run_id, step_id=step,
+        )
+        self._text_buf = ""
+        return [event]
 
     def _flush_reasoning(self, step: int) -> list[SessionEvent]:
         if not self._rsn_buf:

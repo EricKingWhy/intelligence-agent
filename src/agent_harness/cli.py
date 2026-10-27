@@ -130,7 +130,10 @@ from agent_harness.session.service import SessionContextCompaction
 from agent_harness.storage.delegation_tree import SessionBudgetHandle
 from agent_harness.storage.session_archive import install_session_archive
 from agent_harness.storage.sqlite import SqliteSessionMetaStore
-from agent_harness.tooling.approve_policy import ApprovePolicyStore
+from agent_harness.tooling.approve_policy import (
+    ApprovePolicyStore,
+    LegacyImportError,
+)
 from agent_harness.tooling.contract import PermissionPolicy
 
 if TYPE_CHECKING:
@@ -732,7 +735,7 @@ def _deadline_dimension_lines(data: dict) -> list[str]:
     判据与 `_extra_dimension_lines` 同源：**键在不在**。键缺席（`#315` 之前的老事件）
     ⇒ 零行（不拿一片 unavailable 当信息）；`None` ⇒ `unlimited`（这一维没配，与同块
     `limit unlimited` 同一个词）；形状认不出（数 / 空串 / 带首尾空白）⇒ `unavailable`
-    ——`agent/run_budget._deadline_or_none` 对同一份事件读作"没配"（它不 strip），
+    ——`agent/run_budget.deadline_or_none` 对同一份事件读作"没配"（它不 strip），
     这里跟着它读：不印那个形状，也不编一个时刻。
     """
     limits = ((data.get("limits") or {}).get("run") or {})
@@ -1285,7 +1288,9 @@ async def run(
         store = JsonlSessionStore(root=workspace_root / "sessions")
         # #1389：会话全文存档（派生检索索引）。CLI `run` 不经 RunManager，
         # store 级观察者是本路径唯一覆盖点。
-        install_session_archive(store, workspace_root / "sessions" / "state.db")
+        archive_observer = install_session_archive(
+            store, workspace_root / "sessions" / "state.db",
+        )
         _, wiring = await assemble_wiring(settings, sessions=store)
         # WS-2 / ADR-0025：项目索引必须拿到会话 header 来源，故先建 store 再建 stores
         # （首次 bootstrap 就在 initialize_stores 里发生，AC14–16）。
@@ -1405,6 +1410,7 @@ async def run(
                     pause_data = event.data
         finally:
             memory_session_var.reset(session_token)
+            archive_observer.close()
         if pause_data is not None:
             # 恢复指令要给出**本会话 id**——暂停摘要是事件的纯函数（不含会话上下文），
             # 而 CLI 的一次性命令此前从不打印 session_id。提示读的是 durable 事件的
@@ -1502,11 +1508,11 @@ def main() -> None:
 def _main_serve(argv: list[str]) -> None:
     """W-11（#355）：单机服务冷启动闭环（附着 → 否则竞争启动 → 二次检查）。
 
-    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 127.0.0.1 /
-    localhost，个人桌面服务不暴露 LAN）；远程/LAN 部署保持既有显式配置入口
-    （`create_prod_app` + 显式 jwt_secret），不经本命令。
+    本机个人服务固定 loopback + 随机受管端口（`--host` 被限定为 IPv4/IPv6
+    loopback，个人桌面服务不暴露 LAN）。控制面默认仅本机；非回环部署必须显式
+    配置 `CONTROL_PLANE_ALLOWED_HOSTS`，才能通过 Host 闸。
     """
-    from agent_harness.host_service import HostServiceError, serve_once
+    from agent_harness.host_service import HostServiceError, loopback_url, serve_once
 
     parser = argparse.ArgumentParser(
         prog="agent-harness serve",
@@ -1515,8 +1521,8 @@ def _main_serve(argv: list[str]) -> None:
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        choices=["127.0.0.1", "localhost"],
-        help="绑定地址；只允许 loopback（W-11：个人服务不暴露 LAN，远程部署走显式配置入口）",
+        choices=["127.0.0.1", "localhost", "::1"],
+        help="绑定地址；本命令只允许 IPv4/IPv6 loopback；非回环部署须显式配置 CONTROL_PLANE_ALLOWED_HOSTS",
     )
     args = parser.parse_args(argv)
     settings = Settings()
@@ -1533,7 +1539,7 @@ def _main_serve(argv: list[str]) -> None:
         return
     if not outcome.served and outcome.endpoint is not None:
         print(
-            f"已有本机服务在运行：http://127.0.0.1:{outcome.endpoint.port}"
+            f"已有本机服务在运行：{loopback_url(outcome.endpoint.host, outcome.endpoint.port, '')}"
             "（已附着，本进程退出）"
         )
 
@@ -3504,13 +3510,16 @@ def _main_memory(argv: list[str]) -> None:
     - `memory reject <id>`：明确丢弃；
     - `memory blocked` / `promote <id>` / `discard <id>`（#1461）：后台 formation 被审批门
       拦下的写入的两段式处置——列表、放行重放、丢弃。
+    - `memory reproject [--target memory|user]`（#1482）：派生层与 markdown 权威面对账，
+      即 `store.py` 降级 warning 里那句运维指令的真实入口。
 
     与 web 的 `/api/memory-pending*` 是**同一条**领域路径（`StagedWriteStore`），CLI 只
     做渲染。身份取本进程的 `get_identity_context()`（单用户部署下即 local/local），与
     web 的 `_trusted_v2()` 同源。
 
     退出码：approve/reject 被拒（pin 失效、id 不存在）是**业务结果**不是进程失败，
-    照常打印原因并退 0；只有命令自报失败（迁移有未导出条目）才退 2。
+    照常打印原因并退 0；命令自报失败才退 2 —— 迁移有未导出条目，或 `reproject` 未收敛
+    （markdown 未装配 / 有文件读不出来 / 账本仍有该 target 的积压行 / 仍有待投影项）。
     """
     parser = argparse.ArgumentParser(prog="agent-harness memory")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -3529,6 +3538,42 @@ def _main_memory(argv: list[str]) -> None:
     subcommands.add_parser(
         "migrate", help="把 SQLite 里的 active 记忆一次性导出到 memories/*.md（幂等）",
     )
+    identity = subcommands.add_parser(
+        "identity",
+        help="盘点旧身份/版本并逐项批准映射（#1493：不自动选赢家，未裁决不写文件）",
+    )
+    identity.add_argument(
+        "action", choices=("plan", "list", "show", "approve", "resolve", "apply"),
+        help="plan=只读盘点；list/show=读清单；approve/resolve=人工裁决；apply=过闸写当前文件",
+    )
+    identity.add_argument("item", nargs="?", default=None, metavar="ID",
+                          help="approve/resolve 的条目 ID（list 里可查）")
+    identity.add_argument(
+        "--conflict", action="append", default=None, metavar="M1,M2",
+        help="显式声明正文冲突的旧 memory_id 组（可重复；不支持自动判定）",
+    )
+    identity.add_argument(
+        "--merge", default=None, metavar="SOURCE",
+        help="resolve：取哪一条正文（memory_id）或哪个旧 key 的设置（tenant/user）",
+    )
+    identity.add_argument("--archive", action="append", default=None, metavar="ID",
+                          help="resolve 预算冲突：哪几条不进当前文件（进只读档案，可重复）",
+    )
+    identity.add_argument("--archive-all", action="store_true",
+                          help="resolve 空正文/扫描/分隔符拒绝项：整组不导入（进只读档案）")
+    identity.add_argument(
+        "--memory-limit", type=int, default=None,
+        help="plan：压低 MEMORY.md 预算（缺省用部署配置；高于部署配置会被拒绝）")
+    identity.add_argument(
+        "--user-limit", type=int, default=None,
+        help="plan：压低 USER.md 预算（缺省用部署配置；高于部署配置会被拒绝）")
+    reproject = subcommands.add_parser(
+        "reproject", help="把派生层与 memories/*.md 对账（收敛重复投影与积压账本）",
+    )
+    reproject.add_argument(
+        "--target", choices=("memory", "user"), default=None,
+        help="只对账一个文件；缺省两个都跑",
+    )
     args = parser.parse_args(argv)
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
@@ -3537,6 +3582,77 @@ def _main_memory(argv: list[str]) -> None:
     if failed:
         # 迁移有 skipped 行 = 有记忆真的没进 markdown，脚本化调用必须能看出来。
         raise SystemExit(2)
+
+
+def _identity_summary(manifest: dict, *, created: bool) -> str:
+    """一行分区计数 + 还差什么（未批/未裁/活 lease），让人知道下一步做什么。"""
+    partition = manifest["partition"]
+    pending_approvals = [
+        item["id"] for item in manifest["items"]
+        if item["disposition"] == "map" and not item.get("approved_at")
+    ]
+    conflicts = [item["id"] for item in manifest["items"] if item["disposition"] == "conflict"]
+    leases = [item["id"] for item in manifest["items"] if item.get("lease_live")]
+    lines = [
+        (
+            f"映射清单{'已生成' if created else '已更新'}："
+            f"条目 {partition['items']} 项 / 源行 {partition['rows_total']}"
+            f"（映射 {partition['rows_mapped']}、档案 {partition['rows_archived']}、"
+            f"冲突 {partition['rows_conflicted']}）"
+        ),
+        f"待逐项批准：{len(pending_approvals)} 项",
+        f"待人工裁决的冲突：{len(conflicts)} 项" + (
+            f"（{'、'.join(conflicts)}）" if conflicts else ""),
+    ]
+    if leases:
+        lines.append(f"仍有活 lease（先等结终态或过期）：{'、'.join(leases)}")
+    if not pending_approvals and not conflicts and not leases:
+        lines.append("全部获批且无未决冲突：可以执行 memory identity apply")
+    return "\n".join(lines)
+
+
+def _identity_listing(manifest: dict) -> str:
+    if not manifest["items"]:
+        return "（清单为空：没有任何旧数据需要映射）"
+    lines = ["ID	状态	目标/原因	来源数"]
+    for item in manifest["items"]:
+        state = item["disposition"]
+        if state == "map":
+            state += "（已批）" if item.get("approved_at") else "（待批）"
+        note = item.get("target") or item.get("reason") or item.get("status") or ""
+        if item.get("lease_live"):
+            note = f"{note} [活 lease]".strip()
+        lines.append(f"{item['id']}\t{state}\t{note}\t{len(item.get('sources') or ())}")
+    return "\n".join(lines)
+
+
+def _identity_detail(manifest: dict, item_id: str) -> str:
+    for item in manifest["items"]:
+        if item["id"] != item_id:
+            continue
+        lines = [f"{item_id}：{item['kind']} / {item['disposition']}"]
+        for key in ("target", "content_hash", "content_length", "reason", "status",
+                    "idempotency_key", "outcome", "expires_at", "origin", "payload_hash"):
+            if item.get(key) is not None:
+                lines.append(f"  {key} = {item[key]}")
+        if item.get("decision"):
+            lines.append(f"  裁决 = {item['decision']}")
+        if item.get("entries"):
+            lines.append(f"  超限条目 = {'、'.join(item['entries'])}")
+        for variant in item.get("variants") or ():
+            lines.append(
+                f"  变体 {variant['key']}：hash={variant.get('content_hash') or variant.get('values')}"
+                f"（{variant.get('values_source') or 'explicit'}）"
+            )
+        for source in item.get("sources") or ():
+            lines.append(
+                f"  来源 {source['table']}/{source['id']} row_hash={source['row_hash'][:16]} "
+                f"identity={source.get('identity')}"
+            )
+        # 正文只在库里：要读原文时按来源 ID 回库，清单里不留副本。
+        lines.append("  正文不在清单里：按上面的 memory_id 回库查看，确认后再裁决")
+        return "\n".join(lines)
+    return f"清单里没有 {item_id}"
 
 
 async def _memory_command(
@@ -3549,6 +3665,75 @@ async def _memory_command(
         build_memory_v2_service,
     )
     from agent_harness.memory.v2.commands import trusted_identity_for_session
+
+    if args.command == "identity":
+        # #1493：旧身份/版本映射。与 migrate 同法**不**装配服务——盘点/写文件都只碰
+        # `memory-v2.db` 与 `memories/*.md`，装服务会顺手 purge 墓碑、起后台循环。
+        from agent_harness.memory.v2 import identity_mapping as mapping
+
+        manifest_path = Path(settings.workspace_dir) / mapping.MANIFEST_NAME
+        try:
+            if args.action == "plan":
+                manifest = await mapping.plan_identity_mapping(
+                    settings.workspace_dir,
+                    database_path=Path(settings.workspace_dir) / MEMORY_V2_DATABASE_NAME,
+                    explicit_conflicts=[
+                        [value.strip() for value in group.split(",") if value.strip()]
+                        for group in (args.conflict or ())
+                    ],
+                    memory_char_limit=(args.memory_limit if args.memory_limit is not None
+                                       else settings.memory_char_limit),
+                    user_char_limit=(args.user_limit if args.user_limit is not None
+                                     else settings.user_char_limit),
+                    # 部署配置的当下取值：flag 只能压低预算，不能抬过它（"不扩预算"红线）。
+                    deployment_memory_char_limit=settings.memory_char_limit,
+                    deployment_user_char_limit=settings.user_char_limit,
+                )
+                return _identity_summary(manifest, created=True), False
+            if args.action == "apply":
+                receipt = await mapping.apply_identity_mapping(manifest_path)
+                counts = receipt["counts"]
+                lines = [
+                    (
+                        f"映射完成：active={counts['active']} 导出={counts['exported']} "
+                        f"去重={counts['deduplicated']}"
+                        f"（MEMORY.md {counts['memory']} / USER.md {counts['user']}）"
+                    ),
+                    f"kind 缺失默认归入 MEMORY.md：{counts['kind_defaulted']} 条（tier≠profile）",
+                    f"设置四项映射：{receipt['settings']} 条",
+                    (
+                        "只读档案：records={records} staged={staged} jobs={jobs} "
+                        "tombstones={tombstones}".format(**receipt["archive"])
+                    ),
+                    f"旧数据销毁：{receipt['destruction']}（批复不等于批准销毁）",
+                ]
+                if counts["skipped"]:
+                    lines.append(f"未写入 {len(counts['skipped'])} 条：")
+                    lines.extend(f"  {item_id}: {error}"
+                                 for item_id, error in counts["skipped"])
+                return "\n".join(lines), bool(counts["skipped"])
+            manifest = mapping.load_manifest(manifest_path)
+            if args.action == "list":
+                return _identity_listing(manifest), False
+            if args.action == "show":
+                if not args.item:
+                    return "show 需要条目 ID（先用 memory identity list 查看）", True
+                return _identity_detail(manifest, args.item), False
+            if not args.item:
+                return f"{args.action} 需要条目 ID（先用 memory identity list 查看）", True
+            if args.action == "approve":
+                manifest = await mapping.approve_item(manifest_path, args.item)
+            else:
+                manifest = await mapping.resolve_conflict(
+                    manifest_path, args.item, merge_source=args.merge,
+                    archive_items=args.archive, archive_all=args.archive_all,
+                )
+            return _identity_summary(manifest, created=False), False
+        except FileNotFoundError:
+            return "映射清单不存在：先运行 memory identity plan", True
+        except mapping.MappingBlocked as blocked:
+            # 业务阻断不是崩溃：逐条说清"为什么还不能写"，退码 2 让脚本能看出来。
+            return "\n".join(["映射被阻断：", *(f"  - {reason}" for reason in blocked.reasons)]), True
 
     if args.command == "migrate":
         # #1353 §4：一次性导出。不需要建服务（迁移只读 records 表、写 markdown 文件），
@@ -3582,6 +3767,45 @@ async def _memory_command(
     service = await build_memory_v2_service(settings)
     staged = service.staged
     trusted = trusted_identity_for_session("", None)
+    if args.command == "reproject":
+        # #1482 Finding 二甲案：给降级 warning 指的那句运维指令接一个真实入口。
+        # 与 migrate 分支不同——reproject 必须读活账本与派生层，所以走 `build_memory_v2_service`
+        # 装配（与 pending/approve 同形）。
+        if service.markdown is None:
+            # 没有权威面就没有可对账的东西：全零摘要会装作成功，直接报错。
+            return "reproject 失败：本部署未装配 markdown 权威面（memories/*.md）。", True
+        lines = ["记忆投影对账："]
+        failed_targets: list[str] = []
+        for target in ([args.target] if args.target else ["memory", "user"]):
+            summary = await service.reproject(trusted, target)
+            lines.append(
+                f"  {target}: created={summary['created']} deleted={summary['deleted']} "
+                f"pending={summary['pending']} desired={summary['desired']}"
+            )
+            if summary["unreadable"]:
+                # `unreadable` 列的是**真正读不出来**的文件，不一定就是本轮的对账对象：
+                # 另一侧读不出来时把本 target 说成不可读，会让运维去修错文件（#1482 F2）。
+                unreadable = "、".join(summary["unreadable"])
+                if target in summary["unreadable"]:
+                    lines.append(f"    {target}: 文件读不出来，本轮未对账（修好文件后重跑）")
+                    failed_targets.append(f"{target} 不可读")
+                else:
+                    lines.append(
+                        f"    {unreadable} 读不出来，本轮无法判定 {target}"
+                        "（修好文件后重跑）"
+                    )
+                    failed_targets.append(f"{target} 未对账（{unreadable} 不可读）")
+            if summary["remaining"]:
+                lines.append(f"    账本仍有 {summary['remaining']} 行待收敛")
+                failed_targets.append(f"{target} 账本积压 {summary['remaining']} 行")
+            if summary["pending"]:
+                failed_targets.append(f"{target} 仍有待投影项")
+                for skipped_target, _digest, reason in summary["skipped"]:
+                    lines.append(f"    跳过（{skipped_target}）：{reason}")
+        if failed_targets:
+            lines.append("未收敛：" + "；".join(dict.fromkeys(failed_targets)))
+            return "\n".join(lines), True
+        return "\n".join(lines), False
     if args.command == "journey":
         # #1353 M10：与 GET /api/memory-journey 同一条领域路径（版本链 → 卡片）。
         from agent_harness.memory.v2.journey import build_journey
@@ -3670,17 +3894,23 @@ async def _memory_command(
 
 
 def _main_approvals(argv: list[str]) -> None:
-    """CLI approvals 入口（#684 Phase 2）：项目级持久审批规则的公开管理面。
+    """CLI approvals 入口（#684 Phase 2，#1487 迁移面）：持久审批规则的公开管理面。
 
-    - `approvals policy list`：列出本项目 `.agent-harness/approve-policy.json` 的规则；
+    - `approvals policy list`：列出本项目持久审批规则（#1487：控制目录内文件）；
+      检测到旧工作区规则文件时附迁移提示；
     - `approvals policy remove <id> [--yes]`：默认二次确认——无 `--yes` 且规则存在时，
       只打印将删规则并 `SystemExit(2)` 拒绝执行（**零改动**）；`--yes` 真删；id 不存在
-      幂等成功（不报错）。
+      幂等成功（不报错）；
+    - `approvals policy import-legacy [--yes]`（#1487）：把旧工作区
+      `.agent-harness/approve-policy.json` **显式**迁移进控制目录（严格校验 + 按 id
+      去重 + 幂等）——Runtime 永不自动信任旧位（旧位在 agent 可达空间，静默导入
+      = 信任 agent 自建文件），迁移必须是用户手势；默认只打印将导入清单并拒绝
+      执行（零改动），`--yes` 才写入。
 
     规则内容由 Runtime 在审批流里精确派生、只读展示，CLI **不提供创建入口**：唯一安装
     路径是用户在审批卡上主动选「以后都允许」（F21：显式授权，禁止静默创建）。项目根 =
     进程当前工作目录，与 `ToolExecutor` 的 `project_root` 回落口径一致——管理面与真正
-    读取规则的执行域指向同一份文件。
+    读取规则的执行域指向同一份控制文件。
     """
     parser = argparse.ArgumentParser(prog="agent-harness approvals")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -3693,11 +3923,27 @@ def _main_approvals(argv: list[str]) -> None:
         "--yes", action="store_true",
         help="显式确认删除；缺省且规则存在时只打印将删规则并拒绝执行（零改动）",
     )
+    import_legacy = policy_sub.add_parser(
+        "import-legacy",
+        help="把旧工作区 .agent-harness/approve-policy.json 显式迁移进控制目录（#1487）",
+    )
+    import_legacy.add_argument(
+        "--yes", action="store_true",
+        help="确认导入预览清单；缺省只打印将导入的规则并拒绝执行（零改动）",
+    )
     args = parser.parse_args(argv)
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
     if args.policy_command == "list":
         print(approvals_policy_list_command())
+        return
+    if args.policy_command == "import-legacy":
+        output, confirm_required = approvals_policy_import_legacy_command(
+            yes=args.yes,
+        )
+        print(output)
+        if confirm_required:
+            raise SystemExit(2)
         return
     output, confirm_required = approvals_policy_remove_command(
         args.rule_id, yes=args.yes,
@@ -3711,7 +3957,9 @@ def _approve_policy_store(project_root: Path | str | None = None) -> ApprovePoli
     """本项目持久审批规则存储；`project_root` 缺省 = 进程当前工作目录。
 
     与 `ToolExecutor.__init__` 的回落口径逐字一致（`Path.cwd()`），保证 CLI / Web 管理面
-    与执行域读写同一份 `.agent-harness/approve-policy.json`。
+    与执行域读写同一份控制文件（#1487：控制目录内按项目根哈希命名的 JSON；控制目录
+    默认 `<home>/.agent-harness/approve-policy/`，`AGENT_HARNESS_APPROVE_POLICY_ROOT`
+    可钉根）。
     """
     return ApprovePolicyStore(Path(project_root) if project_root is not None else Path.cwd())
 
@@ -3721,18 +3969,88 @@ def approvals_policy_list_command(*, project_root: Path | str | None = None) -> 
 
     无规则时给友好提示（不是空输出）——「没有配置」与「读取失败」在人类眼里都应先是
     一句可读的话。坏文件由 `ApprovePolicyStore.load` fail-closed 成空列表，与无规则同形
-    （回调到默认逐调用审批，绝不臆造放行）。
+    （回调到默认逐调用审批，绝不臆造放行）。检测到旧工作区规则文件（#1487 迁移源）
+    时附一行迁移提示——只探测不读取，提示本身零副作用。
     """
-    rules = _approve_policy_store(project_root).load()
-    if not rules:
-        return "（暂无持久审批规则）"
-    lines = [f"本项目持久审批规则（{len(rules)} 条）："]
+    store = _approve_policy_store(project_root)
+    rules = store.load()
+    lines: list[str] = []
+    if rules:
+        lines.append(f"本项目持久审批规则（{len(rules)} 条）：")
+        lines.extend(
+            f"  id={rule.id}  tool={rule.tool}  key={rule.key}  "
+            f"granularity={rule.granularity.value}  created_at={rule.created_at}"
+            for rule in rules
+        )
+    else:
+        lines.append("（暂无持久审批规则）")
+    if store.legacy_present:
+        lines.append(
+            f"检测到旧工作区规则文件 {store.legacy_path}（Runtime 已不再读取它）；"
+            "运行 `approvals policy import-legacy` 迁移，迁移后可删除旧文件。"
+        )
+    return "\n".join(lines)
+
+
+def approvals_policy_import_legacy_command(
+    *, project_root: Path | str | None = None, yes: bool = False,
+) -> tuple[str, bool]:
+    """`approvals policy import-legacy` 的可测核心：返回 `(文本, 是否需确认/失败)`。
+
+    为什么必须显式（不能 Runtime 自动导）：旧位在 agent 可达空间，自动信任它 =
+    信任 agent 自建文件——F21「显式授权」在迁移面上的落点。语义全部来自
+    `ApprovePolicyStore.import_legacy` / `preview_legacy`：严格校验（created_at
+    可解析、command 档无换行）、按 id 去重（控制侧已有同 id 时控制侧胜）、幂等。
+
+    **默认二次确认**（对齐 remove，B 轴审查 P3-2）：无 `--yes` 只打印将导入清单
+    （preview，零改动）并 exit 2；`--yes` 才写入。旧位内容**无法证明来自 Runtime**
+    （格式公开，agent 可预埋全字段合规的规则），逐条核对清单就是把确认手势从
+    文件粒度下沉到规则粒度。
+
+    `confirm_required=True` 时调用方 `SystemExit(2)`（含两种形态：待确认、失败）。
+    旧文件**在场但读不动**（`LegacyImportError`，A 轴审查 P3-1）如实报错、
+    不给删除建议——防止用户按「迁移完成可删除」的提示删掉可能含可恢复规则的坏文件。
+    """
+    store = _approve_policy_store(project_root)
+    if not store.legacy_present:
+        return ("（未发现旧工作区规则文件，无需迁移）", False)
+    try:
+        result = store.import_legacy() if yes else store.preview_legacy()
+    except LegacyImportError as e:
+        return (
+            (
+                f"旧工作区规则文件存在但无法解析，未导入任何规则：{e}\n"
+                f"请人工检查 {store.legacy_path}（未改动、不会自动删除）。"
+            ),
+            True,
+        )
+    action = "已从" if yes else "将从"
+    lines = [
+        (
+            f"{action} {store.legacy_path} 导入 {len(result.imported)} 条规则"
+            f"（跳过 {result.skipped} 条：不合规或 id 重复），控制文件：{store.path}"
+        )
+    ]
     lines.extend(
         f"  id={rule.id}  tool={rule.tool}  key={rule.key}  "
         f"granularity={rule.granularity.value}  created_at={rule.created_at}"
-        for rule in rules
+        for rule in result.imported
     )
-    return "\n".join(lines)
+    if not yes:
+        lines.append(
+            "旧位内容无法证明来自 Runtime 产物（格式公开，可能被预埋）——"
+            "请逐条核对上方清单。"
+        )
+        lines.append("加 --yes 执行导入（未确认，未改动）。")
+        return ("\n".join(lines), True)
+    if result.skipped:
+        lines.append(
+            f"注意：{result.skipped} 条未导入（不合规或 id 重复）——"
+            "建议人工核对旧文件后再决定是否删除。"
+        )
+    else:
+        lines.append("旧文件迁移完成后不再被任何代码读取，可手动删除。")
+    return ("\n".join(lines), False)
 
 
 def approvals_policy_remove_command(

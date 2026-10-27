@@ -1,4 +1,4 @@
-"""RetrievalProvider / WebSearchProvider / FakeWebSearchProvider 测试（T2, #77）。"""
+"""WebSearchProvider / WebHit / FakeWebSearchProvider 测试（T2, #77）。"""
 
 from __future__ import annotations
 
