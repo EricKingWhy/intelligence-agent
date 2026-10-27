@@ -112,6 +112,8 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
   const authInputRef = useRef<HTMLInputElement>(null);
   /** 「更多工具」触发器：令牌面板从任何路径关闭时，焦点都回到这里。 */
   const moreTriggerRef = useRef<HTMLButtonElement>(null);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [moreTooltipOpen, setMoreTooltipOpen] = useState(false);
   /** 本次菜单关闭是否由「打开 API 身份令牌」引起：只在那一次阻止 Radix 归还焦点。
    *  不能按「面板此刻是否打开」判断——面板已开时用 Esc/其它菜单项关菜单也会被误吞。 */
   const authFocusPendingRef = useRef(false);
@@ -358,8 +360,12 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
         )}
         {/* #1372 改动 6 / #1396：低频动作全部进 "…" 菜单。默认可见动作只剩密度下拉
             与「更多」两个；每一项仍是同一条既有回调，功能零丢失。 */}
-        <DropdownMenu.Root>
-          <Tip content="更多工具——记忆 / 看板 / 恢复 / 主题 / 身份令牌 / 上下文 / 审批 / Inspector">
+        <DropdownMenu.Root open={moreMenuOpen} onOpenChange={setMoreMenuOpen}>
+          <Tip
+            content="更多工具——记忆 / 看板 / 恢复 / 主题 / 身份令牌 / 上下文 / 审批 / Inspector"
+            open={moreTooltipOpen && !moreMenuOpen}
+            onOpenChange={setMoreTooltipOpen}
+          >
             <DropdownMenu.Trigger asChild>
               <button
                 ref={moreTriggerRef}
