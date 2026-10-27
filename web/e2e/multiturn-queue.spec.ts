@@ -716,39 +716,56 @@ test('T12n：迟到的 422 → 说出「续聊参数无效」（与窗内同一�
 test('T12o：迟到的 2xx 收据（queued）→ 无假「连接中断」、无错误条', async ({ page }) => {
   const calls: Record<string, unknown>[] = [];
   const subs: Array<{ session_id: string; after_seq?: unknown }> = [];
+  let releaseQueuedResponse!: () => void;
+  const queuedResponseGate = new Promise<void>((resolve) => {
+    releaseQueuedResponse = resolve;
+  });
+  page.once('close', releaseQueuedResponse);
   await routeApi(page, {
     sessions: [],
-    events: [],
+    events: LIVE_FRAMES,
     wsSubscribes: subs,
-    onSessionPost: (route) => fulfillSse(route, FIRST_FRAMES),
-    onMessagesPost: (route) => {
+    onSessionPost: (route) => fulfillSse(route, LIVE_FRAMES),
+    onMessagesPost: async (route) => {
       calls.push(JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>);
-      // 窗外落定的**收据**（极短 JSON 被延迟到窗外，慢链路上的真实形态）
-      return answerLate(route, 200, { status: 'queued', mode: 'queue' });
+      // 让测试先观察到窗外按 launched 接上的流，再由测试释放迟到收据。
+      await queuedResponseGate;
+      if (page.isClosed()) return;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'queued', mode: 'queue' }),
+      });
     },
     // 心跳 opt-in：本用例等待 6s 验证无假「连接中断」，真后端 2s 一次
     // server_ping 计入停摆看门狗活性（#420 AC1）；mock 缺省静默，高负载下
     // 累计静默超 10s 会被误判断流。只给本用例开，不碰全局默认。
-    onWs: () => ({ ending: 'keep', pingIntervalMs: 2000 }),
+    onWs: () => ({ events: LIVE_FRAMES, hasActiveRun: true, ending: 'keep', pingIntervalMs: 2000 }),
   });
 
   await page.goto('/');
-  await openIdleSession(page);
+  await submitTask(page, '长任务');
+  await expect(page.locator('.composer-stop')).toBeVisible({ timeout: 5000 });
+  await expect.poll(() => subs.length, { timeout: 8000 }).toBeGreaterThan(0);
+  const initialSubscriptions = subs.length;
 
   const box = page.getByLabel('Agent 任务');
   await box.fill('慢链路上排个队');
   await box.press('Enter');
 
   await expect.poll(() => calls.length, { timeout: 8000 }).toBe(1);
+  await expect.poll(() => subs.length, { timeout: 8000 }).toBeGreaterThan(initialSubscriptions);
+  releaseQueuedResponse();
+  await expect.poll(() => subs.length, { timeout: 8000 }).toBe(initialSubscriptions + 2);
   // 活过三轮退避（500 + 1000 + 2000）＋余量：假「连接中断」正是在那之后才弹出来
   await page.waitForTimeout(6000);
   await expect(page.locator('.app-error')).toHaveCount(0);
   await expect(page.locator('.reconnect-banner')).toBeHidden();
-  /* 订阅恰好两次：① 窗外按 launched 接的那条（已被纠正，代际推进后它的整条重连链
+  /* 续聊过程只新开两次订阅：① 窗外按 launched 接的那条（已被纠正，代际推进后它的整条重连链
      失效）；② 纠正后由 ack 分支**换**上的那条（本地游标续接）。要锁的是"接错的流
      没有被重连复活"——那种复活会在上面留下假「连接中断」，也会把这里推成 3 次以上
      （每轮退避各一条）。 */
-  expect(subs).toHaveLength(2);
+  expect(subs).toHaveLength(initialSubscriptions + 2);
 });
 
 /* ── T12o-缝隙：迟到纠正落进 release()→#2 重锁的缝隙 → 仍不得排新重连链 ──

@@ -80,6 +80,8 @@ export interface WsScript {
   delayMs?: number;
   /** Delay between streamed frames so a test can observe intermediate UI state. */
   frameDelayMs?: number;
+  /** Hold the stream after the first incremental frame until the test releases it. */
+  frameGateAfterFirstFrame?: Promise<void>;
   /** 下发 `frames` **之前**等待（用例精确掌握「新事件」到达的虚拟时刻）。
    *
    *  与 `delayMs` / `frameDelayMs` 的区别是**谁掌握时钟**：那两个走测试进程（Node）的
@@ -182,6 +184,11 @@ async function installWsRoute(
         // 也在发 2s 一次的 server_ping；计时器放在 delay 之前，避免
         // delay + 测试前置步骤累计静默超 10s 被停摆看门狗误判。
         let pingTimer: ReturnType<typeof setInterval> | undefined;
+        let socketClosed = false;
+        ws.onClose(() => {
+          socketClosed = true;
+          if (pingTimer) clearInterval(pingTimer);
+        });
         if (script?.pingIntervalMs) {
           pingTimer = setInterval(() => {
             try {
@@ -190,11 +197,9 @@ async function installWsRoute(
               if (pingTimer) clearInterval(pingTimer);
             }
           }, script.pingIntervalMs);
-          ws.onClose(() => {
-            if (pingTimer) clearInterval(pingTimer);
-          });
         }
         if (script?.delayMs) await new Promise((r) => setTimeout(r, script.delayMs));
+        if (socketClosed) return;
         const events = script?.events ?? sessionEvents.get(sessionId) ?? mock.events ?? [];
         const frames = script?.frames ?? [];
         const active = script?.hasActiveRun ?? frames.length > 0;
@@ -208,8 +213,12 @@ async function installWsRoute(
         );
         // 用例持有的闸门：放行前不下发增量帧（快照已在上方立即下行）。
         if (script?.frameGate) await script.frameGate;
+        if (socketClosed) return;
         for (const [index, f] of frames.entries()) {
+          if (socketClosed) return;
           ws.send(JSON.stringify({ type: 'event', session_id: sessionId, event: f }));
+          if (index === 0 && script?.frameGateAfterFirstFrame) await script.frameGateAfterFirstFrame;
+          if (socketClosed) return;
           if (script?.frameDelayMs && index < frames.length - 1) {
             await new Promise((r) => setTimeout(r, script.frameDelayMs));
           }
