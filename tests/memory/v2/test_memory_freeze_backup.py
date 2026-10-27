@@ -336,6 +336,29 @@ def test_backup_requires_a_complete_writer_proof(tmp_path: Path) -> None:
     assert "writer" in result.stderr.lower()
 
 
+def test_backup_rejects_writer_proof_for_a_different_workspace(tmp_path: Path) -> None:
+    proof_workspace = tmp_path / "proof-workspace"
+    target_workspace = tmp_path / "target-workspace"
+    assert run_tool("seed", "--workspace", str(proof_workspace)).returncode == 0
+    assert run_tool("seed", "--workspace", str(target_workspace)).returncode == 0
+    output = offline_archive(tmp_path)
+
+    result = run_tool(
+        "backup",
+        "--workspace",
+        str(target_workspace),
+        "--output",
+        str(output),
+        "--writer-proof",
+        str(proof_workspace / "writer-proof.json"),
+        "--rehearsal-fixture",
+    )
+
+    assert result.returncode != 0
+    assert "scope workspace does not match backup workspace" in result.stderr.lower()
+    assert not output.exists()
+
+
 def test_backup_rejects_synthetic_fixture_without_rehearsal_flag(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     assert run_tool("seed", "--workspace", str(workspace)).returncode == 0

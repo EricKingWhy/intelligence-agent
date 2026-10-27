@@ -470,6 +470,21 @@ def _validate_writer_proof(
     return proof
 
 
+def _validate_writer_proof_workspace(proof: dict[str, Any], workspace: Path) -> None:
+    for category, entry in proof["writers"].items():
+        scope_workspace = Path(entry["scope"]["workspace"]).expanduser()
+        try:
+            resolved_scope = scope_workspace.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise BackupError(
+                f"writer {category!r} scope workspace is not a resolvable path"
+            ) from error
+        if resolved_scope != workspace:
+            raise BackupError(
+                f"writer {category!r} scope workspace does not match backup workspace"
+            )
+
+
 def _file_role(relative: str) -> str:
     name = PurePosixPath(relative).name
     if name in {"MEMORY.md", "USER.md"}:
@@ -970,7 +985,7 @@ def _seed_workspace(workspace: Path) -> dict[str, Any]:
                 "method": "fixture-no-writer",
                 "control_action": f"seed fixture starts no {category} writer",
                 "scope": {
-                    "workspace": "representative seeded workspace",
+                    "workspace": str(workspace),
                     "hosts": ["seed-fixture"],
                     "clones": ["seed-fixture"],
                     "cross_clone_checked": True,
@@ -1011,6 +1026,7 @@ def _backup(
     output = _prepare_output(output_arg, workspace)
     writer_proof = _resolve_existing(writer_proof_arg, "writer proof")
     proof = _load_writer_proof(writer_proof, allow_fixture=allow_fixture)
+    _validate_writer_proof_workspace(proof, workspace)
     proof_hash = _sha256_file(writer_proof)
     before = _source_inventory(workspace)
     snapshots: dict[str, bytes] = {}
