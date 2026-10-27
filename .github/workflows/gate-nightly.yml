@@ -44,7 +44,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: 装 Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: 装 uv 0.10.9（缓存 ~/.cache/uv）
@@ -80,7 +80,7 @@ jobs:
             --out artifacts/coverage-baseline.json \
             --scope "pytest tests + --cov=src/agent_harness（ubuntu-latest / py3.13）"
       - name: 上传测试报告（失败也传）
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: nightly-backend-reports
@@ -118,7 +118,7 @@ jobs:
         working-directory: web
         run: pnpm build
       - name: 上传测试报告（失败也传）
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: nightly-frontend-reports
@@ -185,7 +185,7 @@ jobs:
         working-directory: web
         run: node node_modules/@playwright/test/cli.js test --workers=2
       - name: 上传 e2e 产物（trace/截图，失败也传）
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: nightly-e2e-artifacts

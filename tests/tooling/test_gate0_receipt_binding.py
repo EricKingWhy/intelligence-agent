@@ -415,6 +415,29 @@ def test_post_rollout_receipt_cannot_omit_ledger_binding(
     assert "review_ledger" in receipts[tested_sha]["reason"]
 
 
+@pytest.mark.parametrize("source_available", [False, True], ids=["missing-object", "resolved-object"])
+def test_unverifiable_historical_receipt_is_not_valid_gate0_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    source_available: bool,
+) -> None:
+    repo, base_sha, tested_sha, ledger = _receipt_repo(tmp_path, monkeypatch)
+    receipt_sha = tested_sha if source_available else "0" * 40
+    archived = json.loads(_receipt(repo, tested_sha, ledger, base_sha))
+    archived["sha"] = receipt_sha
+    archived["source_object_verification"] = {
+        "status": "UNVERIFIABLE_HISTORICAL",
+        "checked_at": "2026-10-27",
+        "reason_code": "source_absent_in_checked_local_and_github_repositories",
+    }
+    _commit(repo, "retain unverifiable historical receipt", {
+        f"docs/gate/{receipt_sha}.json": (json.dumps(archived, indent=2) + "\n").encode(),
+    })
+
+    result = gate0.head_tree_receipts(repo)[receipt_sha]
+    assert not result["valid"]
+    assert "unverifiable" in result["reason"]
+
+
 @pytest.mark.parametrize(
     "mutation", ["missing", "failed", "duplicate", "empty", "unknown"]
 )
