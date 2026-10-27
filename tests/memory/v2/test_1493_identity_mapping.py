@@ -40,6 +40,7 @@ from agent_harness.memory.v2.markdown_store import (
     entry_digest,
 )
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
+from agent_harness.memory.v2.write_approval import APPROVING_LEASE
 from tests.memory.v2._records import RAW_COLUMN_NAMES
 
 pytestmark = pytest.mark.asyncio
@@ -336,10 +337,17 @@ async def test_plan_partitions_every_source_row_and_hashes_are_recomputable(tmp_
     for item in manifest["items"]:
         for source in item["sources"]:
             row = _fetch_source_row(database, source)
-            expected = hashlib.sha256(_canonical(row).encode("utf-8")).hexdigest()
+            hash_row = ({key: value for key, value in row.items()
+                         if key not in {"lease_owner", "lease_expires_at", "updated_at"}}
+                        if source["table"] == "memory_v2_jobs" else row)
+            expected = hashlib.sha256(_canonical(hash_row).encode("utf-8")).hexdigest()
             assert source["row_hash"] == expected, f"{source['table']}/{source['id']} 行 hash 对不上"
             if row.get("content") is not None:
                 assert source["content_hash"] == entry_digest(row["content"].strip())
+
+    staged_item = _item(manifest, "archive:memory_v2_staged:stg-pending")
+    assert staged_item["sources"][0]["identity"] == staged_item["identity"]
+    assert staged_item["identity"] == _IDENTITY_A
 
     # 旧 ID / 版本 / 迁移来源标签（provenance）都在行上。
     mapped = _items(manifest, kind="entry", disposition="map")
@@ -816,3 +824,341 @@ async def test_plan_records_the_deployment_ceiling_for_audit(tmp_path) -> None:
     assert manifest["limits"]["memory"] == 900
     assert manifest["deployment_limits"]["memory"] == DEFAULT_MEMORY_CHAR_LIMIT
     assert manifest["deployment_limits"]["user"] == DEFAULT_USER_CHAR_LIMIT
+
+
+@pytest.mark.parametrize(
+    "groups",
+    [
+        [["m6", "m7"], ["m6", "m3"]],
+        [["m3", "m7"], ["m6", "m7"]],
+        [["m6", "m6"]],
+    ],
+)
+async def test_conflict_groups_reject_reused_source_ids_before_writing_manifest(
+    tmp_path, groups,
+) -> None:
+    workspace, database = await _seed(tmp_path)
+    repeated = next(
+        memory_id for group in groups for memory_id in group
+        if sum(memory_id in other for other in groups) > 1
+        or group.count(memory_id) > 1
+    )
+
+    with pytest.raises(MappingBlocked) as blocked:
+        await _plan(workspace, database, explicit_conflicts=groups)
+
+    assert repeated in " ".join(blocked.value.reasons)
+    assert not (workspace / MANIFEST_NAME).exists()
+
+
+async def test_distinct_explicit_conflict_groups_partition_each_source_once(tmp_path) -> None:
+    workspace, database = await _seed(tmp_path)
+    manifest = await _plan(
+        workspace, database, explicit_conflicts=[["m6", "m7"], ["m1", "m2"]],
+    )
+
+    conflicts = _items(manifest, kind="entry_conflict")
+    sources = [source["id"] for item in conflicts for source in item["sources"]]
+    assert len(conflicts) == 2
+    assert sorted(sources) == ["m1", "m2", "m6", "m7"]
+    assert len(sources) == len(set(sources))
+
+
+async def test_apply_rechecks_tampered_deployment_budget_before_writing(tmp_path) -> None:
+    records = (
+        *_DEFAULT_RECORDS,
+        *(
+            _record_row(memory_id=f"large-{index}", content=f"记录{index}-" + "x" * 890)
+            for index in range(4)
+        ),
+    )
+    workspace, database = await _seed(tmp_path, records=records)
+    manifest_path = workspace / MANIFEST_NAME
+    planned = await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+    assert _items(planned, kind="budget_conflict"), "夹具须先触发部署预算冲突"
+
+    tampered = load_manifest(manifest_path)
+    tampered["limits"]["memory"] = DEFAULT_MEMORY_CHAR_LIMIT * 10
+    tampered["items"] = [
+        item for item in tampered["items"] if item["kind"] != "budget_conflict"
+    ]
+    manifest_path.write_text(
+        json.dumps(tampered, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    await _resolve_all_conflicts(manifest_path, load_manifest(manifest_path))
+    await _approve_every_map_item(manifest_path)
+    before_manifest = manifest_path.read_bytes()
+    before_database = _table_counts(database)
+
+    with pytest.raises(MappingBlocked) as blocked:
+        await apply_identity_mapping(manifest_path, now=CLOCK)
+
+    message = " ".join(blocked.value.reasons)
+    assert "不得扩大预算" in message and str(DEFAULT_MEMORY_CHAR_LIMIT) in message
+    assert _table_counts(database) == before_database
+    assert manifest_path.read_bytes() == before_manifest
+    assert not (workspace / "memories").exists()
+
+
+@pytest.mark.parametrize(
+    "entity",
+    ["job", "staged"],
+)
+async def test_apply_rescans_live_leases_created_after_plan(tmp_path, entity) -> None:
+    workspace, database = await _seed(tmp_path)
+    manifest_path = workspace / MANIFEST_NAME
+    manifest = await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+    await _resolve_all_conflicts(manifest_path, manifest)
+    await _approve_every_map_item(manifest_path)
+
+    if entity == "job":
+        _insert_jobs(database, [{
+            "job_id": "job-after-plan", "idempotency_key": "form-after-plan",
+            "stage": "applying", "outcome": None, "identity": _IDENTITY_A,
+            "lease_owner": "worker-new",
+            "lease_expires_at": (CLOCK + timedelta(minutes=5)).isoformat(),
+        }])
+    else:
+        _insert_staged(database, [{
+            "id": "stg-after-plan", "identity": _IDENTITY_A, "status": "approving",
+            "claimed_at": (CLOCK - timedelta(minutes=1)).isoformat(), "payload": "{}",
+        }])
+
+    with pytest.raises(MappingBlocked) as blocked:
+        await apply_identity_mapping(manifest_path, now=CLOCK)
+
+    assert "lease" in " ".join(blocked.value.reasons)
+    assert not (workspace / "memories").exists()
+
+
+@pytest.mark.parametrize("entity", ["job", "staged"])
+async def test_apply_refreshes_expired_lease_snapshots(tmp_path, entity) -> None:
+    if entity == "job":
+        active_jobs = [{
+            "job_id": "job-expiring", "idempotency_key": "form-expiring",
+            "stage": "applying", "outcome": None, "identity": _IDENTITY_A,
+            "lease_owner": "worker-live",
+            "lease_expires_at": (CLOCK + timedelta(minutes=5)).isoformat(),
+        }]
+        workspace, database = await _seed(tmp_path, jobs=active_jobs)
+        apply_time = CLOCK + timedelta(minutes=10)
+    else:
+        workspace, database = await _seed(tmp_path)
+        claimed_at = CLOCK - timedelta(minutes=1)
+        _insert_staged(database, [{
+            "id": "stg-expiring", "identity": _IDENTITY_A, "status": "approving",
+            "claimed_at": claimed_at.isoformat(), "payload": "{}",
+        }])
+        apply_time = claimed_at + APPROVING_LEASE + timedelta(seconds=1)
+
+    manifest_path = workspace / MANIFEST_NAME
+    manifest = await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+    item_id = (
+        "archive:memory_v2_jobs:job-expiring" if entity == "job"
+        else "archive:memory_v2_staged:stg-expiring"
+    )
+    assert _item(manifest, item_id)["lease_live"] is True
+    await _resolve_all_conflicts(manifest_path, manifest)
+    await _approve_every_map_item(manifest_path)
+
+    if entity == "job":
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE memory_v2_jobs SET lease_owner=NULL, lease_expires_at=?, updated_at=? "
+                "WHERE job_id='job-expiring'",
+                (OLD, apply_time.isoformat()),
+            )
+            connection.commit()
+
+    receipt = await apply_identity_mapping(manifest_path, now=apply_time)
+
+    assert receipt["counts"]["skipped"] == []
+    assert _item(load_manifest(manifest_path), item_id)["lease_live"] is False
+
+
+async def test_plan_marks_live_approving_lease_and_blocks_apply(tmp_path) -> None:
+    workspace, database = await _seed(tmp_path)
+    _insert_staged(database, [{
+        "id": "stg-live", "identity": _IDENTITY_A, "status": "approving",
+        "claimed_at": (CLOCK - timedelta(minutes=1)).isoformat(), "payload": "{}",
+    }])
+    manifest_path = workspace / MANIFEST_NAME
+    manifest = await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+
+    item_id = "archive:memory_v2_staged:stg-live"
+    assert _item(manifest, item_id)["lease_live"] is True
+    await _resolve_all_conflicts(manifest_path, manifest)
+    await _approve_every_map_item(manifest_path)
+
+    with pytest.raises(MappingBlocked) as blocked:
+        await apply_identity_mapping(manifest_path, now=CLOCK)
+
+    assert "lease" in " ".join(blocked.value.reasons)
+    assert not (workspace / "memories").exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        (
+            "settings",
+            (
+                "UPDATE memory_v2_settings SET extraction_enabled=0 "
+                "WHERE tenant_id='tenant-a' AND user_id='user-a'"
+            ),
+        ),
+        (
+            "staged",
+            ("UPDATE memory_v2_staged SET payload='changed' WHERE id='stg-pending'"),
+        ),
+        (
+            "jobs",
+            ("UPDATE memory_v2_jobs SET outcome='changed' WHERE job_id='job-done'"),
+        ),
+        (
+            "archived_record",
+            ("UPDATE memory_v2_records SET content='changed' WHERE memory_id='m4'"),
+        ),
+        (
+            "tombstones",
+            ("UPDATE memory_v2_tombstones SET expires_at='2020' WHERE memory_id='tomb-1'"),
+        ),
+    ],
+)
+async def test_apply_blocks_drift_in_non_entry_sources(tmp_path, mutation) -> None:
+    _, sql = mutation
+    workspace, database = await _seed(tmp_path)
+    manifest_path = workspace / MANIFEST_NAME
+    manifest = await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+    await _resolve_all_conflicts(manifest_path, manifest)
+    await _approve_every_map_item(manifest_path)
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(sql)
+        connection.commit()
+
+    with pytest.raises(MappingBlocked) as blocked:
+        await apply_identity_mapping(manifest_path, now=CLOCK)
+
+    assert "变化" in " ".join(blocked.value.reasons)
+    assert not (workspace / "memories").exists()
+
+async def test_empty_rejection_can_be_archived_and_receipt_counts_record_rows(tmp_path) -> None:
+    workspace, database = await _seed(
+        tmp_path, records=(_record_row(memory_id="empty-1", content="   "),),
+    )
+    manifest_path = workspace / MANIFEST_NAME
+    manifest = await _plan(workspace, database, explicit_conflicts=[])
+    empty = next(item for item in manifest["items"] if item.get("reason") == "empty_rejected")
+
+    resolved = await resolve_conflict(manifest_path, empty["id"], archive_all=True, now=CLOCK)
+
+    archived = [item for item in resolved["items"] if item["disposition"] == "archive"]
+    assert any(
+        source["table"] == "memory_v2_records" and source["id"] == "empty-1"
+        for item in archived for source in item.get("sources", [])
+    )
+    await _approve_every_map_item(manifest_path)
+    receipt = await apply_identity_mapping(manifest_path, now=CLOCK)
+    record_rows = sum(
+        1 for item in load_manifest(manifest_path)["items"]
+        if item["disposition"] == "archive"
+        for source in item.get("sources", [])
+        if source["table"] == "memory_v2_records"
+    )
+    assert receipt["archive"]["records"] == record_rows == 1
+
+
+async def test_staged_only_identity_adds_settings_variant(tmp_path) -> None:
+    equal_non_default = (
+        ("tenant-a", "user-a", 0, 1, 1, 0),
+        ("tenant-b", "user-b", 0, 1, 1, 0),
+    )
+    workspace, database = await _seed(
+        tmp_path, settings_rows=equal_non_default, records=(),
+    )
+    identity_z = {"tenant_id": "tenant-z", "user_id": "user-z", "project_id": "proj-z"}
+    _insert_staged(database, [{
+        "id": "stg-tenant-z", "identity": identity_z, "status": "pending",
+        "claimed_at": None, "payload": "{}",
+    }])
+
+    manifest = await _plan(workspace, database, explicit_conflicts=[])
+
+    settings = _item(manifest, "conflict:settings")
+    variants = {variant["key"]: variant for variant in settings["variants"]}
+    assert set(variants) == {"tenant-a/user-a", "tenant-b/user-b", "tenant-z/user-z"}
+    assert variants["tenant-z/user-z"]["values_source"] == "missing_row_default"
+    staged = _item(manifest, "archive:memory_v2_staged:stg-tenant-z")
+    assert staged["sources"][0]["identity"] == identity_z
+
+
+async def test_plan_refuses_to_overwrite_existing_manifest(tmp_path) -> None:
+    workspace, database = await _seed(tmp_path)
+    await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+    manifest_path = workspace / MANIFEST_NAME
+    before = manifest_path.read_bytes()
+
+    with pytest.raises(MappingBlocked, match="已存在"):
+        await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+
+    assert manifest_path.read_bytes() == before
+
+
+async def test_plan_budget_includes_existing_memory_file(tmp_path) -> None:
+    workspace, database = await _seed(tmp_path)
+    memories = workspace / "memories"
+    memories.mkdir()
+    (memories / "MEMORY.md").write_text("x" * 30, encoding="utf-8")
+
+    manifest = await _plan(
+        workspace, database, explicit_conflicts=[["m6", "m7"]], memory_char_limit=40,
+    )
+
+    budget = _item(manifest, "budget:memory")
+    assert budget["baseline"] == 30
+    assert budget["entries"]
+
+
+async def test_identical_content_for_different_targets_stays_separate(tmp_path) -> None:
+    content = "same words, different destination"
+    records = (
+        _record_row(memory_id="memory-copy", content=content),
+        _record_row(memory_id="user-copy", content=content, kind="user", tier="profile"),
+    )
+    workspace, database = await _seed(tmp_path, records=records)
+
+    manifest = await _plan(workspace, database, explicit_conflicts=[])
+
+    matching = [
+        item for item in manifest["items"]
+        if item["kind"] == "entry" and item["content_hash"] == entry_digest(content)
+    ]
+    assert len(matching) == 2
+    assert {item["target"] for item in matching} == {"memory", "user"}
+    assert len({item["id"] for item in matching}) == 2
+
+
+async def test_apply_persists_a_job_lease_that_became_live_after_plan(tmp_path) -> None:
+    workspace, database = await _seed(tmp_path)
+    manifest_path = workspace / MANIFEST_NAME
+    manifest = await _plan(workspace, database, explicit_conflicts=[["m6", "m7"]])
+    item_id = "archive:memory_v2_jobs:job-lost"
+    assert _item(manifest, item_id)["lease_live"] is False
+    await _resolve_all_conflicts(manifest_path, manifest)
+    await _approve_every_map_item(manifest_path)
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE memory_v2_jobs SET lease_owner='worker-new', lease_expires_at=?, updated_at=? "
+            "WHERE job_id='job-lost'",
+            ((CLOCK + timedelta(minutes=5)).isoformat(), CLOCK.isoformat()),
+        )
+        connection.commit()
+
+    with pytest.raises(MappingBlocked) as blocked:
+        await apply_identity_mapping(manifest_path, now=CLOCK)
+
+    assert "lease" in " ".join(blocked.value.reasons)
+    assert _item(load_manifest(manifest_path), item_id)["lease_live"] is True
+    assert not (workspace / "memories").exists()

@@ -9,6 +9,7 @@ requires-python = ">=3.11"
 dependencies = [
     "aiosqlite>=0.21.0",
     "anyio>=4.0,<5",
+    "cryptography>=50.0.1",
     "fastapi>=0.159.1",
     # endpoint_guard uses private transport hooks; update only with compatibility tests.
     "httpx2==2.16.0",
@@ -19,7 +20,7 @@ dependencies = [
     "keyring>=24",
     "langchain-core>=1.6.5",
     "langchain-openai>=1.5.0",
-    "mcp>=2.1.1",
+    "mcp>=2.3.0",
     # #823 MM-02：图片归一化（EXIF 方向、alpha→WebP 否则 JPEG、限内缩放）需要
     # 真实解码/重编码，标准库做不到。归一化语义移植自 DeepSeek Harness
     # `attachment-local/src/normalization.ts`（MIT，commit 5badb150，上游用 sharp），

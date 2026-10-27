@@ -4,8 +4,9 @@
  * MemoryPanel 的 Radix Dialog 壳与 `project-dialog-*` 样式——是工作台里的一个
  * 管理浮层，不是独立页面/路由。
  *
- * 单一真相：数据源只有 `GET /api/approve-policy/rules`（后端读项目根
- * `.agent-harness/approve-policy.json`，与执行域命中规则时读的是同一份文件）。
+ * 单一真相：数据源只有 `GET /api/approve-policy/rules`（后端读控制目录内的
+ * 项目控制文件（#1487，默认 `~/.agent-harness/approve-policy/`），与执行域
+ * 命中规则时读的是同一份文件）。
  * 前端只读展示 + 原样撤销，**不提供创建入口**——唯一安装路径是用户在审批卡上主动
  * 选「以后都允许」（安全红线 F21：禁止静默创建持久授权）。
  *
