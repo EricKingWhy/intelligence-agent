@@ -1,4 +1,4 @@
-# Memory freeze / encrypted offline backup runbook
+# Memory freeze / plaintext offline backup runbook
 
 本手册对应 #1492 / ticket-010。它保全一个 workspace 的完整 Memory 生命周期，
 不把备份接入运行时、检索或 Memory provider，也不执行任何销毁。
@@ -21,9 +21,9 @@ tombstone purge。`seed` 只用于本地代表性演练；真实生产 workspace
   约束用于 manifest 对账；AWS 的机制说明见
   <https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html>。
 - **BUILD（最小边界工具）**：仓库没有现成的离线冻结/恢复工具，因此新增 standalone
-  CLI、manifest 和恢复 rehearsal；不复制第三方源码。AES-GCM 使用已声明的
-  `cryptography` 依赖；其官方文档要求密钥保密且同一密钥不得复用 nonce：
-  <https://cryptography.io/en/latest/hazmat/primitives/aead/#aes-gcm>。
+  CLI、manifest 和恢复 rehearsal；不复制第三方源码。使用 Python 标准库 `tarfile` 写出
+  明文 tar，不新增 runtime dependency 或密钥流程。归档内容可由能读取目标介质的人直接读取；
+  manifest 哈希可发现意外损坏或不匹配，不提供加密、来源认证或防恶意篡改。
 - **DEFER**：生产停写由所有者按部署拓扑执行；到期销毁不在本票授权内，保留截止日只触发
   人工复核。
 
@@ -32,6 +32,8 @@ tombstone purge。`seed` 只用于本地代表性演练；真实生产 workspace
 在真实 workspace 运行前，所有者要逐项停写/围住并把证据写入 `writer-proof.json`。
 本地文件锁只能保护一次文件操作，不能证明跨 clone、跨主机或人工编辑器已经停止，因此
 不能作为 `scope` 或 `proof` 的唯一依据。
+每个 writer 的 `scope.workspace` 必须填写传给 `backup --workspace` 的同一 workspace 规范绝对路径；
+工具会逐项要求它精确匹配已解析的目标路径，避免把另一 workspace 的停写证明用于当前备份。
 
 | writer 分类 | 停写/围住动作 | 停写已生效的证明口径 |
 | --- | --- | --- |
@@ -53,7 +55,7 @@ tombstone purge。`seed` 只用于本地代表性演练；真实生产 workspace
     "memory_tool": {
       "category": "memory_tool", "status": "stopped", "method": "endpoint-disable",
       "control_action": "<disable the Memory write endpoint>",
-      "scope": {"workspace": "<deployment scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true},
+      "scope": {"workspace": "<canonical absolute path passed to --workspace>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true},
       "proof": {"evidence_type": "service-state", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"},
       "verification": {
         "host": "<host or control plane>", "active_writers": 0, "active_writer_processes": [],
@@ -61,11 +63,11 @@ tombstone purge。`seed` 只用于本地代表性演练；真实生产 workspace
         "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"
       }
     },
-    "formation": {"category": "formation", "status": "stopped", "method": "worker-quiesce", "control_action": "<stop workers>", "scope": {"workspace": "<deployment scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "process-list", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
-    "approval": {"category": "approval", "status": "absent", "method": "endpoint-disable", "control_action": "<disable approval writes>", "scope": {"workspace": "<deployment scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "control-plane", "observed_state": "absent", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
-    "governance": {"category": "governance", "status": "stopped", "method": "worker-quiesce", "control_action": "<stop maintenance>", "scope": {"workspace": "<deployment scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "scheduler-state", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
-    "external_legacy_process": {"category": "external_legacy_process", "status": "absent", "method": "process-stop", "control_action": "<stop all legacy processes>", "scope": {"workspace": "<all hosts/clones>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "process-list", "observed_state": "absent", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
-    "human_writer": {"category": "human_writer", "status": "stopped", "method": "manual-pause", "control_action": "<pause all human editing>", "scope": {"workspace": "<operator scope>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "manual-confirmation", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}}
+    "formation": {"category": "formation", "status": "stopped", "method": "worker-quiesce", "control_action": "<stop workers>", "scope": {"workspace": "<canonical absolute path passed to --workspace>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "process-list", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
+    "approval": {"category": "approval", "status": "absent", "method": "endpoint-disable", "control_action": "<disable approval writes>", "scope": {"workspace": "<canonical absolute path passed to --workspace>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "control-plane", "observed_state": "absent", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
+    "governance": {"category": "governance", "status": "stopped", "method": "worker-quiesce", "control_action": "<stop maintenance>", "scope": {"workspace": "<canonical absolute path passed to --workspace>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "scheduler-state", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
+    "external_legacy_process": {"category": "external_legacy_process", "status": "absent", "method": "process-stop", "control_action": "<stop all legacy processes>", "scope": {"workspace": "<canonical absolute path passed to --workspace>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "process-list", "observed_state": "absent", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}},
+    "human_writer": {"category": "human_writer", "status": "stopped", "method": "manual-pause", "control_action": "<pause all human editing>", "scope": {"workspace": "<canonical absolute path passed to --workspace>", "hosts": ["<host>"], "clones": ["<clone>"], "cross_clone_checked": true}, "proof": {"evidence_type": "manual-confirmation", "observed_state": "stopped", "evidence_ref": "<owner evidence reference>"}, "verification": {"host": "<host>", "active_writers": 0, "active_writer_processes": [], "write_activity": "none", "mtime_stable": true, "last_write_at": "<UTC timestamp>", "verified_at": "<UTC timestamp>", "evidence_ref": "<owner evidence reference>"}}
   }
 }
 ```
@@ -88,37 +90,34 @@ $archive = Join-Path $env:TEMP 'memory-freeze-1492.iab'
 $restore = Join-Path $env:TEMP 'memory-freeze-1492-restore'
 .venv\Scripts\python.exe scripts/memory_freeze_backup.py seed --workspace $seed
 
-# 由所有者从安全输入/密钥管理器设置；不要把密钥写入仓库、日志、报告或命令历史。
-# 由所有者批准的密钥管理器仅向 backup/restore 进程注入 MEMORY_BACKUP_KEY；命令只写变量名。
-# 不要在交互 shell 中赋真实 key，也不要把 key 放进命令、参数、脚本、transcript、history、文件或日志。
 .venv\Scripts\python.exe scripts/memory_freeze_backup.py backup `
   --workspace $seed `
   --output $archive `
   --writer-proof (Join-Path $seed 'writer-proof.json') `
-  --rehearsal-fixture `
-  --key-env MEMORY_BACKUP_KEY
+  --rehearsal-fixture
 .venv\Scripts\python.exe scripts/memory_freeze_backup.py restore `
   --archive $archive `
-  --restore-root $restore `
-  --key-env MEMORY_BACKUP_KEY
+  --restore-root $restore
 ```
 
-备份在 AES-GCM 加密 tar 流中直接生成，不落未加密的 tar/staging 副本；成功的 backup
-receipt 必须显示 `encrypted=true`、`snapshot_method=sqlite-online-backup-api`、
+备份以 Python 标准库 tar 流直接生成明文 archive；成功的 backup receipt 必须显示
+`encrypted=false`、`archive_format=plain-tar-v1`、`snapshot_method=sqlite-online-backup-api`、
 `runtime_loaded=false`、`retrieval_registered=false` 与 `retention_until=2027-10-23`。
 本地 seed 只有显式传入 `--rehearsal-fixture` 才允许使用 synthetic fixture proof；生产命令
 不得传该 flag，必须使用 owner 生成的 process/service/scheduler/manual evidence。
 restore receipt 必须显示 source files、database tables、row/table manifests 和 SQLite
 `integrity_check` 全部匹配，并内嵌完整 `source_file_manifest`、各表状态/旧键/lease/provenance
 摘要和行哈希。种子 V2 workspace 同时包含带 lease 的 forming job 与带 idempotency key、终态
-及 outcome 的 completed job。加密 manifest 还绑定原 workspace 路径，工具会拒绝把恢复根放回
+及 outcome 的 completed job。Manifest 还绑定原 workspace 路径，工具会拒绝把恢复根放回
 原 workspace；输出目录必须是 workspace 运行目录之外的全新隔离位置。至少存在 `memory.db` 或
 `memory-v2.db` 才允许生成成功备份；两者都缺失会失败，不会把没有 SQLite 历史的 workspace
 报为归档成功。恢复也会拒绝没有数据库快照的 manifest。生产验收时，所有者必须将 manifest 的
 absent 数据库项与 workspace 预期来源清单逐项核对；若预期存在但缺失，停止验收。
 
-恢复过程会把解密文件先写到目标父目录下的私有暂存目录；只有 GCM 认证、归档成员、source/db
-哈希与完整性检查全部通过后才发布恢复目录。认证或校验失败时会清理暂存内容。
+恢复过程会在 restore-root 父目录下创建暂存目录；该父目录必须预先存在且访问受控，Windows
+下暂存安全依赖该目录继承的 ACL。只有归档成员、source/db 哈希与 SQLite 完整性检查全部通过后
+才发布恢复目录。哈希用于发现意外损坏或不匹配，不认证归档来源，也不防止恶意修改；校验失败时
+会清理暂存内容。
 
 ## 生产执行（待所有者在场）
 
@@ -128,22 +127,26 @@ absent 数据库项与 workspace 预期来源清单逐项核对；若预期存�
 
 1. 所有者按上表完成六类 writer 的停写/围住，审阅证据并生成完整 `writer-proof.json`；
    生产 backup 不得使用 `--rehearsal-fixture`。
-2. 选择 workspace 外、访问权限受控的离线输出目录；不得把 `.iab` 放入 workspace，也不得
-   把它挂载成当前 Memory retrieval source。
-3. 由所有者批准的密钥管理器在 backup/restore 子进程中按进程级注入 `MEMORY_BACKUP_KEY`；命令仅写 `--key-env MEMORY_BACKUP_KEY`。不要在交互 shell 中将真实值赋给环境变量，也不要把 key 放入命令、参数、脚本、transcript、history、文件或日志。恢复时按同一密钥管理流程重新注入，再运行 `restore` 到另一个隔离目录；密钥丢失时联系密钥所有者按其备份/轮换流程恢复，本仓库不保存、导出或重置密钥。
-4. 运行 `backup`，工具会枚举数据库主文件及 WAL/shm/journal、Markdown 主文件与
+2. 选择 workspace 外、访问权限受控且已存在的离线输出目录，并在操作记录中注明获准读取者/
+   访问范围；Windows 上核实目录 ACL，若介质不支持 ACL，则记录物理保管方式并确保仅获准者能访问。`.iab` 是明文，包含 Memory 内容，
+   任何有权限读取该介质的人都能读取。不得把归档放入 workspace，也不得把它挂载成当前 Memory
+   retrieval source。
+3. 运行 `backup`，工具会枚举数据库主文件及 WAL/shm/journal、Markdown 主文件与
    bak/tmp/lock，并对每张表记录列、行数、行哈希、状态、旧键、lease、provenance 的
    计数/哈希。冻结期间任何源文件变化都会使命令失败，不会产出可接受的 archive。
-5. 在独立主机/目录运行 `restore`，核对 manifest match、每个 DB 的 SQLite integrity check
-   与表级 hashes；不要把恢复出的 snapshot 接入运行时。
-6. 将加密产物与不含密钥的 receipt 按组织保管策略登记。保留截止日固定为 **2027-10-23**；
-   到期只创建人工复核事项，不能自动删除数据库、日志、映射或 backup。销毁必须另立票并
-   取得单独裁决。
+4. 在独立主机运行 `restore`；restore-root 父目录必须预先存在且访问受控，并在操作记录中注明
+   获准读取者/访问范围。核对 manifest match、每个 DB 的 SQLite integrity check 与表级 hashes；
+   不要把恢复出的 snapshot 接入运行时。
+5. 将明文 archive 与 receipt 按所有者选定的介质与保留策略登记。保留截止日固定为
+   **2027-10-23**；到期只创建人工复核事项，不能自动删除数据库、日志、映射或 backup。
+   销毁必须另立票并取得单独裁决。
 
 ## 失败处理
 
 - 缺 writer、writer 仍为活动状态、使用本机锁冒充跨主机冻结、workspace 在操作期间变化、
-  输出位于 workspace 内、缺少密钥或密文认证失败：停止并修正证据/路径后重试。
+  输出位于 workspace 内或归档成员/哈希/SQLite 校验失败：停止并修正证据/路径后重试。
+- 进程被强制终止时不能保证清理；受控输出目录中可能留下隐藏的明文 `.tmp` 归档。确认进程已退出后，
+  所有者须检查并按介质保管策略处置；不能仅凭临时文件存在就认定备份成功。
 - 不要调用 Memory runtime 初始化来“发现表”，因为初始化路径可能执行 tombstone 清理；
   工具只读现有文件，并用 SQLite Online Backup API 生成 destination snapshot。
 - 不要只复制 WAL 活跃数据库的 `.db` 主文件，也不要手工删除任何 sidecar、tombstone、
