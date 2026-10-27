@@ -6,14 +6,11 @@
 1. **等价**：append / compaction / superseded / fork-resume / 视觉口径变化 /
    pruner 装配六种形态下，投影消息与 source ranges 都等于全量基线
    （`derive_messages_with_source_ranges(session.events, ...)` 直接调用）。
-2. **失效**：缓存键少一个维度就必须实测变红（键 = 会话对象 + 事件前缀 + 视觉口径）。
+2. **失效**：追加事件、原地改写 payload、切换视觉口径都必须使缓存失效。
 3. **少做真实工作**：同夹具下 derive 调用次数下降，且缓存可丢弃、可从事件流重建。
 
-投影是纯函数（`derive.py` docstring），会话事件 append-only 且 `session.mark()` 是
-长度版本——「同一事件前缀 + 同一视觉口径」两次派生必然逐条相同，这是复用的前提。
-`SessionEvent.data` 是浅冻结（`Session.append` 按引用存，不复制），故该前提还依赖
-「append 之后不再原地改 data」的既有约定（当前全仓无此用法，与 `_token_memo` 同一
-条约定）；详见 builder `_derive_pairs` 注释。
+投影是纯函数（`derive.py` docstring）。`SessionEvent.data` 是浅冻结，因此缓存还校验
+事件内容快照，确保同 mark 下原地改写 payload 后不会复用旧投影。
 """
 
 from __future__ import annotations
@@ -568,3 +565,44 @@ class TestReducedWork:
         builder.usage_snapshot(session)
 
         assert session.events == before
+
+
+class TestProjectionCacheOwnership:
+    @pytest.mark.asyncio
+    async def test_in_place_event_payload_change_invalidates_projection(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {"content": "before"})
+        builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
+
+        first = await builder.build(session)
+        assert any(
+            isinstance(message, HumanMessage) and message.content == "before"
+            for message in first
+        )
+
+        session.events[-1].data["content"] = "after"
+        second = await builder.build(session)
+
+        assert any(
+            isinstance(message, HumanMessage) and message.content == "after"
+            for message in second
+        )
+
+    @pytest.mark.asyncio
+    async def test_build_returns_messages_detached_from_cached_projection(self, tmp_path):
+        session = make_session(tmp_path)
+        session.append(USER_MESSAGE, {
+            "content": [{"type": "text", "text": "original"}],
+        })
+        builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
+
+        first = await builder.build(session)
+        user_message = next(message for message in first if isinstance(message, HumanMessage))
+        user_message.content[0]["text"] = "mutated by caller"
+
+        second = await builder.build(session)
+        rebuilt_user_message = next(
+            message for message in second if isinstance(message, HumanMessage)
+        )
+
+        assert rebuilt_user_message.content == [{"type": "text", "text": "original"}]
