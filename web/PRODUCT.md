@@ -26,7 +26,7 @@ web
 - 本机运行、单人使用；API 默认本地信任模式（`JWT_SECRET` 未配置时不做身份校验）。没有多租户/协作场景要照顾。
 - 日常真实使用的面（用户 2026-09-13 亲述）：**Timeline（事件时间线）、Terminal（命令输出）、Overview**。右栏 Inspector 的 **Changes 与 Artifacts 目前实际不使用**——这不代表该删除，但代表它们不该成为设计的重心。
 - 主要形态是长时间挂在屏幕上的开发工具（桌面 / 笔记本），PRD §5.2 明确移动端非目标。
-- 真实会话里能拿到的供给面：`GET /api/sessions/{id}/events` 事件流（含 `artifact/created`、`artifact/externalized`、`tool/approval-requested`、`permission/resolved`、`tool/output_delta`）；改动以 `tool/result.data.{before,after,truncated}` 携带，**没有独立 diff 事件**；`/api/sessions/{id}/approve` 与 `/api/permission-modes` 是仅有的两个相关端点。
+- 真实会话里能拿到的供给面：`GET /api/sessions/{id}/events` 事件流（含 `artifact/created`、`artifact/externalized`、`tool/approval-requested`、`permission/resolved`、`tool/output_delta`）；`GET /api/sessions/{id}/artifacts/{artifact_id}` 提供带行范围、关键字和行数上限的产物内容切片；改动以 `tool/result.data.{before,after,truncated}` 携带，**没有独立 diff 事件**；`/api/sessions/{id}/approve` 与 `/api/permission-modes` 也是相关端点。
 
 ## Capabilities and Constraints
 
@@ -40,7 +40,7 @@ web
 已知技术约束（实测，不是猜测）：
 
 - 终端**没有 PTY / 交互式 shell**：`sandbox/local.py` 是一次性 `subprocess.Popen`，输出经 `tool/output_delta` 合帧增量推送。因此任何"终端面板"只能是**命令输出聚合**，不可能是双向交互终端。
-- **没有 artifact 内容 HTTP 接口**：产物内容只有模型工具（`inspect_artifact` / `read_artifact`）能读；网页端拿不到，`DiffBlock` 的"点击查看"深链因此至今未接线。
+- **artifact 内容可经会话作用域 HTTP 接口读取**：`GET /api/sessions/{id}/artifacts/{artifact_id}` 返回有界内容切片；Artifacts 面板默认预览最新产物，切换卡片会切换预览，工具卡中的归档内容也能就地展开。
 - `GET /api/capabilities` 已声明 `surfaces.{artifacts,terminal,changes}`，但**前端从未消费**（全局无 `getCapabilities`）——契约现成而悬空。
 - 两处 diff 渲染并存：中心列的 `DiffBlock`（ToolCard / ApprovalCard 用）与 Inspector `ChangesTab` 内联的 `.diff-cols`。
 

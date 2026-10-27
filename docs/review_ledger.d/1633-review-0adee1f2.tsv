@@ -1,0 +1,1 @@
+2026-10-27	#1633 双轴独立审查（Standards/Spec 无发现）：仅升级 oxlint 至 1.89.0，package 与 lockfile 的 peer 范围和平台 binding 版本一致；同步 merge 无特有文件差异。Oxlint lint、Vitest 全量（207 files/2727 passed，1 skipped）、tsc/build、stylelint 均通过。	2e124c7cae1ea56ab1c374ee803a4b9eddf55de3..0adee1f28d00e3df4237392095396b7b2c58b4a7

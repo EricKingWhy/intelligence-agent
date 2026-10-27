@@ -204,12 +204,6 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return res;
 }
 
-export async function getHealth(): Promise<{ status: string }> {
-  const res = await apiFetch('/api/health');
-  if (!res.ok) throw new Error(`health ${res.status}`);
-  return res.json();
-}
-
 /** 列会话摘要。
  *
  *  `includeArchived` 默认 `false`——**与后端默认逐字一致**（#171 AC3：不带参数就不返回
@@ -823,26 +817,6 @@ export async function getSlashRegistry(): Promise<SlashRegistryCommand[]> {
       ...(typeof c.argumentHint === 'string' ? { argumentHint: c.argumentHint } : {}),
       ...(typeof c.namespace === 'string' ? { namespace: c.namespace } : {}),
     }));
-}
-
-/** #367 / W-23 选项 A：POST /api/worktrees —— 为 git 仓库创建隔离 worktree。
- *  响应 `{worktree_path}`。目录冲突默认走这个（六家共识），"排队等"作次选项。 */
-export async function createWorktree(repoPath: string): Promise<string> {
-  const res = await apiFetch('/api/worktrees', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ repo_path: repoPath }),
-  });
-  if (!res.ok) {
-    const detail = await readErrorDetail(res);
-    throw new SessionError(res.status, detail || `create worktree ${res.status}`);
-  }
-  const body: unknown = await res.json();
-  const r = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
-  if (typeof r.worktree_path !== 'string' || !r.worktree_path) {
-    throw new SessionError(res.status, 'create worktree 回执缺少 worktree_path');
-  }
-  return r.worktree_path;
 }
 
 /** B1 契约通用清单条目——{id, display_name, description}。
