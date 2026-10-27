@@ -311,3 +311,216 @@ async def test_delegate_tree_quotas_are_single_sourced(tmp_path):
     assert delegate._max_delegations == expected
     # 树账消费点（build_runtime → provider.activate）：委派计数判超的那份。
     assert delegate._provider._max_delegations == expected
+
+
+# ── #1503 C2：一份纯选择决策 + 三投影矩阵 ────────────────────────────────
+
+
+def test_root_tool_selection_is_a_pure_boolean_combination():
+    """决策是**纯函数**：只做布尔组合，不看 settings / wiring / 文件系统。"""
+    from agent_harness.assembly import _root_tool_selection
+
+    # `None` 派生保留了旧语义：跟随 include_constraint_tools（CLI 只登记、不澄清）。
+    assert _root_tool_selection(
+        include_constraint_tools=True, include_constraint_resolution_tool=None,
+        has_artifact_store=False, has_session_store=False,
+    ) == _root_tool_selection(
+        include_constraint_tools=True, include_constraint_resolution_tool=True,
+        has_artifact_store=False, has_session_store=False,
+    )
+    # submit_plan 与 resolver 同开关、且要 artifact store（store 选不出 ⇒ 无处落盘）。
+    assert not _root_tool_selection(
+        include_constraint_tools=True, include_constraint_resolution_tool=True,
+        has_artifact_store=False, has_session_store=False,
+    ).include_submit_plan
+    assert _root_tool_selection(
+        include_constraint_tools=True, include_constraint_resolution_tool=True,
+        has_artifact_store=True, has_session_store=False,
+    ).include_submit_plan
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multiagent", [False, True], ids=["no-ma", "ma"])
+@pytest.mark.parametrize(
+    ("include_constraint_tools", "include_constraint_resolution_tool"),
+    [(False, None), (True, None), (True, False), (True, True)],
+    ids=["none", "both", "registration-only", "both-with-resolution"],
+)
+@pytest.mark.parametrize("with_store", [True, False], ids=["artifact", "no-artifact"])
+async def test_three_projections_agree_across_the_full_switch_matrix(
+    tmp_path, multiagent, include_constraint_tools,
+    include_constraint_resolution_tool, with_store,
+):
+    """AC2：根工具 / Capability / Artifact / Delegate × 开关矩阵，三投影逐名一致。
+
+    构造（`_build_tooling`）、名字集（`root_registry_tool_names`）、恢复元数据
+    （`root_registry_reconcile_info`）必须对**每一种**开关组合给出同一份名字集——
+    此前三处各写一遍 if 级联，"同一 `include_*` 下三方相等"只能靠人肉同步。
+    """
+    from agent_harness.assembly import root_registry_reconcile_info
+
+    overrides: dict[str, object] = {}
+    if not with_store:
+        # 显式关掉本地 artifact 落盘（`artifact_dir` 为空是合法配置，不是故障）。
+        overrides["artifact_dir"] = ""
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+        **({"capabilities": json.dumps(
+            {"multiagent": {"provider": "builtin", "enabled": True, "options": {}}}
+        )} if multiagent else {}),
+        **overrides,
+    )
+    _, wiring = await assemble_wiring(settings)
+    session_id = "sess-matrix"
+    session_store = JsonlSessionStore(root=tmp_path / "sessions")
+    kwargs = {
+        "include_constraint_tools": include_constraint_tools,
+        "include_constraint_resolution_tool": include_constraint_resolution_tool,
+    }
+
+    tooling = _build_tooling(
+        settings, wiring,
+        session_id=session_id, workspace=tmp_path / "workspaces" / session_id,
+        workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+        session_store=session_store, agent_profile=None,
+        **kwargs,
+    )
+    built = {tool.name for tool in tooling.registry.list()}
+    names = root_registry_tool_names(
+        settings, wiring, session_id=session_id, session_store=session_store, **kwargs,
+    )
+    info = root_registry_reconcile_info(
+        settings, wiring, session_id=session_id, session_store=session_store, **kwargs,
+    )
+
+    assert built == names == set(info), "三投影在开关矩阵上漂移"
+    # 决策与两个投影同源的旁证：构造产出的 selection 与名字集判据一致。
+    assert tooling.selection.include_submit_plan == ("submit_plan" in names)
+    assert ("delegate" in names) == (multiagent and session_store is not None)
+
+
+def test_projection_has_no_construction_side_effects(tmp_path, monkeypatch):
+    """AC1：names / reconcile 探针**零构造、零 I/O、零 mkdir**。
+
+    判据是"不实例化 sandbox、不建 workspace 目录"——直接给一个**不存在**的
+    workspace 路径，两个投影跑完它仍然不存在；并封死 workspace registry 的
+    create / mkdir 入口（被调用即红）。
+    """
+    import asyncio
+
+    from agent_harness.assembly import root_registry_reconcile_info
+
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+    )
+    _, wiring = asyncio.run(assemble_wiring(settings))
+    ghost_workspace = tmp_path / "never-created" / "sess-probe"
+
+    def _forbid(*args, **kwargs):
+        raise AssertionError("零副作用探针不得触碰 workspace registry / sandbox")
+
+    monkeypatch.setattr(WorkspaceRegistry, "create", _forbid)
+    monkeypatch.setattr(WorkspaceRegistry, "get", _forbid)
+    monkeypatch.setattr(Path, "mkdir", _forbid)
+
+    names = root_registry_tool_names(
+        settings, wiring, session_id="sess-probe", session_store=None,
+        include_constraint_tools=True, include_constraint_resolution_tool=True,
+    )
+    info = root_registry_reconcile_info(
+        settings, wiring, session_id="sess-probe", session_store=None,
+        include_constraint_tools=True, include_constraint_resolution_tool=True,
+    )
+
+    assert names and set(info) == names
+    assert not ghost_workspace.exists()
+
+
+@pytest.mark.parametrize("missing", ["update_plan", "read_artifact"])
+def test_negative_control_missing_projection_branch_is_red(tmp_path, monkeypatch, missing):
+    """AC2 负控：**同步漏一个工具**（只留在构造里）⇒ 对账必须红。
+
+    变异模拟"新增工具来源时只改了 `_build_tooling`"——这正是三方对账存在的
+    理由。两个代表：一个无条件工具（`update_plan`）、一个条件分支工具
+    （artifact 读回工具）。断言在变异下真的看到不一致（不是恒真断言）。
+    """
+    import asyncio
+
+    import agent_harness.assembly as assembly_module
+
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+    )
+    _, wiring = asyncio.run(assemble_wiring(settings))
+    session_id = "sess-negative-control"
+    session_store = JsonlSessionStore(root=tmp_path / "sessions")
+
+    real = assembly_module._root_registry_tools
+
+    def _missing_tool(*args, **kwargs):
+        return [tool for tool in real(*args, **kwargs) if tool.name != missing]
+
+    monkeypatch.setattr(assembly_module, "_root_registry_tools", _missing_tool)
+    names = root_registry_tool_names(
+        settings, wiring, session_id=session_id, session_store=session_store,
+        include_constraint_tools=True, include_constraint_resolution_tool=True,
+    )
+    tooling = _build_tooling(
+        settings, wiring, session_id=session_id,
+        workspace=tmp_path / "workspaces" / session_id,
+        workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+        session_store=session_store, agent_profile=None,
+        include_constraint_tools=True, include_constraint_resolution_tool=True,
+    )
+    built = {tool.name for tool in tooling.registry.list()}
+
+    assert built != names, "构造与名字集漏了同一个工具时必须可见（负控）"
+    assert missing in built and missing not in names
+
+
+@pytest.mark.asyncio
+async def test_web_names_adapter_matches_web_root_assembly(tmp_path):
+    """裁决书 §5.3-4：`_names` 端口 == **Web 根真实装配**的名字集（第四方对账）。
+
+    历史 `_names` 落默认 `(False, False)`（12 名），既不等于 Web 根（16）也不等于
+    CLI 根（13）——清理通道因此会把操作员刚声明的根专属 ceiling 判 stale。
+    #1503 裁决 Q2 A：清理口径统一为**最宽真实根口径**（Web 根，`(True, True)`）。
+    """
+    from agent_harness.web.app import _registered_tool_names_provider
+
+    settings = Settings(
+        _env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test",
+    )
+    _, wiring = await assemble_wiring(settings)
+    stores = recovery_stores(tmp_path / "harness.db")
+    await initialize_stores(stores)
+    session_id = "sess-web-names"
+    session_store = JsonlSessionStore(root=tmp_path / "sessions")
+
+    async def _get_wiring():
+        return None, wiring
+
+    names = _registered_tool_names_provider(
+        settings=settings, store=session_store, get_wiring=_get_wiring,
+    )
+    projected = await names(session_id)
+
+    with patch("agent_harness.assembly.create_chat_model",
+               return_value=ScriptedModelFactory()):
+        runtime = await build_runtime(
+            settings=settings, wiring=wiring, stores=stores,
+            workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+            session_id=session_id, workspace=tmp_path / "workspaces" / session_id,
+            session_store=session_store, max_agent_turns=10,
+            permission_mode=PermissionPolicy.WORKSPACE_WRITE,
+            # Web 根装配口径（`session/service.py` create / resume 路径）。
+            include_constraint_tools=True,
+        )
+    web_root = {tool.name for tool in runtime.registry.list()}
+
+    assert projected == frozenset(web_root)
+    # 根专属四名一个都不能少（这正是历史误清的那批）。
+    assert {
+        "ask_user", "submit_plan", "register_constraint",
+        "request_constraint_resolution",
+    } <= projected
