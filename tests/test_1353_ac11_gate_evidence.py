@@ -5,7 +5,8 @@ AC11 要求交付时给出 gate0 6/6、pytest 全量 `-n 4`、Playwright 全量�
 
 1. Gate-0 的六条机械车道由 `scripts/gate0.py` 声明（不是人写在文档里的清单）；
 2. 收据 schema 带 `sha` / `tree` / `lanes` / `wall_seconds` / `tool_versions`，
-   且记录的 `tree` 等于 `git rev-parse <sha>^{tree}`（协议 §8.7 第 3 条：读数必须能指到树）；
+   且源对象可用时，记录的 `tree` 等于 `git rev-parse <sha>^{tree}`；唯一的历史收据例外需有明确标记，
+   其记录保留作档案，但不作为有效 Gate-0 证据；
 3. e2e 车道的输入（playwright 配置 + 全量 spec + package 脚本）存在。
 
 本文件只读仓库，不跑任何门禁。
@@ -28,6 +29,16 @@ WEB = REPO_ROOT / "web"
 EXPECTED_LANES = ("diff-check", "ruff", "oxlint", "tsc", "stylelint", "guards", "coverage")
 
 _REQUIRED_RECEIPT_KEYS = ("sha", "tree", "lanes", "wall_seconds", "tool_versions")
+_UNVERIFIABLE_HISTORICAL_RECEIPTS = {
+    "1696353d8800972d4b937c4d8330a1a93e65b535": {
+        "tree": "9ab84f1e0dafd28ac85d57b873f2111802816d65",
+        "source_object_verification": {
+            "status": "UNVERIFIABLE_HISTORICAL",
+            "checked_at": "2026-10-27",
+            "reason_code": "source_absent_in_checked_local_and_github_repositories",
+        },
+    },
+}
 
 
 def _load_gate0():
@@ -111,13 +122,12 @@ def test_gate_receipts_are_machine_recorded_and_point_at_their_tree():
     # 各起一个 git 进程（997+ 次）。两类失败显式分开：
     #   ① sha 在库但 tree 不一致 —— 收据造假/树对不上；
     #   ② sha 不在对象库 —— 无法在本仓核验（跨 clone 历史收据或对象被 GC），
-    #      同样红，处理方式需裁决（补齐对象 / 移除收据 / 明确接受不可核验语义）。
+    #      不构成有效 Gate-0 证据。
     commit_trees: dict[str, str] = {}
     for line in _git("log", "--all", "--format=%H %T").splitlines():
         commit, tree = line.split()
         commit_trees[commit] = tree
 
-    unresolvable: list[str] = []
     for path in paths:
         receipt = json.loads(path.read_text(encoding="utf-8"))
         sha, recorded = str(receipt["sha"]), str(receipt["tree"])
@@ -128,17 +138,25 @@ def test_gate_receipts_are_machine_recorded_and_point_at_their_tree():
                 cwd=REPO_ROOT, capture_output=True, text=True, check=False,
             )
             if probe.returncode != 0:
-                unresolvable.append(f"{path.name}（sha={sha} 不在本仓对象库，tree 无法核验）")
+                archival = _UNVERIFIABLE_HISTORICAL_RECEIPTS.get(sha)
+                assert archival is not None, (
+                    f"{path.name} references an absent object without an approved archive entry"
+                )
+                assert recorded == archival["tree"], (
+                    f"{path.name} does not match the approved historical tree"
+                )
+                assert receipt.get("source_object_verification") == archival[
+                    "source_object_verification"
+                ], f"{path.name} lacks the exact unverifiable-history marker"
                 continue
             actual = _git("rev-parse", f"{sha}^{{tree}}")
+        assert receipt.get("source_object_verification") is None, (
+            f"{path.name} is marked unverifiable although its source object is available"
+        )
         assert actual == recorded, (
             f"{path.name} 记录的 tree 与 {sha} 的真实 tree 不一致："
             f"{recorded} != {actual}"
         )
-    assert not unresolvable, (
-        "以下收据的 sha 不在本仓对象库，tree 校验无法执行（全量核对不静默跳过）：\n"
-        + "\n".join(unresolvable)
-    )
 
 
 def test_playwright_full_suite_inputs_exist():
