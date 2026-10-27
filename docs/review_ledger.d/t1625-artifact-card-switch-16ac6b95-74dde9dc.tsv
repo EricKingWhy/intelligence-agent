@@ -1,0 +1,1 @@
+2026-10-27	#1625 artifact-card switch E2E follow-up: Correctness/Spec PASS and Standards PASS, 0 findings; test verifies latest selection, requested artifact ID, and preview content after switching. Test-only, no runtime changes. Evidence: docs/phase_status/2026-10.md #1625 follow-up.	16ac6b958703c6f8fa0c1b3f508383805356428b..74dde9dc19f641af6726a526d48a354ecbe4ba87

@@ -1,0 +1,1 @@
+2026-10-27	#1641 (#1372 AC3): control the shared Radix tooltip/menu Escape layer; new one-Escape regression. Correctness/Spec PASS, Standards PASS, P0-P4=0; exact range reviewed; detailed evidence in docs/phase_status/2026-10.md.	04c624fa04f87459663147ca20d1a325bfb53c14..6fcf33bfbd49881c56ded4b632acae4ac00bf6bc
