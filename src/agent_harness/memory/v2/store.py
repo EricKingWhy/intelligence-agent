@@ -240,10 +240,6 @@ def _require_projection_target(target: str | None) -> None:
         raise ValueError(f"unknown projection target {target!r}")
 
 
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
 def _fts_indexed(content: str) -> str:
     """索引侧文本：CJK 逐字切开，其余原样（见 `_CJK_RUN` 的说明）。"""
     return _CJK_RUN.sub(lambda match: " " + " ".join(match.group()) + " ", content)

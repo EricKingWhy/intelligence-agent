@@ -860,6 +860,7 @@ def head_tree_receipts(repo_root=None) -> dict:
     `None == None` 为真，必须显式拒绝——否则三字段手写收据能顶掉整条在场检查）。
     新收据还须带 `review_ledger`，其摘要按收据 `sha` 对应的 Git tree 重算。仅 rollout 提交之前
     的历史收据可缺字段；rollout 之后缺字段即 invalid。不从当前 HEAD 或工作树补造旧收据的指纹。
+    任何带有 `source_object_verification` 字段的收据都仅作归档并判无效，即使源对象后来可读。
     其余一律 invalid（**当它不存在** = fail-closed）。
     """
     repo_root = repo_root or REPO_ROOT
@@ -915,6 +916,12 @@ def head_tree_receipts(repo_root=None) -> dict:
         if obj.get("sha") != sha:
             receipts[sha] = {"valid": False,
                              "reason": f"sha 字段 {obj.get('sha')!r} 与文件名不符"}
+            continue
+        if "source_object_verification" in obj:
+            receipts[sha] = {
+                "valid": False,
+                "reason": "source object is marked unverifiable historical",
+            }
             continue
         tree_request = tree_requests[sha]
         tree_object = objects.get(tree_request)

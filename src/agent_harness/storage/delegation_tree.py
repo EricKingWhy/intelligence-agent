@@ -2110,13 +2110,6 @@ class SessionBudgetHandle:
             step_id=step_id, after_seq=after_seq,
         )
 
-    async def resolve_empty_model_request_accounting(
-        self, accounting_id: str, *, refund_step: bool,
-    ) -> None:
-        await self.ledger.resolve_empty_session_model_request_accounting(
-            self.budget_key, accounting_id, refund_step=refund_step,
-        )
-
     async def resolve_unsettled_model_request_accounting(
         self, accounting_id: str,
     ) -> None:

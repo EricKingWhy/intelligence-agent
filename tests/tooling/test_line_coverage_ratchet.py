@@ -613,6 +613,7 @@ def test_deleted_line_beginning_with_two_dashes_is_not_a_file_header(repo: Path)
     assert "变更可执行行：0/1 = 0.00%" in proc.stdout
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows filenames cannot contain a double quote")
 def test_path_with_a_quote_is_unquoted_correctly(repo: Path) -> None:
     """含 `"` 的路径即使 `core.quotePath=false` 也会被 git 加引号 + 反斜杠转义。
 

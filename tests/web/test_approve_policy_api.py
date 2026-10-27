@@ -33,6 +33,15 @@ from agent_harness.web.app import create_app
 _RULES_PATH = "/api/approve-policy/rules"
 
 
+@pytest.fixture(autouse=True)
+def _pin_control_root(tmp_path: Path, monkeypatch) -> None:
+    """#1487：控制目录钉 tmp_path 的兄弟目录——默认落 home（hermeticity）；也不
+    放 tmp_path 下：这些用例的项目根就是 tmp_path，控制文件必须不在项目树内。
+    兄弟目录随 pytest 的 run 根目录（pytest-<N>/）一起被 retention 清理。"""
+    control = tmp_path.parent / f"{tmp_path.name}-approve-policy-control"
+    monkeypatch.setenv("AGENT_HARNESS_APPROVE_POLICY_ROOT", str(control))
+
+
 def _rule(rule_id: str = "r1", *, key: str = "npm run build") -> ApprovePolicyRule:
     return ApprovePolicyRule(
         id=rule_id,
@@ -82,7 +91,7 @@ class TestListRules:
     def test_corrupt_file_fails_closed_to_empty(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        target = tmp_path / ".agent-harness" / "approve-policy.json"
+        target = ApprovePolicyStore(tmp_path).path
         target.parent.mkdir(parents=True)
         target.write_text("{ not json", encoding="utf-8")
         client = _client(tmp_path, monkeypatch)

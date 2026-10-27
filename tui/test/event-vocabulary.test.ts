@@ -41,11 +41,20 @@ function listTsFiles(dir: string): string[] {
  * 守卫钉的是「活代码手抄」；注释里提事件名是合法文档（复核 A1 的 8 处全在注释里）。
  * 边界不是「正则里的 `/`」而是「正则里的引号」：`/^['"]+|['"]+$/g` 会让只认字符串态
  * 的解析器误入引号态、吞掉后续活代码（增量复核 F-1 实证）。故 `/` 按「上一个非空白
- * 字符属于 `(,=:[!&|?{};+-*%~^<>` 或行首」判为正则开头，正则内再分字符类两态。
- * ponytail: 不认 `return /re/`（前一个是字母，按除号处理）；本仓唯一的这种写法
- * （`src/lib/wsl.ts:22`）正则内无引号/注释符，无害；真需要再加关键字判定。
+ * 字符属于 `(,=:[!&|?{};*%~^<>` 或行首」判为正则开头，正则内再分字符类两态。
+ * `+`/`-` 不在前置集里：`i++ / 2`、`i-- / 2` 是除法，留着会把后续注释吞成正则，
+ * 注释里的事件名就假红（#1549 P3-1）。代价是 `s + /re/.source` 这类合法正则也被
+ * 当除法——文本层无法与 `n + / 2` 区分，只能靠语法消歧；`tui/src` 现无此形态。
+ * 前面是标识符时不可能是正则，只有关键字后可以：`return /[//]/` 这类正则体内的裸
+ * `//` 曾被当行注释吞掉后继活代码（#1549 P3-2），故补 `REGEX_KEYWORDS`。
+ * 注释判定保持在正则判定之前：`x = 1; // 注释` 的 `//` 前是 `;`（preceder），
+ * 若先判正则就会把整行注释吞成正则。
  */
-const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%~^<>";
+const REGEX_PRECEDERS = "(,=:[!&|?{};*%~^<>";
+const REGEX_KEYWORDS = new Set([
+  "return", "typeof", "instanceof", "case", "delete", "void", "yield", "await",
+  "throw", "new", "do", "else", "in", "of",
+]);
 
 function stripComments(text: string): string {
   type Mode = "code" | "line" | "block" | "double" | "single" | "template" | "regex";
@@ -53,11 +62,29 @@ function stripComments(text: string): string {
   let inClass = false;
   // 上一个非空白字符；行首为 ""。只用来判 `/` 是正则开头还是除号。
   let prev = "";
+  // 上一个标识符 / 关键字（可跨空白）；`return /re/` 这类只认关键字后的 `/`。
+  let lastWord = "";
+  // 该标识符前的字符；`.` 之后是属性名（`obj.in / 2` 是除法），不算关键字。
+  let lastWordPrev = "";
+  let word = "";
+  let wordPrev = "";
   let out = "";
   for (let i = 0; i < text.length; i++) {
     const ch = text[i] ?? "";
     const next = text[i + 1];
     if (mode === "code") {
+      // 先结算标识符，`return/re/`（无空格）也认得出关键字。
+      if (/[A-Za-z0-9_$]/.test(ch)) {
+        if (word === "") wordPrev = prev;
+        word += ch;
+      } else if (word !== "") {
+        lastWord = word;
+        lastWordPrev = wordPrev;
+        word = "";
+      }
+      // 注释判定必须在正则判定之前：`x = 1; // 注释` 的 `/` 前是 `;`（preceder），
+      // 先判正则会把整行注释吞成正则。`return /[//]/` 的正则自第一个 `/` 起就不以
+      // 裸 `//` 开头（第二字符是 `[`），故不受这条顺序影响。
       if (ch === "/" && next === "/") {
         mode = "line";
         out += "  ";
@@ -70,7 +97,12 @@ function stripComments(text: string): string {
         i++;
         continue;
       }
-      if (ch === "/" && (prev === "" || REGEX_PRECEDERS.includes(prev))) {
+      if (
+        ch === "/" &&
+        (prev === "" ||
+          REGEX_PRECEDERS.includes(prev) ||
+          (REGEX_KEYWORDS.has(lastWord) && lastWordPrev !== "."))
+      ) {
         mode = "regex";
         inClass = false;
         out += ch;
@@ -79,9 +111,11 @@ function stripComments(text: string): string {
       if (ch === '"') mode = "double";
       else if (ch === "'") mode = "single";
       else if (ch === "`") mode = "template";
-      if (ch === "\n") prev = "";
-      else if (!/\s/.test(ch)) prev = ch;
-      out += ch;
+      // 换行即不可能是关键字/自增的尾巴；关键字不跨行生效（`return` 后会 ASI）。
+      if (ch === "\n") {
+        prev = "";
+        lastWord = "";
+      } else if (!/\s/.test(ch)) prev = ch;      out += ch;
       continue;
     }
     if (mode === "line") {
@@ -178,6 +212,32 @@ test("stripComments 认正则字面量里的引号（增量复核 F-1）", () =>
   // 真实夹具：`src/lib/image-paste.ts` 的 `/^['"]+|['"]+$/g` 曾让 `"file://"` 被空白化。
   const real = stripComments(readFileSync(join(SRC_ROOT, "lib", "image-paste.ts"), "utf8"));
   assert.ok(real.includes(`"file://"`), "正则同行之后的字符串必须原样保留");
+});
+
+test("stripComments 不把 ++/-- 与二元 + 后的除法判成正则（#1549 P3-1）", () => {
+  // `n++ / 2`、`n + / 2` 是除法。`+`/`-` 若留在正则前置字符集里，会吞到下一个 `/`，
+  // 同行注释不再剥除，注释里的事件名就假红（增量复核 §7.3）。
+  const src = `const a = n++ / 2; // 文档提及 "run/paused"\nconst b = n-- / 2; // "x/y"\nconst c = n + / 2; // "tool/call"\nconst d = cfg.in / 2; // "step/started"\n`;
+  const out = stripComments(src);
+  assert.equal(out.length, src.length, "只许等长空白化，不许增删字符");
+  assert.ok(!out.includes(`"run/paused"`), "++ 后除法所在行的注释必须被剥除");
+  assert.ok(!out.includes(`"x/y"`), "-- 后除法所在行的注释必须被剥除");
+  assert.ok(!out.includes(`"tool/call"`), "二元 + 后除法所在行的注释必须被剥除");
+  assert.ok(!out.includes(`"step/started"`), "`.in` 是属性名不是关键字，其后除法不得判成正则");
+  // 前置字符是 `(` 的合法正则不许被误伤：`src/app.ts` 的 `split(/\s+/)`。
+  const app = stripComments(readFileSync(join(SRC_ROOT, "app.ts"), "utf8"));
+  assert.ok(app.includes("split(/\\s+/)"), "合法正则字面量必须原样保留");
+});
+
+test("stripComments 认 return 后正则里的裸 //（#1549 P3-2）", () => {
+  // `return /[//]/`、`/[/]/`：正则内的裸 `//` 曾被当行注释，吞掉后继活代码（增量复核 §7.4）。
+  const src = `function f(x) { return /[//]/.test(x); }\nfunction g(x) { return /[/]/.test(x); }\nconst keep = "run/paused"; // 注释 "x/y"\n`;
+  const out = stripComments(src);
+  assert.equal(out.length, src.length, "只许等长空白化，不许增删字符");
+  assert.ok(out.includes("return /[//]/.test(x);"), "正则内裸 // 不得脱轨");
+  assert.ok(out.includes("return /[/]/.test(x);"), "字符类里的 / 不得脱轨");
+  assert.ok(out.includes(`"run/paused"`), "活代码字面量必须保留");
+  assert.ok(!out.includes(`"x/y"`), "行注释里的字面量必须被剥除");
 });
 
 test("src/ 下（生成物之外）不再出现事件值字面量", () => {

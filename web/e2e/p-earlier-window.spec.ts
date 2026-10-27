@@ -39,8 +39,9 @@ test('时间线「加载更早 N 条」：真实点击展开折叠的前段，�
   });
 
   await page.goto('/');
-  await page.locator('.session-item').first().click();
-  await expect(page.locator('.session-item').first()).toContainText('长会话');
+  const session = page.getByRole('region', { name: '未分组' }).getByRole('button', { name: /长会话/ });
+  await session.click();
+  await expect(session).toContainText('长会话');
 
   // 默认 tab 就是 Timeline（`useState<Tab>('timeline')`）；Inspector 在 ≥1200px 默认展开
   await expect(page.getByRole('tab', { name: '时间线' })).toHaveAttribute('aria-selected', 'true');
@@ -50,7 +51,7 @@ test('时间线「加载更早 N 条」：真实点击展开折叠的前段，�
   await expect(page.locator('.timeline-window-bar')).toContainText('显示最近 200');
   // 窗口是**最近** 200 条：第一行是 seq 61（1..60 被折叠）
   await expect(rows).toHaveCount(200);
-  await expect(rows.first().locator('.tl-seq')).toHaveText('61');
+  await expect(rows.first().locator('.tl-meta-text')).toContainText('#61 · text/delta');
 
   const earlier = page.locator('.timeline-earlier');
   await expect(earlier).toHaveText('加载更早 60 条'); // min(STEP=500, hidden=60)
@@ -59,6 +60,6 @@ test('时间线「加载更早 N 条」：真实点击展开折叠的前段，�
 
   // 展开后：全部 260 行、最早一行露出来（seq 1）、折叠条消失
   await expect(rows).toHaveCount(TOTAL);
-  await expect(rows.first().locator('.tl-seq')).toHaveText('1');
+  await expect(rows.first().locator('.tl-meta-text')).toContainText('#1 · session/started');
   await expect(page.locator('.timeline-window-bar')).toHaveCount(0);
 });

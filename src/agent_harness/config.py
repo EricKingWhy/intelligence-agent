@@ -1,9 +1,12 @@
 """全局运行配置：只定义"运行需要什么"，从 .env 读取。"""
 
+import logging
+import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from agent_harness.attachments.validation import parse_allowed_media_types
@@ -13,6 +16,14 @@ from agent_harness.attachments.validation import parse_allowed_media_types
 #: 配置，错误推迟到首个请求内才爆（R6-5）。安装为 site-packages 时锚点
 #: 无意义但无害（该路径下不存在 .env，退化为环境变量配置）。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+logger = logging.getLogger(__name__)
+
+#: 已退役键（#1535）：`MILVUS_COLLECTION` 无任何运行时消费者，检索目标只由
+#: `knowledge_collection`（`KNOWLEDGE_COLLECTION`）决定。部署 `.env` 里残留该键时
+#: **只告警、不拒绝**——`extra="ignore"` 的启动鲁棒性（见下方 `model_config`）不变，
+#: 单为它破例改成拒绝会让"他应用变量混入"这类既有容忍面变成启动崩溃。
+_RETIRED_KEYS: tuple[str, ...] = ("MILVUS_COLLECTION",)
 
 #: 上下文窗口五挡位（#1197 项 1）。**唯一的**挡位清单：`Settings.max_context_tokens`
 #: 的构造期白名单、API 的 PATCH 校验、前端选择器三处都读它——挡位表分列两处就会出现
@@ -102,7 +113,6 @@ class Settings(BaseSettings):
     jwt_secret: SecretStr | None = None
     milvus_uri: str = ""
     milvus_token: SecretStr = SecretStr("")
-    milvus_collection: str = ""
     # Knowledge 域独立 Collection（ADR-0013 决策 13）：必填无默认——
     # 不配 = knowledge capability 缺席降级，绝不静默写默认库。
     knowledge_collection: str = ""
@@ -311,6 +321,55 @@ class Settings(BaseSettings):
     # development，绝不落入 default）；release 标版本/SHA（空=不塞，SDK 自决）。
     langfuse_tracing_environment: str = "development"
     langfuse_release: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_on_retired_keys(cls, data: Any) -> Any:
+        """残留的已退役键被忽略时**告警**（#1535 AC2），绝不拒绝/改写。
+
+        为什么要检查两处：pydantic-settings 只把 `Settings` 已有字段的键交给
+        validator（env var 路在没有同名字段时根本不会出现在 `data` 里）；而 env file
+        的残留值因为 `extra != "forbid"` 会进 `data`，却**不进** `os.environ`。两条路
+        都是部署实态，缺一条就会漏报。
+
+        为什么是 warning 而不是拒绝：见 `_RETIRED_KEYS` 上方注释——`extra="ignore"`
+        的启动鲁棒性是既有政策，告警只提供可观察信号。
+
+        `raiseExceptions` 那一小段（#1535 X-P2-2(e)）：`setup_logging` 在构造 handler
+        时就把 `sys.stderr` 绑成当时的流，进程里换过/关过 stderr（pytest capsys 每轮
+        换一个，上一轮结束时关闭；部署里重定向到已关的管道同理）后 root handler 仍
+        指着死流。此时 emit 失败会让 stdlib `Handler.handleError` 往**当前** stderr 打
+        `--- Logging error --- Traceback …`——那是 logging 自身的错误，不是配置错误，
+        却会连坐调用方对 stderr 的断言。只在 root 上确有已关闭流时对**这一条** emit
+        关掉 `raiseExceptions`（stdlib 文档语义：False = 忽略 logging 自身异常）；活
+        handler（caplog / JSONL / 活 console）仍照收本记录，正常部署可观察性不变。
+
+        ponytail: `logging.raiseExceptions` 是模块级全局，这一小段不是线程安全的——
+        它只围住一次构造期 emit，且只在已检出死流时才短暂置 False。构造期是启动
+        单线程路径；若将来 `Settings()` 在并发路径上高频构造，改成自带
+        `handleError` 的 handler 子类（或在 `setup_logging` 侧剔除死 handler）。
+        """
+        present = {str(key).lower() for key in os.environ}
+        if isinstance(data, Mapping):
+            present.update(str(key).lower() for key in data)
+        dead_stream = any(
+            getattr(getattr(handler, "stream", None), "closed", False)
+            for handler in logging.getLogger().handlers
+        )
+        raise_exceptions = logging.raiseExceptions
+        if dead_stream:
+            logging.raiseExceptions = False
+        try:
+            for retired in _RETIRED_KEYS:
+                if retired.lower() in present:
+                    logger.warning(
+                        "%s 已退役（#1535），该键被忽略：检索目标只由 KNOWLEDGE_COLLECTION"
+                        "（Settings.knowledge_collection）决定，请从部署配置中删除它。",
+                        retired,
+                    )
+        finally:
+            logging.raiseExceptions = raise_exceptions
+        return data
 
     @field_validator("max_context_tokens")
     @classmethod

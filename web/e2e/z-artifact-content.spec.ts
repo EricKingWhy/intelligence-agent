@@ -2,7 +2,8 @@
  *
  *  票面 AC6 明说"e2e 对 artifact/diff 目前零覆盖，至少新增一条'外置 diff → 就地展开
  *  → 可见'"。这里给四条：
- *  - **清单 → 打开内容**（AC1 的正路，走 #185 的真实端点形状）；
+ *  - **清单 → 默认预览内容**（AC1 的正路，走 #185 的真实端点形状）；
+ *  - **切换所选卡片 → 对应预览内容**（AC1 的多产物路径）；
  *  - **归档 diff → 就地展开 → 可见**（AC2 的正路，且与清单**同一渲染器**）；
  *  - **503 与 404 两种拿不到**（AC1 的三态：失败原因必须分开说，detail 照显原文）。
  *
@@ -12,6 +13,7 @@
  */
 
 import { expect, test } from '@playwright/test';
+import { EARLY_RESPONSE_WINDOW_MS } from '../src/hooks/useSession';
 import { SID, T, capabilityFixture, fulfillSse, routeApi, submitTask, type FrameSpec } from './fixtures';
 
 const AID = '0123456789abcdef';
@@ -71,15 +73,29 @@ const SLICE = {
   truncated: false,
 };
 
-async function openSession(page: import('@playwright/test').Page, frames: FrameSpec[], extra = {}) {
+async function openSession(
+  page: import('@playwright/test').Page,
+  frames: FrameSpec[],
+  extra = {},
+  options: { sessionPostDelayMs?: number } = {},
+) {
+  const sessions: Array<Record<string, unknown>> = [];
   await routeApi(page, {
     capabilities: [capabilityFixture({ chat: true, timeline: true, changes: true, artifacts: true })],
-    sessions: [{
-      session_id: SID, event_count: frames.length, first_event_time: T, last_event_time: T,
-      first_user_message: '写一个大文件', trace_id: null, trace_url: null,
-    }],
+    sessions,
     events: frames,
-    onSessionPost: (route) => fulfillSse(route, frames),
+    onSessionPost: async (route) => {
+      const createdAt = new Date().toISOString();
+      for (const frame of frames) frame.time = createdAt;
+      sessions.push({
+        session_id: SID, event_count: frames.length, first_event_time: createdAt, last_event_time: createdAt,
+        first_user_message: '写一个大文件', trace_id: null, trace_url: null,
+      });
+      if (options.sessionPostDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.sessionPostDelayMs));
+      }
+      await fulfillSse(route, frames);
+    },
     ...extra,
   });
   await page.goto('/');
@@ -110,22 +126,25 @@ async function openArtifactsTab(page: import('@playwright/test').Page) {
   await aside.getByRole('tab', { name: '产出文件' }).click();
 }
 
-test('AC1：Artifacts 清单 → 点"查看内容" → 内容真的可见（走 #185 端点）', async ({ page }) => {
+test('AC1：Artifacts 清单 → 默认预览选中的产物内容（走 #185 端点）', async ({ page }) => {
   const frames = framesWithArtifact();
-  await openSession(page, frames, { artifactContent: SLICE });
+  const requestedIds: string[] = [];
+  await openSession(page, frames, {
+    artifactContent: SLICE,
+    onArtifactGet: async (_route, artifactId) => {
+      requestedIds.push(artifactId);
+      return false;
+    },
+  });
   await openArtifactsTab(page);
 
   // 清单本身在（票面要求"保留并可读"，不是被内容面板取代）
   await expect(page.locator('.step-detail')).toContainText(AID.slice(0, 16));
   await expect(page.locator('.step-detail')).toContainText('text/plain');
 
-  // 内容**未**展开时不请求（组件只在展开后取数）
-  await expect(page.locator('.artifact-content')).toHaveCount(0);
-
-  await page.getByRole('button', { name: '查看内容' }).click();
-
   const content = page.locator('.artifact-content');
   await expect(content).toBeVisible();
+  await expect.poll(() => requestedIds).toContain(AID);
   await expect(content).toContainText('CONTENT_LINE_ONE');
   await expect(content).toContainText('CONTENT_LINE_TWO');
   await expect(content).toContainText('共 2 行');
@@ -133,9 +152,94 @@ test('AC1：Artifacts 清单 → 点"查看内容" → 内容真的可见（走 
   await expect(page.locator('.artifact-line-no').first()).toHaveText('1');
 });
 
+test('AC1：切换所选卡片后预览请求并显示对应产物内容', async ({ page }) => {
+  const secondArtifactId = 'fedcba9876543210';
+  const frames = framesWithArtifact();
+  const completed = frames.pop()!;
+  frames.push(
+    {
+      type: 'tool/call',
+      data: { tool_call_id: 'tc-2', tool_name: 'write', args: { path: 'second.txt' } },
+      seq: 7, session_id: SID, run_id: 'run-186', step_id: 1, time: T,
+    },
+    {
+      type: 'tool/result',
+      data: {
+        tool_call_id: 'tc-2',
+        content: JSON.stringify({
+          ok: true,
+          message: 'ok',
+          artifact_ref: secondArtifactId,
+          data: { path: 'second.txt', before: '', after: '... [truncated, 1 lines total]', truncated: true },
+        }),
+      },
+      seq: 8, session_id: SID, run_id: 'run-186', step_id: 1, time: T,
+    },
+    {
+      type: 'artifact/externalized',
+      data: {
+        artifact_id: secondArtifactId, session_id: SID, source_tool: 'write',
+        tool_call_id: 'tc-2', size: 2048, mime_type: 'text/plain',
+      },
+      seq: 9, session_id: SID, run_id: 'run-186', step_id: 1, time: T,
+    },
+    { ...completed, seq: 10 },
+  );
+
+  const slices: Record<string, typeof SLICE> = {
+    [AID]: {
+      ...SLICE,
+      lines: [{ line_number: 1, text: 'FIRST_ARTIFACT_CONTENT' }],
+      total_lines: 1,
+      returned_lines: 1,
+    },
+    [secondArtifactId]: {
+      ...SLICE,
+      artifact_id: secondArtifactId,
+      lines: [{ line_number: 1, text: 'SECOND_ARTIFACT_CONTENT' }],
+      total_lines: 1,
+      returned_lines: 1,
+    },
+  };
+  const requestedIds: string[] = [];
+  await openSession(page, frames, {
+    onArtifactGet: async (route, artifactId) => {
+      requestedIds.push(artifactId);
+      const slice = slices[artifactId];
+      if (!slice) return false;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(slice) });
+      return true;
+    },
+  });
+  await openArtifactsTab(page);
+
+  const cards = page.locator('.art-card');
+  const preview = page.locator('.art-preview');
+  const content = preview.locator('.artifact-content');
+  await expect(cards).toHaveCount(2);
+  // 默认选中最新产物，并从真实路由载入它的内容。
+  await expect(cards.nth(1)).toHaveAttribute('aria-pressed', 'true');
+  await expect(preview.locator('.pv-name')).toHaveText('second.txt');
+  await expect(content).toContainText('SECOND_ARTIFACT_CONTENT');
+  await expect.poll(() => requestedIds.at(-1)).toBe(secondArtifactId);
+
+  const requestsBeforeSwitch = requestedIds.length;
+  await cards.nth(0).click();
+  await expect(cards.nth(0)).toHaveAttribute('aria-pressed', 'true');
+  await expect(cards.nth(1)).toHaveAttribute('aria-pressed', 'false');
+  await expect(preview.locator('.pv-name')).toHaveText('big.txt');
+  await expect(content).toContainText('FIRST_ARTIFACT_CONTENT');
+  await expect(content).not.toContainText('SECOND_ARTIFACT_CONTENT');
+  await expect.poll(() => requestedIds.slice(requestsBeforeSwitch)).toContain(AID);
+});
+
 test('AC2/AC6：外置 diff → 就地展开 → 可见（与清单同一渲染器）', async ({ page }) => {
   const frames = framesWithArtifact();
-  await openSession(page, frames, { artifactContent: SLICE });
+  // Force the POST response past useSession's early-response window so this also
+  // exercises the new-session claim path under nightly-suite load.
+  await openSession(page, frames, { artifactContent: SLICE }, {
+    sessionPostDelayMs: EARLY_RESPONSE_WINDOW_MS + 250,
+  });
 
   // 中心列里那张工具卡：diff 已归档 → 占位 + 展开入口
   await expandToolToL2(page);
@@ -237,7 +341,6 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
     },
   });
   await openArtifactsTab(page);
-  await page.getByRole('button', { name: '查看内容' }).click();
   const err = page.locator('.artifact-content-error');
   await expect(err).toBeVisible();
   await expect(err).toContainText('本部署没有可读取的产出文件存储');
@@ -254,7 +357,6 @@ test('AC1：拿不到时分因说明——503"部署没配存储"与 404"不在�
     artifactContentError: { status: 404, detail: `artifact '${AID}' 不在会话 's1' 的命名空间里` },
   });
   await openArtifactsTab(page);
-  await page.getByRole('button', { name: '查看内容' }).click();
   const gone = page.locator('.artifact-content-error');
   await expect(gone).toContainText('不在本会话里');
   await expect(gone).not.toContainText('本部署没有可读取的产出文件存储');
@@ -272,7 +374,6 @@ test('#227：同一个 503 的**第二个原因**（自带码）不说成"部署
     },
   });
   await openArtifactsTab(page);
-  await page.getByRole('button', { name: '查看内容' }).click();
   const err = page.locator('.artifact-content-error');
   await expect(err).toBeVisible();
   // 后端文案照显（含码本体的诊断信息由它承担）
