@@ -662,7 +662,9 @@ class TestProjectionCacheOwnership:
         assert second[0][0].tool_calls[0]["args"]["zero"].hex() == (-0.0).hex()
 
     @pytest.mark.asyncio
-    async def test_tuple_snapshot_tracks_nested_payload_mutation(self, tmp_path):
+    async def test_tuple_snapshot_tracks_nested_payload_mutation(
+        self, tmp_path, monkeypatch,
+    ):
         session = make_session(tmp_path)
         session.append(MODEL_COMPLETED, {
             "content": "",
@@ -673,8 +675,10 @@ class TestProjectionCacheOwnership:
             }],
         })
         builder = ContextBuilder(ScriptedModel([]), max_context_tokens=10_000_000)
+        calls = _counting(monkeypatch)
 
         first = builder._derive_pairs(session)
+        assert calls["n"] == 1
         nested = session.events[-1].data["tool_calls"][0]["args"]["nested"]
         assert isinstance(nested, tuple)
         assert first[0][0].tool_calls[0]["args"]["nested"][0]["value"] == "before"
@@ -682,6 +686,8 @@ class TestProjectionCacheOwnership:
         nested[0]["value"] = "after"
         second = builder._derive_pairs(session)
 
+        assert calls["n"] == 2, "tuple payload changes must re-derive the projection"
+        assert second is not first
         assert second[0][0].tool_calls[0]["args"]["nested"][0]["value"] == "after"
 
     @pytest.mark.asyncio
