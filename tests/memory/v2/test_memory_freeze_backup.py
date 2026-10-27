@@ -355,7 +355,7 @@ def test_backup_rejects_writer_proof_for_a_different_workspace(tmp_path: Path) -
     )
 
     assert result.returncode != 0
-    assert "scope workspace does not match backup workspace" in result.stderr.lower()
+    assert "scope workspace does not match canonical backup workspace path" in result.stderr.lower()
     assert not output.exists()
 
 
@@ -382,6 +382,35 @@ def test_backup_rejects_relative_writer_proof_workspace(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "scope workspace must be an absolute path" in result.stderr.lower()
+    assert not output.exists()
+
+
+def test_backup_rejects_noncanonical_writer_proof_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert run_tool("seed", "--workspace", str(workspace)).returncode == 0
+    alias_component = workspace / "path-alias"
+    alias_component.mkdir()
+    proof = json.loads((workspace / "writer-proof.json").read_text(encoding="utf-8"))
+    alias_path = str(alias_component / "..")
+    for entry in proof["writers"].values():
+        entry["scope"]["workspace"] = alias_path
+    proof_path = tmp_path / "aliased-writer-proof.json"
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
+    output = offline_archive(tmp_path)
+
+    result = run_tool(
+        "backup",
+        "--workspace",
+        str(workspace),
+        "--output",
+        str(output),
+        "--writer-proof",
+        str(proof_path),
+        "--rehearsal-fixture",
+    )
+
+    assert result.returncode != 0
+    assert "canonical backup workspace path" in result.stderr.lower()
     assert not output.exists()
 
 

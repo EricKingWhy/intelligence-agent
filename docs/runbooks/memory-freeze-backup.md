@@ -33,7 +33,7 @@ tombstone purge。`seed` 只用于本地代表性演练；真实生产 workspace
 本地文件锁只能保护一次文件操作，不能证明跨 clone、跨主机或人工编辑器已经停止，因此
 不能作为 `scope` 或 `proof` 的唯一依据。
 每个 writer 的 `scope.workspace` 必须填写传给 `backup --workspace` 的同一 workspace 规范绝对路径；
-工具会解析路径并逐项核对，避免把另一 workspace 的停写证明用于当前备份。
+工具会逐项要求它精确匹配已解析的目标路径，避免把另一 workspace 的停写证明用于当前备份。
 
 | writer 分类 | 停写/围住动作 | 停写已生效的证明口径 |
 | --- | --- | --- |
