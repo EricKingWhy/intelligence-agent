@@ -1040,6 +1040,19 @@ class RunOutcome:
 #: （`Message file not found: …` + `return 1`）。
 IMAGE_INPUT_EXIT_CODE = 1
 
+#: #1486 AC3：CLI 用 local 后端时必须**诚实明示**没有 OS 级隔离。
+#: local 是已批准的默认（`shell=True` 子进程），隔离边界来自工具策略而非操作系统；
+#: 措辞不伪装"已被隔离"，并指向真正有 OS 边界的选择（Docker 后端）。
+LOCAL_SANDBOX_NOTICE = (
+    "运行位置：本机（local）——无 OS 级文件/网络隔离：命令以当前用户身份直接读写宿主目录、"
+    "可触达本机网络，隔离仅来自工具策略（permission policy）。需要 OS 级边界请改用 Docker 后端。"
+)
+
+
+def local_sandbox_notice() -> str:
+    """CLI 启动时打印的一行诚实说明（纯函数，便于测试锚同一文案）。"""
+    return LOCAL_SANDBOX_NOTICE
+
 
 class ImageInputRejected(Exception):
     """`--image` 的输入在提交前被拒（文案可直接展示；见 `_admit_cli_images`）。"""
@@ -1297,6 +1310,8 @@ async def run(
         stores = recovery_stores(workspace_root / "harness.db", workspace_headers=store)
         await initialize_stores(stores)
         workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
+        # #1486 AC3：CLI 的 run 入口固定 local 后端，必须明示它没有 OS 级隔离。
+        _emit_stderr(local_sandbox_notice())
         # 崩溃扫描**不**在 CLI 里跑：在途 run 只存在于持有它的进程内存中，
         # 短命命令无法区分「别的进程在跑」与「崩溃遗留」，误标会撞 seq
         # （见 recovery/scan.py 单进程假设）。扫描归属长驻会话宿主（web lifespan）。
