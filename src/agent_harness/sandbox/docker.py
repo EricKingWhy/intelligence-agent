@@ -472,8 +472,6 @@ while IFS=$'\t' read -r -d '' owner mode kind path; do
   chmod "$mode" "$path" || abort_with_rollback "MIGRATE_ERROR chmod restore failed: $path" 98
 done < "$D/pre.bin"
 
-if [ "${FAIL_INJECT:-}" = "after-chown" ]; then abort_with_rollback 'MIGRATE_TEST_INJECTED after chown' 99; fi
-
 find . -xdev -printf '%U:%G\t%m\t%y\t%p\0' > "$D/post.bin" || abort_with_rollback 'MIGRATE_ERROR post manifest failed' 100
 if ! awk -v want="$U:$G" 'BEGIN{RS="\0"} { i=index($0, "\t"); if (i == 0 || substr($0,1,i-1) != want) { print "MIGRATE_MISMATCH " $0; bad=1 } } END { exit bad }' "$D/post.bin"; then
   abort_with_rollback 'MIGRATE_ERROR ownership verification failed' 101
