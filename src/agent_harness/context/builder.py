@@ -757,8 +757,7 @@ class ContextBuilder:
         # 性能阈值。故**只复用已构造的消息**，不做增量前缀计算（票面：不承诺
         # 缺证据的增量框架）。
         #
-        # 等价性前提（逐条可核）：事件 append-only，唯一追加路径是
-        # `Session._persist_event`（故 `session.mark()` 是精确的**长度**版本）；
+        # 等价性前提（逐条可核）：事件 append 只增长度 mark；
         # `derive_messages_with_source_ranges` 是纯函数；全仓唯一原地改消息对象的
         # 位置是 compactor 对 `model_copy()` 副本的裁剪。SessionEvent 的 `data`
         # 虽然按 append-only 约定使用，但运行时仍是可变 dict；内容快照将该约定
