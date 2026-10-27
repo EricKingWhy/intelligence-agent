@@ -1749,12 +1749,26 @@ def _registered_tool_names_provider(
     / workspace_registry——否则会在归属对账之前对 workspace `mkdir`。
     存为 `AppState.registered_tool_names` 成员——`session_service()` 与其他
     collaborator 一样**原样搬入**领域层。CLI 侧复用同一容器，两条入口同一判据。
+
+    **口径 = Web 根的最宽真实装配 `(True, True)`（#1503 裁决 Q2 A）**，不是历史
+    上的默认 `(False, False)`：
+
+    - `session_budgets` 是**树级共享行**（`run_budget.session_budget_key` = 树根），
+      同一行 ceiling 可能 Web 声明、CLI 清理 ⇒ 只有"最宽真实根口径"不随入口漂移；
+    - 方向 fail-safe：多留一个当前入口调不到的 ceiling 只是多一条告警，删掉一个
+      活的 ceiling 是不可逆损失（只删 ceiling、不动消耗事实，事后连"配过上限"
+      都只剩审计痕迹）；
+    - 不变量（裁决书 §5.4）：清理通道的 `registered` 集必须 ⊇ 任一入口 validator
+      在该会话上的判据集；否则"声明合法 → 清理判 stale"就是一条静默的数据丢失
+      通道。`submit_plan` 仍随 artifact store 在册与否，未选中时被清是正确的。
     """
 
     async def _names(session_id: str) -> frozenset[str]:
         _, wiring = await get_wiring()
         return root_registry_tool_names(
             settings, wiring, session_id=session_id, session_store=store,
+            include_constraint_tools=True,
+            include_constraint_resolution_tool=True,
         )
 
     return _names
@@ -3846,6 +3860,9 @@ def create_app(
         陈旧键，**不动**消耗事实表 `tool_calls_by_tool` / `tool_attempts_by_tool`，
         也**不落** typed SessionEvent（预算变更本就不进会话真相，不变量 #16/#22）；清除
         痕迹只落一条 `session_budget_events(kind="tool_limits_purged")` 审计并 bump version。
+        根 registry 口径 = **最宽真实根口径**（Web 根 `include_*` 全开，#1503 裁决
+        Q2 A）——声明合法的根专属工具名（`ask_user` / `submit_plan` /
+        `register_constraint` / `request_constraint_resolution`）不会被判 stale。
 
         可选 query `?tool=<name>` 收窄到单名（对应 CLI `--tool`）：服务端仍按根 registry
         权威判 stale，点名**正常注册名 / 从未存在名**都是安全 no-op，只有点名**确实陈旧**

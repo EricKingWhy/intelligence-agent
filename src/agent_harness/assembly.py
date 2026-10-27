@@ -218,6 +218,64 @@ class _RootTooling:
     context_artifact_store: Any | None
     context_read_tool_name: str | None
     runtime_multiagent_provider: Any | None
+    #: 本次构造所用的**同一份**选择决策——下游（profile 收窄后的接回）从这里
+    #: 派生，不再自己重算开关（#1503 C2）。
+    selection: _RootToolSelection
+
+
+@dataclass(frozen=True, slots=True)
+class _RootToolSelection:
+    """根工具面的**唯一**选择决策（#1503 C2 / 裁决 15 A：assembly 内一份纯决策）。
+
+    **零副作用**：只做布尔组合，不构造 Tool / registry / sandbox，不 I/O、不 mkdir、
+    不读盘。`select_artifact_store` 给出的"本部署有没有可用的 artifact store"是
+    **输入事实**，不是本对象决定的事。
+
+    三个消费者（`_build_tooling` 构造 / `root_registry_tool_names` 名字集 /
+    `root_registry_reconcile_info` 恢复元数据）与 `build_runtime` 的 profile 收窄
+    接回都从它对派生——同一条可用性规则此前在四处各写一遍 if 级联，漂移只能靠
+    `tests/test_assembly_root_registry_names.py` 的三方对账事后发现。
+
+    **不变量（#1503 裁决书 §5.4）**：清理通道的 `registered` 集必须 ⊇ 任一入口
+    validator 在该会话上的判据集；否则"声明合法 → 清理判 stale"就是一条静默的
+    数据丢失通道。所以 Web 根（最宽口径）用它时开满两个 `include_*`。
+    """
+
+    include_register_constraint: bool
+    #: `request_constraint_resolution` 与 `ask_user` 共用这一道开关（同一回答通道）。
+    include_resolution_tool: bool
+    include_artifact_read_tool: bool
+    include_submit_plan: bool
+    #: capability 工具里的 `delegate` 依赖 `session_store` 建子会话，缺席即降级缺席。
+    include_delegate: bool
+
+
+def _root_tool_selection(
+    *,
+    include_constraint_tools: bool,
+    include_constraint_resolution_tool: bool | None,
+    has_artifact_store: bool,
+    has_session_store: bool,
+) -> _RootToolSelection:
+    """把入口开关 + 部署事实折成一份纯决策（唯一一处 `None` 派生与条件组合）。
+
+    `include_constraint_resolution_tool=None` 的旧语义保留：跟随
+    `include_constraint_tools`（CLI 只要登记工具、不要会暂停的澄清工具）。
+    """
+    include_resolution_tool = (
+        include_constraint_tools
+        if include_constraint_resolution_tool is None
+        else include_constraint_resolution_tool
+    )
+    return _RootToolSelection(
+        include_register_constraint=include_constraint_tools,
+        include_resolution_tool=include_resolution_tool,
+        include_artifact_read_tool=has_artifact_store,
+        # `submit_plan` 与 `ask_user` 同一条分发路（都要真人回答），且计划正文
+        # 要落 artifact store——store 选不出 ⇒ 无处持久化，工具缺席（fail-open）。
+        include_submit_plan=include_resolution_tool and has_artifact_store,
+        include_delegate=has_session_store,
+    )
 
 
 def _root_profile_spec(agent_profile: str | None) -> AgentSpec:
@@ -261,16 +319,23 @@ def _build_tooling(
     为什么独立成函数（#564 裁决 (a)）：service 层的 session 注册名校验必须发生在
     eager CAS **之前**，彼时 build_runtime 还没有跑，"哪些工具已注册"只能从同一份
     构造逻辑取。build_runtime 调本函数；pre-CAS 校验用的是本函数的**零副作用**
-    名字集投影 `root_registry_tool_names`（不实例化 sandbox，审查 P2-1）——新增
-    工具来源必须同时落在两处（漏落 = `tests/test_assembly_root_registry_names.py`
-    的三方对账红灯）。
+    名字集投影 `root_registry_tool_names`（不实例化 sandbox，审查 P2-1）。
+
+    #1503 C2：**工具面选择只在本函数与两个投影共用的 `_root_tool_selection`
+    里写一次**——本函数、`root_registry_tool_names`、`root_registry_reconcile_info`
+    都从那份纯决策派生。新增工具来源仍要落到三处（构造 / 名字 / 恢复元数据），
+    漏落 = `tests/test_assembly_root_registry_names.py` 的对账红灯。
     """
     # #286：根委派配额来自档位声明（与 build_runtime 的树账同一取用点）。
     root_max_delegations = _root_profile_spec(agent_profile).max_delegations
-    include_resolution_tool = (
-        include_constraint_tools
-        if include_constraint_resolution_tool is None
-        else include_constraint_resolution_tool
+    # store 构造无副作用（mkdir 在写路径）；选一次、构造与决策共用，避免两处
+    # 各调一次选择器（那正是 #192 收敛掉的那种漂移面）。
+    selection = select_artifact_store(settings, session_id)
+    choice = _root_tool_selection(
+        include_constraint_tools=include_constraint_tools,
+        include_constraint_resolution_tool=include_constraint_resolution_tool,
+        has_artifact_store=selection is not None,
+        has_session_store=session_store is not None,
     )
     # #372（ADR-0048 残余 16）：已有持久映射的会话（fork 副本 / 委派子会话的
     # 属主 alias）走"取回既有绑定"的 get 语义——alias 映射记录的是属主授权，
@@ -316,7 +381,7 @@ def _build_tooling(
     # 无构造依赖——会话从 `current_session_var` 在执行期拿（context.py）。与
     # BUILTIN_LOCAL_TOOLS 同样无条件注册；profile 归属见 `profiles._CODING_TOOLS`。
     registry.register(UpdatePlanTool())
-    if include_constraint_tools:
+    if choice.include_register_constraint:
         # 冲突指引**跟着 resolver 的在册状态走**：resolver 缺席的入口（CLI）拿到那段话
         # 只会去调一个不存在的工具（#663 P2）。注入的是**增量**转接句，不是 resolver
         # guidance 的副本——那份全文经 `tool:request_constraint_resolution` 独立进
@@ -330,11 +395,11 @@ def _build_tooling(
         registry.register(RegisterConstraintTool(
             resolution_guidance=(
                 REGISTER_CONSTRAINT_HANDOFF
-                if include_resolution_tool
+                if choice.include_resolution_tool
                 else None
             ),
         ))
-    if include_resolution_tool:
+    if choice.include_resolution_tool:
         registry.register(RequestConstraintResolutionTool())
         # #1204：通用提问 `ask_user` 与澄清工具共用**回答通道**（都靠前端提交
         # `input_request`），故与它同一道开关——没有回答通道的入口（CLI）不注册。
@@ -351,8 +416,7 @@ def _build_tooling(
     overflow_handler = None
     context_artifact_store = None
     context_read_tool_name: str | None = None
-    selection = select_artifact_store(settings, session_id)
-    if selection is not None:
+    if choice.include_artifact_read_tool and selection is not None:
         read_tool = selection.read_tool(selection.store)
         registry.register(read_tool)
         # 摘要里的读回提示点名**这个**工具（#186 AC4）：S3 配 `inspect_artifact`，
@@ -372,14 +436,13 @@ def _build_tooling(
     # #1356：`submit_plan`（计划提交 + 审批）与 `ask_user` **同一条分发路**——
     # 两者都要一个真人回答，而回答通道只有 web 有，故共用
     # `include_resolution_tool` 这道开关（子代理没有可审批的用户，不注册）。
-    # 落点必须在 `select_artifact_store` **之后**：store 是构造依赖（同
-    # `InspectArtifactTool`），计划正文由它落盘；store 选不出 ⇒ 计划无处持久化，
-    # 工具缺席（fail-open，不变量 21：可选能力故障不许拖垮 Core）。
-    if include_resolution_tool and selection is not None:
+    # store 是构造依赖（同 `InspectArtifactTool`），计划正文由它落盘；store 选不出
+    # ⇒ 计划无处持久化，工具缺席（fail-open，不变量 21）。
+    if choice.include_submit_plan and selection is not None:
         registry.register(SubmitPlanTool(selection.store))
 
     runtime_multiagent_provider = None
-    if wiring.multiagent_provider is not None and session_store is not None:
+    if wiring.multiagent_provider is not None and choice.include_delegate:
         # CapabilityWiring is cached across requests; activation state is not.
         # Give each root Runtime its own provider and DelegateTool while descendants
         # inherit that same registry/provider through AgentFactory.
@@ -388,7 +451,7 @@ def _build_tooling(
     for capability_tool in wiring.tools:
         # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席
         # （不注册 delegate，单代理照常），与 optional capability 语义一致。
-        if isinstance(capability_tool, DelegateTool) and session_store is None:
+        if isinstance(capability_tool, DelegateTool) and not choice.include_delegate:
             logger.warning(
                 "multiagent 已启用但未提供 session_store，delegate 工具降级缺席"
             )
@@ -411,6 +474,7 @@ def _build_tooling(
         context_artifact_store=context_artifact_store,
         context_read_tool_name=context_read_tool_name,
         runtime_multiagent_provider=runtime_multiagent_provider,
+        selection=choice,
     )
 
 
@@ -475,36 +539,65 @@ def root_registry_tool_names(
     capability 工具在 wiring 里已是实例。`_build_tooling` 与本函数必须同源一致
     ——`tests/test_assembly_root_registry_names.py` 三方对账（真实装配 /
     `_build_tooling` / 本函数），漂移即红灯。
+
+    工具面开关不在这里自己拼：与构造共用 `_root_tool_selection` 那一份纯决策
+    （#1503 C2），本函数只负责"把决策映射成名字"。
     """
-    names: set[str] = {tool_cls(None).name for tool_cls in BUILTIN_LOCAL_TOOLS}
-    # W-26（#380）：`update_plan` 无条件注册（与 `_build_tooling` 同一句判定）。
-    names.add(UpdatePlanTool().name)
-    include_resolution_tool = (
-        include_constraint_tools
-        if include_constraint_resolution_tool is None
-        else include_constraint_resolution_tool
+    return frozenset(
+        tool.name for tool in _root_registry_tools(
+            settings, wiring, session_id=session_id, session_store=session_store,
+            include_constraint_tools=include_constraint_tools,
+            include_constraint_resolution_tool=include_constraint_resolution_tool,
+        )
     )
-    if include_constraint_tools:
-        names.add(RegisterConstraintTool().name)
-    if include_resolution_tool:
-        names.add(RequestConstraintResolutionTool().name)
-        # #1204：通用提问与澄清工具同一道回答通道开关（见 `_build_tooling`）。
-        names.add(AskUserTool().name)
+
+
+def _root_registry_tools(
+    settings: Settings,
+    wiring: CapabilityWiring,
+    *,
+    session_id: str,
+    session_store: JsonlSessionStore | None,
+    include_constraint_tools: bool,
+    include_constraint_resolution_tool: bool | None,
+) -> list[Tool]:
+    """根 registry 的**零副作用**工具清单——两个投影唯一的名字来源（#1503 C2）。
+
+    只实例化"构造器只存依赖"的工具（本地工具传 ``None`` 读类属性，capability 工具
+    在 wiring 里已是实例）；**不构造 sandbox、不 mkdir、不读盘**。
+    `root_registry_tool_names` 取名字、`root_registry_reconcile_info` 取元数据，
+    同一条 if 级联只有这里一份——此前三处各写一遍，漂移只能靠对账测试事后发现。
+    """
     selection = select_artifact_store(settings, session_id)
-    if selection is not None:
+    choice = _root_tool_selection(
+        include_constraint_tools=include_constraint_tools,
+        include_constraint_resolution_tool=include_constraint_resolution_tool,
+        has_artifact_store=selection is not None,
+        has_session_store=session_store is not None,
+    )
+    tools: list[Tool] = [tool_cls(None) for tool_cls in BUILTIN_LOCAL_TOOLS]
+    # W-26（#380）：`update_plan` 无条件注册（与 `_build_tooling` 同一句判定）。
+    tools.append(UpdatePlanTool())
+    if choice.include_register_constraint:
+        tools.append(RegisterConstraintTool())
+    if choice.include_resolution_tool:
+        tools.append(RequestConstraintResolutionTool())
+        # #1204：通用提问与澄清工具同一道回答通道开关（见 `_build_tooling`）。
+        tools.append(AskUserTool())
+    if choice.include_artifact_read_tool and selection is not None:
         # 读回工具名从**配对的那个工具类**上取，不写第二遍字面量（#186 AC4 同源）。
-        names.add(selection.read_tool(None).name)
-    if include_resolution_tool and selection is not None:
-        # #1356：`submit_plan` 与 `ask_user` 同一道开关、同样依赖 artifact store
-        # ——与 `_build_tooling` 同名分支逐字同判（漂移即三方对账红灯）。
-        names.add(SUBMIT_PLAN_TOOL_NAME)
+        tools.append(selection.read_tool(None))
+    if choice.include_submit_plan:
+        # #1356：`submit_plan` 与 `ask_user` 同一道开关、同样依赖 artifact store。
+        # 这里的 `None` store 实例只为取名字与 `reconcile_hint`（`execute` 才用 store），
+        # 与 #1356 既有的元数据投影写法同形。
+        tools.append(SubmitPlanTool(None))
     for capability_tool in wiring.tools:
-        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
-        # 与 `_build_tooling` 的同名分支逐字同判（名字在不在，两边必须一致）。
-        if isinstance(capability_tool, DelegateTool) and session_store is None:
+        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席。
+        if isinstance(capability_tool, DelegateTool) and not choice.include_delegate:
             continue
-        names.add(capability_tool.name)
-    return frozenset(names)
+        tools.append(capability_tool)
+    return tools
 
 
 def _tool_reconcile_info(tool: Tool) -> ToolReconcileInfo:
@@ -540,43 +633,18 @@ def root_registry_reconcile_info(
     ``request_constraint_resolution`` / ``submit_plan``）是否在册由装配点决定，
     投影必须能跟着开——否则它们的 ``reconcile_hint`` 永远到不了 UI，恢复裁决
     退化为无提示的人工 DEFER/high。
+
+    名字来源与 ``root_registry_tool_names`` **同一个** ``_root_registry_tools``
+    （#1503 C2：一条规则一份决策），本函数只负责把工具映射成元数据。
     """
-    info: dict[str, ToolReconcileInfo] = {}
-    for tool_cls in BUILTIN_LOCAL_TOOLS:
-        tool = tool_cls(None)
-        info[tool.name] = _tool_reconcile_info(tool)
-    update_plan = UpdatePlanTool()
-    info[update_plan.name] = _tool_reconcile_info(update_plan)
-    include_resolution_tool = (
-        include_constraint_tools
-        if include_constraint_resolution_tool is None
-        else include_constraint_resolution_tool
-    )
-    if include_constraint_tools:
-        info[RegisterConstraintTool().name] = _tool_reconcile_info(
-            RegisterConstraintTool()
+    return {
+        tool.name: _tool_reconcile_info(tool)
+        for tool in _root_registry_tools(
+            settings, wiring, session_id=session_id, session_store=session_store,
+            include_constraint_tools=include_constraint_tools,
+            include_constraint_resolution_tool=include_constraint_resolution_tool,
         )
-    if include_resolution_tool:
-        # #1204：通用提问与澄清工具同一道回答通道开关（与名字集同判）。
-        info[RequestConstraintResolutionTool().name] = _tool_reconcile_info(
-            RequestConstraintResolutionTool()
-        )
-        info[AskUserTool().name] = _tool_reconcile_info(AskUserTool())
-    selection = select_artifact_store(settings, session_id)
-    if selection is not None:
-        read_tool = selection.read_tool(None)
-        info[read_tool.name] = _tool_reconcile_info(read_tool)
-    if include_resolution_tool and selection is not None:
-        # #1356：`submit_plan` 与 `ask_user` 同一道开关、同样依赖 artifact store
-        # ——与 `root_registry_tool_names` / `_build_tooling` 同名分支逐字同判。
-        info[SUBMIT_PLAN_TOOL_NAME] = _tool_reconcile_info(SubmitPlanTool(None))
-    for capability_tool in wiring.tools:
-        # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席，
-        # 与 `root_registry_tool_names` 的同名分支逐字同判（两边必须一致）。
-        if isinstance(capability_tool, DelegateTool) and session_store is None:
-            continue
-        info[capability_tool.name] = _tool_reconcile_info(capability_tool)
-    return info
+    }
 
 
 def create_chat_model(
@@ -769,18 +837,13 @@ async def build_runtime(
     # agent_profile 兑现——只放开这一半会放大子会话工具面，两条必须一起成立。
     # （sandbox 规则与 registry 构造在 `_build_tooling`——与 #564 的 pre-CAS 校验
     # 同一事实源，见其 docstring。）
-    include_resolution_tool = (
-        include_constraint_tools
-        if include_constraint_resolution_tool is None
-        else include_constraint_resolution_tool
-    )
     tooling = _build_tooling(
         settings, wiring,
         session_id=session_id, workspace=instruction_cwd,
         workspace_registry=workspace_registry, session_store=session_store,
         agent_profile=agent_profile,
         include_constraint_tools=include_constraint_tools,
-        include_constraint_resolution_tool=include_resolution_tool,
+        include_constraint_resolution_tool=include_constraint_resolution_tool,
         project_instructions=project_instructions,
         # #363 / W-19：显式 sandbox 后端选择。
         sandbox_backend=sandbox_backend,
@@ -844,27 +907,30 @@ async def build_runtime(
     if agent_profile == "coding":
         # These tools belong to a direct user-facing root coding session. They stay out
         # of the shared coding tool_scope so AgentFactory cannot grant them to children.
+        # #1503 C2：接回哪几个不在这里重算开关——用 `_build_tooling` 刚产出的那份
+        # 同一个决策（`tooling.selection`）。此处此前是同一规则的第**四**份实现。
+        choice = tooling.selection
         registered_names = {tool.name for tool in registry.list()}
-        if include_constraint_tools and RegisterConstraintTool().name not in registered_names:
+        if choice.include_register_constraint and RegisterConstraintTool().name not in registered_names:
             registry.register(RegisterConstraintTool(
                 resolution_guidance=(
                     REGISTER_CONSTRAINT_HANDOFF
-                    if include_resolution_tool
+                    if choice.include_resolution_tool
                     else None
                 ),
             ))
-        if include_resolution_tool and RequestConstraintResolutionTool().name not in registered_names:
+        if choice.include_resolution_tool and RequestConstraintResolutionTool().name not in registered_names:
             registry.register(RequestConstraintResolutionTool())
         # #1204：通用提问与澄清工具同一道回答通道开关（见 `_build_tooling`）。
         # #1224：同源注入配置的超时档（与 `_build_tooling` 逐字一致）。
-        if include_resolution_tool and AskUserTool().name not in registered_names:
+        if choice.include_resolution_tool and AskUserTool().name not in registered_names:
             registry.register(
                 AskUserTool(timeout_seconds=settings.ask_user_question_timeout)
             )
         # #1356：`submit_plan` 同属"根会话专属"一组，与上面两个一样在 profile
         # 收窄后接回（`_CODING_TOOLS` 不收它 ⇒ 收窄会把它剔掉）。
         if (
-            include_resolution_tool
+            choice.include_submit_plan
             and context_artifact_store is not None
             and SUBMIT_PLAN_TOOL_NAME not in registered_names
         ):
