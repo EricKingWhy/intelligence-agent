@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from agent_harness.config import Settings
-from agent_harness.storage.artifact import ArtifactStore, SESSION_KEY_PATTERN
+from agent_harness.storage.artifact import SESSION_KEY_PATTERN, ArtifactStore
 from agent_harness.storage.local_artifact import LocalArtifactStore
 from agent_harness.storage.minio_artifact import MinioArtifactStore
 from agent_harness.storage.s3_artifact import S3ArtifactStore
