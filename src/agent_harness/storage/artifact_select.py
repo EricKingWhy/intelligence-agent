@@ -22,10 +22,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from agent_harness.config import Settings
+from agent_harness.storage import local_artifact, minio_artifact, s3_artifact
 from agent_harness.storage.artifact import SESSION_KEY_PATTERN, ArtifactStore
-from agent_harness.storage.local_artifact import LocalArtifactStore
-from agent_harness.storage.minio_artifact import MinioArtifactStore
-from agent_harness.storage.s3_artifact import S3ArtifactStore
 from agent_harness.tooling import Tool
 from agent_harness.tools.inspect_artifact import InspectArtifactTool
 from agent_harness.tools.read_artifact import ReadArtifactTool
@@ -102,7 +100,7 @@ def plan_artifact_store(settings: Settings, session_id: str) -> ArtifactStorePla
             settings.artifact_store_region,
         )):
             return None
-        return ArtifactStorePlan(S3ArtifactStore, InspectArtifactTool, "s3")
+        return ArtifactStorePlan(s3_artifact.S3ArtifactStore, InspectArtifactTool, "s3")
     if _minio_configured(settings):
         if not all((
             settings.minio_endpoint,
@@ -111,10 +109,10 @@ def plan_artifact_store(settings: Settings, session_id: str) -> ArtifactStorePla
             settings.minio_secret_key.get_secret_value(),
         )):
             return None
-        return ArtifactStorePlan(MinioArtifactStore, ReadArtifactTool, "minio")
+        return ArtifactStorePlan(minio_artifact.MinioArtifactStore, ReadArtifactTool, "minio")
     if not settings.artifact_dir.strip():
         return None
-    return ArtifactStorePlan(LocalArtifactStore, ReadArtifactTool, "local")
+    return ArtifactStorePlan(local_artifact.LocalArtifactStore, ReadArtifactTool, "local")
 
 
 def select_artifact_store(settings: Settings, session_id: str) -> ArtifactStoreSelection | None:

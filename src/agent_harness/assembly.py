@@ -229,22 +229,15 @@ class _RootTooling:
 
 @dataclass(frozen=True, slots=True)
 class _RootToolSelection:
-    """根工具面的**唯一**选择决策（#1503 C2 / 裁决 15 A：assembly 内一份纯决策）。
+    """根工具面的唯一纯选择决策（#1503 C2）。
 
-    This object only combines boolean inputs. It does not construct Tools, registries,
-    sandboxes, or stores. Projections pass a pure ArtifactStorePlan; runtime assembly
-    uses actual store-construction success. If an expected provider failure degrades the
-    runtime to no store, the runtime omits store-dependent tools while projections retain
-    the configured plan. This is the approved AC2 exception in issue #1503.
+    This combines boolean inputs only; it constructs no tools, registries, sandboxes,
+    or stores. Artifact projections use a pure plan, while runtime assembly uses the
+    constructed provider result; Issue #1503 records the AC2 degradation exception.
 
-    三个消费者（`_build_tooling` 构造 / `root_registry_tool_names` 名字集 /
-    `root_registry_reconcile_info` 恢复元数据）与 `build_runtime` 的 profile 收窄
-    接回都从它对派生——同一条可用性规则此前在四处各写一遍 if 级联，漂移只能靠
-    `tests/test_assembly_root_registry_names.py` 的三方对账事后发现。
-
-    **不变量（#1503 裁决书 §5.4）**：清理通道的 `registered` 集必须 ⊇ 任一入口
-    validator 在该会话上的判据集；否则"声明合法 → 清理判 stale"就是一条静默的
-    数据丢失通道。所以 Web 根（最宽口径）用它时开满两个 `include_*`。
+    `_build_tooling`, both registry projections, and coding-profile rejoin derive from
+    this decision. Registry projections must include every root tool allowed by
+    validation so stale-budget cleanup cannot remove a valid limit.
     """
 
     include_register_constraint: bool
@@ -536,18 +529,12 @@ def root_registry_tool_names(
     include_constraint_tools: bool = False,
     include_constraint_resolution_tool: bool | None = None,
 ) -> frozenset[str]:
-    """根 registry 名字集的**零副作用**计算——pre-CAS session 名字校验专用。
+    """计算 pre-CAS 所需根工具名；不构造工具或 ArtifactStore。
 
-    #564 审查 P2-1：validator 若走完整 `_build_tooling`，`LocalSubprocessSandbox
-    .__init__` 会对 workspace `mkdir`，发生在 service 的归属对账（#266
-    `SessionCwdUnavailable` 守卫，`WorkspaceNotFound` 子型）**之前** ⇒ 坏名 422
-    会把已删 cwd 凭空重建、合法名
-    Names come from class metadata and a pure artifact provider plan; capability
-    tools reuse instances already held by wiring. No Tool or store is constructed
-    here. Runtime assembly and these projections share the same selection policy.
-
-    工具面开关不在这里自己拼：与构造共用 `_root_tool_selection` 那一份纯决策
-    （#1503 C2），本函数只负责"把决策映射成名字"。
+    完整 `_build_tooling` 会先创建 sandbox，可能在 service 的归属对账之前对
+    workspace 执行 `mkdir`（#564 P2-1）。名称取自工具类元数据和纯 ArtifactStore
+    计划；capability 工具复用 wiring 中的实例。开关沿用 `_root_tool_selection`
+    的共享决策（#1503 C2）。
     """
     return frozenset(
         tool.name for tool in _root_registry_tools(
