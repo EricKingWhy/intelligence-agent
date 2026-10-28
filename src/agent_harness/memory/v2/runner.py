@@ -93,7 +93,7 @@ from agent_harness.memory.v2.jobs import (
     MemoryFormationJob,
     MemoryJobOutcome,
     MemoryJobStage,
-    SqliteMemoryV2JobStore,
+    MemoryV2JobStore,
 )
 from agent_harness.memory.v2.journey import memory_fingerprint
 from agent_harness.memory.v2.notification import (
@@ -374,7 +374,7 @@ class MemoryJobRunner:
     def __init__(
         self,
         *,
-        jobs: SqliteMemoryV2JobStore,
+        jobs: MemoryV2JobStore,
         sessions: JsonlSessionStore,
         executor: MemoryJobExecutor,
         roles: MemoryModelRoles,

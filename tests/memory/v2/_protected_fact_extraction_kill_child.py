@@ -10,7 +10,7 @@ from pathlib import Path
 from agent_harness.memory.v2.capability import MemoryV2Service
 from agent_harness.memory.v2.executor import MemoryJobExecutor, MemoryModelStage
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
-from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryV2JobStore
 from agent_harness.memory.v2.roles import MemoryModelRoles
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.model.config import ModelConfig
@@ -43,7 +43,7 @@ async def main() -> None:
     case = sys.argv[2]
     session_id = sys.argv[3]
     database = root / "memory-v2.db"
-    jobs = SqliteMemoryV2JobStore(database)
+    jobs = MemoryV2JobStore(database)
     await jobs.initialize()
     job = await jobs.claim(worker_id="dead-worker")
     if job is None:

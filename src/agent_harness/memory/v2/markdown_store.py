@@ -1,8 +1,20 @@
-"""markdown 权威的记忆存储：``MEMORY.md`` / ``USER.md``（#1353 M2 + M3）。
+"""markdown 权威面的**文件引擎**：``MEMORY.md`` / ``USER.md``（#1353 M2 + M3；#1494 拆分）。
 
 移植自 NousResearch/hermes-agent ``tools/memory_tool_store.py``（commit
 b324b1f7ed52369ab4bd3b1a03378729120b0f01，2026-10-02，MIT，
 Copyright (c) 2025 Nous Research），保留逐行结构以便与上游对读。
+
+# #1494（ADR-0058 D2）后的职责边界
+
+本模块**只剩机制**：路径与目录、锁、读盘与解析、漂移备份、原子替换、容量/条目计数、
+会话快照渲染，以及模型面响应的措辞（consolidation 预算与 usage 文案）。
+**写操作的语义**（add / replace / remove / batch / remove_by_digest 的匹配、扫描、上限、
+pin 规则与批量原子性）全部归 `commit.MemoryCommit`——它是当前内容的唯一可变事实入口。
+本模块只暴露一个变更入口 `mutate_now()`，且只有 `commit.py` 调用它（静态图见
+`tests/memory/v2/test_1494_single_writer.py`）。
+
+保留在本模块的写侧动作只有两个，都属于「机制的必然部分」而不是可选写路径：
+`mutate_now` 临界区本身，以及它内部的漂移备份与 `os.replace`。
 
 # 与上游的四处有意偏差（issue #1353 §0 已批准）
 
@@ -11,7 +23,7 @@ Copyright (c) 2025 Nous Research），保留逐行结构以便与上游对读。
    手改/外部追加是合法的用户意图，拒写会让用户的编辑永远卡住。备份保证不丢。
 2. 无 `hermes_constants.mkdir_under_hermes_home`：目录由本模块自建（0700）。
 3. 无 monkeypatch 的模块级 `get_memory_dir`：目录在构造时注入，测试直接传 tmp_path。
-4. `_mutate` 的阻塞 IO（`fcntl.flock`）一律经 ``asyncio.to_thread`` 调用，
+4. `mutate_now` 的阻塞 IO（`fcntl.flock`）一律经 ``asyncio.to_thread`` 调用，
    绝不在事件循环里直调（issue §7 R9）。
 
 # 权威性
@@ -22,24 +34,19 @@ markdown 是**唯一权威**；SQLite（`memory_v2_records`）降为派生/历�
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import os
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agent_harness.memory.v2.threat_patterns import (
-    first_threat_message as _first_threat_message,
-)
-from agent_harness.memory.v2.threat_patterns import (
-    scan_for_threats,
-)
+from agent_harness.memory.v2.file_state import atomic_write_text, file_lock
+from agent_harness.memory.v2.threat_patterns import scan_for_threats
 from agent_harness.session.context import current_session_var, run_context_var
 from agent_harness.session.event import MEMORY_HUMAN_UPDATED
 
@@ -66,43 +73,16 @@ MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 SNAPSHOT_CACHE_LIMIT = 128
 
 _DIR_MODE = 0o700
-_FILE_MODE = 0o600
 
 
-def _scan_memory_content(content: str) -> str | None:
-    """命中注入/外泄模式时的错误文案。strict scope：记忆进系统提示，污染会跨会话留存。"""
-    return _first_threat_message(content, scope="strict")
-
-
-def _delimiter_error(content: str) -> str | None:
-    """含保留分隔符的 content 一旦落盘就会分裂成多条——**拒绝，不转义**。
-
-    转义会让磁盘文本 ≠ 记忆文本，而 pin / digest / 去重全按正文逐字相等判定。
-    拒绝让模型当场自纠（拆成多次 add），代价只是一轮重试。
-
-    判定按**读侧口径**、且覆盖两个同形变体：
-
-    - 写侧 `newline=""` 原样保留 `\\r`，读侧 `read_text` 会把 CRLF/CR 折成 LF ⇒
-      `\\r\\n§\\r\\n` 落盘后在重载时就是分隔符，必须先折行再判；
-    - 结尾的半个分隔符 `\\n§`（`normalize_entry` 已 strip，故不会带尾随空白）
-      与下一条 `join` 时凑出 `\\n§\\n`，把**下一条**并进本条——同样要拒。
-    """
-    folded = content.replace("\r\n", "\n").replace("\r", "\n")
-    if ENTRY_DELIMITER in folded or folded.endswith(ENTRY_DELIMITER[:-1]):
-        return (
-            f"Blocked: content contains the reserved entry delimiter {ENTRY_DELIMITER!r}; "
-            "split it into multiple add operations."
-        )
-    return None
-
-
-def _error(message: str, **extra: Any) -> dict[str, Any]:
+def error_response(message: str, **extra: Any) -> dict[str, Any]:
+    """模型面失败响应的唯一形状（`success=False` + 文案 + 附加字段）。"""
     return {"success": False, "error": message, **extra}
 
 
 def _read_failed_error(path: Path) -> dict[str, Any]:
     """文件存在但读不出来：按空视图保存会抹掉它，所以拒写。"""
-    return _error(
+    return error_response(
         f"Refusing to write {path.name}: the file exists on disk but could not be read right now "
         f"(temporarily locked by another program, a permission change, invalid/corrupt text encoding, "
         f"or a filesystem error). Treating an unreadable file as empty and saving would wipe existing "
@@ -151,6 +131,38 @@ def entry_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def entries_digest(entries: Sequence[str]) -> str:
+    """一个目标文件**解析后条目序列**的摘要（#1494 回执的 before/after 口径）。
+
+    对条目序列取摘要而不是原始字节：BOM、行尾、条目间空行都由解析吸收，
+    回执判的是「内容是不是这一份」。与 `entry_digest` 同一哈希族。
+    """
+    return hashlib.sha256(ENTRY_DELIMITER.join(entries).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class MutationOutcome:
+    """`mutate_now` 的结果：要么是拒绝/只读响应，要么是「已写盘」的完整描述。
+
+    ``response`` 非 None ⇒ mutator 返回了 dict（错误或 dry-run）：**没有写盘**。
+    ``entries_before`` / ``entries_after`` 是解析后的条目序列（提交 seam 由此算回执摘要）；
+    ``entries_after`` 为 None 表示未写盘。``message`` / ``extra`` 是 mutator 的成功文案与
+    附加字段（`replaced_entry` / `deduplicated` …），由调用方组装模型面响应。
+    """
+
+    response: dict[str, Any] | None
+    entries_before: list[str] | None
+    entries_after: list[str] | None
+    limit: int
+    message: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+    drift_backup: str | None = None
+
+    @property
+    def wrote(self) -> bool:
+        return self.entries_after is not None
+
+
 def pinned_index(entries: list[str], matched_entry: str) -> int | None:
     """staged 写入审阅时的那条完整条目当前的下标；条目已消失 → None（stale）。"""
     entry = normalize_entry(matched_entry)
@@ -163,24 +175,6 @@ def stale_entry_message(entry: str) -> str:
         f"in memory as reviewed. Recreate the change against the current entry or reject it; the "
         f"pending record has been preserved."
     )
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """同目录 tempfile + ``os.replace``，读者永远看不到半截文件；落盘后收紧到 0600。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".mem_", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-        with suppress(OSError):
-            os.chmod(tmp_name, _FILE_MODE)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(tmp_name)
-        raise
-    with suppress(OSError):
-        os.chmod(path, _FILE_MODE)
 
 
 class MarkdownMemoryStore:
@@ -248,18 +242,35 @@ class MarkdownMemoryStore:
         没有 session/run 维度。并发 run 的 run-start 会互相把对方的计数清零，正在累计
         的那一侧会被中途续满额度。单用户部署里并发 run 罕见，影响小。
         """
-        self._consolidation_failures = 0
+        with self._guard:
+            self._consolidation_failures = 0
 
-    def _consolidation_failure(self, response: dict[str, Any]) -> dict[str, Any]:
+    @contextmanager
+    def preserve_consolidation_failures(self) -> Iterator[None]:
+        """预检期间冻结计数：预检不是一次模型尝试，不能消耗/回滚别人的自纠额度。
+
+        整段持 `_guard`（RLock，mutator 内的 `batch_failure` 可重入），因此并发写入的
+        计数递增/清零不会与快照还原交错；预检本身只做内存计算，不阻塞文件写。
+        """
+        with self._guard:
+            failures = self._consolidation_failures
+            try:
+                yield
+            finally:
+                self._consolidation_failures = failures
+
+    def consolidation_failure(self, response: dict[str, Any]) -> dict[str, Any]:
         """记一次 consolidation 失败：未超上限返回原响应（含重试指引），超上限返回 TERMINAL。"""
-        self._consolidation_failures += 1
-        if self._consolidation_failures <= MAX_CONSOLIDATION_FAILURES_PER_TURN:
+        with self._guard:
+            self._consolidation_failures += 1
+            failures = self._consolidation_failures
+        if failures <= MAX_CONSOLIDATION_FAILURES_PER_TURN:
             return response
         return {
             "success": False,
             "done": True,
             "error": (
-                f"Memory consolidation failed {self._consolidation_failures} times this turn. Stop "
+                f"Memory consolidation failed {failures} times this turn. Stop "
                 "retrying memory calls — leave memory unchanged for now and continue with your reply "
                 "to the user. The fact can be saved in a later turn."
             ),
@@ -369,6 +380,20 @@ class MarkdownMemoryStore:
     def _char_limit(self, target: str) -> int:
         return self.user_char_limit if target == "user" else self.memory_char_limit
 
+    def char_limit(self, target: str) -> int:
+        """目标文件的字符上限（系统镜像的写前预检用；正常写入仍是 mutator 的 limit 参数）。"""
+        return self._char_limit(target)
+
+    @property
+    def consolidation_failures(self) -> int:
+        return self._consolidation_failures
+
+    @consolidation_failures.setter
+    def consolidation_failures(self, value: int) -> None:
+        """兼容旧调用点；预检已改用 `preserve_consolidation_failures`。"""
+        with self._guard:
+            self._consolidation_failures = value
+
     def _usage(self, target: str) -> str:
         return f"{self._char_count(target):,}/{self._char_limit(target):,}"
 
@@ -385,54 +410,11 @@ class MarkdownMemoryStore:
         title = MEMORY_BLOCK_HEADERS["user" if target == "user" else "memory"]
         return f"{sep}\n{title} [{self._usage_pct(target, len(content))}]\n{sep}\n{content}"
 
-    # ------------------------------------------------------------------ 锁
-
-    @contextmanager
-    def _file_lock(self, path: Path) -> Iterator[None]:
-        """对独立 ``.lock`` 文件加排他锁，记忆文件本身仍可被原子替换。"""
-        try:
-            import fcntl
-        except ImportError:  # pragma: no cover — Windows
-            fcntl = None  # type: ignore[assignment]
-            import msvcrt
-        else:
-            msvcrt = None  # type: ignore[assignment]
-
-        self._ensure_directory()
-        lock_path = path.with_suffix(path.suffix + ".lock")
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        raw_fd = os.open(lock_path, flags, _FILE_MODE)
-        try:
-            # 创建模式会被 umask 过滤，也不会修好旧进程留下的松权限；在加锁前按 fd 收紧，
-            # 避免路径替换窗口。
-            if hasattr(os, "fchmod"):
-                os.fchmod(raw_fd, _FILE_MODE)
-            fd = os.fdopen(raw_fd, "r+", encoding="utf-8")
-        except Exception:
-            os.close(raw_fd)
-            raise
-        with fd:
-            def _flock(unlock: bool) -> None:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
-                else:  # pragma: no cover — Windows
-                    fd.seek(0)
-                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_LOCK, 1)
-
-            _flock(False)
-            try:
-                yield
-            finally:
-                with suppress(OSError):
-                    _flock(True)
-
     # ------------------------------------------------------------------ 写核心
 
     def _write_file(self, path: Path, entries: list[str]) -> None:
         try:
-            _atomic_write_text(path, ENTRY_DELIMITER.join(entries))
+            atomic_write_text(path, ENTRY_DELIMITER.join(entries))
         except OSError as error:
             raise RuntimeError(f"Failed to write memory file {path}: {error}") from error
 
@@ -490,10 +472,13 @@ class MarkdownMemoryStore:
         except Exception as error:  # noqa: BLE001 — 通知是观察，不能破坏写入
             logger.warning("漂移备份通知发送失败（%s）：%s", type(error).__name__, target)
 
-    def _mutate(
+    def mutate_now(
         self, target: str, mutator: Callable[[list[str], int], Any], *, skip_drift: bool = False,
-    ) -> dict[str, Any]:
-        """加锁 → 重读磁盘 → ``mutator(entries, limit)`` → 落盘 → 成功响应。
+    ) -> MutationOutcome:
+        """加锁 → 重读磁盘 → ``mutator(entries, limit)`` → 落盘。
+
+        这是本模块**唯一**的变更入口（ADR-0058 D2）；调用者只有 `commit.MemoryCommit`。
+        阻塞 IO：一律经 ``asyncio.to_thread`` 调用，不在事件循环里直调。
 
         重读保证不会用旧快照覆盖并发写（上游 #119668）。读失败一律拒写（即便 add 也会
         重写整个文件）。**漂移不再拒写**：先备份 ``.bak.<ts>``，再以磁盘内容为准继续
@@ -507,350 +492,82 @@ class MarkdownMemoryStore:
         path = self.path_for(target)
         bak: str | None = None
         drift_entries: list[str] = []
-        with self._guard, self._file_lock(path):
+        with self._guard, file_lock(path):
             raw, read_ok = self.read_raw_checked(path)
             if not read_ok:
-                return _read_failed_error(path)
+                return MutationOutcome(
+                    response=_read_failed_error(path), entries_before=None,
+                    entries_after=None, limit=self._char_limit(target),
+                )
             bak = None if skip_drift else self._detect_external_drift(target, raw)
             # 漂移时仍以磁盘为准：解析结果就是权威内容，写回只是规范化。
-            self._set_entries(target, list(dict.fromkeys(self._parse_entries(raw))))
+            entries = list(dict.fromkeys(self._parse_entries(raw)))
+            self._set_entries(target, entries)
             if bak:
-                drift_entries = list(self._entries_for(target))
-            result = mutator(self._entries_for(target), self._char_limit(target))
+                drift_entries = list(entries)
+            result = mutator(list(entries), self._char_limit(target))
             if isinstance(result, dict):
                 response = {**result, "drift_backup": bak} if bak else result
+                outcome = MutationOutcome(
+                    response=response, entries_before=entries, entries_after=None,
+                    limit=self._char_limit(target), drift_backup=bak,
+                )
             else:
-                self._set_entries(target, result[0])
+                new_entries = result[0]
+                self._set_entries(target, new_entries)
                 self._ensure_directory()
-                self._write_file(path, result[0])
-                extra_fields = result[2] if len(result) > 2 else {}
-                response = self._success_response(target, result[1], **extra_fields)
-                if bak:
-                    response["drift_backup"] = bak
+                self._write_file(path, new_entries)
+                outcome = MutationOutcome(
+                    response=None, entries_before=entries, entries_after=list(new_entries),
+                    limit=self._char_limit(target),
+                    message=result[1],
+                    extra=dict(result[2]) if len(result) > 2 else {},
+                    drift_backup=bak,
+                )
         if bak:
             # 锁外发通知：事件写盘（fsync）不该占着记忆文件的写锁。
             self._notify_drift(target, bak, drift_entries)
-        return response
+        return outcome
 
-    def _failure_with_entries(self, target: str, message: str) -> dict[str, Any]:
+    def _usage_of(self, target: str, entries: Sequence[str]) -> str:
+        return f"{len(ENTRY_DELIMITER.join(entries)):,}/{self._char_limit(target):,}"
+
+    def failure_with_entries(
+        self, target: str, entries: Sequence[str], message: str,
+    ) -> dict[str, Any]:
         """携带活条目列表的 consolidation 失败，让模型就地合并。"""
-        return self._consolidation_failure(
-            _error(message, current_entries=self._entries_for(target), usage=self._usage(target))
-        )
-
-    def _batch_failure(self, target: str, message: str) -> dict[str, Any]:
-        """batch 中止失败，**不**回显 ``current_entries``：store 没变、调用方已有清单，
-        回显只会让每次重试把上下文撑得更大（上游 #97316）。"""
-        return self._consolidation_failure(
-            _error(
-                message + " No operations were applied (batch is all-or-nothing).",
-                usage=self._usage(target),
+        return self.consolidation_failure(
+            error_response(
+                message, current_entries=list(entries), usage=self._usage_of(target, entries),
             )
         )
 
-    def _success_response(self, target: str, message: str | None = None, **extra: Any) -> dict[str, Any]:
+    def batch_failure(self, target: str, entries: Sequence[str], message: str) -> dict[str, Any]:
+        """batch 中止失败，**不**回显 ``current_entries``：store 没变、调用方已有清单，
+        回显只会让每次重试把上下文撑得更大（上游 #97316）。"""
+        return self.consolidation_failure(
+            error_response(
+                message + " No operations were applied (batch is all-or-nothing).",
+                usage=self._usage_of(target, entries),
+            )
+        )
+
+    def success_response(
+        self, target: str, entries: Sequence[str], message: str | None = None, **extra: Any,
+    ) -> dict[str, Any]:
         """TERMINAL 且**不带**条目列表：回显条目会诱导模型「再找点要修的」并重发同样的操作。"""
-        self._consolidation_failures = 0
+        with self._guard:
+            self._consolidation_failures = 0
         return {
             "success": True,
             "done": True,
             "target": target,
-            "usage": self._usage_pct(target, self._char_count(target)),
-            "entry_count": len(self._entries_for(target)),
+            "usage": self._usage_pct(target, len(ENTRY_DELIMITER.join(entries))),
+            "entry_count": len(entries),
             **({"message": message} if message else {}),
             **extra,
             "note": "Write saved. This update is complete — do not repeat it.",
         }
-
-    # ------------------------------------------------------------------ 操作
-
-    def _add_sync(self, target: str, content: str) -> dict[str, Any]:
-        content = normalize_entry(content)
-        if not content:
-            return _error("Content cannot be empty.")
-        if delimiter_error := _delimiter_error(content):
-            return _error(delimiter_error)
-        if scan_error := _scan_memory_content(content):
-            return _error(scan_error)
-
-        def _add(entries: list[str], limit: int) -> Any:
-            if content in entries:
-                return self._success_response(
-                    target, "Entry already exists (no duplicate added).", deduplicated=True,
-                )
-            if len(ENTRY_DELIMITER.join(entries + [content])) > limit:
-                return self._failure_with_entries(
-                    target,
-                    f"Memory at {self._char_count(target):,}/{limit:,} chars. Adding this entry "
-                    f"({len(content)} chars) would exceed the limit. Consolidate now: use 'replace' to "
-                    f"merge overlapping entries into shorter ones or 'remove' stale or less important "
-                    f"entries (see current_entries below), then retry this add — all in this turn.",
-                )
-            return entries + [content], "Entry added.", {"deduplicated": False}
-
-        # add 会重写整个文件，所以要和其他写路径一样走漂移备份：手改后追加不是漂移
-        # （`_detect_external_drift` 只在 round-trip 失败或单条超限时返回备份路径），
-        # 但**无法 round-trip** 的手改会在 add 时被静默规范化——没有备份就等于吞掉。
-        # 这是对上游 `add(..., skip_drift=True)`（`memory_tool_store.py:294-296`）的
-        # **有意偏差**：#1353 §0 裁决 1（漂移语义反转：手改合法 → 备份 + 以文件为准）
-        # 的必然推论，与 F-08 同源；追认记录见 #1441「#1353 偏差清单追认」，已落盘于
-        # https://github.com/EricKingWhy/intelligence-agent/issues/1353#issuecomment-6315586413
-        # （含 a-05 实测证据）。回退成上游不对称会重新制造「add 时手改不备份」的洞。
-        return self._mutate(target, _add)
-
-    def _replace_sync(
-        self, target: str, old_text: str, new_content: str, matched_entry: str | None = None,
-    ) -> dict[str, Any]:
-        new_content = normalize_entry(new_content)
-        if not normalize_entry(old_text):
-            return _error("old_text cannot be empty.")
-        if not new_content:
-            return _error("new_content cannot be empty. Use 'remove' to delete entries.")
-        if delimiter_error := _delimiter_error(new_content):
-            return _error(delimiter_error)
-        if scan_error := _scan_memory_content(new_content):
-            return _error(scan_error)
-        return self._edit(target, normalize_entry(old_text), new_content, matched_entry)
-
-    def _remove_sync(self, target: str, old_text: str, matched_entry: str | None = None) -> dict[str, Any]:
-        if not normalize_entry(old_text):
-            return _error("old_text cannot be empty.")
-        return self._edit(target, normalize_entry(old_text), None, matched_entry)
-
-    def _locate(
-        self, entries: list[str], old_text: str, verb: str, matched_entry: str | None = None,
-    ) -> int | dict[str, Any]:
-        """``old_text`` 选中的条目下标，或编辑应返回的错误 dict。
-
-        staged 写入携带审阅时的**完整条目**（``matched_entry``）：只有那一条合格，
-        重放不会命中一条「仍包含 old_text 的更新条目」。
-        """
-        if matched_entry is not None:
-            idx = pinned_index(entries, matched_entry)
-            return idx if idx is not None else _error(stale_entry_message(matched_entry))
-        idx, ambiguous = find_unique_match(entries, old_text)
-        if ambiguous:
-            return _error(
-                f"Multiple entries matched '{old_text}'. Be more specific.",
-                matches=[e[:80] + ("..." if len(e) > 80 else "") for e in entries if old_text in e],
-            )
-        if idx is None:
-            return self._consolidation_failure(
-                _error(
-                    f"No entry matched '{old_text}'. Check current_entries below and retry with the "
-                    f"exact text of the entry you want to {verb}.",
-                    current_entries=entries,
-                )
-            )
-        return idx
-
-    def _resolve_entry_sync(self, target: str, old_text: str, verb: str) -> dict[str, Any]:
-        """``{"success": True, "matched_entry": <完整条目>}``，在锁内读当前态。"""
-
-        def _resolve(entries: list[str]) -> dict[str, Any]:
-            idx = self._locate(entries, normalize_entry(old_text), verb)
-            return idx if isinstance(idx, dict) else {"success": True, "matched_entry": entries[idx]}
-
-        return self._mutate(target, lambda entries, _limit: _resolve(entries), skip_drift=True)
-
-    def _edit(
-        self, target: str, old_text: str, new_content: str | None, matched_entry: str | None = None,
-    ) -> dict[str, Any]:
-        def _apply(entries: list[str], limit: int) -> Any:
-            idx = self._locate(entries, old_text, "replace" if new_content else "remove", matched_entry)
-            if isinstance(idx, dict):
-                return idx
-            replaced = entries[:idx] + ([] if new_content is None else [new_content]) + entries[idx + 1:]
-            if new_content is None:
-                return replaced, "Entry removed.", {"removed_entry": entries[idx]}
-            new_total = len(ENTRY_DELIMITER.join(replaced))
-            if new_total > limit:
-                return self._failure_with_entries(
-                    target,
-                    f"Replacement would put memory at {new_total:,}/{limit:,} chars. Shorten the new "
-                    f"content, or 'remove' other stale or less important entries to make room (see "
-                    f"current_entries below), then retry — all in this turn.",
-                )
-            return replaced, "Entry replaced.", {"replaced_entry": entries[idx]}
-
-        return self._mutate(target, _apply)
-
-    @staticmethod
-    def _apply_batch_op(
-        working: list[str], act: str, content: str, old_text: str, pos: str,
-        matched_entry: str | None = None,
-    ) -> tuple[str | None, str | None]:
-        """把一个 batch op 应用到 *working*；返回 ``(错误消息, 被替换/删除的原条目)``。"""
-        if act == "add":
-            if not content:
-                return f"{pos}: content is required.", None
-            if content not in working:  # 幂等：重复条目跳过，不让整批失败
-                working.append(content)
-            return None, None
-        if act not in ("replace", "remove"):
-            return f"{pos}: unknown action. Use add, replace, or remove.", None
-        if not old_text:
-            return f"{pos}: old_text is required.", None
-        if act == "replace" and not content:
-            return f"{pos}: content is required (use action='remove' to delete).", None
-        if matched_entry is not None:
-            idx = pinned_index(working, matched_entry)
-            if idx is None:
-                return f"{pos}: {stale_entry_message(matched_entry)}", None
-        else:
-            idx, ambiguous = find_unique_match(working, old_text)
-            if ambiguous:
-                return f"{pos}: '{old_text}' matched multiple distinct entries -- be more specific.", None
-            if idx is None:
-                return f"{pos}: no entry matched '{old_text}'.", None
-        previous_content = working[idx]
-        working[idx:idx + 1] = [content] if act == "replace" else []
-        return None, previous_content
-
-    def _batch_sync(
-        self, target: str, operations: list[dict[str, Any]], *, commit: bool,
-        trusted_pins: bool = False,
-    ) -> dict[str, Any]:
-        if not operations:
-            return _error("operations list is empty.")
-        # 预扫描与执行读同一个规范化后的 op：模型可传 `new_text` 别名，若预扫描只看
-        # `content`，投毒内容就会绕过威胁扫描直接进盘。折叠优先级与执行处逐字同形。
-        #
-        # `matched_entry` 是**系统 pin**（stage 时钉住的条目全文），不是模型输入：
-        # 直写路径（write_approval 默认关）里模型能自己填它，填成别的条目就能绕过
-        # old_text 把那条改掉。只有审批重放（`trusted_pins=True`）能携带它。
-        # 注：单条 `replace`/`remove` 的 `matched_entry` 仍是调用方自证（pin 在这一层
-        # 无法与调用方区分），其模型不可达由工具面（`operations_payload`）保证。
-        ops = [
-            {
-                **(op or {}),
-                "content": normalize_entry((op or {}).get("content") or (op or {}).get("new_text") or ""),
-                "matched_entry": (op or {}).get("matched_entry") if trusted_pins else None,
-            }
-            for op in operations
-        ]
-        # 先扫所有 add/replace 内容，再碰磁盘——一个投毒 op 拒绝整批。
-        # 只查会落盘的 op：remove 的 content 不参与写入，拿它拒绝一次合法删除是误伤。
-        for i, op in enumerate(ops):
-            if op.get("action") not in {"add", "replace"} or not op["content"]:
-                continue
-            if delimiter_error := _delimiter_error(op["content"]):
-                return _error(f"Operation {i + 1}: {delimiter_error}")
-            if scan_error := _scan_memory_content(op["content"]):
-                return _error(f"Operation {i + 1}: {scan_error}")
-
-        def _apply(entries: list[str], limit: int) -> Any:
-            working = list(entries)  # 整批校验通过才提交
-            matched: list[str | None] = []
-            for i, op in enumerate(ops):
-                act = op.get("action")
-                msg, previous_content = self._apply_batch_op(
-                    working,
-                    act,
-                    op["content"],
-                    normalize_entry(op.get("old_text") or ""),
-                    f"Operation {i + 1} ({act or 'unknown'})",
-                    op.get("matched_entry"),
-                )
-                if msg:
-                    return self._batch_failure(target, msg)
-                matched.append(previous_content)
-            if entries and not working:
-                # #103419：把最后一条删掉的 consolidation batch 会提交一个空文件当成功。
-                # 拒绝；单条 remove() 才是有意清空的路径。
-                label = self.path_for(target).name
-                return self._batch_failure(
-                    target,
-                    f"Refusing to empty {label}: this batch would remove every entry from a "
-                    f"previously non-empty store. Keep at least one entry — merge overlapping "
-                    f"entries into a shorter one instead of removing the last one. To delete the "
-                    f"final entry deliberately, use single remove() calls.",
-                )
-            new_total = len(ENTRY_DELIMITER.join(working))  # 只在最终态校验预算
-            if new_total > limit:
-                return self._batch_failure(
-                    target,
-                    f"After applying all {len(operations)} operations, memory would be at "
-                    f"{new_total:,}/{limit:,} chars -- over the limit. Remove or shorten more "
-                    f"entries in the same batch, then retry.",
-                )
-            if not commit:
-                return {"success": True, "matched_entries": matched}
-            replaced: dict[int, str] = {}
-            removed: dict[int, str] = {}
-            for i, (op, previous_content) in enumerate(zip(ops, matched), 1):
-                if previous_content is not None:
-                    (replaced if op.get("action") == "replace" else removed)[i] = previous_content
-            extra: dict[str, Any] = {}
-            if replaced:
-                extra["replaced_entries"] = replaced
-            if removed:
-                extra["removed_entries"] = removed
-            return working, f"Applied {len(operations)} operation(s).", extra
-
-        return self._mutate(target, _apply, skip_drift=not commit)
-
-    def _resolve_batch_entries_sync(
-        self, target: str, operations: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        # 解析阶段只做「old_text 选中了哪条」——模型给的 matched_entry 一律不认。
-        return self._batch_sync(target, operations, commit=False, trusted_pins=False)
-
-    # ------------------------------------------------------------------ async 外壳
-
-    async def add(self, target: str, content: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._add_sync, target, content)
-
-    async def replace(
-        self, target: str, old_text: str, new_content: str, matched_entry: str | None = None,
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(self._replace_sync, target, old_text, new_content, matched_entry)
-
-    async def remove(self, target: str, old_text: str, matched_entry: str | None = None) -> dict[str, Any]:
-        return await asyncio.to_thread(self._remove_sync, target, old_text, matched_entry)
-
-    async def resolve_entry(self, target: str, old_text: str, verb: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._resolve_entry_sync, target, old_text, verb)
-
-    async def apply_batch(
-        self, target: str, operations: list[dict[str, Any]], *, trusted_pins: bool = False,
-    ) -> dict[str, Any]:
-        """``trusted_pins=True`` 只给审批重放用（`write_approval._replay`）：它携带的是
-        stage 时从磁盘钉住的条目全文，属于系统 pin。其余调用方（含模型工具面）的
-        ``matched_entry`` 一律剥掉，按 ``old_text`` 重新定位。"""
-        return await asyncio.to_thread(
-            self._batch_sync, target, operations, commit=True, trusted_pins=trusted_pins)
-
-    async def resolve_batch_entries(
-        self, target: str, operations: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(self._resolve_batch_entries_sync, target, operations)
-
-    async def remove_by_digest(self, digests: Sequence[str]) -> list[str]:
-        """按正文哈希清理条目（墓碑-only 删除的补偿入口，见 `store.MemoryDeletionReceiptV2`）。
-
-        两个文件都扫：墓碑是 content-free 的，除哈希外没有任何分拣线索（kind/tier 随
-        记录行一起没了），所以不能替调用方猜 USER.md 还是 MEMORY.md。返回被清理的
-        文件名（不含条目内容），供调用方留痕；没命中的文件不重写。
-        """
-        wanted = set(digests)
-        if not wanted:
-            return []
-        cleaned: list[str] = []
-        for target in ("memory", "user"):
-            def _drop(entries: list[str], _limit: int) -> Any:
-                kept = [entry for entry in entries if entry_digest(entry) not in wanted]
-                removed = len(entries) - len(kept)
-                if not removed:
-                    return {"success": True, "removed_by_digest": 0}
-                return kept, f"Removed {removed} entry(ies) matched by digest.", {
-                    "removed_by_digest": removed,
-                }
-
-            response = await asyncio.to_thread(self._mutate, target, _drop)
-            if response.get("removed_by_digest"):
-                cleaned.append(self.path_for(target).name)
-        return cleaned
 
     # ------------------------------------------------------------------ 查询
 
@@ -873,7 +590,10 @@ __all__ = [
     "MAX_CONSOLIDATION_FAILURES_PER_TURN",
     "MEMORY_BLOCK_HEADERS",
     "MarkdownMemoryStore",
+    "MutationOutcome",
+    "entries_digest",
     "entry_digest",
+    "error_response",
     "find_unique_match",
     "normalize_entry",
     "pinned_index",

@@ -9,6 +9,7 @@
 ### 变更（Changed）
 
 - **#423**：创建或续聊会话时显式声明不自动批准（`auto_approve=false`、未选档位）的行为变更——危险工具调用不再落入 deny 兜底（旧文案 "manual approval not yet wired"），而是进入交互审批队列（Web UI 弹审批卡，超时按 fail-closed 拒绝）。`danger-full-access` 档行为不变（无需审批）；未声明任何档位时维持原装配默认。
+- **#1535**：退役无运行消费者的 `MILVUS_COLLECTION` 配置（`Settings.milvus_collection` 字段与 `.env.example` 承诺一并删除）。Knowledge 检索目标只由 `KNOWLEDGE_COLLECTION` 决定；部署环境里残留该键时**运行时告警**并忽略——不拒绝启动、不改写检索目标（`extra="ignore"` 政策不变）。
 
 ---
 

@@ -35,7 +35,7 @@ from agent_harness.memory.v2.assembly import (
     MEMORY_V2_DATABASE_NAME,
     build_memory_formation,
 )
-from agent_harness.memory.v2.jobs import MemoryJobStage, SqliteMemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryJobStage, MemoryV2JobStore
 from agent_harness.memory.v2.runner import MemoryFormationNotifier
 from agent_harness.session import (
     MODEL_COMPLETED,
@@ -121,11 +121,10 @@ async def test_recall_is_wired_even_without_a_formation_model_role(tmp_path, mon
 
 @pytest.mark.asyncio
 async def test_a_resolvable_primary_role_builds_the_pipeline(tmp_path) -> None:
-    """可解析出主角色 ⇒ 真 runner，且作业表与记录表在**同一个库文件**里。
+    """可解析出主角色 ⇒ 真 runner；记录/派生态在 SQLite，job 状态在文件 owner。
 
-    同库不是省事：AC6/AC7 要的"终态与副作用一起落地"是**一个 SQLite 事务**
-    （`jobs.commit_with_outcome` 是那笔事务的唯一入口）。分库会把这条性质变成分布式事务，
-    而"记忆写了、job 还停在 FORMING"正是恢复扫描会重跑一遍的中间态。
+    #1494 / ADR-0058 D1+D4：job / lease / 幂等不再是 SQLite 表。装配必须建出
+    ``<workspace>/memory-state/jobs/``，而记录与 outbox 仍留在同一个库文件里。
     """
     runner = await build_memory_formation(_settings(tmp_path), sessions=_sessions(tmp_path))
 
@@ -133,7 +132,10 @@ async def test_a_resolvable_primary_role_builds_the_pipeline(tmp_path) -> None:
     assert isinstance(runner, MemoryFormationNotifier), "接入 Runtime 的端口契约"
     database = tmp_path / MEMORY_V2_DATABASE_NAME
     assert database.exists()
-    assert {"memory_v2_jobs", "memory_v2_records", "memory_v2_outbox"} <= await _table_names(database)
+    tables = await _table_names(database)
+    assert {"memory_v2_records", "memory_v2_outbox"} <= tables
+    assert "memory_v2_jobs" not in tables, "操作状态终态不得回到 SQLite（ADR-0056 §5）"
+    assert (tmp_path / "memory-state" / "jobs").is_dir()
     await runner.aclose()
 
 
@@ -359,7 +361,7 @@ async def test_the_visible_answer_does_not_wait_for_a_slow_memory_model(
     runner = await build_memory_formation(_settings(tmp_path), sessions=sessions)
     assert runner is not None
     database = tmp_path / MEMORY_V2_DATABASE_NAME
-    jobs = SqliteMemoryV2JobStore(database)
+    jobs = MemoryV2JobStore(database)
     await jobs.initialize()
     events = sessions.read_events(session.session_id)
 

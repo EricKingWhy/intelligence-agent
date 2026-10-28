@@ -5,7 +5,7 @@
 
 - `build_memory_v2_service` 装配出的 service（同一 `memory-v2.db` 里的 records / jobs /
   staged / blocked，加上 markdown 权威面）；
-- `SqliteMemoryV2JobStore.commit_with_outcome` 的那笔真实终态事务（"blocked 行与 job 终态
+- `MemoryV2JobStore.commit_with_outcome` 的那笔真实终态事务（"blocked 行与 job 终态
   一起落地"是 AC7① 的机制根）；
 - 真实 JSONL 会话日志（切片、投影别名、runner 的事件出口）；
 - AC7① 的**真子进程 SIGKILL**（`_blocked_write_kill_child.py`，与
@@ -41,14 +41,16 @@ from agent_harness.identity import (
     set_identity_context,
 )
 from agent_harness.memory.v2 import assembly
-from agent_harness.memory.v2._sqlite import write_connection
 from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.commit import build_markdown_commit
 from agent_harness.memory.v2.executor import MemoryJobExecutor, MemoryJobResult
+from agent_harness.memory.v2.file_state import MemoryStateRoot
 from agent_harness.memory.v2.jobs import (
     MemoryJobOutcome,
     MemoryJobStage,
-    SqliteMemoryV2JobStore,
+    MemoryV2JobStore,
 )
+from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.roles import MemoryModelRoles
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import (
@@ -125,7 +127,7 @@ class Gate:
     settings: Settings
     database: Path
     service: MemoryV2Service
-    jobs: SqliteMemoryV2JobStore
+    jobs: MemoryV2JobStore
     sessions: JsonlSessionStore
 
 
@@ -135,7 +137,7 @@ async def gate(tmp_path) -> Gate:
         _env_file=None, workspace_dir=str(tmp_path / "workspace"), model_api_key="sk-test")
     service = await assembly.build_memory_v2_service(settings)
     database = Path(settings.workspace_dir) / assembly.MEMORY_V2_DATABASE_NAME
-    jobs = SqliteMemoryV2JobStore(database)
+    jobs = MemoryV2JobStore(database)
     await jobs.initialize()
     return Gate(settings=settings, database=database, service=service, jobs=jobs,
                 sessions=JsonlSessionStore(tmp_path / "sessions"))
@@ -226,10 +228,9 @@ async def _insert_blocked_row(
             mode="json"),
         "pin": None,
     }]}
-    async with write_connection(blocked.database_path) as connection:
-        blocked_id = await blocked.insert_in(
-            connection, job_id="job-manual", identity=_identity(trusted),
-            project_id=project_id, payload=payload)
+    blocked_id = await blocked.insert(
+        job_id="job-manual", identity=_identity(trusted),
+        project_id=project_id, payload=payload)
     assert blocked_id is not None, "the manual row must be unique inside this workspace"
     return blocked_id
 
@@ -320,7 +321,7 @@ async def test_ac1_runner_reports_human_blocked_with_counts_only(
     [blocked_id] = event.data["blocked_ids"]
     assert MEMORY_UPDATED not in [e.type for e in sessions.read_events(SESSION)]
 
-    jobs = SqliteMemoryV2JobStore(Path(settings.workspace_dir) / assembly.MEMORY_V2_DATABASE_NAME)
+    jobs = MemoryV2JobStore(Path(settings.workspace_dir) / assembly.MEMORY_V2_DATABASE_NAME)
     await jobs.initialize()
     persisted = await jobs.get(job.job_id)
     assert (persisted.stage, persisted.outcome) == (
@@ -375,7 +376,7 @@ async def test_ac1_settings_read_failure_keeps_the_gate_closed_for_writes(
         identity_context_var.reset(token)
         await runner.aclose()
 
-    jobs = SqliteMemoryV2JobStore(
+    jobs = MemoryV2JobStore(
         Path(settings.workspace_dir) / assembly.MEMORY_V2_DATABASE_NAME)
     await jobs.initialize()
     persisted = await jobs.get(job.job_id)
@@ -718,7 +719,7 @@ async def test_web_promote_rejection_returns_403_and_reason_code(memory_app) -> 
     assert isinstance(response.json()["detail"], str)
     assert response.headers["X-Memory-Reason-Code"] == "secret_content"
     assert (await blocked.get(blocked_id)).status == BLOCKED
-    assert _record_count(blocked.database_path) == 0
+    assert _record_count(blocked.store.database_path) == 0
 
 
 # --------------------------------------------------------------------------------------
@@ -741,7 +742,7 @@ async def test_ac7_hard_kill_before_commit_recovers_to_one_blocked_row(
 
     records = SqliteMemoryV2Store(database)
     await records.initialize()
-    jobs = SqliteMemoryV2JobStore(database)
+    jobs = MemoryV2JobStore(database)
     await jobs.initialize()
     job = await jobs.enqueue(
         idempotency_key=f"memory-v2:{run_id}", trusted=LOCAL,
@@ -783,8 +784,17 @@ async def test_ac7_hard_kill_before_commit_recovers_to_one_blocked_row(
                 f"output={output!r}, stdout={stdout!r}, stderr={stderr!r}")
 
         # 崩溃窗口的现场：行只在子进程那笔**未提交**事务里，job 也还没终结
-        at_barrier = BlockedWriteStore(database, writer=None)
-        assert await at_barrier.list_for(LOCAL.tenant_id, LOCAL.user_id) == []
+        engine = MarkdownMemoryStore(tmp_path / "memories")
+        engine.load_from_disk()
+        at_barrier = BlockedWriteStore(
+            MemoryStateRoot(tmp_path / "memory-state"), writer=None,
+            commit=build_markdown_commit(engine, tmp_path),
+            store=SqliteMemoryV2Store(database),
+        )
+        # #1494 / ADR-0058 D5：blocked 是文件 owner，先于 job 终态持久。崩溃点因此
+        # 是「文件已有一行、job 仍未终结」；恢复必须复用同一个确定性 id，而不是再插一行。
+        at_barrier_rows = await at_barrier.list_for(LOCAL.tenant_id, LOCAL.user_id)
+        assert len(at_barrier_rows) == 1
         assert not (await jobs.get(job.job_id)).stage.is_terminal
 
         process.kill()
@@ -799,7 +809,7 @@ async def test_ac7_hard_kill_before_commit_recovers_to_one_blocked_row(
             await process.stdout.read()
             await process.stderr.read()
 
-    restarted_jobs = SqliteMemoryV2JobStore(database)
+    restarted_jobs = MemoryV2JobStore(database)
     await restarted_jobs.initialize()
     recovered = await restarted_jobs.claim(
         worker_id="recovery-worker", now=datetime.now(UTC) + timedelta(hours=1))
@@ -817,6 +827,7 @@ async def test_ac7_hard_kill_before_commit_recovers_to_one_blocked_row(
     assert result is not None and result.outcome is MemoryJobOutcome.BLOCKED
     rows = await service.blocked.list_for(LOCAL.tenant_id, LOCAL.user_id)
     assert len(rows) == 1, "崩溃恢复必须恰好收敛到一行：0 = 静默丢掉，2 = 重复拦下"
+    assert rows[0].id == at_barrier_rows[0].id, "恢复必须复用崩溃前那条确定性 id"
     assert list(result.blocked_ids) == [rows[0].id]
     assert _record_count(database) == 0
     assert (await restarted_jobs.get(job.job_id)).stage is MemoryJobStage.COMPLETED

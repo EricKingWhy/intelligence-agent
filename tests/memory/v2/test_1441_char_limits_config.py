@@ -60,11 +60,12 @@ async def test_configured_limits_reach_the_store_and_gate_writes(tmp_path) -> No
     assert markdown is not None
     assert (markdown.memory_char_limit, markdown.user_char_limit) == (40, 20)
 
-    # 上限不是装饰：40 字符的 MEMORY.md 收得下 39，收不下 41。
-    assert (await markdown.add("memory", "m" * 39))["success"] is True
-    assert (await markdown.add("memory", "n" * 3))["success"] is False
-    assert (await markdown.add("user", "u" * 20))["success"] is True
-    assert (await markdown.add("user", "v"))["success"] is False
+    # 上限不是装饰：40 字符的 MEMORY.md 收得下 39，收不下 41。写入口是唯一 seam。
+    commit = service.commit
+    assert (await commit.add("memory", "m" * 39))["success"] is True
+    assert (await commit.add("memory", "n" * 3))["success"] is False
+    assert (await commit.add("user", "u" * 20))["success"] is True
+    assert (await commit.add("user", "v"))["success"] is False
 
 
 # ---------------------------------------------------------------- 迁移路径同源（审查 P2）

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -1321,35 +1322,30 @@ def test_attempts_ledger_is_credential_scanned_on_write(driver, tmp_path):
 
 
 def test_read_job_row_is_read_only_and_per_run(driver, tmp_path):
-    """`_read_job_row` 只读：**不存在的键**返回 None，不 INSERT 一行出来。
+    """`_read_job_row` 只读：**不存在的键**返回 None，不写一条 job 出来。
 
-    这条钉的是判据的牙齿：若实现改成 `jobs.enqueue`（INSERT OR IGNORE），"本次 run 有 job
-    行"就恒真，`extraction_job_completed` 永远为真——正是 P1-1 那类假绿。同时验证幂等键
-    的 per-run 归属：另一条 run_id 的键读不到本 run 的行。
+    这条钉的是判据的牙齿：若实现改成 `jobs.enqueue`（写 job 文件），"本次 run 有 job 行"
+    就恒真，`extraction_job_completed` 永远为真——正是 P1-1 那类假绿。同时验证幂等键的
+    per-run 归属：另一条 run_id 的键读不到本 run 的行。job 事实在
+    `memory-state/jobs/<job_id>.json`（#1494 / ADR-0058 D4），不再有 SQLite 行。
     """
-    import sqlite3
-
     db = tmp_path / "memory-v2.db"
-    connection = sqlite3.connect(db)
-    connection.execute(
-        "CREATE TABLE memory_v2_jobs (idempotency_key TEXT PRIMARY KEY, job_id TEXT, "
-        "stage TEXT, protected_fact_extraction_state TEXT, "
-        "protected_fact_extraction_candidates TEXT)"
-    )
-    connection.execute(
-        "INSERT INTO memory_v2_jobs VALUES ('memory-v2:run-a', 'j1', 'completed', 'done', ?)",
-        (json.dumps([{"source": "u0", "value": "x"}]),),
-    )
-    connection.commit()
-    connection.close()
+    digest = hashlib.sha256(b"memory-v2:run-a").hexdigest()[:32]
+    jobs_dir = db.parent / "memory-state" / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    (jobs_dir / f"job_{digest}.json").write_text(json.dumps({
+        "job_id": f"job_{digest}",
+        "idempotency_key": "memory-v2:run-a",
+        "stage": "completed",
+        "protected_fact_extraction_state": "done",
+        "protected_fact_extraction_candidates": [{"source": "u0", "value": "x"}],
+    }), encoding="utf-8")
 
     hit = driver._read_job_row(db, "memory-v2:run-a")
-    assert hit == {"job": "j1", "extraction_state": "done"}
+    assert hit == {"job": f"job_{digest}", "extraction_state": "done"}
     assert driver._read_job_row(db, "memory-v2:run-b") is None
-    # 只读：行数没变（run-b 那次没有把自己插进去）。
-    connection = sqlite3.connect(db)
-    assert connection.execute("SELECT COUNT(*) FROM memory_v2_jobs").fetchone()[0] == 1
-    connection.close()
+    # 只读：run-b 那次没有把自己写成第二条 job 文件。
+    assert [path.name for path in jobs_dir.glob("*.json")] == [f"job_{digest}.json"]
 
 
 def test_extraction_candidates_parses_per_run_raw_output(driver):
@@ -1680,32 +1676,27 @@ def test_new_active_constraints_uses_identity_not_similarity(driver):
 
 def test_extraction_candidates_prefers_adopted_over_model_raw(driver, tmp_path):
     """P3-1：判据优先"executor 采纳的候选"（`ready` 窗口），取不到才退回模型原始输出。"""
-    import sqlite3
-
     db = tmp_path / "memory-v2.db"
-    connection = sqlite3.connect(db)
-    connection.execute(
-        "CREATE TABLE memory_v2_jobs (idempotency_key TEXT PRIMARY KEY, job_id TEXT, "
-        "stage TEXT, protected_fact_extraction_state TEXT, "
-        "protected_fact_extraction_candidates TEXT)"
-    )
-    connection.execute(
-        "INSERT INTO memory_v2_jobs VALUES ('memory-v2:run-a', 'j1', 'completed', 'ready', ?)",
-        (json.dumps([{"source": "u0", "value": "adopted"}]),),
-    )
-    connection.commit()
-    connection.close()
+    digest = hashlib.sha256(b"memory-v2:run-a").hexdigest()[:32]
+    jobs_dir = db.parent / "memory-state" / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    job_path = jobs_dir / f"job_{digest}.json"
+
+    def _write(state: str, candidates: list[dict[str, str]] | None) -> None:
+        job_path.write_text(json.dumps({
+            "job_id": f"job_{digest}",
+            "idempotency_key": "memory-v2:run-a",
+            "stage": "completed",
+            "protected_fact_extraction_state": state,
+            "protected_fact_extraction_candidates": candidates,
+        }), encoding="utf-8")
+
+    _write("ready", [{"source": "u0", "value": "adopted"}])
     assert driver._read_extraction_candidates(db, "memory-v2:run-a") == [
         {"source": "u0", "value": "adopted"},
     ]
     # 置 NULL 之后（`done`）取不到 ⇒ None（调用方退回模型原始输出，而不是判成"零候选"）。
-    connection = sqlite3.connect(db)
-    connection.execute(
-        "UPDATE memory_v2_jobs SET protected_fact_extraction_candidates=NULL, "
-        "protected_fact_extraction_state='done' WHERE idempotency_key='memory-v2:run-a'",
-    )
-    connection.commit()
-    connection.close()
+    _write("done", None)
     assert driver._read_extraction_candidates(db, "memory-v2:run-a") is None
 
 
