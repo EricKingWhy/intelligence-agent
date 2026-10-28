@@ -301,5 +301,52 @@ def test_purge_requires_trusted_origin(tmp_path):
     assert _limits(client, sid) == {_STALE: 5}, "被拒请求零副作用"
 
 
+# ── #1503 裁决 Q2 A：清理口径 = 最宽真实根口径（Web 根，16 名）────────────
+
+
+def test_root_only_tool_ceilings_are_not_stale_on_web(tmp_path):
+    """四个根专属名在 Web 上**合法且真在生效**——清理不得把它们判 stale。
+
+    历史 `_names` 落默认 `(False, False)`（12 名），四个根专属名因此被判陈旧、
+    静默删 ceiling（只留 `reason: "unregistered"` 的审计，看不出是误判）。
+    真陈旧名（`ghost-tool`）仍必须被清——本用例的负控，防止把判据写成
+    "什么都保留"的无脑白名单。
+    """
+    client = _client(tmp_path)
+    sid = _create_session(client)
+    root_only = {
+        "ask_user": 3,
+        "submit_plan": 2,
+        "register_constraint": 1,
+        "request_constraint_resolution": 4,
+    }
+    before_version = _seed_budget(
+        client, sid, tool_call_limits={**root_only, _REGISTERED: 9, _STALE: 7},
+    )
+
+    resp = _post(client, sid)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["purged"] == {_STALE: 7}, "只清真陈旧名"
+    assert body["remaining"] == {**root_only, _REGISTERED: 9}
+    assert body["version"] == before_version + 1
+    assert _limits(client, sid) == {**root_only, _REGISTERED: 9}
+
+
+def test_submit_plan_is_stale_when_no_artifact_store(tmp_path):
+    """`submit_plan` 依赖 artifact store 在册；store 选不出时它**确实**陈旧。"""
+    client = _client(tmp_path, artifact_dir="")
+    sid = _create_session(client)
+    before_version = _seed_budget(
+        client, sid, tool_call_limits={"submit_plan": 2, _REGISTERED: 9},
+    )
+
+    resp = _post(client, sid)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["purged"] == {"submit_plan": 2}
+    assert _limits(client, sid) == {_REGISTERED: 9}
+    assert _row(client, sid)["version"] == before_version + 1
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-q"])
