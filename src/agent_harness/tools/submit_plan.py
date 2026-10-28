@@ -109,11 +109,7 @@ class SubmitPlanTool(Tool):
     plan_mode_exempt: bool = True
 
     def __init__(self, artifact_store: ArtifactStore) -> None:
-        """`artifact_store` 只在 `execute` 期使用（落计划正文）。
-
-        装配期为了拿名字而 `SubmitPlanTool(None)` 的写法依赖这条契约；要名字请用
-        `SUBMIT_PLAN_TOOL_NAME`，别再造一个 `None` 实例。
-        """
+        """The store is used by execute; name projections use SUBMIT_PLAN_TOOL_NAME."""
         self._store = artifact_store
 
     @property

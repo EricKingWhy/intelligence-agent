@@ -301,10 +301,6 @@ def test_purge_requires_trusted_origin(tmp_path):
     assert _limits(client, sid) == {_STALE: 5}, "被拒请求零副作用"
 
 
-if __name__ == "__main__":  # pragma: no cover
-    pytest.main([__file__, "-q"])
-
-
 # ── #1503 裁决 Q2 A：清理口径 = 最宽真实根口径（Web 根，16 名）────────────
 
 
@@ -350,3 +346,7 @@ def test_submit_plan_is_stale_when_no_artifact_store(tmp_path):
     assert resp.json()["purged"] == {"submit_plan": 2}
     assert _limits(client, sid) == {_REGISTERED: 9}
     assert _row(client, sid)["version"] == before_version + 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__, "-q"])

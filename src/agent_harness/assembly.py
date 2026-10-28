@@ -19,6 +19,7 @@ import logging
 import platform
 from dataclasses import dataclass
 from datetime import date
+from inspect import getattr_static
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -68,7 +69,10 @@ from agent_harness.storage import (
     SqliteOperationLedger,
     SqliteSessionMetaStore,
 )
-from agent_harness.storage.artifact_select import select_artifact_store
+from agent_harness.storage.artifact_select import (
+    plan_artifact_store,
+    select_artifact_store,
+)
 from agent_harness.storage.delegation_tree import SqliteDelegationTreeLedger
 from agent_harness.tooling import Tool, ToolExecutor, ToolRegistry
 from agent_harness.tooling.approval import ApprovalCallback, ApprovalResponse
@@ -227,9 +231,9 @@ class _RootTooling:
 class _RootToolSelection:
     """根工具面的**唯一**选择决策（#1503 C2 / 裁决 15 A：assembly 内一份纯决策）。
 
-    **零副作用**：只做布尔组合，不构造 Tool / registry / sandbox，不 I/O、不 mkdir、
-    不读盘。`select_artifact_store` 给出的"本部署有没有可用的 artifact store"是
-    **输入事实**，不是本对象决定的事。
+    This object only combines boolean inputs. It does not construct Tools, registries,
+    sandboxes, or stores. Projections pass a pure ArtifactStorePlan; runtime assembly
+    passes the result of constructing the selected store.
 
     三个消费者（`_build_tooling` 构造 / `root_registry_tool_names` 名字集 /
     `root_registry_reconcile_info` 恢复元数据）与 `build_runtime` 的 profile 收窄
@@ -248,6 +252,12 @@ class _RootToolSelection:
     include_submit_plan: bool
     #: capability 工具里的 `delegate` 依赖 `session_store` 建子会话，缺席即降级缺席。
     include_delegate: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _RootToolProjection:
+    name: str
+    reconcile_info: ToolReconcileInfo
 
 
 def _root_tool_selection(
@@ -321,15 +331,12 @@ def _build_tooling(
     构造逻辑取。build_runtime 调本函数；pre-CAS 校验用的是本函数的**零副作用**
     名字集投影 `root_registry_tool_names`（不实例化 sandbox，审查 P2-1）。
 
-    #1503 C2：**工具面选择只在本函数与两个投影共用的 `_root_tool_selection`
-    里写一次**——本函数、`root_registry_tool_names`、`root_registry_reconcile_info`
-    都从那份纯决策派生。新增工具来源仍要落到三处（构造 / 名字 / 恢复元数据），
-    漏落 = `tests/test_assembly_root_registry_names.py` 的对账红灯。
+    #1503 C2: `_root_tool_selection` owns the shared policy. The builder and both
+    # projections consume that choice; projection metadata comes from tool classes.
     """
     # #286：根委派配额来自档位声明（与 build_runtime 的树账同一取用点）。
     root_max_delegations = _root_profile_spec(agent_profile).max_delegations
-    # store 构造无副作用（mkdir 在写路径）；选一次、构造与决策共用，避免两处
-    # 各调一次选择器（那正是 #192 收敛掉的那种漂移面）。
+    # Construct the selected store once; its result feeds the shared tool decision.
     selection = select_artifact_store(settings, session_id)
     choice = _root_tool_selection(
         include_constraint_tools=include_constraint_tools,
@@ -533,12 +540,9 @@ def root_registry_tool_names(
     .__init__` 会对 workspace `mkdir`，发生在 service 的归属对账（#266
     `SessionCwdUnavailable` 守卫，`WorkspaceNotFound` 子型）**之前** ⇒ 坏名 422
     会把已删 cwd 凭空重建、合法名
-    resume 掩蔽守卫。名字集不依赖 sandbox 实例：本地工具"构造器只存依赖"（既有
-    判定，`tests/agent/test_tool_scope_reconciliation.py` 传 None 读 `.name`）；
-    读回工具名只由 Provider 选择决定（store 构造无副作用，mkdir 在写路径）；
-    capability 工具在 wiring 里已是实例。`_build_tooling` 与本函数必须同源一致
-    ——`tests/test_assembly_root_registry_names.py` 三方对账（真实装配 /
-    `_build_tooling` / 本函数），漂移即红灯。
+    Names come from class metadata and a pure artifact provider plan; capability
+    tools reuse instances already held by wiring. No Tool or store is constructed
+    here. Runtime assembly and these projections share the same selection policy.
 
     工具面开关不在这里自己拼：与构造共用 `_root_tool_selection` 那一份纯决策
     （#1503 C2），本函数只负责"把决策映射成名字"。
@@ -560,54 +564,73 @@ def _root_registry_tools(
     session_store: JsonlSessionStore | None,
     include_constraint_tools: bool,
     include_constraint_resolution_tool: bool | None,
-) -> list[Tool]:
+) -> list[_RootToolProjection]:
     """根 registry 的**零副作用**工具清单——两个投影唯一的名字来源（#1503 C2）。
 
-    只实例化"构造器只存依赖"的工具（本地工具传 ``None`` 读类属性，capability 工具
-    在 wiring 里已是实例）；**不构造 sandbox、不 mkdir、不读盘**。
-    `root_registry_tool_names` 取名字、`root_registry_reconcile_info` 取元数据，
-    同一条 if 级联只有这里一份——此前三处各写一遍，漂移只能靠对账测试事后发现。
+    This projection uses class metadata and a pure artifact provider plan. It reuses
+    capability instances from wiring and constructs neither Tools nor stores.
+    `root_registry_tool_names` reads names while `root_registry_reconcile_info` reads
+    recovery metadata from these same projection records.
     """
-    selection = select_artifact_store(settings, session_id)
+    artifact_plan = plan_artifact_store(settings, session_id)
     choice = _root_tool_selection(
         include_constraint_tools=include_constraint_tools,
         include_constraint_resolution_tool=include_constraint_resolution_tool,
-        has_artifact_store=selection is not None,
+        has_artifact_store=artifact_plan is not None,
         has_session_store=session_store is not None,
     )
-    tools: list[Tool] = [tool_cls(None) for tool_cls in BUILTIN_LOCAL_TOOLS]
+    tools = [_tool_reconcile_info(tool_cls) for tool_cls in BUILTIN_LOCAL_TOOLS]
     # W-26（#380）：`update_plan` 无条件注册（与 `_build_tooling` 同一句判定）。
-    tools.append(UpdatePlanTool())
+    tools.append(_tool_reconcile_info(UpdatePlanTool))
     if choice.include_register_constraint:
-        tools.append(RegisterConstraintTool())
+        tools.append(_tool_reconcile_info(RegisterConstraintTool))
     if choice.include_resolution_tool:
-        tools.append(RequestConstraintResolutionTool())
+        tools.append(_tool_reconcile_info(RequestConstraintResolutionTool))
         # #1204：通用提问与澄清工具同一道回答通道开关（见 `_build_tooling`）。
-        tools.append(AskUserTool())
-    if choice.include_artifact_read_tool and selection is not None:
+        tools.append(_tool_reconcile_info(AskUserTool))
+    if choice.include_artifact_read_tool and artifact_plan is not None:
         # 读回工具名从**配对的那个工具类**上取，不写第二遍字面量（#186 AC4 同源）。
-        tools.append(selection.read_tool(None))
+        tools.append(_tool_reconcile_info(artifact_plan.read_tool))
     if choice.include_submit_plan:
-        # #1356：`submit_plan` 与 `ask_user` 同一道开关、同样依赖 artifact store。
-        # 这里的 `None` store 实例只为取名字与 `reconcile_hint`（`execute` 才用 store），
-        # 与 #1356 既有的元数据投影写法同形。
-        tools.append(SubmitPlanTool(None))
+        tools.append(_tool_reconcile_info(
+            SubmitPlanTool, name_override=SUBMIT_PLAN_TOOL_NAME,
+        ))
     for capability_tool in wiring.tools:
         # multiagent 依赖 session_store 建独立 child session——缺席时降级缺席。
         if isinstance(capability_tool, DelegateTool) and not choice.include_delegate:
             continue
-        tools.append(capability_tool)
+        tools.append(_tool_reconcile_info(capability_tool))
     return tools
 
 
-def _tool_reconcile_info(tool: Tool) -> ToolReconcileInfo:
-    """Tool 实例/裸构造 → 恢复裁决呈现元数据（属性逐字快照，不执行任何方法）。"""
-    hint = tool.reconcile_hint
-    return ToolReconcileInfo(
-        replay_safe=tool.replay_safe,
-        verifiable=hint.verifiable,
-        suggested_action=hint.suggested_action,
+def _tool_reconcile_info(
+    tool: Tool | type[Tool], *, name_override: str | None = None,
+) -> _RootToolProjection:
+    if isinstance(tool, type):
+        name = name_override or _class_property_value(tool, "name")
+        replay_safe = _class_property_value(tool, "replay_safe")
+        hint = _class_property_value(tool, "reconcile_hint")
+    else:
+        name = tool.name
+        replay_safe = tool.replay_safe
+        hint = tool.reconcile_hint
+    return _RootToolProjection(
+        name=name,
+        reconcile_info=ToolReconcileInfo(
+            replay_safe=replay_safe,
+            verifiable=hint.verifiable,
+            suggested_action=hint.suggested_action,
+        ),
     )
+
+
+def _class_property_value(tool_cls: type[Tool], name: str) -> Any:
+    descriptor = getattr_static(tool_cls, name)
+    if isinstance(descriptor, property):
+        if descriptor.fget is None:
+            raise AttributeError(f"{tool_cls.__name__}.{name} has no getter")
+        return descriptor.fget(None)
+    return descriptor
 
 
 def root_registry_reconcile_info(
@@ -621,9 +644,9 @@ def root_registry_reconcile_info(
 ) -> dict[str, ToolReconcileInfo]:
     """根 registry 恢复裁决呈现元数据的**零副作用**计算（#357 W-13 §2.4）。
 
-    与 ``root_registry_tool_names`` 逐分支同构（名字集的对账测试同型钉住）：
-    本地工具"构造器只存依赖"（传 ``None`` 读类属性），capability 工具在
-    wiring 里已是实例——**不实例化 sandbox、不 mkdir**（审查 P2-1 同款取舍）。
+    It consumes the same projection records as ``root_registry_tool_names``.
+    Local tool metadata comes from class descriptors; capability metadata comes
+    from existing wiring instances. It constructs no Tools, stores, or sandboxes.
     消费点：``_reconcile_pending`` 产出 ``default_action/risk_level/probe``
     只读展示字段；判据与真实工具面漂移即红灯
     （``tests/test_assembly_root_registry_names.py``）。
@@ -638,7 +661,7 @@ def root_registry_reconcile_info(
     （#1503 C2：一条规则一份决策），本函数只负责把工具映射成元数据。
     """
     return {
-        tool.name: _tool_reconcile_info(tool)
+        tool.name: tool.reconcile_info
         for tool in _root_registry_tools(
             settings, wiring, session_id=session_id, session_store=session_store,
             include_constraint_tools=include_constraint_tools,
