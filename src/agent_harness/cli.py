@@ -3574,6 +3574,10 @@ def _main_memory(argv: list[str]) -> None:
         "--target", choices=("memory", "user"), default=None,
         help="只对账一个文件；缺省两个都跑",
     )
+    subcommands.add_parser(
+        "reconcile",
+        help="按 MemoryCommit 回执对账内容发布（补发布 / 已发布 / 冲突待人工）",
+    )
     args = parser.parse_args(argv)
     settings = Settings()
     setup_logging(settings.log_level, settings.workspace_dir)
@@ -3767,6 +3771,54 @@ async def _memory_command(
     service = await build_memory_v2_service(settings)
     staged = service.staged
     trusted = trusted_identity_for_session("", None)
+    if args.command == "reconcile":
+        # #1494 AC3：对账是**显式**运维入口。启动时也跑一次，但这里要输出读数与退出码：
+        # 需要人工裁决的回执（NEED_RECONCILE）不能只留在日志里。
+        commit = service.commit
+        if commit is None:
+            return "reconcile 失败：本部署未装配 markdown 权威面（memories/*.md）。", True
+        report = await commit.reconcile()
+        lines = [
+            f"记忆提交对账：检查 {report.examined} 条回执",
+            f"  已提交（回放或无待发布）: {len(report.committed)}",
+        ]
+        for operation_id in report.committed:
+            lines.append(f"    {operation_id}")
+        if report.republished:
+            lines.append(f"  本轮补发布: {len(report.republished)}")
+            for operation_id in report.republished:
+                lines.append(f"    {operation_id}")
+        if report.needs_reconcile:
+            lines.append(f"  待人工裁决: {len(report.needs_reconcile)}")
+            for operation_id, reason in report.needs_reconcile:
+                lines.append(f"    {operation_id}  reason={reason}")
+        if report.unreadable:
+            lines.append(f"  回执不可读: {len(report.unreadable)}")
+            for name, error in report.unreadable:
+                lines.append(f"    {name}: {error}")
+        import_report = service.legacy_import_report
+        import_failed = False
+        if import_report and not import_report.get("skipped"):
+            import_failed = import_report.get("converged") is False
+            lines.append(
+                "旧状态导入："
+                f"settings={import_report.get('settings', 0)}"
+                f"（冲突 {import_report.get('settings_conflicts', 0)}"
+                f"/不可读 {import_report.get('settings_unreadable', 0)}）"
+                f" tombstone={import_report.get('tombstones', 0)}"
+                f" staged={import_report.get('staged', 0)}"
+                f" blocked={import_report.get('blocked', 0)}"
+                f" jobs={import_report.get('jobs', 0)}"
+                f" 补发布={import_report.get('republished', 0)}"
+                f"（不可读 {import_report.get('republish_unreadable', 0)}）"
+            )
+            if import_failed:
+                lines.append(
+                    "  导入未收敛：存在 settings 冲突或补发布不可读；"
+                    "见 memory-state/settings-conflict.json 与 NEED_RECONCILE 回执，"
+                    "处理后才会写完成标记。"
+                )
+        return "\n".join(lines), not report.ok or import_failed
     if args.command == "reproject":
         # #1482 Finding 二甲案：给降级 warning 指的那句运维指令接一个真实入口。
         # 与 migrate 分支不同——reproject 必须读活账本与派生层，所以走 `build_memory_v2_service`

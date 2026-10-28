@@ -47,7 +47,7 @@ from agent_harness.memory.v2.index import InMemoryMemoryV2Index
 from agent_harness.memory.v2.jobs import (
     MemoryJobOutcome,
     MemoryJobStage,
-    SqliteMemoryV2JobStore,
+    MemoryV2JobStore,
 )
 from agent_harness.memory.v2.projection import build_formation_input
 from agent_harness.memory.v2.roles import MemoryModelRoles
@@ -96,7 +96,7 @@ RUN = "run-1"
 class Env:
     path: object
     store: SqliteMemoryV2Store
-    jobs: SqliteMemoryV2JobStore
+    jobs: MemoryV2JobStore
     index: InMemoryMemoryV2Index
     service: MemoryV2Service
     sessions: JsonlSessionStore
@@ -111,7 +111,7 @@ async def env(tmp_path) -> Env:
     path = tmp_path / "memory-v2.db"
     store = SqliteMemoryV2Store(path)
     await store.initialize()
-    jobs = SqliteMemoryV2JobStore(path)
+    jobs = MemoryV2JobStore(path)
     await jobs.initialize()
     index = InMemoryMemoryV2Index()
     return Env(
@@ -305,7 +305,11 @@ def _rows(env: Env, table: str) -> list[dict]:
 
 
 def _job_rows(env: Env) -> list[dict]:
-    return _rows(env, "memory_v2_jobs")
+    # #1494 / ADR-0058 D4：job 状态已从 SQLite 移到 memory-state/jobs/<job_id>.json。
+    return [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(env.jobs.root.jobs_dir.glob("*.json"))
+    ]
 
 
 def _memory_rows(env: Env) -> list[dict]:
@@ -687,7 +691,7 @@ async def test_hard_kill_recovery_reuses_saved_candidates_without_duplicate_fact
 
     records = SqliteMemoryV2Store(database)
     await records.initialize()
-    jobs = SqliteMemoryV2JobStore(database)
+    jobs = MemoryV2JobStore(database)
     await jobs.initialize()
     job = await jobs.enqueue(
         idempotency_key=f"memory-v2:{run_id}",
@@ -762,7 +766,7 @@ async def test_hard_kill_recovery_reuses_saved_candidates_without_duplicate_fact
             await process.stdout.read()
             await process.stderr.read()
 
-    restarted_jobs = SqliteMemoryV2JobStore(database)
+    restarted_jobs = MemoryV2JobStore(database)
     await restarted_jobs.initialize()
     recovered = await restarted_jobs.claim(
         worker_id="recovery-worker",

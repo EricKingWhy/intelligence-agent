@@ -32,7 +32,6 @@ from agent_harness.memory.v2.identity_mapping import (
     plan_identity_mapping,
     resolve_conflict,
 )
-from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
 from agent_harness.memory.v2.markdown_store import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
@@ -133,6 +132,48 @@ _TOMBSTONES = (
 )
 
 
+#: 五个 owner 在 #1494 之前的状态表；本文件测的是**旧库一次性盘点**，所以夹具
+#: 显式建出旧 schema（新代码不再创建它们，见 ADR-0058 D2–D7）。
+_LEGACY_DDL = """
+CREATE TABLE IF NOT EXISTS memory_v2_settings (
+    tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+    extraction_enabled INTEGER NOT NULL, recall_enabled INTEGER NOT NULL,
+    fallback_enabled INTEGER NOT NULL DEFAULT 1,
+    write_approval INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS memory_v2_staged (
+    id TEXT PRIMARY KEY, identity TEXT NOT NULL, payload TEXT NOT NULL,
+    pinned_entry TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, claimed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS memory_v2_jobs (
+    job_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, project_id TEXT,
+    session_id TEXT NOT NULL, run_id TEXT,
+    protected_fact_token_budget INTEGER,
+    protected_fact_extraction_state TEXT NOT NULL DEFAULT 'pending',
+    protected_fact_extraction_candidates TEXT,
+    stage TEXT NOT NULL, state TEXT NOT NULL, outcome TEXT, reason TEXT,
+    lease_owner TEXT, lease_expires_at TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_v2_tombstones (
+    memory_id TEXT PRIMARY KEY, root_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+    scope TEXT NOT NULL, project_id TEXT, version INTEGER,
+    deleted_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+    deletion_reason TEXT NOT NULL,
+    content_hashes TEXT NOT NULL, source_hashes TEXT NOT NULL
+);
+"""
+
+
+def _create_legacy_tables(db: Path) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.executescript(_LEGACY_DDL)
+
+
 def _insert(db: Path, table: str, rows) -> None:
     rows = list(rows)
     if not rows:
@@ -202,8 +243,7 @@ async def _seed(
     workspace.mkdir(parents=True)
     database = workspace / "memory-v2.db"
     await SqliteMemoryV2Store(database).initialize()
-    # job 表由 job store 单独建（`assembly` 里两个 store 各自 initialize），夹具同样两步。
-    await SqliteMemoryV2JobStore(database).initialize()
+    _create_legacy_tables(database)
     _insert_records(database, _DEFAULT_RECORDS if records is None else records)
     _insert_settings(database, _EQUAL_SETTINGS if settings_rows is None else settings_rows)
     _insert_staged(database, _STAGED_ROWS)
