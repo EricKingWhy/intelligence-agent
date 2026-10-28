@@ -389,42 +389,111 @@ def test_store_persists_sidecar_and_returns_stable_projection(tmp_path: Path) ->
     assert sidecar.name == "board_state.json"
 
 
-def test_projection_validation_and_sidecar_write_share_delete_lock(
+def test_projection_sidecar_write_serializes_with_hard_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = JsonlSessionStore(root=tmp_path)
-    session = Session.start(store)
+    store, session = _session_with_task(tmp_path)
     projection_store = BoardProjectionStore(store)
     session_lock = store._lock_for(session.session_id)
-    observations: list[tuple[str, bool]] = []
-    original_read_last_line = projection_store._read_last_line
+    sidecar_temp_created = threading.Event()
+    allow_sidecar_write = threading.Event()
+    delete_waiting_for_lock = threading.Event()
+    writer_done = threading.Event()
+    delete_done = threading.Event()
+    sidecar_write_completed = threading.Event()
+    writer_errors: list[BaseException] = []
+    delete_errors: list[BaseException] = []
+    delete_results: list[bool] = []
+    write_lock_states: list[bool] = []
     original_write_sidecar = projection_store._write_sidecar
+    original_mkstemp = bp.tempfile.mkstemp
+    original_lock_for = store._lock_for
 
-    def lock_is_held(operation: str) -> None:
+    class ObservedStoreLock:
+        def __enter__(self):
+            if threading.current_thread().name == "session-deleter":
+                if not session_lock.acquire(blocking=False):
+                    delete_waiting_for_lock.set()
+                    session_lock.acquire()
+            else:
+                session_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            session_lock.release()
+            return False
+
+    observed_lock = ObservedStoreLock()
+
+    def observed_lock_for(session_id: str):
+        if session_id == session.session_id:
+            return observed_lock
+        return original_lock_for(session_id)
+
+    def pause_after_mkstemp(*args, **kwargs):
+        result = original_mkstemp(*args, **kwargs)
+        sidecar_temp_created.set()
+        if not allow_sidecar_write.wait(timeout=5):
+            raise TimeoutError("test did not release the sidecar writer")
+        return result
+
+    def observe_write_lock(session_id: str, projection, stamp) -> None:
         acquired = session_lock.acquire(blocking=False)
-        observations.append((operation, not acquired))
+        write_lock_states.append(not acquired)
         if acquired:
             session_lock.release()
-
-    def observe_read_last_line(path: Path) -> bytes | None:
-        lock_is_held("event-tail-read")
-        return original_read_last_line(path)
-
-    def observe_write_sidecar(session_id: str, projection, stamp) -> None:
-        lock_is_held("sidecar-write")
         original_write_sidecar(session_id, projection, stamp)
+        sidecar_write_completed.set()
 
-    monkeypatch.setattr(projection_store, "_read_last_line", observe_read_last_line)
-    monkeypatch.setattr(projection_store, "_write_sidecar", observe_write_sidecar)
-    projection_store.update_from_events(
-        session.session_id, session.events, recompute=True,
+    def update_projection() -> None:
+        try:
+            projection_store.update_from_events(
+                session.session_id, session.events, recompute=True,
+            )
+        except BaseException as error:  # noqa: BLE001 - report worker failures in the test
+            writer_errors.append(error)
+        finally:
+            writer_done.set()
+
+    def delete_session() -> None:
+        try:
+            delete_results.append(store.delete_session(session.session_id))
+        except BaseException as error:  # noqa: BLE001 - report worker failures in the test
+            delete_errors.append(error)
+        finally:
+            delete_done.set()
+
+    monkeypatch.setattr(store, "_lock_for", observed_lock_for)
+    monkeypatch.setattr(bp.tempfile, "mkstemp", pause_after_mkstemp)
+    monkeypatch.setattr(projection_store, "_write_sidecar", observe_write_lock)
+    writer = threading.Thread(
+        target=update_projection, name="projection-writer", daemon=True,
     )
+    deleter = threading.Thread(
+        target=delete_session, name="session-deleter", daemon=True,
+    )
+    writer.start()
+    try:
+        assert sidecar_temp_created.wait(timeout=5)
+        deleter.start()
+        delete_blocked = delete_waiting_for_lock.wait(timeout=5)
+    finally:
+        allow_sidecar_write.set()
+        writer.join(timeout=5)
+        if deleter.ident is not None:
+            deleter.join(timeout=5)
 
-    assert observations == [("event-tail-read", True), ("sidecar-write", True)]
-    assert store.board_state_path(session.session_id).exists()
-
-    assert store.delete_session(session.session_id) is True
     assert not (tmp_path / session.session_id).exists()
+    assert not store.events_path(session.session_id).exists()
+
+    assert delete_blocked, "hard delete must wait for projection disk validation and write"
+    assert writer_done.is_set()
+    assert delete_done.is_set()
+    assert not writer_errors
+    assert not delete_errors
+    assert delete_results == [True]
+    assert write_lock_states == [True]
+    assert sidecar_write_completed.is_set()
 
 
 def test_sidecar_is_only_a_cache_and_self_heals_after_deletion(tmp_path: Path) -> None:
