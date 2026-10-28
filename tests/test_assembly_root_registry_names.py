@@ -209,7 +209,7 @@ async def test_root_reconcile_info_projection_matches_real_root_registry(tmp_pat
     from agent_harness.tooling.contract import ToolReconcileInfo
     from agent_harness.tools.bash import BashTool
     from agent_harness.tools.read import ReadTool
-    from agent_harness.tools.submit_plan import SubmitPlanTool
+    from agent_harness.tools.submit_plan import SUBMIT_PLAN_TOOL_NAME, SubmitPlanTool
 
     settings = _settings(tmp_path, multiagent=False)
     _, wiring = await assemble_wiring(settings)
@@ -238,10 +238,10 @@ async def test_root_reconcile_info_projection_matches_real_root_registry(tmp_pat
         include_constraint_tools=True,
     ), "reconcile info 投影与真实根 registry 漂移"
     # #1356：`submit_plan` 的 reconcile_hint 现在真的能到 UI（P1-3 的判据）。
-    submit_plan = SubmitPlanTool(None)
-    assert info[submit_plan.name].verifiable is True
-    assert info[submit_plan.name].suggested_action == (
-        submit_plan.reconcile_hint.suggested_action
+    submit_plan_hint = SubmitPlanTool.reconcile_hint.fget(None)
+    assert info[SUBMIT_PLAN_TOOL_NAME].verifiable is True
+    assert info[SUBMIT_PLAN_TOOL_NAME].suggested_action == (
+        submit_plan_hint.suggested_action
     )
 
     assert all(isinstance(v, ToolReconcileInfo) for v in info.values())
@@ -402,6 +402,62 @@ async def test_three_projections_agree_across_the_full_switch_matrix(
     # 决策与两个投影同源的旁证：构造产出的 selection 与名字集判据一致。
     assert tooling.selection.include_submit_plan == ("submit_plan" in names)
     assert ("delegate" in names) == (multiagent and session_store is not None)
+
+
+@pytest.mark.asyncio
+async def test_expected_artifact_store_construction_failure_is_projection_exception(
+    tmp_path, monkeypatch,
+):
+    """AC2 approved exception: projections report configured intent, runtime degrades."""
+    from agent_harness.assembly import root_registry_reconcile_info
+    from agent_harness.storage.s3_artifact import S3ArtifactStore
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        model_api_key="sk-test",
+        artifact_dir=str(tmp_path / "artifacts"),
+        artifact_store_endpoint="https://s3.invalid",
+        artifact_store_bucket="b",
+        artifact_store_region="us-east-1",
+        artifact_store_access_key="k",
+        artifact_store_secret_key="s",
+    )
+
+    def _unavailable(self, _settings, *, session_id):
+        raise RuntimeError("optional artifact SDK is unavailable")
+
+    monkeypatch.setattr(S3ArtifactStore, "__init__", _unavailable)
+    _, wiring = await assemble_wiring(settings)
+    session_id = "sess-store-failure"
+    kwargs = {
+        "include_constraint_tools": True,
+        "include_constraint_resolution_tool": True,
+    }
+
+    tooling = _build_tooling(
+        settings,
+        wiring,
+        session_id=session_id,
+        workspace=tmp_path / "workspaces" / session_id,
+        workspace_registry=WorkspaceRegistry(root=tmp_path, backend="local"),
+        session_store=None,
+        agent_profile=None,
+        **kwargs,
+    )
+    names = root_registry_tool_names(
+        settings, wiring, session_id=session_id, session_store=None, **kwargs,
+    )
+    info = root_registry_reconcile_info(
+        settings, wiring, session_id=session_id, session_store=None, **kwargs,
+    )
+    built = {tool.name for tool in tooling.registry.list()}
+
+    assert {"inspect_artifact", "submit_plan"} <= names
+    assert set(info) == names
+    assert not ({"inspect_artifact", "submit_plan"} & built)
+    assert tooling.selection.include_artifact_read_tool is False
+    assert tooling.selection.include_submit_plan is False
 
 
 def test_projection_has_no_construction_side_effects(tmp_path, monkeypatch):

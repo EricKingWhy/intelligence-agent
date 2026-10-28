@@ -233,7 +233,9 @@ class _RootToolSelection:
 
     This object only combines boolean inputs. It does not construct Tools, registries,
     sandboxes, or stores. Projections pass a pure ArtifactStorePlan; runtime assembly
-    passes the result of constructing the selected store.
+    uses actual store-construction success. If an expected provider failure degrades the
+    runtime to no store, the runtime omits store-dependent tools while projections retain
+    the configured plan. This is the approved AC2 exception in issue #1503.
 
     三个消费者（`_build_tooling` 构造 / `root_registry_tool_names` 名字集 /
     `root_registry_reconcile_info` 恢复元数据）与 `build_runtime` 的 profile 收窄
