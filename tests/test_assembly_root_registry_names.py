@@ -342,13 +342,16 @@ def test_root_tool_selection_is_a_pure_boolean_combination():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("multiagent", [False, True], ids=["no-ma", "ma"])
 @pytest.mark.parametrize(
+    "with_session_store", [True, False], ids=["session-store", "no-session-store"],
+)
+@pytest.mark.parametrize(
     ("include_constraint_tools", "include_constraint_resolution_tool"),
     [(False, None), (True, None), (True, False), (True, True)],
     ids=["none", "both", "registration-only", "both-with-resolution"],
 )
 @pytest.mark.parametrize("with_store", [True, False], ids=["artifact", "no-artifact"])
 async def test_three_projections_agree_across_the_full_switch_matrix(
-    tmp_path, multiagent, include_constraint_tools,
+    tmp_path, multiagent, with_session_store, include_constraint_tools,
     include_constraint_resolution_tool, with_store,
 ):
     """AC2：根工具 / Capability / Artifact / Delegate × 开关矩阵，三投影逐名一致。
@@ -372,7 +375,9 @@ async def test_three_projections_agree_across_the_full_switch_matrix(
     )
     _, wiring = await assemble_wiring(settings)
     session_id = "sess-matrix"
-    session_store = JsonlSessionStore(root=tmp_path / "sessions")
+    session_store = (
+        JsonlSessionStore(root=tmp_path / "sessions") if with_session_store else None
+    )
     kwargs = {
         "include_constraint_tools": include_constraint_tools,
         "include_constraint_resolution_tool": include_constraint_resolution_tool,
@@ -416,21 +421,50 @@ def test_projection_has_no_construction_side_effects(tmp_path, monkeypatch):
     _, wiring = asyncio.run(assemble_wiring(settings))
     ghost_workspace = tmp_path / "never-created" / "sess-probe"
 
+    import agent_harness.assembly as assembly_module
+    from agent_harness.multiagent.tools import DelegateTool
+    from agent_harness.tools.ask_user import AskUserTool
+    from agent_harness.tools.inspect_artifact import InspectArtifactTool
+    from agent_harness.tools.read_artifact import ReadArtifactTool
+    from agent_harness.tools.register_constraint import RegisterConstraintTool
+    from agent_harness.tools.request_constraint_resolution import (
+        RequestConstraintResolutionTool,
+    )
+    from agent_harness.tools.submit_plan import SubmitPlanTool
+    from agent_harness.tools.update_plan import UpdatePlanTool
+
     def _forbid(*args, **kwargs):
-        raise AssertionError("零副作用探针不得触碰 workspace registry / sandbox")
+        raise AssertionError(
+            "projection performed a forbidden construction or filesystem operation"
+        )
 
-    monkeypatch.setattr(WorkspaceRegistry, "create", _forbid)
-    monkeypatch.setattr(WorkspaceRegistry, "get", _forbid)
-    monkeypatch.setattr(Path, "mkdir", _forbid)
+    with monkeypatch.context() as probe:
+        probe.setattr(WorkspaceRegistry, "create", _forbid)
+        probe.setattr(WorkspaceRegistry, "get", _forbid)
+        probe.setattr(assembly_module, "select_artifact_store", _forbid)
+        for tool_cls in (
+            *assembly_module.BUILTIN_LOCAL_TOOLS,
+            UpdatePlanTool,
+            RegisterConstraintTool,
+            RequestConstraintResolutionTool,
+            AskUserTool,
+            InspectArtifactTool,
+            ReadArtifactTool,
+            SubmitPlanTool,
+            DelegateTool,
+        ):
+            probe.setattr(tool_cls, "__init__", _forbid)
+        for method in ("mkdir", "resolve", "stat", "open", "exists", "is_dir"):
+            probe.setattr(Path, method, _forbid)
 
-    names = root_registry_tool_names(
-        settings, wiring, session_id="sess-probe", session_store=None,
-        include_constraint_tools=True, include_constraint_resolution_tool=True,
-    )
-    info = root_registry_reconcile_info(
-        settings, wiring, session_id="sess-probe", session_store=None,
-        include_constraint_tools=True, include_constraint_resolution_tool=True,
-    )
+        names = root_registry_tool_names(
+            settings, wiring, session_id="sess-probe", session_store=None,
+            include_constraint_tools=True, include_constraint_resolution_tool=True,
+        )
+        info = root_registry_reconcile_info(
+            settings, wiring, session_id="sess-probe", session_store=None,
+            include_constraint_tools=True, include_constraint_resolution_tool=True,
+        )
 
     assert names and set(info) == names
     assert not ghost_workspace.exists()
