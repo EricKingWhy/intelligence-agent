@@ -57,6 +57,14 @@ def test_fetches_unreferenced_receipt_commit_and_keeps_archived_exception(tmp_pa
     run = subprocess.run([sys.executable, str(SCRIPT)], cwd=target, encoding="utf-8", errors="replace", capture_output=True, check=False)
     assert run.returncode == 0, run.stderr
     assert git(target, "rev-parse", f"refs/gate-evidence/{sha}") == sha
+    bundle = tmp_path / "evidence.bundle"
+    clone = tmp_path / "bundle-clone"
+    git(target, "bundle", "create", str(bundle), "--all")
+    git(tmp_path, "clone", "--no-checkout", str(bundle), str(clone))
+    git(clone, "bundle", "verify", str(bundle))
+    git(clone, "fetch", "origin", "refs/gate-evidence/*:refs/gate-evidence/*")
+    git(clone, "gc", "--prune=now")
+    assert git(clone, "rev-parse", f"refs/gate-evidence/{sha}^{{tree}}") == tree
 
 
 def test_unfetchable_receipt_stays_failure(tmp_path: Path) -> None:
