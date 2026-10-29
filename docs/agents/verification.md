@@ -76,6 +76,8 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   失败签名；CI 的检出里没有那两棵树 ⇒ 只有建过安装包的机器会踩到。
   判据：`tests/tooling/test_pytest_root_scope.py`（#856）。
 
+**历史 Gate 收据对象前置（#1517）**：完整克隆仍可能缺少未被分支或标签引用的历史提交。运行 `python scripts/fetch_gate_receipts.py` 从 `origin` 获取缺失对象并保留到 `refs/gate-evidence/`；失败时按错误中的 SHA 检查远端和访问权限，不能跳过收据校验。运行 `pytest tests/test_1353_ac11_gate_evidence.py` 仍须核对每张收据的真实 tree 和唯一批准的历史例外。离线交接先执行该脚本，再用 `git bundle create evidence.bundle --all` 打包所有引用；接收端用 `git bundle verify evidence.bundle` 验证后克隆并运行原测试。远端已无法提供的对象仍需从有该对象的可信仓库获取，不能视为有效证据。
+
 ### ③ 后端全量（本机沙箱绕行）
 
 - 命令：`./scripts/run_tests_clean.sh [target]`
