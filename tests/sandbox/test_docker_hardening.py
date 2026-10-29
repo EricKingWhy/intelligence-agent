@@ -233,6 +233,44 @@ def test_legacy_volume_ownership_migrated_then_compile_install_and_restart_work(
         sandbox.delete()
 
 
+@pytest.mark.parametrize(
+    ("seed", "path", "expected_mode"),
+    [
+        ("printf 'SG' > /workspace/sg.txt && chmod 2755 /workspace/sg.txt",
+         "sg.txt", "2755"),
+        ("mkdir -p /workspace/shared && chmod 2775 /workspace/shared",
+         "shared", "2775"),
+    ],
+    ids=["setgid-file", "setgid-dir"],
+)
+def test_setgid_mode_survives_ownership_migration(
+    docker_client, seed: str, path: str, expected_mode: str
+) -> None:
+    """setgid 位（文件 2755 / 目录 2775）迁移后必须保留，工作区必须能起来。
+
+    `chown -R` 会清掉 setgid；把位加回去要 `CAP_FSETID`。缺它时 helper 的
+    chmod 静默丢位 → 复核 `MIGRATE_ERROR content or mode changed` → 每次
+    重试都同样失败，卷里只要有一个 setgid 条目工作区就永久不可用。
+    """
+    sandbox = _sandbox("h1486-setgid")
+    _seed_volume(docker_client, sandbox._volume_name, seed)
+    try:
+        sandbox.ensure_started()
+        mode = sandbox.exec(f"stat -c %a /workspace/{path}").stdout.strip()
+        assert mode == expected_mode, f"{path} 的 setgid 位被迁移丢掉：{mode}"
+        assert _manifest(docker_client, sandbox._volume_name).count(
+            f"1000:1000 {expected_mode} /workspace/{path}"
+        ) == 1
+        # 重试路径不再粘住：停止后按名字找回，迁移是幂等的。
+        sandbox.stop()
+        sandbox.ensure_started()
+        assert sandbox.exec(f"stat -c %a /workspace/{path}").stdout.strip() == (
+            expected_mode
+        )
+    finally:
+        sandbox.delete()
+
+
 def test_ownership_migration_failure_rolls_back_and_retry_recovers(
     docker_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:

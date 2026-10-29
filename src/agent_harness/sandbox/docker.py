@@ -405,7 +405,10 @@ HARDENED_SECURITY_OPT = ["no-new-privileges:true"]
 #: 具名卷属主迁移容器：以 uid 0 起、只保留 chown/chmod 所需的能力，且
 #: `--network none`（迁移不需要网络）。工作区容器自身已 `cap_drop=ALL`，
 #: 不能借它 chown（#1486 探针实测：非 root + cap_drop=ALL 下 chown 报 EPERM）。
-_OWNERSHIP_HELPER_CAPS = ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+#: `FSETID` 必须给：`chown` 会清掉 setgid 位，而把 setgid 位加回去要
+#: `CAP_FSETID`（调用者 gid 不属于文件新组时缺它就静默丢位）——缺了它，
+#: 卷里只要有一个 setgid 条目，迁移的复核就永远失败、工作区永久不可用。
+_OWNERSHIP_HELPER_CAPS = ["CHOWN", "FOWNER", "DAC_OVERRIDE", "FSETID"]
 
 #: 迁移备份卷：`<workspace volume>-migration-backup`，挂在 helper 的 /backup。
 #: 备份 tar 留在**独立卷**里而不是 helper 的 /tmp/用户卷：helper 被硬杀时
