@@ -7,7 +7,6 @@ ToolExecutor. It deliberately does not emit SessionEvents or execute commands.
 from __future__ import annotations
 
 import re
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -18,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_harness.redaction import redact_secret_values
 from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, SESSION_KEY_PATTERN
-from agent_harness.storage.sqlite import retry_on_busy
+from agent_harness.storage.sqlite import _connect, retry_on_busy
 
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9._:-]+")
 _LEGACY_SESSION_ID = "legacy-transport"
@@ -133,16 +132,6 @@ CREATE TABLE IF NOT EXISTS transport_ledger (
     created_at TEXT NOT NULL
 )
 """
-
-
-@asynccontextmanager
-async def _connect(database_path: Path):
-    connection = await aiosqlite.connect(database_path)
-    try:
-        await connection.execute("PRAGMA busy_timeout=10000")
-        yield connection
-    finally:
-        await connection.close()
 
 
 class SqliteTransportLedger:
