@@ -1,0 +1,2 @@
+2026-10-29	#1532 initial Standards P2=1 and Spec P2=2, tests needed independent filter and SessionEvent pairing coverage; fixes in follow-up. Evidence: docs/phase_status/2026-10.md #1532.	2b04fa767137b2723f01a2a1f6a43ce7bd2cd2da..7b5ca1d522affcc1f253d1bfcb8f6b1aeccf8216
+2026-10-29	#1532 follow-up Standards and Spec PASS P0-P4=0; prior P2 closed, independent isolated mutation and runtime pairing verified. Evidence: docs/phase_status/2026-10.md #1532.	7b5ca1d522affcc1f253d1bfcb8f6b1aeccf8216..c73599a9dbeb8d159edac64f21707db2e6019270
