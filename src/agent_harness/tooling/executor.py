@@ -39,7 +39,7 @@ import json
 import logging
 import sqlite3
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1141,6 +1141,52 @@ class ToolExecutor:
             run_id=run_id, step_id=step_id,
         )
 
+    async def finalize_execution(
+        self,
+        session: Session | None,
+        execution: ToolExecution,
+        *,
+        run_id: str | None,
+        step_id: int | None,
+        synchronous: bool = False,
+        record_result: Callable[[SessionEvent], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[SessionEvent]:
+        """Persist a completed execution and forward its durable budget evidence.
+
+        Execution stays separate so Runtime can insert deferred MODEL_COMPLETED.
+        Nested exec workers retain synchronous Session IO; both IO modes share
+        this ordering. The optional consumer owns its ledger, never the executor.
+        Batch-abort committed-event flushing remains independent.
+        """
+        if session is None:
+            return
+        pending = (
+            self.emit_pending_events(
+                session, pending_events=execution.pending_events,
+                run_id=run_id, step_id=step_id,
+            )
+            if synchronous else await self.emit_pending_events_async(
+                session, pending_events=execution.pending_events,
+                run_id=run_id, step_id=step_id,
+            )
+        )
+        for event in pending:
+            yield event
+        content = execution.result.model_dump_json()
+        event = (
+            self.emit_result_event(
+                session, tool_call_id=execution.tool_call_id, content=content,
+                run_id=run_id, step_id=step_id, budget_delta=execution.budget_delta,
+            )
+            if synchronous else await self.emit_result_event_async(
+                session, tool_call_id=execution.tool_call_id, content=content,
+                run_id=run_id, step_id=step_id, budget_delta=execution.budget_delta,
+            )
+        )
+        if record_result is not None:
+            await record_result(event)
+        yield event
+
     def emit_truncation_refusals(
         self,
         session: Any,
@@ -1707,29 +1753,26 @@ class ToolExecutor:
                         target = self._registry.get(child_name)
                     if (getattr(target, "is_code_execution", False)
                             or self._is_batch_exclusive(child)):
-                        result = ToolResult.failure(
-                            message="Recursive code execution and blocking user-input tools cannot run inside exec.",
-                            error_code=ErrorCode.PERMISSION_DENIED,
+                        execution = ToolExecution(
+                            tool_call_id=child.id,
+                            result=ToolResult.failure(
+                                message="Recursive code execution and blocking user-input tools cannot run inside exec.",
+                                error_code=ErrorCode.PERMISSION_DENIED,
+                            ),
+                            budget_delta=_rejected_delta(child_name),
                         )
-                        delta = _rejected_delta(child_name)
                     else:
                         execution, = await self.execute_batch(
                             [child], operation_context=operation_context, session=session,
                             step_id=step_id, tracer=tracer, tool_quota=tool_quota,
                             run_deadline=run_deadline,
                         )
-                        result, delta = execution.result, execution.budget_delta
-                        if session is not None:
-                            self.emit_pending_events(
-                                session, pending_events=execution.pending_events,
-                                run_id=run_id, step_id=step_id,
-                            )
-                    if session is not None:
-                        self.emit_result_event(
-                            session, tool_call_id=child.id, content=result.model_dump_json(),
-                            run_id=run_id, step_id=step_id, budget_delta=delta,
-                        )
-                    return result
+                    async for _ in self.finalize_execution(
+                        session, execution, run_id=run_id, step_id=step_id,
+                        synchronous=True,
+                    ):
+                        pass
+                    return execution.result
                 except Exception as error:
                     # A child ledger/event failure must abort the run, rather
                     # than being converted to a retryable outer tool failure.
