@@ -1252,6 +1252,9 @@ class RegisteredToolNamesProvider(Protocol):
     **不得**改回完整 `_build_tooling`——那会构造 sandbox 并在归属对账前 mkdir
     workspace（审查 P2-1）。
 
+    名称集按 Issue #1503 Q2 A 使用完整根工具口径，必须覆盖任一入口 validator
+    接受的根工具，避免把合法 ceiling 判成 stale。
+
     未注入（直构 `SessionService` 的调用方）⇒ 清除通道 **fail-closed**：拿空名字集
     去算会把**全部** ceiling 误判为陈旧并清空，所以调用方必须显式注入。
     """
@@ -4615,6 +4618,9 @@ class SessionService:
         服务端用**根 registry** 权威判 stale（树级语义，客户端不掌握），只删 ceiling
         表里的陈旧键——**不动**消耗事实表 `tool_calls_by_tool` / `tool_attempts_by_tool`，
         也**不落** typed SessionEvent（预算变更本就不进会话真相；不变量 #16/#22）。
+
+        根 registry 口径由注入的 `RegisteredToolNamesProvider` 按 Issue #1503 Q2 A
+        提供；声明可用的根工具不得被判为 stale。
 
         守卫与语义：
 

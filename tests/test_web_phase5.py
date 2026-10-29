@@ -31,7 +31,12 @@ def test_web_configures_overflow_and_refresh_returns_same_events(tmp_path, monke
     monkeypatch.setattr("agent_harness.assembly.create_chat_model", lambda config, **kw: model)
     settings = Settings(_env_file=None, workspace_dir=str(tmp_path / "state"),
                         model_api_key="sk-test-placeholder",
-                        artifact_store_endpoint="https://example.test", artifact_overflow_chars=200)
+                        artifact_store_endpoint="https://example.test",
+                        artifact_store_bucket="artifacts",
+                        artifact_store_access_key="test-access",
+                        artifact_store_secret_key="test-secret",
+                        artifact_store_region="us-east-1",
+                        artifact_overflow_chars=200)
     # workspace 字段是安全边界（V1）：只接受 workspaces_root 下的单段目录名，不是主机路径。
     workspace = tmp_path / "state" / "workspaces" / "overflow-task"
     workspace.mkdir(parents=True)
