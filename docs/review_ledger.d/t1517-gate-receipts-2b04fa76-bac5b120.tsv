@@ -1,0 +1,2 @@
+2026-10-30	#1517 初审：Standards P2×1、Spec P2×1；分别发现 bundle 克隆后引用丢失和仓库外 verify 失败。详见月档；仅部分交付。	2b04fa767137b2723f01a2a1f6a43ce7bd2cd2da..7643439f82c2df1f4566304a0e78cf10ef1f6424
+2026-10-30	#1517 修后复审：Standards PASS；Spec 原 P2 已闭合、新 P2×1 未解决（audit refs 未导入导致 GC 丢对象）；不得视作完成。详见月档。	7643439f82c2df1f4566304a0e78cf10ef1f6424..bac5b120ed5a32b73481f984fb893c43e4b7bec7
