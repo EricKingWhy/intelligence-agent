@@ -74,7 +74,7 @@ describe('issue 1540: projectHistory measurements', () => {
           const target = location === 'tail' ? turns : Math.floor(turns / 2);
           for (let i = 0; i < extra; i++) {
             events.push({
-              type: 'model/delta',
+              type: 'text/delta',
               data: { delta: 'x' },
               seq: events.length,
               run_id: 'r',
