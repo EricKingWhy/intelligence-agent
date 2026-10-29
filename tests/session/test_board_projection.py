@@ -496,6 +496,108 @@ def test_projection_sidecar_write_serializes_with_hard_delete(
     assert sidecar_write_completed.is_set()
 
 
+def test_replay_read_events_serializes_with_hard_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """冷启动重放的 ``read_events`` 必须持 per-session store 锁：硬删在它读取期间只能等。
+
+    本用例靶向 ``_replay_once`` 的 read 锁点（变异 M2 = 删掉包 ``read_events`` 的
+    ``with self._store._lock_for(...)``）：M2 下 deleter 会当场拿到锁并删掉目录，
+    ``delete_waiting_for_lock`` 永不置位 ⇒ 本用例红。``monkeypatch`` 只做时序观测
+    （锁获取状态 + 暂停读取），store 与文件系统全程真实运行。
+    """
+    store, session = _session_with_task(tmp_path)
+    first = BoardProjectionStore(store).get(session.session_id)
+    # 删掉 sidecar ⇒ 冷实例的 get() 必走重放（sidecar 命中不读事件流）。
+    store.board_state_path(session.session_id).unlink()
+
+    session_lock = store._lock_for(session.session_id)
+    read_entered = threading.Event()
+    allow_read_to_finish = threading.Event()
+    delete_waiting_for_lock = threading.Event()
+    delete_done = threading.Event()
+    reader_done = threading.Event()
+    reader_errors: list[BaseException] = []
+    delete_results: list[bool] = []
+    delete_errors: list[BaseException] = []
+    original_lock_for = store._lock_for
+    original_read_events = store.read_events
+
+    class ObservedStoreLock:
+        """deleter 侧非阻塞试锁：失败即证明重放正在该会话的 store 锁内。"""
+
+        def __enter__(self):
+            if threading.current_thread().name == "session-deleter":
+                if not session_lock.acquire(blocking=False):
+                    delete_waiting_for_lock.set()
+                    session_lock.acquire()
+            else:
+                session_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            session_lock.release()
+            return False
+
+    observed_lock = ObservedStoreLock()
+
+    def observed_lock_for(session_id: str):
+        if session_id == session.session_id:
+            return observed_lock
+        return original_lock_for(session_id)
+
+    def pause_read_events(session_id: str):
+        read_entered.set()
+        if not allow_read_to_finish.wait(timeout=5):
+            raise TimeoutError("test did not release the replay reader")
+        return original_read_events(session_id)
+
+    def read_projection() -> None:
+        try:
+            assert BoardProjectionStore(store).get(session.session_id) == first
+        except BaseException as error:  # noqa: BLE001 - report worker failures in the test
+            reader_errors.append(error)
+        finally:
+            reader_done.set()
+
+    def delete_session() -> None:
+        try:
+            delete_results.append(store.delete_session(session.session_id))
+        except BaseException as error:  # noqa: BLE001 - report worker failures in the test
+            delete_errors.append(error)
+        finally:
+            delete_done.set()
+
+    monkeypatch.setattr(store, "_lock_for", observed_lock_for)
+    monkeypatch.setattr(store, "read_events", pause_read_events)
+    reader = threading.Thread(
+        target=read_projection, name="projection-reader", daemon=True,
+    )
+    deleter = threading.Thread(
+        target=delete_session, name="session-deleter", daemon=True,
+    )
+    reader.start()
+    try:
+        assert read_entered.wait(timeout=5)
+        deleter.start()
+        delete_blocked = delete_waiting_for_lock.wait(timeout=5)
+    finally:
+        allow_read_to_finish.set()
+        reader.join(timeout=5)
+        if deleter.ident is not None:
+            deleter.join(timeout=5)
+
+    assert delete_blocked, (
+        "hard delete must wait for the replay read_events critical section"
+    )
+    assert reader_done.is_set()
+    assert delete_done.is_set()
+    assert not reader_errors
+    assert not delete_errors
+    assert delete_results == [True]
+    assert not (tmp_path / session.session_id).exists()
+
+
 def test_sidecar_is_only_a_cache_and_self_heals_after_deletion(tmp_path: Path) -> None:
     store, session = _session_with_task(tmp_path)
     first = BoardProjectionStore(store).get(session.session_id)
