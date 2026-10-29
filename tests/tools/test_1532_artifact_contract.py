@@ -56,3 +56,60 @@ async def test_artifact_tool_denial_precedes_read(tool_type):
     result = await executor.execute({"id": "denied-1", "name": tool.name, "args": {"artifact_ref": "missing"}})
     assert result.tool_call_id == "denied-1"
     assert result.result.error_code is ErrorCode.PERMISSION_DENIED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", [ReadArtifactTool, InspectArtifactTool])
+@pytest.mark.parametrize("options,expected,truncated", [
+    ({"start_line": 2, "end_line": 3}, [2, 3], False),
+    ({"start_line": 3}, [3, 4], False),
+    ({"end_line": 2}, [1, 2], False),
+    ({"keyword": "needle"}, [1, 3], False),
+    ({"max_lines": 1}, [1], True),
+])
+async def test_each_filter_independently_changes_the_returned_slice(tool_type, options, expected, truncated):
+    store = FakeArtifactStore()
+    artifact = await store.save(
+        "session-1", "needle alpha\nbeta\nneedle gamma\ntail",
+        mime_type="text/plain", source_tool="bash", tool_call_id="write",
+    )
+    tool = tool_type(store)
+    result = await tool.execute(tool.args_schema(artifact_ref=artifact.artifact_id, **options))
+    assert [line["line_number"] for line in result.data["lines"]] == expected
+    assert result.data["truncated"] is truncated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", [ReadArtifactTool, InspectArtifactTool])
+async def test_artifact_call_and_result_are_paired_in_real_session(tmp_path, tool_type):
+    import json
+
+    from langchain_core.messages import AIMessage
+
+    from agent_harness.agent import AgentRuntime
+    from agent_harness.session import TOOL_CALL, TOOL_RESULT
+    from tests.conftest import make_session
+    from tests.scripted_model import ScriptedModel
+
+    store = FakeArtifactStore()
+    artifact = await store.save(
+        "session-1", "a\nb", mime_type="text/plain", source_tool="bash", tool_call_id="write",
+    )
+    tool = tool_type(store)
+    registry = ToolRegistry()
+    registry.register(tool)
+    model = ScriptedModel([
+        AIMessage(content="", tool_calls=[{
+            "id": "call-1", "name": tool.name,
+            "args": {"artifact_ref": artifact.artifact_id, "max_lines": 1},
+        }]),
+        AIMessage(content="done"),
+    ])
+    session = make_session(tmp_path)
+    result = await AgentRuntime(model, registry, ToolExecutor(registry)).run(session, "read")
+    assert result.status == "completed"
+    pair = [event for event in session.events if event.type in (TOOL_CALL, TOOL_RESULT)]
+    assert [event.type for event in pair] == [TOOL_CALL, TOOL_RESULT]
+    assert [event.data["tool_call_id"] for event in pair] == ["call-1", "call-1"]
+    output = json.loads(pair[1].data["content"])
+    assert output["ok"] is True and output["data"]["lines"] == [{"line_number": 1, "text": "a"}]
