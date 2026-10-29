@@ -472,6 +472,8 @@ class BoardProjectionStore:
 
         try:
             with self._store._lock_for(session_id):
+                # 持 store 锁调 read_events 不自锁：它（经 read_events_report）内部只取
+                # `_state_guard`，不取这把非可重入的会话锁——这是此写法成立的全部理由。
                 events = self._store.read_events(session_id)
             projection, cacheable = _derive(events)
         except BaseException as error:
@@ -532,7 +534,7 @@ class BoardProjectionStore:
                 # O(1) 对账：本视图的最后一笔必须就是盘上最后一笔，且 seq 连续
                 # （连续 ⇒ 本视图没漏掉旁路写者插进来的事件）。不成立就不落盘、
                 # 不进缓存，让 get() 从盘上重放（独立审查 P2）。
-                # Store lock serializes event-file reads and sidecar writes with hard delete.
+                # store 锁把事件文件读取与侧车写入同 hard delete 串行化。
                 with self._store._lock_for(session_id):
                     if not self._view_matches_disk(session_id, events):
                         self._forget(session_id)
