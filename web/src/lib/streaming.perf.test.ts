@@ -64,6 +64,45 @@ function countNodes(state: ReturnType<typeof initConversation>): number {
   return state.turns.reduce((n, t) => n + t.activities.length, 0);
 }
 
+
+describe('issue 1540: projectHistory measurements', () => {
+  it('records raw samples for sequential and historical updates', () => {
+    for (const turns of [500, 2000, 5000]) {
+      for (const extra of [0, 1000, 4000]) {
+        for (const location of extra === 0 ? ['tail'] : ['tail', 'historical']) {
+          const events = buildFixture(turns);
+          const target = location === 'tail' ? turns : Math.floor(turns / 2);
+          for (let i = 0; i < extra; i++) {
+            events.push({
+              type: 'model/delta',
+              data: { delta: 'x' },
+              seq: events.length,
+              run_id: 'r',
+              step_id: target,
+              session_id: 'b',
+              time: T0,
+            });
+          }
+          const samples = [];
+          for (let i = 0; i < 5; i++) {
+            const started = performance.now();
+            const state = projectHistory('b', events);
+            samples.push(performance.now() - started);
+            expect(state.turns.length).toBe(turns);
+            expect(countNodes(state)).toBe(turns * 3);
+            expect(state.events.length).toBe(events.length);
+            expect(state.turns[target - 1].model.text).toBe(`answer ${target}${'x'.repeat(extra)}`);
+          }
+          console.log('ISSUE1540 ' + JSON.stringify({
+            turns, extra, location, events: events.length,
+            samples_ms: samples,
+          }));
+        }
+      }
+    }
+  }, 120000);
+});
+
 describe('bench: 10k 逻辑节点（#102，PRD §15.3）', () => {
   it('fixture 自校验：5000 轮 → 15k activity 节点（超 PRD 10k 线 50%）', () => {
     const s = projectHistory('b', buildFixture(5000));
