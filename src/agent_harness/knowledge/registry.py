@@ -7,14 +7,12 @@ source_id 稳定不换。连接纪律照 memory record store / storage/sqlite.py
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
 
 from agent_harness.knowledge.types import KnowledgeSource
-
-_BUSY_TIMEOUT_MS = 10_000
+from agent_harness.storage.sqlite import _connect
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS knowledge_sources (
@@ -34,14 +32,8 @@ class SqliteKnowledgeSourceRegistry:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
 
-    @asynccontextmanager
-    async def _connect(self):
-        connection = await aiosqlite.connect(self.database_path)
-        try:
-            await connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-            yield connection
-        finally:
-            await connection.close()
+    def _connect(self):
+        return _connect(self.database_path)
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
