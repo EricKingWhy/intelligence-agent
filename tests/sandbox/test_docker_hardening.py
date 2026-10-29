@@ -399,6 +399,143 @@ def test_custom_image_root_user_is_de_privileged(docker_client) -> None:
         docker_client.images.remove(image, force=True)
 
 
+def _commit_image_with_named_user(
+    docker_client, tag: str, *, create_user: bool
+) -> str:
+    """提交一个 `USER app:app` 镜像；create_user 决定镜像里到底有没有该用户。"""
+    base = docker_client.containers.run(
+        "python:3-slim", ["sleep", "infinity"], detach=True
+    )
+    try:
+        if create_user:
+            result = base.exec_run(
+                ["sh", "-c", "groupadd -g 1500 app && useradd -u 1500 -g 1500 -m app"]
+            )
+            assert result.exit_code == 0, result.output
+        docker_client.api.commit(
+            base.id, repository=tag.rsplit(":", 1)[0], tag=tag.rsplit(":", 1)[1],
+            changes=["USER app:app"],
+        )
+    finally:
+        base.remove(force=True)
+    return tag
+
+
+def test_custom_image_named_user_and_group_is_resolved_and_workspace_usable(
+    docker_client,
+) -> None:
+    """`USER app:app`（镜像内确有该用户）：名字必须解析成数字，迁移真的发生。
+
+    复核 P1（Spec F3 = Standards P1-2）：含 `:` 的声明被原样下传 → 迁移脚本
+    `find -uid app` 报 non-numeric、输出为空 → 误报 `MIGRATE_OK records=0
+    (already owned)`，卷仍 0:0，容器用户写不了工作区。
+    """
+    image = _commit_image_with_named_user(
+        docker_client, f"agent-harness-test-1486:{uuid4().hex}", create_user=True
+    )
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    suffix = uuid4().hex
+    sandbox = DockerSandbox(
+        image=image,
+        container_name=f"agent-harness-h1486-named-{suffix}",
+        volume_name=f"agent-harness-h1486-named-{suffix}",
+    )
+    try:
+        sandbox.ensure_started()
+        attrs = _inspect(docker_client, sandbox._container_name)
+        assert attrs["Config"]["User"] == "1500:1500"
+        assert sandbox.exec("id -u").stdout.strip() == "1500"
+        manifest = _manifest(docker_client, sandbox._volume_name)
+        assert "1500:1500 755 /workspace" in manifest
+        assert "0:0 755 /workspace" not in manifest
+        # 容器用户自己可写；harness 写的文件也归它。
+        assert sandbox.exec("printf X > /workspace/via_exec.txt").exit_code == 0
+        sandbox.write_text("via_api.txt", "ok")
+        assert sandbox.read_text("via_api.txt") == "ok"
+        assert "1500:1500 666 /workspace/via_api.txt" in _manifest(
+            docker_client, sandbox._volume_name
+        )
+    finally:
+        sandbox.delete()
+        docker_client.images.remove(image, force=True)
+
+
+def test_custom_image_unknown_named_user_fails_loudly_without_leftovers(
+    docker_client,
+) -> None:
+    """`USER app:app` 但镜像里没有该用户：响亮 SandboxHardeningError、无半成品。"""
+    image = _commit_image_with_named_user(
+        docker_client, f"agent-harness-test-1486:{uuid4().hex}", create_user=False
+    )
+    from agent_harness.sandbox.docker import DockerSandbox, SandboxHardeningError
+
+    suffix = uuid4().hex
+    sandbox = DockerSandbox(
+        image=image,
+        container_name=f"agent-harness-h1486-ghost-{suffix}",
+        volume_name=f"agent-harness-h1486-ghost-{suffix}",
+    )
+    try:
+        with pytest.raises(SandboxHardeningError) as excinfo:
+            sandbox.ensure_started()
+        assert "app:app" in str(excinfo.value)
+        import docker
+
+        with pytest.raises(docker.errors.NotFound):
+            docker_client.containers.get(sandbox._container_name)
+        sandbox.delete()  # 不得 409：卷上没有残留容器挂着
+        with pytest.raises(docker.errors.NotFound):
+            docker_client.volumes.get(sandbox._volume_name)
+    finally:
+        docker_client.images.remove(image, force=True)
+
+
+def test_container_start_failure_is_wrapped_and_cleaned_up(
+    docker_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """create 成功但 start 失败：`SandboxHardeningError` + 半成品容器被清掉。
+
+    `containers.create` 不查 passwd，镜像声明了容器里不存在的用户时错误要到
+    `start()` 才出现；那一步必须和迁移在同一个清理边界里，不能漏出裸 APIError
+    500 + 停止态容器 + 挂着卷（后者会让 `delete()` 报 409）。
+
+    名字解析已在 `_resolve_container_user` 阶段 fail-closed（见上一条用例），
+    这里用真实 create + 真实卷、只把 `start` 换成抛错，验的是**清理边界**。
+    """
+    import docker
+
+    from agent_harness.sandbox.docker import SandboxHardeningError
+
+    sandbox = _sandbox("h1486-startfail")
+    # `client.containers` 每次访问都是新集合对象，只能打在类上。
+    containers_cls = type(sandbox._client.containers)
+    real_create = containers_cls.create
+
+    def create_with_failing_start(self, *args, **kwargs):
+        container = real_create(self, *args, **kwargs)
+        # 只影响主容器；helper 也走 `containers.run → create`，别一起打坏。
+        if kwargs.get("name") == sandbox._container_name:
+            def fail_start(**_kwargs):
+                raise docker.errors.APIError("simulated start failure")
+
+            container.start = fail_start  # type: ignore[method-assign]
+        return container
+
+    monkeypatch.setattr(containers_cls, "create", create_with_failing_start)
+    try:
+        with pytest.raises(SandboxHardeningError) as excinfo:
+            sandbox.ensure_started()
+        assert "启动容器" in str(excinfo.value)
+        with pytest.raises(docker.errors.NotFound):
+            docker_client.containers.get(sandbox._container_name)
+        sandbox.delete()
+        with pytest.raises(docker.errors.NotFound):
+            docker_client.volumes.get(sandbox._volume_name)
+    finally:
+        sandbox.delete()
+
+
 def test_default_profile_keeps_build_network_and_no_resource_limits(
     docker_client,
 ) -> None:

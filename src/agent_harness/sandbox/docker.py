@@ -417,10 +417,11 @@ _BACKUP_MOUNT = "/backup"
 _BACKUP_SUFFIX = "-migration-backup"
 
 #: 属主迁移脚本（bash；默认 `python:3-slim` 自带）。步骤：
-#: 0) 备份卷里已有 `pre.tar` → 上次迁移没走完，先按备份整体恢复（幂等重试）；
+#: 0) 备份卷里已有 `pre.tar` → 上次迁移没走完，先**整归档校验通过**再按备份
+#:    整体恢复（幂等重试）；校验不过就不动活数据、保留备份并响亮失败；
 #: 1) 卷内已全部是目标属主 → 直接成功（重启/重开无副作用）；
-#: 2) 整树 tar 快照（numeric owner：模式/属主/符号链接/空目录/hard link）落
-#:    独立备份卷，并落一份「模式/类型/路径」索引；
+#: 2) 整树 tar 快照先写 `pre.tar.tmp` 再原子改名（numeric owner：模式/属主/
+#:    符号链接/空目录/hard link）落独立备份卷，并落一份「模式/类型/路径」索引；
 #: 3) `chown -R` 到目标 uid:gid；
 #: 4) 按快照恢复 chown 清掉的 setuid/setgid 位（迁移只改属主，不改权限）；
 #: 5) 复核：属主全部为目标，且「模式/类型/路径」逐条 NUL 记录比较不变。
@@ -432,23 +433,38 @@ BACKUP=$3
 U=$1
 G=$2
 D=/tmp/.harness-migration
+# 目标必须是数字：镜像声明 `USER name:group` 时若上游漏了名字解析，`find -uid`
+# 会报 non-numeric 且输出为空——那绝不能被当成「已全部合规」。
+case "${U}${G}" in
+  *[!0-9]*|'') printf 'MIGRATE_ERROR non-numeric target %s:%s\n' "$U" "$G"; exit 99 ;;
+esac
 rm -rf "$D"
 mkdir -p "$D" "$BACKUP" || { printf 'MIGRATE_ERROR cannot create snapshot dir\n'; exit 91; }
 
 if [ -f "$BACKUP/pre.tar" ]; then
   printf 'MIGRATE_RECOVER previous incomplete migration\n'
+  # 只有「整个归档可读完」才允许解包：快照改为 tmp+mv 原子落盘后，这里理论上
+  # 只会见到完整 tar；仍做一次全量校验，截断归档一律不动活数据。
+  tar -tf "$BACKUP/pre.tar" > /dev/null \
+    || { printf 'MIGRATE_ERROR backup is incomplete; left untouched at %s\n' "$BACKUP/pre.tar"; exit 89; }
   tar -xpf "$BACKUP/pre.tar" --numeric-owner -C /workspace \
     || { printf 'MIGRATE_ERROR cannot restore backup\n'; exit 89; }
   rm -f "$BACKUP/pre.tar"
 fi
 
-if [ -z "$(find . -xdev \( ! -uid "$U" -o ! -gid "$G" \) -print -quit)" ]; then
+# 快路径只在 find 成功时成立：find 报错（非数字 uid、卷不可读）必须响亮失败。
+mismatch=$(find . -xdev \( ! -uid "$U" -o ! -gid "$G" \) -print -quit) \
+  || { printf 'MIGRATE_ERROR cannot inspect workspace\n'; exit 99; }
+if [ -z "$mismatch" ]; then
   printf 'MIGRATE_OK records=0 target=%s:%s (already owned)\n' "$U" "$G"
   exit 0
 fi
 
-tar -cpf "$BACKUP/pre.tar" --numeric-owner . || { printf 'MIGRATE_ERROR snapshot failed\n'; exit 92; }
-tar -tf "$BACKUP/pre.tar" > "$D/pre.list" || { printf 'MIGRATE_ERROR snapshot unreadable\n'; exit 93; }
+# 快照先写 .tmp 再原子改名：被杀时留下的是 .tmp，「pre.tar 存在 ⇒ 完整」。
+tar -cpf "$BACKUP/pre.tar.tmp" --numeric-owner . \
+  || { printf 'MIGRATE_ERROR snapshot failed\n'; exit 92; }
+mv -f "$BACKUP/pre.tar.tmp" "$BACKUP/pre.tar" \
+  || { printf 'MIGRATE_ERROR snapshot rename failed\n'; exit 92; }
 find . -xdev -printf '%U:%G\t%m\t%y\t%p\0' > "$D/pre.bin" || { printf 'MIGRATE_ERROR manifest failed\n'; exit 94; }
 find . -xdev -printf '%m\t%y\t%p\0' | LC_ALL=C sort -z > "$D/pre.rest" || { printf 'MIGRATE_ERROR manifest failed\n'; exit 94; }
 records=$(tr -cd '\000' < "$D/pre.bin" | wc -c)
@@ -469,7 +485,7 @@ abort_with_rollback() { printf '%s\n' "$1"; rollback || { printf 'MIGRATE_FATAL 
 
 chown -R "$U:$G" /workspace || abort_with_rollback 'MIGRATE_ERROR chown failed' 97
 
-while IFS=$'\t' read -r -d '' owner mode kind path; do
+while IFS=$'\t' read -r -d '' _ mode kind path; do
   [ -n "$path" ] || continue
   [ "$kind" = "l" ] && continue
   chmod "$mode" "$path" || abort_with_rollback "MIGRATE_ERROR chmod restore failed: $path" 98
@@ -620,14 +636,19 @@ class DockerSandbox(Sandbox):
         declared = str((image_attrs.get("Config") or {}).get("User") or "").strip()
         if not declared or declared.split(":", 1)[0] in ("root", "0"):
             return DEFAULT_CONTAINER_USER
-        if ":" in declared:
-            # 镜像给全了 uid:gid，原样使用。
-            return declared
         if declared.isdecimal():
             # 只声明 uid 时 Docker 的组会落到 0（root 组）——显式补同名 gid，
             # 不让降权档出现 root 组。
             return f"{declared}:{declared}"
-        # 镜像只给用户名：用镜像自身解析出数字 uid/gid，保证挂载属主可预测。
+        # 带 `:` 的声明不能直接信：`USER nobody:nogroup` / `USER app:app` 是
+        # 名字而不是数字，原样下传会让迁移脚本的 `find -uid` 报 non-numeric
+        # 从而「空输出 = 已合规」误报成功，属主永远迁不过去。逐段判定：
+        # 两段都已是十进制才原样使用，任一段是名字就进镜像解析。
+        uid_part, _, gid_part = declared.partition(":")
+        if uid_part.isdecimal() and (gid_part or uid_part).isdecimal():
+            return declared
+        # 名字（裸名字或 name:group）一律用镜像自身解析出数字 uid/gid，
+        # 保证挂载属主可预测；解析不出就响亮失败，不猜。
         resolved = self._resolve_image_uid_gid(declared)
         if resolved is None:
             raise SandboxHardeningError(
@@ -637,10 +658,17 @@ class DockerSandbox(Sandbox):
         return resolved
 
     def _resolve_image_uid_gid(self, declared: str) -> str | None:
+        """在镜像内解析 `user` / `user:group` / `uid:group` 为数字 uid:gid。"""
+        user_part, _, group_part = declared.partition(":")
+        user_part = user_part or "0"
+        group_part = group_part or user_part
         try:
             output = self._client.containers.run(
                 self._image,
-                ["sh", "-c", f"id -u {shlex.quote(declared)}; id -g {shlex.quote(declared)}"],
+                [
+                    "sh", "-c",
+                    f"id -u {shlex.quote(user_part)}; id -g {shlex.quote(group_part)}",
+                ],
                 remove=True,
                 entrypoint="",
                 user="0:0",
@@ -682,13 +710,21 @@ class DockerSandbox(Sandbox):
         )
         try:
             self._migrate_volume_ownership(user)
+            try:
+                container.start()
+            except Exception as error:
+                # 镜像声明了容器里不存在的用户时 start 才报错（create 不解析
+                # passwd）。统一成 SandboxHardeningError，别让调用方收到裸
+                # APIError 500 还得自己判断半成品怎么收。
+                raise SandboxHardeningError(
+                    f"无法以用户 {user} 启动容器 {self._container_name}：{error}"
+                ) from error
         except BaseException:
-            # 迁移失败不留半成品容器（下次按名字找回时会被当成"历史容器"再判一次，
+            # 迁移/启动失败不留半成品容器（下次按名字找回时会被当成"历史容器"再判一次，
             # 但那会把失败原因埋在二次重建里）。显式移除，让错误就是错误。
             with suppress(Exception):
                 container.remove(force=True)
             raise
-        container.start()
         self._container = container
         # put_archive 由 daemon 以 root 解包；缓存数字属主，写文件时显式带上
         # （否则非 root 容器用户改不了 harness 自己写进去的文件）。
@@ -705,13 +741,20 @@ class DockerSandbox(Sandbox):
             return int(uid), int(gid)
         return None
 
-    def _container_owner(self) -> tuple[int, int] | None:
+    def _container_owner(self) -> tuple[int, int]:
         """当前容器用户的数字 uid/gid（put_archive 显式属主用）。
 
-        拿不到（未启动 / 用户是名字且无数字解析）就返回 None——退回镜像默认
-        行为，不猜。
+        容器用户一定已经被归一成数字（`_resolve_container_user`），这里拿不到
+        就是内部状态坏了——响亮失败，绝不退回镜像默认行为：那会把 harness 自己
+        写的文件落成 root 属主，非 root 容器用户随后改不了。
         """
-        return getattr(self, "_owner_uid_gid", None)
+        owner = getattr(self, "_owner_uid_gid", None)
+        if owner is None:
+            raise SandboxHardeningError(
+                f"容器 {self._container_name} 的用户属主未解析为数字 uid/gid，"
+                "拒绝写入属主不确定的文件。"
+            )
+        return owner
 
     def _migrate_volume_ownership(self, user: str) -> None:
         """把具名卷里的历史文件属主迁到容器用户；失败响亮、可重试、不毁数据。
