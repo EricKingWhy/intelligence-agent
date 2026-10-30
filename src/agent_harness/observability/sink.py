@@ -110,7 +110,7 @@ class LangfuseSink:
         public_key: str,
         secret_key: str,
         base_url: str = "",
-        trace_content: str = "full",
+        trace_content: str = "redacted",
         tracing_environment: str = "development",
         release: str = "",
         client_factory: Callable[..., Any] | None = None,
@@ -120,10 +120,8 @@ class LangfuseSink:
     ) -> None:
         self._logger = _LOGGER
         self._client: Any = None
-        # 内容边界（ADR-0018 D6）：full=完整输入输出；redacted=只传 metadata+截断。
-        # 非法值按 full 处理（宁多不少地保守降级到完整侧会泄漏——这里反向：
-        # 未知值归 full 是用户显式默认，redaction 由 tracer 侧再次校验）。
-        self.trace_content = trace_content if trace_content in ("full", "redacted") else "full"
+        # Unknown modes fall back to the redacted default.
+        self.trace_content = trace_content if trace_content in ("full", "redacted") else "redacted"
         self._breaker_threshold = breaker_threshold
         self._breaker_cooldown = breaker_cooldown_seconds
         self._flush_timeout = flush_timeout_seconds

@@ -542,7 +542,7 @@ _Avoid_: sync network in hot path, capability descriptor 包装（那是 Tool �
 _Avoid_: new identity system (spec 12 §4), dispatch+execution 双节点, generic trace names
 
 **Trace Content 边界（full / redacted）**:
-`LANGFUSE_TRACE_CONTENT` 控制上云内容：full=完整输入输出（自有 dev 项目默认），redacted=只传 metadata+截断/摘要。redaction 是单一函数边界的 hook，未来接策略不改埋点。
+`LANGFUSE_TRACE_CONTENT` 控制上云内容：默认 redacted，对可识别秘密脱敏并截断/摘要；full 需显式选择，保留完整内容。metadata-only 始终优先。规则不能保证识别所有秘密；2026-10-30 用户裁决见 ADR-0018 D6。
 _Avoid_: per-call ad-hoc masking, hook as afterthought
 
 **熔断与丢弃计数（Drop Counter）**:
