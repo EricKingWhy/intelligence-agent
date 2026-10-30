@@ -44,3 +44,19 @@ def test_jsonl_redacts_escaped_json_and_incomplete_pem(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "fake" not in json.loads(text)["details"]
     assert "PARTIAL_PRIVATE_MATERIAL" not in text
+
+
+def test_jsonl_redacts_oauth_authentication_and_cli_arguments(tmp_path):
+    path = setup_logging(workspace_dir=str(tmp_path / "workspace"))
+    log_event(
+        logging.getLogger("redaction-test"), "error", "failed",
+        details={"access_token": "fake_access_123", "client_secret": "fake_client_456",
+                 "message": "Authorization: Basic fake_basic_789; --api-key fake_cli_123",
+                 "json": '{"refresh_token":"fake_refresh_123"}',
+                 "quoted": '--client-secret "fake secret words"'},
+    )
+    text = path.read_text(encoding="utf-8")
+    assert all(value not in text for value in (
+        "fake_access_123", "fake_client_456", "fake_basic_789", "fake_cli_123",
+        "fake_refresh_123", "fake secret words",
+    ))

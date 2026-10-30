@@ -114,6 +114,68 @@ def test_unknown_trace_mode_defaults_to_redacted():
     assert span.kwargs["input"]["password"] == "<redacted>"
 
 
+def test_trace_redacts_oauth_authentication_and_cli_arguments():
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder, trace_content="redacted")
+    tracer.run_started()
+    span = tracer.tool_span_started(
+        tool_name="read", tool_call_id="call-1",
+        args={"access_token": "fake_access_123", "client_secret": "fake_client_456",
+              "command": "Authorization: Basic fake_basic_789; --api-key fake_cli_123"},
+        is_delegate=False,
+    )
+    rendered = repr(span.kwargs)
+    assert all(value not in rendered for value in (
+        "fake_access_123", "fake_client_456", "fake_basic_789", "fake_cli_123",
+    ))
+
+
+def test_real_sdk_serializes_redacted_trace_without_secrets():
+    import pytest
+
+    langfuse = pytest.importorskip("langfuse")
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    client = langfuse.Langfuse(
+        public_key="pk-1511", secret_key="sk-1511", base_url="https://example.invalid",
+        tracer_provider=provider, span_exporter=exporter, flush_at=1,
+    )
+    sink = LangfuseSink(
+        public_key="pk-1511", secret_key="sk-1511", trace_content="redacted",
+        client_factory=lambda **kwargs: client,
+    )
+    tracer = RunTracer(
+        sink, session_id="session-1511", run_id="run-1511", agent_id="default",
+        user_input="Authorization: Basic fake_basic_789",
+    )
+    try:
+        tracer.run_started()
+        span = tracer.tool_span_started(
+            tool_name="read", tool_call_id="call-1",
+            args={"access_token": "fake_access_123", "client_secret": "fake_client_456"},
+            is_delegate=False,
+        )
+        tracer.tool_span_completed(span, outcome="success", message="ordinary output")
+        tracer.run_completed("done")
+        client.flush()
+        spans = exporter.get_finished_spans()
+        assert len(spans) >= 2
+        serialized = "\n".join(span.to_json() for span in spans)
+        assert "session-1511" in serialized
+        assert "ordinary output" in serialized
+        assert all(secret not in serialized for secret in (
+            "fake_basic_789", "fake_access_123", "fake_client_456",
+        ))
+    finally:
+        client.shutdown()
+        provider.shutdown()
+
+
 def test_run_started_creates_root_with_identity_metadata():
     recorder = FakeRecorder()
     tracer = _tracer(recorder)

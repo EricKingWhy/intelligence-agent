@@ -27,14 +27,23 @@ _GIT_CONFIG_SECRET = re.compile(
 )
 _GIT_URL_USERINFO = re.compile(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@")
 
+_DIAGNOSTIC_FIELD = (
+    r"(?:api[-_]?key|(?:access|refresh|id)[-_]token|token|password|passwd|"
+    r"(?:client[-_])?secret|secret[-_]key|authorization)"
+)
 _DIAGNOSTIC_JSON_SECRET = re.compile(
-    r'''(?i)(["'](?:api[-_]?key|token|password|passwd|secret|authorization)["']\s*:\s*)'''
+    rf'''(?i)(["']{_DIAGNOSTIC_FIELD}["']\s*:\s*)'''
     r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')'''
 )
 _DIAGNOSTIC_QUOTED_SECRET = re.compile(
-    r'''(?i)((?:--?)?(?:api[-_]?key|token|password|passwd|secret|authorization)\s*(?:=|:)\s*)'''
+    rf'''(?i)((?:--?)?{_DIAGNOSTIC_FIELD}\s*(?:=|:)\s*)'''
     r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')'''
 )
+_DIAGNOSTIC_AUTH = re.compile(r"(?i)(authorization\s*:\s*(?:basic|bearer)\s+)[^\s;,]+")
+_DIAGNOSTIC_CLI = re.compile(
+    rf'''(?i)(--?{_DIAGNOSTIC_FIELD}\s+)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;,]+)'''
+)
+_DIAGNOSTIC_FIELD_NAME = re.compile(rf"(?i){_DIAGNOSTIC_FIELD}\Z")
 _DIAGNOSTIC_PEM = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
     re.DOTALL,
@@ -48,13 +57,14 @@ def redact_diagnostic_value(value):
         value = _DIAGNOSTIC_PEM.sub("<redacted>", value)
         value = _DIAGNOSTIC_JSON_SECRET.sub(r'\1"<redacted>"', value)
         value = _DIAGNOSTIC_QUOTED_SECRET.sub(r'\1"<redacted>"', value)
+        value = _DIAGNOSTIC_AUTH.sub(r"\1<redacted>", value)
+        value = _DIAGNOSTIC_CLI.sub(r"\1<redacted>", value)
         value = _DIAGNOSTIC_BARE_KEY.sub("<redacted>", value)
         return redact_secret_values(value)
     if isinstance(value, dict):
         return {
-            key: "<redacted>" if isinstance(key, str) and re.fullmatch(
-                r"(?i)(api[-_]?key|token|password|passwd|secret|authorization)", key
-            ) else redact_diagnostic_value(item)
+            key: "<redacted>" if isinstance(key, str) and _DIAGNOSTIC_FIELD_NAME.fullmatch(key)
+            else redact_diagnostic_value(item)
             for key, item in value.items()
         }
     if isinstance(value, (tuple, list)):
