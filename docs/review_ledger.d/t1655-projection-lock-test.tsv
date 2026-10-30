@@ -1,0 +1,1 @@
+2026-10-31	#1655 两轴独立审查：Spec/Correctness PASS、Standards PASS，P0–P4=0；隔离副本正常 59/59，拆分锁变异 1 failed / 58 passed；仅证明票面指定的 with/__enter__ 拆锁形态。预审机械收据 docs/gate/5d8318d8b206d865270168734f8dfeb013851ddf.json。	ec317e6bab437f192d825785c71ef474856783cd..5d8318d8b206d865270168734f8dfeb013851ddf
