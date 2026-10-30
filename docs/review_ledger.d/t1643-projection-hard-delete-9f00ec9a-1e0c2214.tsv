@@ -1,0 +1,1 @@
+2026-10-28	#1643 independent two-axis review (separate Standards + Spec readers; full fixed-point code/test diff); both PASS, P0-P4=0. Linux Docker: two race regressions x10, 20/20. Evidence: docs/SDD_TICKET_TRACKER.md.	9f00ec9ad90501c047a0359d43387cdf608e9f42..1e0c2214d41ca1fc2b4e4fd0d8f806adcc3a74b7
