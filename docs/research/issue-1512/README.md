@@ -1,0 +1,116 @@
+# Issue 1512: dependency audit evidence
+
+Baseline commit: `2b04fa767137b2723f01a2a1f6a43ce7bd2cd2da`. Scanned 2026-10-30 UTC on Windows CPython 3.13.5, uv 0.10.9, pip-audit 2.10.1 (PyPI and OSV live services), pnpm 10.32.1 (configured registry). The databases are online services with no exposed fixed snapshot identifier; the date is the observation date, not a database version.
+
+Baseline SHA-256: `uv.lock` d1b77805efffd4803bd8983076fe5987c29db5e0a980db6ec04635ef235c9dfb; `web/pnpm-lock.yaml` ee45170bf262f5f13c49f384cdd70cb2f83d39777cdc6a2cff6dd20bef973e31; `desktop/installer/python-runtime.lock.json` deea01fec18f2c6a86b173020a85022e555dcf04b3dc90a29e82013e5c5c0c26.
+
+Post-upgrade SHA-256: `uv.lock` 069b809b8de851b87ee5060135340b2773d9e69acb0f16d05730f5c680d88aad; `web/pnpm-lock.yaml` 7eac467c81c7a291159dbb5e97afde2eca6584d3e5b63abdd492a34bb7f5f13e; installer lock 9b4e4627f5c3adf9fc8a73fe13510e11dc6ab7492c9bcc27012595442ae6da4d.
+
+Raw scanner output is preserved byte-for-byte in the adjoining `.json.gz` files; gzip is used to avoid storing repeated advisory descriptions in plain text. The negative control is urllib3 1.26.5. The Python production export uses `uv export --locked --no-dev --no-hashes --no-emit-project`; development uses `--all-extras` and includes production plus all optional and development dependencies. pip-audit used `--disable-pip --no-deps`. Markers are evaluated against the Windows scanning interpreter, so the Python uv views do not prove Linux or other Python-version coverage. The installer file instead enumerates the independently pinned win_amd64 CPython 3.12 wheel closure. pnpm audits the committed frontend lock; separate production and development baseline outputs are included.
+
+After the targeted lock upgrades, the PyPI-service Python production, all-extras/development and installer scans, the OSV Python all-extras/development scan, and the pnpm frontend scan returned zero reported advisories. A zero report is time- and database-specific, not a guarantee of safety.
+
+The historical IDs below are grouped by overlapping aliases within the same package/version across the Python scan views. Counts differ between scanners and must not be added. Where an advisory provides no shared alias, it cannot safely be combined by name alone. Frontend records come from the registry audit. Historical triggering conditions are not individually established by the scan: unknown unless assessed separately. All entries below refer to the old versions and were removed from these observed post-upgrade reports.
+
+| Package and old version | Advisory and known aliases | Fixed versions reported | Baseline scope | Trigger assessment |
+| --- | --- | --- | --- | --- |
+| @vitest/mocker >=5.0.0-beta.1 <5.0.3 | CVE-2026-112949, GHSA-qxg6-89mg-rqv8 | >=5.0.3 | web development | unknown individually; upgraded and rescanned |
+| @vitest/mocker >=5.0.0-rc.2 <5.0.3 | CVE-2026-112950, GHSA-xp26-3454-mjgp | >=5.0.3 | web development | unknown individually; upgraded and rescanned |
+| aiohttp 3.14.3 | CVE-2026-111063, GHSA-494j-54xm-rwp3 | 3.14.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| aiohttp 3.14.3 | CVE-2026-111064, GHSA-5wr8-gcqf-gqf3 | 3.14.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| aiohttp 3.14.3 | CVE-2026-111065, GHSA-6cjc-53gc-5rqm | 3.14.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| aiohttp 3.14.3 | CVE-2026-111066, GHSA-9xw5-w5jj-pvcg | 3.14.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| aiohttp 3.14.3 | CVE-2026-111748, GHSA-f9xw-jh8m-3mwq | 3.14.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| aiohttp 3.14.3 | CVE-2026-111749, GHSA-gx76-c99x-2c96 | 3.14.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| aiohttp 3.14.3 | CVE-2026-111750, GHSA-pqxq-w44r-73xw | 3.14.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| aiohttp 3.14.3 | GHSA-2g87-pp6c-29x5 | 3.14.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| certifi 2026.7.22 | GHSA-6q48-6c7w-9gw2, PYSEC-2026-4320 | 2026.10.18 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| fast-uri >=3.0.0 <3.1.9 | CVE-2026-110095, GHSA-xhq7-xmqj-769h | >=3.1.9 | web development | unknown individually; upgraded and rescanned |
+| fast-uri >=3.0.0 <3.1.9 | CVE-2026-110306, GHSA-w74x-v6f9-j3xg | >=3.1.9 | web development | unknown individually; upgraded and rescanned |
+| fast-uri >=3.0.0 <3.1.9 | CVE-2026-110725, GHSA-333x-w4r6-6crp | >=3.1.9 | web development | unknown individually; upgraded and rescanned |
+| fast-uri >=3.1.3 <3.1.9 | CVE-2026-110180, GHSA-wjr9-j795-jxcr | >=3.1.9 | web development | unknown individually; upgraded and rescanned |
+| langchain 1.3.2 | CVE-2026-55443, GHSA-gr75-jv2w-4656, PYSEC-2026-2192, PYSEC-2026-2556 | 1.3.9 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| langgraph-sdk 0.3.15 | CVE-2026-104873, GHSA-fvww-7h3r-vfhp, PYSEC-2026-4240 | 0.4.4 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| multidict 6.7.1 | CVE-2026-104874, GHSA-54p9-h82j-f925, PYSEC-2026-4244 | 6.9.1 | python all-extras/dev | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112390, CVE-2026-112390, GHSA-22hg-r758-rrw9 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112391, CVE-2026-112391, GHSA-254f-3936-288h | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112392, CVE-2026-112392, GHSA-27h8-gf7j-v5hc, PYSEC-2026-4326 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112393, CVE-2026-112393, GHSA-332p-7hrc-92wf | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112394, CVE-2026-112394, GHSA-4558-3h8r-v8xp, PYSEC-2026-4327 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112395, CVE-2026-112395, GHSA-462x-pgg6-55fp | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112396, CVE-2026-112396, GHSA-4rr5-89j8-mwwm, PYSEC-2026-4328 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112397, CVE-2026-112397, GHSA-58r4-6rv3-gfh8, PYSEC-2026-4329 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112398, CVE-2026-112398, GHSA-5x8w-8jj5-q52h, PYSEC-2026-4330 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112399, CVE-2026-112399, GHSA-5xm2-6676-qcp9 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112400, CVE-2026-112400, GHSA-65qm-jvmh-6pqg | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112401, CVE-2026-112401, GHSA-74r2-7ff9-mjj2 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112402, CVE-2026-112402, GHSA-7mwm-ghpf-9vrm, PYSEC-2026-4331 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112403, CVE-2026-112403, GHSA-8g5g-8vmr-9782, PYSEC-2026-4332 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112404, CVE-2026-112404, GHSA-c6hw-5grf-ff96 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112405, CVE-2026-112405, GHSA-cp9v-662q-vvx9, PYSEC-2026-4333 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112406, CVE-2026-112406, GHSA-f2g6-542v-9j58 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112891, CVE-2026-112891, GHSA-fc9g-5qg7-mf45 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112892, CVE-2026-112892, GHSA-gg2r-wvfm-q9rx | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112893, CVE-2026-112893, GHSA-j4m9-6w36-pw47 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112894, CVE-2026-112894, GHSA-jg86-v3jv-hrpm | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112895, CVE-2026-112895, GHSA-p4wg-p73j-c528 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112896, CVE-2026-112896, GHSA-pchr-8j38-3x4p, PYSEC-2026-4334 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112897, CVE-2026-112897, GHSA-q45j-58j2-45rg | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112898, CVE-2026-112898, GHSA-rfgq-q3w2-pmv2 | 13.0.0 | python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112900, CVE-2026-112900, GHSA-w889-685w-c8fh | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-112901, CVE-2026-112901, GHSA-xgh8-jp6q-p5x8, PYSEC-2026-4335 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-114501, CVE-2026-114501, GHSA-654x-cwwv-5j9c, PYSEC-2026-4336 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96636, CVE-2026-96636, GHSA-p8hx-v2p6-rp84, PYSEC-2026-4337 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96637, CVE-2026-96637, GHSA-g842-9rc4-69pw, PYSEC-2026-4338 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96638, CVE-2026-96638, GHSA-24rc-8hj2-v98c | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96639, CVE-2026-96639, GHSA-v9pv-5gc8-w2m6, PYSEC-2026-4339 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96640, CVE-2026-96640, GHSA-mrfp-p49p-3hf2 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96641, CVE-2026-96641, GHSA-4rm8-3hmm-39fg, PYSEC-2026-4340 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96642, CVE-2026-96642, GHSA-3j72-p6qg-6xp7, PYSEC-2026-4341 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96643, CVE-2026-96643, GHSA-g4qv-2jxx-769h, PYSEC-2026-4342 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96644, CVE-2026-96644, GHSA-9v9v-9qvf-h2hj, PYSEC-2026-4343 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | BIT-pillow-2026-96778, CVE-2026-96778, GHSA-g7cr-3p24-7wf7 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | CVE-2026-112899, GHSA-vx6w-vv9f-6gvg | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | CVE-2026-112902, GHSA-xvh5-g6gv-559v | 13.0.0 | python production OSV | unknown individually; upgraded and rescanned |
+| pillow 12.3.0 | GHSA-78g4-xqwv-q3g8 | 13.0.0 | installer, python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-101917, GHSA-2gx3-rcp4-g85q, PYSEC-2026-4140 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-101918, GHSA-42vr-xj54-vc7v, PYSEC-2026-4141 | 2.15.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102265, GHSA-8wjv-2p76-3863, PYSEC-2026-4142 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102266, GHSA-9j54-fg26-wv3r, PYSEC-2026-4143 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102267, GHSA-9v7f-9g4p-ffgj, PYSEC-2026-4144 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102268, GHSA-ffc3-869f-jxw9, PYSEC-2026-4145 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102269, GHSA-hxm8-2xgr-2p9m, PYSEC-2026-4147 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102270, GHSA-jwrc-g2q2-pq5p, PYSEC-2026-4148 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102271, GHSA-p4g4-x82p-q773, PYSEC-2026-4149 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102272, GHSA-r6x4-923q-g947, PYSEC-2026-4150 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102273, GHSA-w2cx-738m-mc7w, PYSEC-2026-4151 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102274, GHSA-w6j9-cwv2-h6wq, PYSEC-2026-4152 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-102275, GHSA-x33g-cr3x-6449, PYSEC-2026-4183 | 2.15.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | CVE-2026-103001, GHSA-gvp8-978c-rx2q, PYSEC-2026-4146 | none listed | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| pyjwt 2.13.0 | GHSA-pxh4-856f-4h89 | 2.14.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| source-map-js >=1.0.0 <1.2.2 | CVE-2026-93749, GHSA-68fv-2mgg-jv7q | >=1.2.2 | web development | unknown individually; upgraded and rescanned |
+| undici >=8.0.0 <8.12.2 | CVE-2026-109383, GHSA-2m5v-pch6-74hx | >=8.12.2 | web development | unknown individually; upgraded and rescanned |
+| undici >=8.0.0 <8.12.2 | CVE-2026-109829, GHSA-4w7w-5xrc-9h26 | >=8.12.2 | web development | unknown individually; upgraded and rescanned |
+| undici >=8.0.0 <8.12.2 | CVE-2026-109841, GHSA-f72v-6w45-q472 | >=8.12.2 | web development | unknown individually; upgraded and rescanned |
+| undici >=8.0.0 <8.12.2 | CVE-2026-109869, GHSA-xjj6-f33q-929c | >=8.12.2 | web development | unknown individually; upgraded and rescanned |
+| undici >=8.0.0 <8.12.2 | CVE-2026-109924, GHSA-4qv8-2p9j-2685 | >=8.12.2 | web development | unknown individually; upgraded and rescanned |
+| undici >=8.0.0 <8.12.2 | CVE-2026-109932, GHSA-9fm3-97px-rjf6 | >=8.12.2 | web development | unknown individually; upgraded and rescanned |
+| undici >=8.0.0 <8.12.2 | CVE-2026-87018, GHSA-qrxm-fqhp-jwvm | >=8.12.2 | web development | unknown individually; upgraded and rescanned |
+| undici >=8.0.0 <8.12.2 | CVE-2026-87029, GHSA-55wc-3pg8-jfw6 | >=8.12.2 | web development | unknown individually; upgraded and rescanned |
+| urllib3 2.7.0 | CVE-2026-97687, GHSA-8988-9cw3-xx77, PYSEC-2026-4175 | 2.8.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| urllib3 2.7.0 | CVE-2026-97688, GHSA-gh4c-6fx4-qh6g, PYSEC-2026-4176 | 2.8.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| urllib3 2.7.0 | CVE-2026-97689, GHSA-vxq7-64xx-v4gw, PYSEC-2026-4177 | 2.8.0 | python all-extras/dev, python production, python production OSV | unknown individually; upgraded and rescanned |
+| vite >=8.3.0 <=8.3.2 | CVE-2026-112942, GHSA-587h-7wmj-h5pm | >=8.3.3 | web development | unknown individually; upgraded and rescanned |
+| vite >=8.3.0 <=8.3.2 | CVE-2026-112943, GHSA-698v-4r3x-3vcv | >=8.3.3 | web development | unknown individually; upgraded and rescanned |
+| vite >=8.3.0 <=8.3.2 | CVE-2026-112944, GHSA-r825-w8mm-5pxw | >=8.3.3 | web development | unknown individually; upgraded and rescanned |
+| vite >=8.3.0 <=8.3.2 | CVE-2026-112945, GHSA-9jrq-w75r-8gcw | >=8.3.3 | web development | unknown individually; upgraded and rescanned |
+| vite >=8.3.0 <=8.3.2 | CVE-2026-112946, GHSA-rq7h-c2jc-7f22 | >=8.3.3 | web development | unknown individually; upgraded and rescanned |
+| vite >=8.3.0 <=8.3.2 | CVE-2026-112947, GHSA-vfpm-58rq-9qcg | >=8.3.3 | web development | unknown individually; upgraded and rescanned |
+
+## Relevant product paths and policy
+
+Pillow is used at `src/agent_harness/attachments/normalize.py` for decoding and encoding uploaded images at projection time; `src/agent_harness/attachments/probe.py` validates supported formats and rejects APNG. The affected JWT dependency verifies HS256 tokens in `src/agent_harness/web/app.py`; this is not evidence that each JWT advisory is reachable. The optional Memory provider imports LangMem in `src/agent_harness/memory/langmem_capability.py`; neither the presence of a package nor this import proves a specific advisory trigger. The frontend vulnerable packages appeared in development tooling, and baseline `web-prod.json` reported no production advisory.
+
+CI reports findings as warnings and retains raw results for 30 days; scanner errors, malformed reports and a failed known-vulnerable negative control fail the job. The job runs on push, PR, manual dispatch and weekly schedule. Weekly polling can delay discovery by up to a week when no push occurs, excluding service outages. Existing warnings are investigated and upgraded when compatible, rather than imposing an unapproved severity threshold or blocking every change.
+
+The frozen-lock and focused regression results, Docker-dependent cases, review, and CI run are tracked separately in the PR. A result is not a full release gate until those checks have actually completed.
