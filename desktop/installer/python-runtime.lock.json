@@ -5,8 +5,8 @@
     "arch": "x64"
   },
   "generated": {
-    "at": "2026-10-20T17:42:24Z",
-    "by": "uv pip compile (existing closure); tzdata from uv.lock, PyPI SHA-256 verified",
+    "at": "2026-10-30T14:31:13Z",
+    "by": "Targeted certifi and Pillow wheel refresh from uv.lock; remaining closure unchanged",
     "from": "pyproject.toml [project] dependencies; original closure 2026-10-07 + tzdata from uv.lock"
   },
   "python": {
@@ -58,10 +58,10 @@
     },
     {
       "name": "certifi",
-      "version": "2026.7.22",
-      "filename": "certifi-2026.7.22-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
-      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+      "version": "2026.10.23",
+      "filename": "certifi-2026.10.23-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/32/d1/a3652fe2c19134d0d15922177821d863cbd7e842d53a21bbe7e8e3a1b5ac/certifi-2026.10.23-py3-none-any.whl",
+      "sha256": "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1"
     },
     {
       "name": "cffi",
@@ -296,10 +296,10 @@
     },
     {
       "name": "pillow",
-      "version": "12.3.0",
-      "filename": "pillow-12.3.0-cp312-cp312-win_amd64.whl",
-      "url": "https://files.pythonhosted.org/packages/45/89/da2f7971a317f83d807fdd4065c0af40208e59e692cc43d315a71a0e96d1/pillow-12.3.0-cp312-cp312-win_amd64.whl",
-      "sha256": "a2b55dd6b2a4c4b7d87ffa56bdb33fdc5fdb9a462173861a7bc097f17d91cb09"
+      "version": "13.0.0",
+      "filename": "pillow-13.0.0-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/ff/cd/73a79ecdc822076002eb24b5e1e4a530b0bb5310fcb6d239abbec877110b/pillow-13.0.0-cp312-cp312-win_amd64.whl",
+      "sha256": "ff3fe9eb621fbb9db4c4be33ab946f6bac5f98ab50ca8d3260503653656c961b"
     },
     {
       "name": "pycparser",

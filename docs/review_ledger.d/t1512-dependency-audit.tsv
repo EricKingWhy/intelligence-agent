@@ -1,0 +1,2 @@
+2026-10-30	#1512 初审：Spec/Correctness 发现平台漏扫 P1 与负控警告范围 P2；Standards 发现基线 CRLF/Git blob 哈希区别未记录 P2；后续提交修复。	2b04fa767137b2723f01a2a1f6a43ce7bd2cd2da..24692c30fc3dea01c836f0b85be80bd8f889b651
+2026-10-30	#1512 修后复审：Spec/Correctness 和 Standards 独立复审，原发现关闭；Spec 未发现新增 P0–P2，Standards 未发现新增可操作问题。多版本同名或非 registry 依赖明确失败，需未来扩展支持。	24692c30fc3dea01c836f0b85be80bd8f889b651..77d36bb057fc5e3a65f355bbec43a0281c9f32bd
