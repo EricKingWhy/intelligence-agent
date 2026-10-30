@@ -389,6 +389,233 @@ def test_store_persists_sidecar_and_returns_stable_projection(tmp_path: Path) ->
     assert sidecar.name == "board_state.json"
 
 
+_DELETER_THREAD_NAME = "session-deleter"
+
+
+class _ObservedStoreLock:
+    """per-session store 锁的观测包装：deleter 侧非阻塞试锁，失败即记「正在等锁」。
+
+    只有 ``session-deleter`` 线程走试锁分支（其余线程正常阻塞获取）；deleter 随即
+    阻塞 ``acquire()``，于是「删除确实被临界区挡住」成为可断言的证据。线程名与
+    ``_DeleteRace.run`` 建线程时用的常量是同一个，改名不会让判据静默失真。
+    """
+
+    def __init__(self, lock: threading.Lock, waiting: threading.Event) -> None:
+        self._lock = lock
+        self._waiting = waiting
+
+    def __enter__(self):
+        if threading.current_thread().name == _DELETER_THREAD_NAME:
+            if not self._lock.acquire(blocking=False):
+                self._waiting.set()
+                self._lock.acquire()
+        else:
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        self._lock.release()
+        return False
+
+
+class _DeleteRace:
+    """两个竞态用例共享的脚手架：投影侧临界区 vs hard delete 的真线程对撞。
+
+    调用方只提供三样东西——进入临界区时的暂停点（用 ``entered`` / ``release`` 两个
+    事件写在自己的 monkeypatch 钩子里）、被观测线程的主体、它的线程名。
+    ``monkeypatch`` 只做时序观测，store 与文件系统全程真实运行（不是 mock 冒充）。
+
+    判别力归属：``delete_blocked``（= deleter 在临界区内试锁失败）是核心断言——去掉
+    被暂停的那一处 store 锁，deleter 会当场拿到锁并删掉目录，该事件永不置位。
+    """
+
+    def __init__(
+        self,
+        store: JsonlSessionStore,
+        session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._store = store
+        self._session = session
+        self.lock = store._lock_for(session.session_id)
+        self._original_lock_for = store._lock_for
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.delete_waiting_for_lock = threading.Event()
+        self.worker_done = threading.Event()
+        self.delete_done = threading.Event()
+        self.worker_errors: list[BaseException] = []
+        self.delete_errors: list[BaseException] = []
+        self.delete_results: list[bool] = []
+        self.delete_blocked = False
+        monkeypatch.setattr(store, "_lock_for", self._observed_lock_for)
+
+    def _observed_lock_for(self, session_id: str):
+        if session_id == self._session.session_id:
+            return _ObservedStoreLock(self.lock, self.delete_waiting_for_lock)
+        return self._original_lock_for(session_id)
+
+    def run(self, worker, *, name: str) -> None:
+        """起 worker → 等它进入临界区 → 起 deleter → 等它撞上锁 → 放行并 join 两端。
+
+        时序结果留在实例上供调用方断言（``worker_entered`` / ``delete_blocked``）：
+        断言写在用例里而不是藏进脚手架，读用例的人能直接看到判据。
+        """
+        worker_thread = threading.Thread(
+            target=self._guarded(worker, self.worker_errors, self.worker_done),
+            name=name,
+            daemon=True,
+        )
+        deleter = threading.Thread(
+            target=self._delete, name=_DELETER_THREAD_NAME, daemon=True,
+        )
+        worker_thread.start()
+        try:
+            self.worker_entered = self.entered.wait(timeout=5)
+            if self.worker_entered:
+                deleter.start()
+                self.delete_blocked = self.delete_waiting_for_lock.wait(timeout=5)
+        finally:
+            self.release.set()
+            worker_thread.join(timeout=5)
+            if deleter.ident is not None:
+                deleter.join(timeout=5)
+
+    @staticmethod
+    def _guarded(body, errors, done):
+        def run() -> None:
+            try:
+                body()
+            except BaseException as error:  # noqa: BLE001 - report worker failures in the test
+                errors.append(error)
+            finally:
+                done.set()
+
+        return run
+
+    def _delete(self) -> None:
+        try:
+            self.delete_results.append(
+                self._store.delete_session(self._session.session_id)
+            )
+        except BaseException as error:  # noqa: BLE001 - report worker failures in the test
+            self.delete_errors.append(error)
+        finally:
+            self.delete_done.set()
+
+
+def test_projection_sidecar_write_serializes_with_hard_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """侧车「尾读校验 + 写入」必须与 hard delete 串行：删除在整个临界区内只能等。
+
+    本用例靶向 ``update_from_events`` 的写侧锁点（变异 M1 = 去掉包
+    ``_view_matches_disk`` + ``_persist`` 的 ``with self._store._lock_for(...)``）：
+    M1 下 deleter 当场拿到锁并删掉目录，``delete_waiting_for_lock`` 永不置位 ⇒ 本用例红。
+    ``observations`` 另行钉住两条观测点：尾读持 store 锁（变异 M8 = 把
+    ``_view_matches_disk`` 移出锁 ⇒ 该点变 False）且**发生在写入之前**（变异 M9 = 先落盘
+    再校验 ⇒ 顺序反转）。``mkstemp`` 前的暂停只做时序观测，store 与文件系统全程真实运行。
+    """
+    store, session = _session_with_task(tmp_path)
+    projection_store = BoardProjectionStore(store)
+    race = _DeleteRace(store, session, monkeypatch)
+    session_lock = race.lock
+    sidecar_write_completed = threading.Event()
+    observations: list[tuple[str, bool]] = []
+    original_write_sidecar = projection_store._write_sidecar
+    original_read_last_line = projection_store._read_last_line
+    original_mkstemp = bp.tempfile.mkstemp
+
+    def pause_after_mkstemp(*args, **kwargs):
+        result = original_mkstemp(*args, **kwargs)
+        race.entered.set()
+        if not race.release.wait(timeout=5):
+            raise TimeoutError("test did not release the sidecar writer")
+        return result
+
+    def record(operation: str) -> None:
+        acquired = session_lock.acquire(blocking=False)
+        observations.append((operation, not acquired))
+        if acquired:
+            session_lock.release()
+
+    def observe_read_last_line(path):
+        record("event-tail-read")
+        return original_read_last_line(path)
+
+    def observe_write_lock(session_id: str, projection, stamp) -> None:
+        record("sidecar-write")
+        original_write_sidecar(session_id, projection, stamp)
+        sidecar_write_completed.set()
+
+    def update_projection() -> None:
+        projection_store.update_from_events(
+            session.session_id, session.events, recompute=True,
+        )
+
+    monkeypatch.setattr(bp.tempfile, "mkstemp", pause_after_mkstemp)
+    monkeypatch.setattr(projection_store, "_read_last_line", observe_read_last_line)
+    monkeypatch.setattr(projection_store, "_write_sidecar", observe_write_lock)
+    race.run(update_projection, name="projection-writer")
+
+    assert not (tmp_path / session.session_id).exists()
+    assert not store.events_path(session.session_id).exists()
+
+    assert race.worker_entered, "projection writer must reach the sidecar temp write"
+    assert race.delete_blocked, "hard delete must wait for projection disk validation and write"
+    assert race.worker_done.is_set()
+    assert race.delete_done.is_set()
+    assert not race.worker_errors
+    assert not race.delete_errors
+    assert race.delete_results == [True]
+    assert observations == [("event-tail-read", True), ("sidecar-write", True)], (
+        "尾读必须持 store 锁并先于侧车写入"
+    )
+    assert sidecar_write_completed.is_set()
+
+
+def test_replay_read_events_serializes_with_hard_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """冷启动重放的 ``read_events`` 必须持 per-session store 锁：硬删在它读取期间只能等。
+
+    本用例靶向 ``_replay_once`` 的 read 锁点（变异 M2 = 删掉包 ``read_events`` 的
+    ``with self._store._lock_for(...)``）：M2 下 deleter 会当场拿到锁并删掉目录，
+    ``delete_waiting_for_lock`` 永不置位 ⇒ 本用例红。``monkeypatch`` 只做时序观测
+    （锁获取状态 + 暂停读取），store 与文件系统全程真实运行。
+    """
+    store, session = _session_with_task(tmp_path)
+    first = BoardProjectionStore(store).get(session.session_id)
+    # 删掉 sidecar ⇒ 冷实例的 get() 必走重放（sidecar 命中不读事件流）。
+    store.board_state_path(session.session_id).unlink()
+
+    race = _DeleteRace(store, session, monkeypatch)
+    original_read_events = store.read_events
+
+    def pause_read_events(session_id: str):
+        race.entered.set()
+        if not race.release.wait(timeout=5):
+            raise TimeoutError("test did not release the replay reader")
+        return original_read_events(session_id)
+
+    def read_projection() -> None:
+        assert BoardProjectionStore(store).get(session.session_id) == first
+
+    monkeypatch.setattr(store, "read_events", pause_read_events)
+    race.run(read_projection, name="projection-reader")
+
+    assert race.worker_entered, "replay reader must reach read_events"
+    assert race.delete_blocked, (
+        "hard delete must wait for the replay read_events critical section"
+    )
+    assert race.worker_done.is_set()
+    assert race.delete_done.is_set()
+    assert not race.worker_errors
+    assert not race.delete_errors
+    assert race.delete_results == [True]
+    assert not (tmp_path / session.session_id).exists()
+
+
 def test_sidecar_is_only_a_cache_and_self_heals_after_deletion(tmp_path: Path) -> None:
     store, session = _session_with_task(tmp_path)
     first = BoardProjectionStore(store).get(session.session_id)

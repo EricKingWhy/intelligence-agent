@@ -503,12 +503,18 @@ class JsonlSessionStore:
         return self._session_dir(session_id) / "board_state.json"
 
     def _lock_for(self, session_id: str) -> threading.Lock:
-        """取得该会话的写锁（懒创建；表结构由 _state_guard 保护）。
+        """取得该会话的存储锁（懒创建；表结构由 _state_guard 保护）。
 
         这把锁是**守卫原子性的一部分**，不是可有可无的优化：`append_event` 的
         「读已落盘最大 seq → 判定 → 写」若不在同一临界区内，两个线程可能都读到同一
         last_seq、都通过判定、都落盘 → 重复 seq。写者跨线程（事件循环的
         `Session.append` + 恢复扫描下放的工作线程），故是 threading.Lock。
+
+        它**不限于写路径**：看板投影在读侧车、回放读事件、核对视图与落盘之间也持它，
+        以便与 hard delete 串行（`board_projection.py` 的 `get()` / `_replay_once()` /
+        `update_from_events()`）。持锁方可以调 `read_events` / `read_events_report`：
+        它们内部只取 `_state_guard`、**不取**本锁，而这把锁**非可重入**——所以此刻
+        不自锁。反过来，若将来给 `read_events` 加上本锁，持锁调用就会静默死锁。
         """
         with self._state_guard:
             lock = self._seq_locks.get(session_id)
