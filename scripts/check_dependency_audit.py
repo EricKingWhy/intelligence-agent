@@ -23,7 +23,7 @@ def main() -> int:
         print(f"::error::{scanner} scan failed or produced an invalid report: {exc}")
         return 1
     if findings:
-        print(f"::warning::{scanner} reported {findings} advisory records; inspect the audit artifact")
+        print(f"::warning::{scanner} ({Path(path).stem}) reported {findings} advisory records; inspect the audit artifact")
     else:
         print(f"{scanner}: no reported advisories")
     return 0

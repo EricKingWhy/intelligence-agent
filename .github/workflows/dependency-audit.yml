@@ -45,17 +45,19 @@ jobs:
           } > audit-results/metadata.txt
           uv export --locked --no-dev --no-hashes --no-emit-project -o audit-results/python-production.txt > /dev/null
           uv export --locked --all-extras --no-hashes --no-emit-project -o audit-results/python-development.txt > /dev/null
+          # Marker-free superset covers packages skipped by the runner's platform/interpreter.
+          python -c 'import tomllib; from pathlib import Path; p=tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))["package"]; assert all("registry" in x["source"] or x["source"] == {"editable": "."} for x in p), "non-registry package needs audit support"; q=[x for x in p if "registry" in x["source"]]; assert len({x["name"] for x in q}) == len(q), "multiple versions need audit support"; Path("audit-results/python-lock-superset.txt").write_text("".join("{}=={}\n".format(x["name"], x["version"]) for x in q), encoding="utf-8")'
           python -c 'import json; from pathlib import Path; p=json.loads(Path("desktop/installer/python-runtime.lock.json").read_text(encoding="utf-8")); Path("audit-results/installer.txt").write_text("".join("{}=={}\n".format(w["name"], w["version"]) for w in p["wheels"]), encoding="utf-8")'
           printf 'urllib3==1.26.5\n' > audit-results/negative-control.txt
-          for name in python-production python-development installer negative-control; do
+          for name in python-production python-development python-lock-superset installer negative-control; do
             set +e
             uv tool run pip-audit==2.10.1 --disable-pip --no-deps -r "audit-results/$name.txt" --format json -o "audit-results/$name.json"
             status=$?
             set -e
-            python scripts/check_dependency_audit.py pip-audit "$status" "audit-results/$name.json"
-            if [[ "$name" == negative-control && "$status" != 1 ]]; then
-              echo '::error::negative control did not detect the known vulnerable dependency'
-              exit 1
+            if [[ "$name" == negative-control ]]; then
+              python -c 'import json,sys; p=json.load(open(sys.argv[2], encoding="utf-8")); assert sys.argv[1] == "1" and any(d["vulns"] for d in p["dependencies"]), "negative control failed"' "$status" "audit-results/$name.json"
+            else
+              python scripts/check_dependency_audit.py pip-audit "$status" "audit-results/$name.json"
             fi
           done
           set +e
