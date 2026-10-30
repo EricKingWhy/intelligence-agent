@@ -39,6 +39,9 @@ Settings 门控（tavily/fallback 同款模式）：`LANGFUSE_PUBLIC_KEY` 为空
 - **observation type=`agent`** = SubAgent 执行（官方多 Agent 规则：无双 dispatch 节点、递归嵌套、按具体 agent_id 命名）。
 
 ### D6 内容边界
+
+**2026-10-30 #1511 用户裁决（覆盖本节历史默认）：** 诊断 JSONL 与 Langfuse 默认对可识别的秘密脱敏；Langfuse `redacted` 为默认，`full` 仅在显式选择时保留原始 trace 内容。规则匹配不构成通用 DLP，无法识别的秘密仍可能出现；SessionEvent 保持业务事实，metadata-only 的限制优先。此决定取代下方历史默认，并记录与冻结 spec 12 §2 的差异。
+
 `LANGFUSE_TRACE_CONTENT=full | redacted`，默认 **full**（用户自有 dev 项目，与 JSONL dev 默认一致）。redacted：只传 metadata + 截断（输入输出截断、args/result 摘要）。redaction hook 一步到位（单一函数边界，未来接策略不再改埋点）。
 
 ### D7 详细埋点清单（用户「详细、好排查」拍板照单全收）

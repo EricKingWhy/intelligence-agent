@@ -74,6 +74,46 @@ def _tracer(recorder: FakeRecorder, *, trace_content: str = "full") -> RunTracer
     )
 
 
+def test_default_trace_redacts_content_and_metadata():
+    from langchain_core.messages import HumanMessage
+
+    recorder = FakeRecorder()
+    sink = LangfuseSink(
+        public_key="pk", secret_key="sk", base_url="https://example.invalid",
+        client_factory=lambda **kwargs: recorder.client(),
+    )
+    tracer = RunTracer(
+        sink, session_id="session-1", run_id="run-1", agent_id="default",
+        user_input="key sk-test-0123456789abcdef",
+    )
+    tracer.run_started()
+    generation = tracer.model_call_started(
+        step=1, messages=[HumanMessage(content="sk-test-0123456789abcdef")],
+    )
+    tracer.model_call_completed(generation, output_text="ordinary answer")
+    span = tracer.tool_span_started(
+        tool_name="read", tool_call_id="call-1", args={"token": "fake-secret"},
+        is_delegate=False,
+    )
+    tracer.tool_span_completed(span, outcome="failed", extra={"password": "fake-password"})
+    rendered = repr([(s.kwargs, s.updates) for s in recorder.spans])
+    assert "sk-test-0123456789abcdef" not in rendered
+    assert "fake-secret" not in rendered
+    assert "fake-password" not in rendered
+    assert recorder.spans[0].kwargs["metadata"]["session_id"] == "session-1"
+
+
+def test_unknown_trace_mode_defaults_to_redacted():
+    recorder = FakeRecorder()
+    tracer = _tracer(recorder, trace_content="invalid")
+    tracer.run_started()
+    span = tracer.tool_span_started(
+        tool_name="read", tool_call_id="call-1", args={"password": "fake-password"},
+        is_delegate=False,
+    )
+    assert span.kwargs["input"]["password"] == "<redacted>"
+
+
 def test_run_started_creates_root_with_identity_metadata():
     recorder = FakeRecorder()
     tracer = _tracer(recorder)

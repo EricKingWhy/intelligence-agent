@@ -27,6 +27,47 @@ _GIT_CONFIG_SECRET = re.compile(
 )
 _GIT_URL_USERINFO = re.compile(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@")
 
+_DIAGNOSTIC_JSON_SECRET = re.compile(
+    r'''(?i)(["'](?:api[-_]?key|token|password|passwd|secret|authorization)["']\s*:\s*)'''
+    r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')'''
+)
+_DIAGNOSTIC_QUOTED_SECRET = re.compile(
+    r'''(?i)((?:--?)?(?:api[-_]?key|token|password|passwd|secret|authorization)\s*(?:=|:)\s*)'''
+    r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')'''
+)
+_DIAGNOSTIC_PEM = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+_DIAGNOSTIC_BARE_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+
+
+def redact_diagnostic_value(value):
+    """Redact recognizable secrets in diagnostic content; preserve its structure."""
+    if isinstance(value, str):
+        value = _DIAGNOSTIC_PEM.sub("<redacted>", value)
+        value = _DIAGNOSTIC_JSON_SECRET.sub(r'\1"<redacted>"', value)
+        value = _DIAGNOSTIC_QUOTED_SECRET.sub(r'\1"<redacted>"', value)
+        value = _DIAGNOSTIC_BARE_KEY.sub("<redacted>", value)
+        return redact_secret_values(value)
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>" if isinstance(key, str) and re.fullmatch(
+                r"(?i)(api[-_]?key|token|password|passwd|secret|authorization)", key
+            ) else redact_diagnostic_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [redact_diagnostic_value(item) for item in value]
+    if callable(getattr(value, "model_dump", None)):
+        try:
+            return redact_diagnostic_value(value.model_dump(mode="json"))
+        except Exception:  # noqa: BLE001 - diagnostics must not interrupt the runtime
+            return "<unavailable>"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_diagnostic_value(str(value))
+
 
 def redact_secret_values(text: str) -> str:
     """凭证值 → `<redacted>`，**不动路径**（`#317` T9 / ADR-0048 D3）。
