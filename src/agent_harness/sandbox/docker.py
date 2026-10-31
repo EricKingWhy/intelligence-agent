@@ -639,17 +639,39 @@ class DockerSandbox(Sandbox):
 
     @staticmethod
     def _is_hardened(attrs: dict) -> bool:
-        """inspect attrs 是否满足降权档：非 root + cap_drop=ALL + no-new-privileges。"""
+        """inspect attrs 是否满足降权档：非 root + cap_drop=ALL + no-new-privileges。
+
+        这是**复用路径唯一的安全门**，所以按结构化白名单判，不看"像不像"：
+
+        - `Config.User` 必须解析出数字 uid 且 `uid != 0`。`0:1000`（root uid、
+          非 root gid）不算非 root；名字解析不出数字（`nobody`）**拒绝复用**，
+          不猜。
+        - `CapDrop` 精确等于 `["ALL"]`，且 `CapAdd` 为空——`cap_drop=ALL` 上再
+          `cap_add=SYS_ADMIN` 等于没丢。
+        - `SecurityOpt` 必须含精确项 `no-new-privileges:true`；子串匹配会把
+          `no-new-privileges:false` 也放过去（内核里是 NoNewPrivs=0）。
+        - `Privileged` 必须显式为 False——privileged 容器会关掉 seccomp，
+          上面几条字段看着合规、实际完全没隔离。
+        - `NetworkMode != "host"`：票面保留的是构建网络（bridge），不是宿主
+          网络栈。
+        `init` 不参与判定：它不是本票降权档的一部分（见 create 处注释）。
+        """
         user = str((attrs.get("Config") or {}).get("User") or "")
-        if not user or user in ("root", "0", "0:0", "root:root"):
+        uid_text, _, _ = user.partition(":")
+        if not uid_text.isdecimal() or int(uid_text) == 0:
             return False
         host = attrs.get("HostConfig") or {}
-        cap_drop = [str(item).upper() for item in host.get("CapDrop") or []]
-        if "ALL" not in cap_drop:
+        cap_drop = sorted(str(item).upper() for item in host.get("CapDrop") or [])
+        if cap_drop != ["ALL"]:
             return False
-        return any(
-            "no-new-privileges" in str(opt) for opt in host.get("SecurityOpt") or []
-        )
+        if [str(item) for item in host.get("CapAdd") or []]:
+            return False
+        if host.get("Privileged") is not False:
+            return False
+        security_opt = [str(opt) for opt in host.get("SecurityOpt") or []]
+        if "no-new-privileges:true" not in security_opt:
+            return False
+        return str(host.get("NetworkMode") or "") != "host"
 
     def _resolve_container_user(self) -> str:
         """返回新容器要用的 `user`：尊重镜像已声明的非 root USER，否则降权档。

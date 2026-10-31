@@ -766,6 +766,79 @@ def test_container_start_failure_is_wrapped_and_cleaned_up(
         sandbox.delete()
 
 
+@pytest.mark.parametrize(
+    ("label", "run_kwargs"),
+    [
+        ("privileged", {"privileged": True}),
+        ("nnp-false", {"security_opt": ["no-new-privileges:false"]}),
+        ("root-uid", {"user": "0:1000"}),
+        ("cap-add", {"cap_add": ["SYS_ADMIN"]}),
+        ("host-network", {"network_mode": "host"}),
+    ],
+    ids=["privileged", "nnp-false", "root-uid", "cap-add", "host-network"],
+)
+def test_loosely_hardened_container_is_not_reused(
+    docker_client, label: str, run_kwargs: dict,
+) -> None:
+    """P2-A：`_is_hardened` 是复用路径唯一安全门，必须按结构化白名单判。
+
+    修复前（实测）：这五类容器全部被判「已硬化」并静默复用——`privileged`
+    容器内 `Seccomp: 0`、`nnp:false` 是 `NoNewPrivs: 0`、`0:1000` 的
+    `id -u` 就是 0。字段看着沾边、实际完全没隔离。
+    """
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    sandbox = _sandbox("h1486-loose")
+    # 先按最接近合规的形态建（其余字段都给足），只让被测的那一项不合规。
+    kwargs = {
+        "user": "1000:1000",
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        **run_kwargs,
+    }
+    legacy = docker_client.containers.run(
+        "python:3-slim",
+        ["sleep", "infinity"],
+        name=sandbox._container_name,
+        detach=True,
+        volumes={sandbox._volume_name: {"bind": "/workspace", "mode": "rw"}},
+        **kwargs,
+    )
+    legacy.reload()
+    legacy_id = legacy.id
+    assert DockerSandbox._is_hardened(legacy.attrs) is False, (
+        f"{label} 容器被判成已硬化，会被静默复用"
+    )
+    try:
+        sandbox.ensure_started()
+        assert sandbox._container.id != legacy_id, f"{label} 历史容器必须重建"
+        attrs = _inspect(docker_client, sandbox._container_name)
+        assert attrs["HostConfig"]["Privileged"] is False
+        assert attrs["HostConfig"]["CapAdd"] in (None, [])
+        assert attrs["HostConfig"]["SecurityOpt"] == ["no-new-privileges:true"]
+        assert attrs["Config"]["User"] == "1000:1000"
+        assert sandbox.exec("id -u").stdout.strip() == "1000"
+    finally:
+        sandbox.delete()
+
+
+def test_is_hardened_rejects_named_user_that_cannot_be_resolved() -> None:
+    """P2-A：名字用户名解析不出数字时**拒绝复用**（不猜）。"""
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    attrs = {
+        "Config": {"User": "nobody:nogroup"},
+        "HostConfig": {
+            "CapDrop": ["ALL"],
+            "CapAdd": None,
+            "SecurityOpt": ["no-new-privileges:true"],
+            "Privileged": False,
+            "NetworkMode": "bridge",
+        },
+    }
+    assert DockerSandbox._is_hardened(attrs) is False
+
+
 def test_default_profile_keeps_build_network_and_no_resource_limits(
     docker_client,
 ) -> None:
