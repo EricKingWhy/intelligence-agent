@@ -740,6 +740,21 @@ class DockerSandbox(Sandbox):
 
     def _create_hardened_container(self) -> None:
         user = self._resolve_container_user()
+        # `containers.create` 不带 docker-py 的自动 pull（那是 `containers.run` 的
+        # 行为）：镜像不在本地就直接 ImageNotFound。直接构造 DockerSandbox(image=…)
+        # 的调用方与测试走的就是这条路，所以这里显式补一次。
+        # 读取失败一律只记 debug：真正的错误由紧随其后的 create 报出来，别在这里
+        # 换成另一条更难懂的错误（注入的 fake client 也可能没有 images）。
+        docker = importlib.import_module("docker")
+        images = getattr(self._client, "images", None)
+        not_found = getattr(getattr(docker, "errors", None), "ImageNotFound", ())
+        if images is not None:
+            try:
+                images.get(self._image)
+            except not_found:
+                images.pull(self._image)
+            except Exception as error:  # noqa: BLE001 — 交给 create 报真错
+                logger.debug("读取镜像 %s 失败：%s", self._image, error)
         # 顺序是硬约束：`containers.create` 会**先用镜像里的 /workspace 填充空卷**
         # （属主 root），所以必须先建容器、再做属主迁移、最后 start。反过来
         # （先迁移后 run）会让 run 的卷填充把刚 chown 好的目录重新写回 root。
@@ -751,6 +766,9 @@ class DockerSandbox(Sandbox):
             user=user,
             cap_drop=HARDENED_CAP_DROP,
             security_opt=HARDENED_SECURITY_OPT,
+            # init=True 不在票面的降权档里，也不参与 `_is_hardened` 判定：它只是
+            # 给容器插一个 PID 1 收尸进程，避免 `sleep infinity` 下的僵尸堆积。
+            # 对隔离边界没有影响，故保留并在此写明用途（复核 P4-1）。
             init=True,
             # 非 root 的 HOME 默认 "/" 不可写（pip 用户安装会 EACCES）；
             # 放 /tmp 让工具链有可写家目录，不额外限制资源或网络（AC3）。
@@ -822,8 +840,9 @@ class DockerSandbox(Sandbox):
     def _migrate_volume_ownership(self, user: str) -> None:
         """把具名卷里的历史文件属主迁到容器用户；失败响亮、可重试、不毁数据。
 
-        - 只对**已存在的**卷做（新建空卷由 Docker 建出来就归 root，仍需一次迁移
-          让非 root 容器可写；空卷迁移是零风险的记录级操作）。
+        - 对**每一个**卷都做，新建的空卷也做：`containers.create` 会先用镜像内容
+          填充空卷（属主 root），非 root 容器仍需要这一次迁移才可写；空卷迁移是
+          零风险的记录级操作。
         - 迁移在一次性 helper 容器里跑（uid 0 + 最小能力集 + `--network none`），
           不进主容器的降权边界。
         - 备份 tar 落在独立 `<volume>-migration-backup` 卷，迁移成功即删；
@@ -885,7 +904,7 @@ class DockerSandbox(Sandbox):
                 f"卷 {self._volume_name} 属主迁移失败（exit={exit_code}）："
                 f"{detail or logs.strip()[-500:]}"
             )
-        # 迁移成功：清掉独立备份卷里的备份，只留一个有标记的空卷供下次重试。
+        # 迁移成功：备份卷整个删掉（里面只剩备份 tar，没有别的用途）。
         try:
             self._client.volumes.get(backup_volume).remove(force=True)
         except Exception:

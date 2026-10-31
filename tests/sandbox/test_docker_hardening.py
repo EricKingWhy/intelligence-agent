@@ -901,6 +901,41 @@ def test_helper_start_failure_leaves_no_orphan_and_delete_succeeds(
         docker_client.images.remove(image, force=True)
 
 
+def test_missing_image_is_pulled_before_create(docker_client) -> None:
+    """P3-1：`containers.create` 不带 docker-py 的自动 pull，缺镜像会直接
+    ImageNotFound。直接构造 DockerSandbox(image=...) 的调用方走这条路，必须补拉。
+
+    用一个本地一定没有、但可拉取的 tag 验：拉取成功并真的跑起来。
+    """
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    try:
+        docker_client.images.remove("busybox:1.36", force=True)
+    except docker.errors.NotFound:
+        pass
+    with pytest.raises(docker.errors.ImageNotFound):
+        docker_client.images.get("busybox:1.36")
+
+    suffix = uuid4().hex
+    sandbox = DockerSandbox(
+        image="busybox:1.36",
+        container_name=f"agent-harness-h1486-pull-{suffix}",
+        volume_name=f"agent-harness-h1486-pull-{suffix}",
+    )
+    try:
+        # busybox 没有 bash：迁移 helper 会响亮失败，但**镜像必须先被拉下来**
+        # （证明 create 前的 get/pull 生效，而不是 ImageNotFound）。
+        with pytest.raises(Exception) as excinfo:
+            sandbox.ensure_started()
+        message = str(excinfo.value)
+        assert "ImageNotFound" not in message, message
+        assert "无法启动卷属主迁移容器" in message, message
+        # 镜像确实在本地了。
+        assert docker_client.images.get("busybox:1.36") is not None
+    finally:
+        sandbox.delete()
+
+
 def test_default_profile_keeps_build_network_and_no_resource_limits(
     docker_client,
 ) -> None:
