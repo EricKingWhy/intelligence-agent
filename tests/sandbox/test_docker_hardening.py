@@ -433,6 +433,92 @@ def test_kill_during_snapshot_does_not_corrupt_workspace_on_retry(
     sandbox.delete()
 
 
+def _write_snapshot_archive(
+    client,
+    workspace_volume: str,
+    *,
+    truncate_at: int | None = None,
+    with_index: bool = True,
+) -> None:
+    """在备份卷里摆一份「上次迁移留下的快照」：4 个同路径文件，内容全为 B。
+
+    写侧形状与迁移脚本一致：`pre.tar` 落盘后把字节数写进 `pre.idx`（同样
+    tmp+mv）。`with_index=False` 模拟升级前留下的旧备份（只有 tar 没有 idx）。
+    """
+    # 成员布局：./ 512 + ./d/ 512 + 4 × (512 头 + 8192 数据) = 40960 字节（实测）。
+    script = (
+        "mkdir -p /backup/src/d && "
+        "for i in 1 2 3 4; do "
+        "head -c 8192 /dev/zero | tr '\\0' B > /backup/src/d/f$i.bin; done && "
+        "cd /backup/src && tar -cpf /backup/pre.tar --numeric-owner . && "
+        "rm -rf /backup/src"
+    )
+    if with_index:
+        # 与写侧同形：**先**记原始字节数（tmp+mv），此后才可能发生截断/半写。
+        # 反过来先截断再记 idx，留下的是一份自洽的截断备份，闸门将形同虚设。
+        script += (
+            " && stat -c %s /backup/pre.tar > /backup/pre.idx.tmp"
+            " && mv -f /backup/pre.idx.tmp /backup/pre.idx"
+        )
+    if truncate_at is not None:
+        script += f" && truncate -s {truncate_at} /backup/pre.tar"
+    _write_backup_files(client, workspace_volume, script)
+
+
+def _seed_four_live_files(client, workspace_volume: str) -> str:
+    """活树：./d/f1..4.bin 各 8192 字节、内容全为 L。返回 sha 清单。"""
+    _seed_volume(
+        client,
+        workspace_volume,
+        "mkdir -p /workspace/d && "
+        "for i in 1 2 3 4; do "
+        "head -c 8192 /dev/zero | tr '\\0' L > /workspace/d/f$i.bin; done",
+    )
+    live_sha = _sha_manifest(client, workspace_volume)
+    assert len(live_sha.strip().splitlines()) == 4
+    return live_sha
+
+
+def _expected_b_manifest() -> str:
+    """备份内容的 `sha256sum` 清单（4 个 8192 字节的 B 文件）。"""
+    import hashlib
+
+    digest = hashlib.sha256(b"B" * 8192).hexdigest()
+    lines = [f"{digest}  ./d/f{i}.bin" for i in (1, 2, 3, 4)]
+    return "\n".join(lines) + "\n"
+
+
+def test_backup_restore_succeeds_when_archive_is_complete(
+    docker_client,
+) -> None:
+    """P1-C 成功路径：完整备份 + pre.idx ⇒ 恢复后迁移成功、活树就是备份内容。
+
+    HEAD 上换入行 `find ... -exec mv -f {} /workspace/ +` 语法非法，这一步必失败，
+    于是**完整备份也恢复不了**（活树已被前一行清空 + exit 89）。本用例在修前
+    必红、修后必绿，是 F-1 的回归锚。
+    """
+    sandbox = _sandbox("h1486-recover")
+    live_sha = _seed_four_live_files(docker_client, sandbox._volume_name)
+    _write_snapshot_archive(docker_client, sandbox._volume_name)
+    try:
+        sandbox.ensure_started()  # 修复前：SandboxHardeningError(exit=89)
+        # 活树内容 == 备份内容（全 B），且 4 个文件一个不少、没混进旧内容。
+        restored = _sha_manifest(docker_client, sandbox._volume_name)
+        assert restored == _expected_b_manifest(), restored
+        assert restored != live_sha
+        # 恢复完成即清备份；迁移成功后备份卷整个删掉。
+        try:
+            docker_client.volumes.get(_backup_volume_name(sandbox._volume_name))
+        except docker.errors.NotFound:
+            pass
+        else:
+            assert _backup_has_restore_artifacts(
+                docker_client, sandbox._volume_name
+            ) == []
+    finally:
+        sandbox.delete()
+
+
 @pytest.mark.parametrize("truncation", ["mid-file", "member-boundary"])
 def test_truncated_backup_is_never_extracted_into_live_tree(
     docker_client, truncation: str,
@@ -440,44 +526,25 @@ def test_truncated_backup_is_never_extracted_into_live_tree(
     """P1-C：备份卷里留着截断的 `pre.tar` 时，恢复不得动活数据。
 
     备份刻意做成**与活树同路径**（快照本来就是同一个卷的副本），这正是原
-    verdict 的复现形态：解包会按路径覆盖活文件。
-
-    `mid-file`：截在某个成员的数据区中间——旧实现直接 `tar -xpf` 到
-    /workspace，tar 在 EOF 前已经把前面几个成员**写进活树**，之后才报错；
-    恢复动作本身成了破坏源。
-    `member-boundary`：截在 512 字节成员边界上——tar 认为「归档到此结束」，
-    退出码 0、只解出前几个成员，同样已经覆盖了活数据。
+    verdict 的复现形态：解包会按路径覆盖活文件。备份**带 pre.idx**（与生产
+    写侧同形）：`mid-file` 靠 tar 自己的退出码就能拦住，`member-boundary`
+    则完全靠字节数闸门——去掉闸门它就会 rc=0 地误报成功。
     """
     sandbox = _sandbox("h1486-trunc")
-    # 活树：4 个同尺寸文件，内容各不相同，方便逐条看见「被覆盖了哪几个」。
-    _seed_volume(
-        docker_client,
-        sandbox._volume_name,
-        "mkdir -p /workspace/d && "
-        "for i in 1 2 3 4; do "
-        "head -c 8192 /dev/zero | tr '\\0' L > /workspace/d/f$i.bin; done",
-    )
-    live_sha = _sha_manifest(docker_client, sandbox._volume_name)
-    assert len(live_sha.strip().splitlines()) == 4
+    live_sha = _seed_four_live_files(docker_client, sandbox._volume_name)
 
-    # 备份：同样的路径，内容全换成 B（一旦被解进活树，sha 立刻变）。
-    # 成员布局：./d(512) + 4 × (512 头 + 8192 数据) = 512 + 4×8704 = 35328 字节。
-    body = (
-        "mkdir -p /backup/src/d && "
-        "for i in 1 2 3 4; do "
-        "head -c 8192 /dev/zero | tr '\\0' B > /backup/src/d/f$i.bin; done && "
-        "cd /backup/src && tar -cpf /backup/pre.tar --numeric-owner . && "
-        "rm -rf /backup/src && "
-    )
     if truncation == "mid-file":
         # 成员布局：./ 512 | ./d/ 512 | f4 头 512 + 数据 8192 | f3 头 512 + 数据 …
         # 12000 落在 f3 的数据区中间 —— tar 自己会报错，但报错前已经写进活树。
-        script = body + "truncate -s 12000 /backup/pre.tar"
+        _write_snapshot_archive(
+            docker_client, sandbox._volume_name, truncate_at=12000
+        )
     else:
         # 9728 = 512 + 512 + 512 + 8192：正好在 f4 成员结束处。tar 认为「归档到此
         # 结束」（rc=0）并原样解出 ./、./d/、f4 —— 只靠退出码完全防不住。
-        script = body + "truncate -s 9728 /backup/pre.tar"
-    _write_backup_files(docker_client, sandbox._volume_name, script)
+        _write_snapshot_archive(
+            docker_client, sandbox._volume_name, truncate_at=9728
+        )
     backup_bytes = docker_client.containers.run(
         "python:3-slim",
         ["sh", "-c", "stat -c %s /backup/pre.tar"],
@@ -503,6 +570,37 @@ def test_truncated_backup_is_never_extracted_into_live_tree(
         )
         with pytest.raises(docker.errors.NotFound):
             docker_client.containers.get(sandbox._container_name)
+    finally:
+        sandbox.delete()
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_legacy_backup_without_index_is_verified_by_manifest(
+    docker_client, truncated: bool,
+) -> None:
+    """F-3：升级前留下的备份只有 pre.tar、没有 pre.idx。
+
+    完整 → 退化成「tar 全量可读 + 解到临时树 + 类型/路径清单比对」后恢复成功；
+    截断（member-boundary，tar 自己 rc=0）→ 清单比对拦下，活数据原样、响亮失败。
+    退化路径同样不先把活树解包，失败绝不碰活数据。
+    """
+    sandbox = _sandbox("h1486-noindex")
+    live_sha = _seed_four_live_files(docker_client, sandbox._volume_name)
+    _write_snapshot_archive(
+        docker_client, sandbox._volume_name,
+        truncate_at=9728 if truncated else None, with_index=False,
+    )
+    try:
+        if truncated:
+            with pytest.raises(Exception) as excinfo:
+                sandbox.ensure_started()
+            assert "89" in str(excinfo.value)
+            assert _sha_manifest(docker_client, sandbox._volume_name) == live_sha
+        else:
+            sandbox.ensure_started()
+            assert _sha_manifest(
+                docker_client, sandbox._volume_name
+            ) == _expected_b_manifest()
     finally:
         sandbox.delete()
 

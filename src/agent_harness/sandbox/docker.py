@@ -430,6 +430,12 @@ _HELPER_LABEL = "agent-harness.migration-helper"
 #: daemon 卡死时不会让会话启动永久挂住（复核 P3-2）。
 _MIGRATION_WAIT_SECONDS = 900
 
+#: 超时后给 helper 的优雅停止窗口（SIGTERM → SIGKILL）。脚本没装 trap，这一步
+#: 换不到「脚本自己回滚」，只是把「正在 chown 时被立刻 SIGKILL」变成「给它几秒
+#: 收尾」；真正的「超时不动数据」需要脚本在 chown 前写标记、恢复侧优先回滚，
+#: 超出本次修复范围（已登记为已知项）。
+_MIGRATION_STOP_GRACE_SECONDS = 10
+
 #: 属主迁移脚本（bash；默认 `python:3-slim` 自带）。步骤：
 #: 0) 备份卷里已有 `pre.tar` → 上次迁移没走完，先核对 `pre.idx` 记录的字节数、
 #:    再解到临时树、最后换入（幂等重试）；任何一步不过都不动活数据、保留备份
@@ -463,19 +469,30 @@ rm -f "$BACKUP/pre.tar.tmp" "$BACKUP/pre.idx.tmp"
 # **临时树**，全部成功后才动 /workspace。任何一步不过都直接返回非零，活数据保持
 # 原样、备份留在备份卷里——恢复动作本身绝不再是破坏源。
 # 为什么不能只看 `tar -xpf` 的退出码：归档正好在 512 字节成员边界被截断时，
-# tar 把它当成「到这儿就结束了的合法归档」，退出码 0 且一个成员都不解（实测：
-# 6 个成员、30720 字节的归档截到 14336 字节 → `-xpf` rc=0，临时树为空）。
-# 那样下面会先清空 /workspace 再搬进空目录 = 静默清库。字节数是最小充分的
+# tar 把它当成「到这儿就结束了的合法归档」，退出码 0 且只解出前几个成员（实测：
+# 5 个成员、40960 字节的归档截到 9728 字节 → `-xpf` rc=0，只解出 ./、./d/、f4）。
+# 那样下面会先清空 /workspace 再搬进残缺备份 = 静默丢文件。字节数是最小充分的
 # 不变量：任何截断都改变归档大小，而 `pre.idx` 在改名**之前**写的是同一份内容。
+# `pre.idx` 是本版本才有的：升级前留下的完整备份只有 pre.tar，此时退化成
+# 「tar 全量可读 + 解到临时树 + 与活树『类型/路径』清单逐条一致」，仍然只动
+# 临时树；成员边界截断被清单比对拦下（那种截断 tar 自己的退出码是 0）。
 restore_from_backup() {
   R="$D/restore"
-  [ -f "$BACKUP/pre.idx" ] || return 1
-  [ "$(stat -c %s "$BACKUP/pre.tar")" = "$(cat "$BACKUP/pre.idx")" ] || return 1
   rm -rf "$R"
   mkdir -p "$R" || return 1
+  if [ -f "$BACKUP/pre.idx" ]; then
+    [ "$(stat -c %s "$BACKUP/pre.tar")" = "$(cat "$BACKUP/pre.idx")" ] || return 1
+  else
+    tar -tf "$BACKUP/pre.tar" > /dev/null || return 1
+  fi
   tar -xpf "$BACKUP/pre.tar" --numeric-owner -C "$R" || return 1
+  if [ ! -f "$BACKUP/pre.idx" ]; then
+    ( cd "$R" && find . -mindepth 1 -printf '%y\t%p\0' | LC_ALL=C sort -z ) > "$D/restore.rest" || return 1
+    find . -mindepth 1 -printf '%y\t%p\0' | LC_ALL=C sort -z > "$D/live.rest" || return 1
+    cmp -s "$D/restore.rest" "$D/live.rest" || return 1
+  fi
   find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + || return 1
-  ( cd "$R" && find . -mindepth 1 -maxdepth 1 -exec mv -f {} /workspace/ + ) || return 1
+  ( cd "$R" && find . -mindepth 1 -maxdepth 1 -exec mv -f -t /workspace {} + ) || return 1
   rm -rf "$R"
 }
 
@@ -902,14 +919,26 @@ class DockerSandbox(Sandbox):
             ) from error
         try:
             # 无上界等待会让会话启动在 daemon 卡住 / 超大卷时永久挂住（复核
-            # P3-2）。超时按迁移失败处理：helper 在 finally 里被删，备份卷里
-            # 若已有 pre.tar 也仍是可复位起点。
+            # P3-2）。超时按迁移失败处理：先请 helper 优雅停下（SIGTERM 让脚本
+            # 有机会走自己的回滚 / 至少不在 chown 半途被 SIGKILL），再把它的
+            # MIGRATE_* 日志带进异常——只看「>900s」运维判断不出停在哪一步。
             status = container.wait(timeout=_MIGRATION_WAIT_SECONDS)
             logs = container.logs(stdout=True, stderr=True).decode("utf-8", "replace")
         except Exception as error:
+            with suppress(Exception):
+                container.stop(timeout=_MIGRATION_STOP_GRACE_SECONDS)
+            detail = ""
+            with suppress(Exception):
+                logs = container.logs(stdout=True, stderr=True).decode(
+                    "utf-8", "replace"
+                )
+                detail = " | ".join(
+                    line for line in logs.splitlines() if line.startswith("MIGRATE")
+                )
             raise SandboxHardeningError(
                 f"卷 {self._volume_name} 属主迁移等待失败"
                 f"（>{_MIGRATION_WAIT_SECONDS}s 或 daemon 异常）：{error}"
+                + (f" | helper 日志：{detail}" if detail else "")
             ) from error
         finally:
             with suppress(Exception):
