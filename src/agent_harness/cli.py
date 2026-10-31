@@ -2792,6 +2792,9 @@ async def fork_command(
     delegation_ledger = SqliteDelegationTreeLedger(workspace_root / "harness.db")
     await delegation_ledger.initialize()
     workspace_registry = WorkspaceRegistry(root=workspace_root, backend="local")
+    # #1486 AC3：fork 入口同样固定 local 后端，必须明示它没有 OS 级隔离
+    # （Spec F5：以前只有 run 打印，fork/resume 静默）。
+    _emit_stderr(local_sandbox_notice())
     summarizer = None
     if not no_summary:
         from agent_harness.model.provider import create_chat_model
@@ -3034,6 +3037,9 @@ async def resume_command(
         settings.workspace_dir = workspace_dir
     setup_logging(settings.log_level, settings.workspace_dir)
     emit = write if write is not None else sys.stdout.write
+    # #1486 AC3：resume 经 AppState 固定 `backend='local'`，同样要明示无 OS 级隔离
+    # （Spec F5：以前只有 run 打印）。
+    _emit_stderr(local_sandbox_notice())
     service = await _cli_session_service(settings)
     events = await service.get_events(session_id)
     paused = latest_paused_run(events)
