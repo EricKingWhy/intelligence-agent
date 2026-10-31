@@ -417,8 +417,9 @@ _BACKUP_MOUNT = "/backup"
 _BACKUP_SUFFIX = "-migration-backup"
 
 #: 属主迁移脚本（bash；默认 `python:3-slim` 自带）。步骤：
-#: 0) 备份卷里已有 `pre.tar` → 上次迁移没走完，先**整归档校验通过**再按备份
-#:    整体恢复（幂等重试）；校验不过就不动活数据、保留备份并响亮失败；
+#: 0) 备份卷里已有 `pre.tar` → 上次迁移没走完，先核对 `pre.idx` 记录的字节数、
+#:    再解到临时树、最后换入（幂等重试）；任何一步不过都不动活数据、保留备份
+#:    并响亮失败（含人工恢复指引）；
 #: 1) 卷内已全部是目标属主 → 直接成功（重启/重开无副作用）；
 #: 2) 整树 tar 快照先写 `pre.tar.tmp` 再原子改名（numeric owner：模式/属主/
 #:    符号链接/空目录/hard link）落独立备份卷，并落一份「模式/类型/路径」索引；
@@ -440,16 +441,38 @@ case "${U}${G}" in
 esac
 rm -rf "$D"
 mkdir -p "$D" "$BACKUP" || { printf 'MIGRATE_ERROR cannot create snapshot dir\n'; exit 91; }
+# 只有 pre.tar.tmp 没有 pre.tar = 上次死在做快照，还没动过活数据；清掉残件
+# 免得陈旧 pre.idx 影响下一次。
+rm -f "$BACKUP/pre.tar.tmp" "$BACKUP/pre.idx.tmp"
+
+# 从备份恢复。备份可能是上次被硬杀留下的：先核对落盘时记录的字节数、再解到
+# **临时树**，全部成功后才动 /workspace。任何一步不过都直接返回非零，活数据保持
+# 原样、备份留在备份卷里——恢复动作本身绝不再是破坏源。
+# 为什么不能只看 `tar -xpf` 的退出码：归档正好在 512 字节成员边界被截断时，
+# tar 把它当成「到这儿就结束了的合法归档」，退出码 0 且一个成员都不解（实测：
+# 6 个成员、30720 字节的归档截到 14336 字节 → `-xpf` rc=0，临时树为空）。
+# 那样下面会先清空 /workspace 再搬进空目录 = 静默清库。字节数是最小充分的
+# 不变量：任何截断都改变归档大小，而 `pre.idx` 在改名**之前**写的是同一份内容。
+restore_from_backup() {
+  R="$D/restore"
+  [ -f "$BACKUP/pre.idx" ] || return 1
+  [ "$(stat -c %s "$BACKUP/pre.tar")" = "$(cat "$BACKUP/pre.idx")" ] || return 1
+  rm -rf "$R"
+  mkdir -p "$R" || return 1
+  tar -xpf "$BACKUP/pre.tar" --numeric-owner -C "$R" || return 1
+  find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + || return 1
+  ( cd "$R" && find . -mindepth 1 -maxdepth 1 -exec mv -f {} /workspace/ + ) || return 1
+  rm -rf "$R"
+}
 
 if [ -f "$BACKUP/pre.tar" ]; then
   printf 'MIGRATE_RECOVER previous incomplete migration\n'
-  # 只有「整个归档可读完」才允许解包：快照改为 tmp+mv 原子落盘后，这里理论上
-  # 只会见到完整 tar；仍做一次全量校验，截断归档一律不动活数据。
-  tar -tf "$BACKUP/pre.tar" > /dev/null \
-    || { printf 'MIGRATE_ERROR backup is incomplete; left untouched at %s\n' "$BACKUP/pre.tar"; exit 89; }
-  tar -xpf "$BACKUP/pre.tar" --numeric-owner -C /workspace \
-    || { printf 'MIGRATE_ERROR cannot restore backup\n'; exit 89; }
-  rm -f "$BACKUP/pre.tar"
+  restore_from_backup || {
+    printf 'MIGRATE_ERROR backup restore failed; backup kept at %s/pre.tar (retry is safe, the backup is not modified)\n' "$BACKUP"
+    printf 'MIGRATE_HINT inspect it read-only: docker run --rm -v %s:/backup <image> tar -tvf /backup/pre.tar\n' "$BACKUP"
+    exit 89
+  }
+  rm -f "$BACKUP/pre.tar" "$BACKUP/pre.idx"
 fi
 
 # 快路径只在 find 成功时成立：find 报错（非数字 uid、卷不可读）必须响亮失败。
@@ -461,8 +484,14 @@ if [ -z "$mismatch" ]; then
 fi
 
 # 快照先写 .tmp 再原子改名：被杀时留下的是 .tmp，「pre.tar 存在 ⇒ 完整」。
+# 同时把归档字节数记进 pre.idx（也先写 .tmp 再改名，且先于 pre.tar 落位）：
+# 恢复侧靠它辨认「成员边界截断」这类 tar 自己不报错的残缺归档。
 tar -cpf "$BACKUP/pre.tar.tmp" --numeric-owner . \
   || { printf 'MIGRATE_ERROR snapshot failed\n'; exit 92; }
+wc -c < "$BACKUP/pre.tar.tmp" | tr -d ' ' > "$BACKUP/pre.idx.tmp" \
+  || { printf 'MIGRATE_ERROR snapshot index failed\n'; exit 92; }
+mv -f "$BACKUP/pre.idx.tmp" "$BACKUP/pre.idx" \
+  || { printf 'MIGRATE_ERROR snapshot index rename failed\n'; exit 92; }
 mv -f "$BACKUP/pre.tar.tmp" "$BACKUP/pre.tar" \
   || { printf 'MIGRATE_ERROR snapshot rename failed\n'; exit 92; }
 find . -xdev -printf '%U:%G\t%m\t%y\t%p\0' > "$D/pre.bin" || { printf 'MIGRATE_ERROR manifest failed\n'; exit 94; }
@@ -478,7 +507,7 @@ rollback() {
   tar -xpf "$BACKUP/pre.tar" --numeric-owner -C /workspace || { printf 'MIGRATE_ROLLBACK_FAILED\n'; return 1; }
   rest_index "$D/rb.rest" || { printf 'MIGRATE_ROLLBACK_FAILED\n'; return 1; }
   cmp -s "$D/pre.rest" "$D/rb.rest" || { printf 'MIGRATE_ROLLBACK_FAILED\n'; return 1; }
-  rm -f "$BACKUP/pre.tar"
+  rm -f "$BACKUP/pre.tar" "$BACKUP/pre.idx"
   printf 'MIGRATE_ROLLBACK_OK\n'; return 0
 }
 abort_with_rollback() { printf '%s\n' "$1"; rollback || { printf 'MIGRATE_FATAL rollback failed\n'; exit 96; }; printf 'MIGRATE_ABORTED\n'; exit "$2"; }
@@ -498,7 +527,7 @@ fi
 rest_index "$D/post.rest" || abort_with_rollback 'MIGRATE_ERROR post manifest failed' 100
 cmp -s "$D/pre.rest" "$D/post.rest" || abort_with_rollback 'MIGRATE_ERROR content or mode changed' 102
 rm -rf "$D"
-rm -f "$BACKUP/pre.tar"
+rm -f "$BACKUP/pre.tar" "$BACKUP/pre.idx"
 printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
 """
 

@@ -20,11 +20,14 @@ root 进程写入后，非 root 容器读不到也写不了，基线没有属主
 
 from __future__ import annotations
 
+from contextlib import suppress
 from uuid import uuid4
 
+import docker
 import pytest
 
 from agent_harness.sandbox.capabilities import probe_docker_capabilities
+from agent_harness.sandbox.docker import SandboxHardeningError
 
 
 def _require_docker_engine() -> None:
@@ -38,8 +41,6 @@ def _require_docker_engine() -> None:
 @pytest.fixture(scope="module")
 def docker_client():
     _require_docker_engine()
-    import docker
-
     client = docker.from_env(use_context=False)
     try:
         yield client
@@ -85,6 +86,52 @@ def _inspect(client, container_name: str) -> dict:
     container = client.containers.get(container_name)
     container.reload()
     return container.attrs
+
+
+def _sha_manifest(client, volume_name: str) -> str:
+    """卷内容逐条 sha256（只算常规文件；类型/模式/属主由 _manifest 管）。"""
+    result = client.containers.run(
+        "python:3-slim",
+        ["sh", "-c",
+         "cd /workspace && find . -type f -exec sha256sum {} + | LC_ALL=C sort"],
+        volumes={volume_name: {"bind": "/workspace", "mode": "ro"}},
+        remove=True,
+    )
+    return result.decode()
+
+
+def _backup_volume_name(workspace_volume: str) -> str:
+    return f"{workspace_volume}-migration-backup"
+
+
+def _write_backup_files(client, workspace_volume: str, script: str) -> None:
+    """在备份卷里摆资产（模拟上次被硬杀留下的快照残件）。"""
+    backup = _backup_volume_name(workspace_volume)
+    try:
+        client.volumes.get(backup)
+    except docker.errors.NotFound:
+        client.volumes.create(backup)
+    container = client.containers.run(
+        "python:3-slim",
+        ["/bin/sh", "-lc", script],
+        volumes={backup: {"bind": "/backup", "mode": "rw"}},
+        detach=True,
+    )
+    try:
+        assert container.wait()["StatusCode"] == 0
+    finally:
+        container.remove(force=True)
+
+
+def _backup_has_restore_artifacts(client, workspace_volume: str) -> list[str]:
+    backup = _backup_volume_name(workspace_volume)
+    result = client.containers.run(
+        "python:3-slim",
+        ["sh", "-c", "ls -1 /backup 2>/dev/null | LC_ALL=C sort"],
+        volumes={backup: {"bind": "/backup", "mode": "ro"}},
+        remove=True,
+    )
+    return [line for line in result.decode().split() if line]
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +314,195 @@ def test_setgid_mode_survives_ownership_migration(
         assert sandbox.exec(f"stat -c %a /workspace/{path}").stdout.strip() == (
             expected_mode
         )
+    finally:
+        sandbox.delete()
+
+
+# ---------------------------------------------------------------------------
+# AC2：迁移中途被硬杀 → 恢复路径不得改坏活数据
+# ---------------------------------------------------------------------------
+
+
+def _seed_bulk_volume(client, volume_name: str) -> None:
+    """一个够大的历史卷：让「快照中途」这个窗口稳稳可命中。
+
+    快照是整卷 `tar -cpf`，卷越大窗口越宽；~120MB 足够让轮询线程在写盘期间
+    稳定命中（实测 8MB 太快，杀到之前 tar 已经写完）。
+    """
+    _seed_volume(
+        client,
+        volume_name,
+        "mkdir -p /workspace/bulk && "
+        "for i in $(seq 1 120); do "
+        "dd if=/dev/urandom of=/workspace/bulk/f$i.bin bs=512k count=2 status=none; "
+        "done && "
+        "printf 'MANIFEST' > /workspace/anchor.txt",
+    )
+
+
+def _kill_helper_mid_snapshot(client, volume_name: str, deadline: float = 60.0) -> bool:
+    """在 helper 写 `pre.tar` 期间 `kill -9` 它。返回是否真的杀到了。"""
+    import time
+
+    backup = _backup_volume_name(volume_name)
+    started = time.monotonic()
+    while time.monotonic() - started < deadline:
+        try:
+            backup_volume_containers = [
+                container
+                for container in client.containers.list(all=True)
+                if any(
+                    mount.get("Name") == backup
+                    for mount in container.attrs.get("Mounts") or []
+                )
+            ]
+        except Exception:  # noqa: BLE001 — daemon 抖动时继续轮询
+            backup_volume_containers = []
+        for container in backup_volume_containers:
+            try:
+                container.reload()
+                if container.status != "running":
+                    continue
+                size = container.exec_run(
+                    ["sh", "-c",
+                     "stat -c %s /backup/pre.tar.tmp 2>/dev/null || echo 0"]
+                ).output.decode().strip()
+            except docker.errors.NotFound:  # 容器被 get 之后又消失/被删
+                continue
+            if size.isdigit() and int(size) > 0:
+                with suppress(Exception):
+                    container.kill()
+                return True
+        time.sleep(0.05)
+    return False
+
+
+def test_kill_during_snapshot_does_not_corrupt_workspace_on_retry(
+    docker_client,
+) -> None:
+    """P1-C：快照写到一半 helper 被硬杀，下一次启动的「恢复」不得改坏活文件。
+
+    症状（修复前）：`pre.tar` 边写边落，被杀后留下截断归档；下次启动步骤 0
+    直接 `tar -xpf` 解它，tar 在 EOF 前已覆盖/截断部分活文件才报错——恢复
+    动作本身成了破坏源，且重试永久粘住（每次 exit 89）。
+    """
+    import threading
+
+    sandbox = _sandbox("h1486-killsnap")
+    _seed_bulk_volume(docker_client, sandbox._volume_name)
+    before = _sha_manifest(docker_client, sandbox._volume_name)
+    before_meta = _manifest(docker_client, sandbox._volume_name)
+    assert len(before.strip().splitlines()) == 121
+
+    killer_result: dict[str, bool] = {}
+    killer = threading.Thread(
+        target=lambda: killer_result.update(
+            killed=_kill_helper_mid_snapshot(docker_client, sandbox._volume_name)
+        ),
+        daemon=True,
+    )
+    killer.start()
+    try:
+        with pytest.raises(SandboxHardeningError):
+            sandbox.ensure_started()  # 被杀死的 helper：exit 137
+    finally:
+        killer.join(timeout=70)
+
+    assert killer_result.get("killed") is True, "没能在快照中途杀掉 helper"
+    # 快照阶段只读：这一刻活数据必须完好。
+    assert _sha_manifest(docker_client, sandbox._volume_name) == before
+
+    # 重试：要么干净地恢复+迁移成功，要么响亮失败但**绝不改坏数据**。
+    retry_error: Exception | None = None
+    try:
+        sandbox.ensure_started()
+    except Exception as error:  # noqa: BLE001 — 允许响亮失败
+        retry_error = error
+    after_sha = _sha_manifest(docker_client, sandbox._volume_name)
+    after_meta = _manifest(docker_client, sandbox._volume_name)
+    assert after_sha == before, "重试（恢复）改坏了活文件内容"
+    if retry_error is None:
+        # 迁移成功：属主迁到 1000，类型/模式/路径不变。
+        assert after_meta.replace("1000:1000", "0:0") == before_meta
+        assert sandbox.read_text("anchor.txt") == "MANIFEST"
+    # 不论哪条路径，重试都不得粘住：再启一次仍然只是「成功或同样响亮失败」。
+    if retry_error is not None:
+        with pytest.raises(SandboxHardeningError):
+            sandbox.ensure_started()
+        assert _sha_manifest(docker_client, sandbox._volume_name) == before
+    sandbox.delete()
+
+
+@pytest.mark.parametrize("truncation", ["mid-file", "member-boundary"])
+def test_truncated_backup_is_never_extracted_into_live_tree(
+    docker_client, truncation: str,
+) -> None:
+    """P1-C：备份卷里留着截断的 `pre.tar` 时，恢复不得动活数据。
+
+    备份刻意做成**与活树同路径**（快照本来就是同一个卷的副本），这正是原
+    verdict 的复现形态：解包会按路径覆盖活文件。
+
+    `mid-file`：截在某个成员的数据区中间——旧实现直接 `tar -xpf` 到
+    /workspace，tar 在 EOF 前已经把前面几个成员**写进活树**，之后才报错；
+    恢复动作本身成了破坏源。
+    `member-boundary`：截在 512 字节成员边界上——tar 认为「归档到此结束」，
+    退出码 0、只解出前几个成员，同样已经覆盖了活数据。
+    """
+    sandbox = _sandbox("h1486-trunc")
+    # 活树：4 个同尺寸文件，内容各不相同，方便逐条看见「被覆盖了哪几个」。
+    _seed_volume(
+        docker_client,
+        sandbox._volume_name,
+        "mkdir -p /workspace/d && "
+        "for i in 1 2 3 4; do "
+        "head -c 8192 /dev/zero | tr '\\0' L > /workspace/d/f$i.bin; done",
+    )
+    live_sha = _sha_manifest(docker_client, sandbox._volume_name)
+    assert len(live_sha.strip().splitlines()) == 4
+
+    # 备份：同样的路径，内容全换成 B（一旦被解进活树，sha 立刻变）。
+    # 成员布局：./d(512) + 4 × (512 头 + 8192 数据) = 512 + 4×8704 = 35328 字节。
+    body = (
+        "mkdir -p /backup/src/d && "
+        "for i in 1 2 3 4; do "
+        "head -c 8192 /dev/zero | tr '\\0' B > /backup/src/d/f$i.bin; done && "
+        "cd /backup/src && tar -cpf /backup/pre.tar --numeric-owner . && "
+        "rm -rf /backup/src && "
+    )
+    if truncation == "mid-file":
+        # 成员布局：./ 512 | ./d/ 512 | f4 头 512 + 数据 8192 | f3 头 512 + 数据 …
+        # 12000 落在 f3 的数据区中间 —— tar 自己会报错，但报错前已经写进活树。
+        script = body + "truncate -s 12000 /backup/pre.tar"
+    else:
+        # 9728 = 512 + 512 + 512 + 8192：正好在 f4 成员结束处。tar 认为「归档到此
+        # 结束」（rc=0）并原样解出 ./、./d/、f4 —— 只靠退出码完全防不住。
+        script = body + "truncate -s 9728 /backup/pre.tar"
+    _write_backup_files(docker_client, sandbox._volume_name, script)
+    backup_bytes = docker_client.containers.run(
+        "python:3-slim",
+        ["sh", "-c", "stat -c %s /backup/pre.tar"],
+        volumes={
+            _backup_volume_name(sandbox._volume_name): {
+                "bind": "/backup", "mode": "ro",
+            }
+        },
+        remove=True,
+    ).decode().strip()
+    assert backup_bytes in ("12000", "9728"), backup_bytes
+
+    try:
+        with pytest.raises(Exception) as excinfo:
+            sandbox.ensure_started()
+        message = str(excinfo.value)
+        assert "89" in message, message
+        # 核心断言：备份一个字节都没进活树（sha 逐条不变）。
+        assert _sha_manifest(docker_client, sandbox._volume_name) == live_sha
+        # 备份留卷内供人工恢复；不留半成品容器。
+        assert "pre.tar" in _backup_has_restore_artifacts(
+            docker_client, sandbox._volume_name
+        )
+        with pytest.raises(docker.errors.NotFound):
+            docker_client.containers.get(sandbox._container_name)
     finally:
         sandbox.delete()
 
@@ -480,8 +716,6 @@ def test_custom_image_unknown_named_user_fails_loudly_without_leftovers(
         with pytest.raises(SandboxHardeningError) as excinfo:
             sandbox.ensure_started()
         assert "app:app" in str(excinfo.value)
-        import docker
-
         with pytest.raises(docker.errors.NotFound):
             docker_client.containers.get(sandbox._container_name)
         sandbox.delete()  # 不得 409：卷上没有残留容器挂着
@@ -503,10 +737,6 @@ def test_container_start_failure_is_wrapped_and_cleaned_up(
     名字解析已在 `_resolve_container_user` 阶段 fail-closed（见上一条用例），
     这里用真实 create + 真实卷、只把 `start` 换成抛错，验的是**清理边界**。
     """
-    import docker
-
-    from agent_harness.sandbox.docker import SandboxHardeningError
-
     sandbox = _sandbox("h1486-startfail")
     # `client.containers` 每次访问都是新集合对象，只能打在类上。
     containers_cls = type(sandbox._client.containers)
