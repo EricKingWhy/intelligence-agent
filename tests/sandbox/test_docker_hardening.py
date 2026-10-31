@@ -839,6 +839,68 @@ def test_is_hardened_rejects_named_user_that_cannot_be_resolved() -> None:
     assert DockerSandbox._is_hardened(attrs) is False
 
 
+def test_helper_start_failure_leaves_no_orphan_and_delete_succeeds(
+    docker_client, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2-B：迁移 helper 起不来时不得留孤儿容器，`delete()` 不得 409。
+
+    修复前（实测，无 bash 的 busybox 镜像）：`ensure_started()` 响亮失败（
+    fail-closed 正确），但同时留下一个挂着工作卷与备份卷的 helper，随后
+    `sandbox.delete()` → `APIError 409 ... volume is in use`。
+    """
+    from agent_harness.sandbox import docker as docker_module
+
+    image = _commit_custom_image(
+        docker_client, f"agent-harness-test-1486:{uuid4().hex}", "65534:65534",
+    )
+    suffix = uuid4().hex
+    sandbox = docker_module.DockerSandbox(
+        image=image,
+        container_name=f"agent-harness-h1486-nobash-{suffix}",
+        volume_name=f"agent-harness-h1486-nobash-{suffix}",
+    )
+    backup_volume = _backup_volume_name(sandbox._volume_name)
+
+    def helper_containers() -> list[str]:
+        """挂着工作卷或备份卷的残留容器（不依赖被测代码的 label 常量）。"""
+        found = []
+        for container in docker_client.containers.list(all=True):
+            container.reload()
+            mounted = {
+                mount.get("Name") for mount in container.attrs.get("Mounts") or []
+            }
+            if mounted & {sandbox._volume_name, backup_volume}:
+                found.append(container.name)
+        return found
+
+    # 让 helper 一定起不来：真实 Engine 的错误路径（不存在的 entrypoint 让
+    # start 报 400），且**不 mock 掉 orphan 本身**——这正是被复现的症状。
+    containers_cls = type(sandbox._client.containers)
+    original_run = containers_cls.run
+
+    def run_failing_helper(self, *args, **kwargs):
+        if kwargs.get("volumes", {}).get(backup_volume):
+            kwargs = dict(kwargs)
+            kwargs["entrypoint"] = "/nonexistent/bash-does-not-exist"
+        return original_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(containers_cls, "run", run_failing_helper)
+    try:
+        with pytest.raises(SandboxHardeningError) as excinfo:
+            sandbox.ensure_started()
+        assert "无法启动卷属主迁移容器" in str(excinfo.value)
+        assert helper_containers() == [], (
+            f"迁移失败留下孤儿 helper：{helper_containers()}"
+        )
+        # 关键回归点：卷能删（没有容器还挂着它）。
+        sandbox.delete()
+        with pytest.raises(docker.errors.NotFound):
+            docker_client.volumes.get(sandbox._volume_name)
+    finally:
+        sandbox.delete()
+        docker_client.images.remove(image, force=True)
+
+
 def test_default_profile_keeps_build_network_and_no_resource_limits(
     docker_client,
 ) -> None:

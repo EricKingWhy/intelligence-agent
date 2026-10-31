@@ -415,6 +415,9 @@ _OWNERSHIP_HELPER_CAPS = ["CHOWN", "FOWNER", "DAC_OVERRIDE", "FSETID"]
 #: 备份仍在，重试可先恢复再迁移（可验证的恢复路径，AC2）。
 _BACKUP_MOUNT = "/backup"
 _BACKUP_SUFFIX = "-migration-backup"
+#: 迁移 helper 容器的认领 label：`containers.run` 在 start 失败时不返回容器对象，
+#: 只能事后按 label 找回来清理（见 `_remove_helper_containers`）。
+_HELPER_LABEL = "agent-harness.migration-helper"
 
 #: 属主迁移脚本（bash；默认 `python:3-slim` 自带）。步骤：
 #: 0) 备份卷里已有 `pre.tar` → 上次迁移没走完，先核对 `pre.idx` 记录的字节数、
@@ -807,6 +810,15 @@ class DockerSandbox(Sandbox):
             )
         return owner
 
+    def _remove_helper_containers(self) -> None:
+        """清掉本卷残留的迁移 helper（失败分支用；按 label 认领，不靠名字猜）。"""
+        with suppress(Exception):
+            for helper in self._client.containers.list(
+                all=True, filters={"label": f"{_HELPER_LABEL}={self._volume_name}"}
+            ):
+                with suppress(Exception):
+                    helper.remove(force=True)
+
     def _migrate_volume_ownership(self, user: str) -> None:
         """把具名卷里的历史文件属主迁到容器用户；失败响亮、可重试、不毁数据。
 
@@ -824,6 +836,10 @@ class DockerSandbox(Sandbox):
             self._client.volumes.get(backup_volume)
         except docker.errors.NotFound:
             self._client.volumes.create(backup_volume)
+        # `containers.run(detach=True)` 是 create + start 两步：start 失败时它抛错
+        # 且**不返回**容器对象，`finally: remove` 拿不到东西 → 孤儿容器仍挂着工作
+        # 卷，随后 `delete()` 的卷删除报 409。用 label 认领，失败分支按 label 清掉。
+        helper_labels = {_HELPER_LABEL: self._volume_name}
         try:
             container = self._client.containers.run(
                 self._image,
@@ -839,6 +855,7 @@ class DockerSandbox(Sandbox):
                 security_opt=HARDENED_SECURITY_OPT,
                 network_mode="none",
                 working_dir=str(self.workspace_root),
+                labels=helper_labels,
                 volumes={
                     self._volume_name: {
                         "bind": str(self.workspace_root),
@@ -849,6 +866,7 @@ class DockerSandbox(Sandbox):
                 detach=True,
             )
         except Exception as error:
+            self._remove_helper_containers()
             raise SandboxHardeningError(
                 f"无法启动卷属主迁移容器（{self._volume_name}）：{error}"
             ) from error
