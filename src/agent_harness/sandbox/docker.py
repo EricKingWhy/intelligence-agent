@@ -157,6 +157,16 @@ def _open_within_pinned_parent(parent_fd: int, name: str, flags: int) -> int:
         raise
 
 
+def _apply_owner(member: tarfile.TarInfo, owner: tuple[int, int] | None) -> None:
+    """给 tar 成员写显式属主（#1486：daemon 以 root 解包）。
+
+    `owner is None` 表示调用方要求保留成员自身观测到的属主（copy_in 的宿主
+    文件语义）；非 None 时一律用它，保证容器内落盘文件归容器用户。
+    """
+    if owner is not None:
+        member.uid, member.gid = owner
+
+
 def _add_pinned_leaf_member(
     archive: tarfile.TarFile,
     parent_fd: int,
@@ -257,8 +267,7 @@ def _walk_fd_tree(
                 )
                 if member is None or not member.isdir():
                     raise PermissionError("copy_in source changed during archive")
-                if owner is not None:
-                    member.uid, member.gid = owner
+                _apply_owner(member, owner)
                 archive.addfile(member)
                 _walk_fd_tree(
                     archive, dir_fd, member_name, dir_flags, file_flags, owner,
@@ -283,8 +292,7 @@ def _walk_fd_tree(
                 )
                 if member is None or not (member.isreg() or member.islnk()):
                     raise PermissionError("copy_in source changed during archive")
-                if owner is not None:
-                    member.uid, member.gid = owner
+                _apply_owner(member, owner)
                 archive.addfile(member, stream)
             finally:
                 stream.close()
@@ -361,8 +369,7 @@ def _archive_posix_tree_fd_relative(
             )
             if member is None or not member.isdir():
                 raise PermissionError("copy_in source changed during archive")
-            if owner is not None:
-                member.uid, member.gid = owner
+            _apply_owner(member, owner)
             archive.addfile(member)
             _walk_fd_tree(
                 archive, root_fd, root_name, dir_flags, file_flags, owner,
@@ -377,8 +384,7 @@ def _archive_posix_tree_fd_relative(
                 )
                 if member is None or not (member.isreg() or member.islnk()):
                     raise PermissionError("copy_in source changed during archive")
-                if owner is not None:
-                    member.uid, member.gid = owner
+                _apply_owner(member, owner)
                 archive.addfile(member, stream)
             finally:
                 stream.close()
@@ -418,6 +424,11 @@ _BACKUP_SUFFIX = "-migration-backup"
 #: 迁移 helper 容器的认领 label：`containers.run` 在 start 失败时不返回容器对象，
 #: 只能事后按 label 找回来清理（见 `_remove_helper_containers`）。
 _HELPER_LABEL = "agent-harness.migration-helper"
+
+#: 迁移 helper 的等待上限。迁移成本 = 两次全树 find + 一次整卷 tar + chown，
+#: 随卷大小线性增长；15 分钟对常见工作区（GB 级）留有充分余量，同时保证
+#: daemon 卡死时不会让会话启动永久挂住（复核 P3-2）。
+_MIGRATION_WAIT_SECONDS = 900
 
 #: 属主迁移脚本（bash；默认 `python:3-slim` 自带）。步骤：
 #: 0) 备份卷里已有 `pre.tar` → 上次迁移没走完，先核对 `pre.idx` 记录的字节数、
@@ -890,8 +901,16 @@ class DockerSandbox(Sandbox):
                 f"无法启动卷属主迁移容器（{self._volume_name}）：{error}"
             ) from error
         try:
-            status = container.wait()
+            # 无上界等待会让会话启动在 daemon 卡住 / 超大卷时永久挂住（复核
+            # P3-2）。超时按迁移失败处理：helper 在 finally 里被删，备份卷里
+            # 若已有 pre.tar 也仍是可复位起点。
+            status = container.wait(timeout=_MIGRATION_WAIT_SECONDS)
             logs = container.logs(stdout=True, stderr=True).decode("utf-8", "replace")
+        except Exception as error:
+            raise SandboxHardeningError(
+                f"卷 {self._volume_name} 属主迁移等待失败"
+                f"（>{_MIGRATION_WAIT_SECONDS}s 或 daemon 异常）：{error}"
+            ) from error
         finally:
             with suppress(Exception):
                 container.remove(force=True)
@@ -1727,10 +1746,9 @@ class DockerSandbox(Sandbox):
             member = tarfile.TarInfo(name=tmp_name)
             member.size = len(payload)
             member.mode = 0o644
-            if owner is not None:
-                # #1486：daemon 以 root 解包；不显式写属主会把文件落成 root，
-                # 非 root 容器用户随后就改不了自己刚写的文件。
-                member.uid, member.gid = owner
+            # #1486：daemon 以 root 解包；不显式写属主会把文件落成 root，
+            # 非 root 容器用户随后就改不了自己刚写的文件。
+            _apply_owner(member, owner)
             archive.addfile(member, io.BytesIO(payload))
         if not self._container.put_archive(str(target.parent), buffer.getvalue()):
             raise RuntimeError(f"无法写入 Workspace 文件 '{target}'")
@@ -1795,8 +1813,7 @@ class DockerSandbox(Sandbox):
                                     raise PermissionError(
                                         "copy_in source changed during archive"
                                     )
-                                if owner is not None:
-                                    member.uid, member.gid = owner
+                                _apply_owner(member, owner)
                                 archive.addfile(member)
                             else:
                                 with os.fdopen(fd, "rb") as stream:
@@ -1813,8 +1830,7 @@ class DockerSandbox(Sandbox):
                                         raise PermissionError(
                                             "copy_in source changed during archive"
                                         )
-                                    if owner is not None:
-                                        member.uid, member.gid = owner
+                                    _apply_owner(member, owner)
                                     archive.addfile(member, stream)
                         finally:
                             if fd is not None:
