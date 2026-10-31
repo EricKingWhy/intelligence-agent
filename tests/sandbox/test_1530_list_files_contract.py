@@ -27,10 +27,13 @@ def sandbox(request: pytest.FixtureRequest, tmp_path: Path):
             pytest.skip('PSEC requires Windows')
         from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
 
-        executable = Path(__file__).resolve().parents[2] / 'desktop/node_modules/@microsoft/mxc-sdk/bin/x64/wxc-exec.exe'
-        if not os.environ.get('IA_MXC_EXECUTABLE') and not executable.is_file():
+        configured = os.environ.get('IA_MXC_EXECUTABLE')
+        bundled = Path(__file__).resolve().parents[2] / 'desktop/node_modules/@microsoft/mxc-sdk/bin/x64/wxc-exec.exe'
+        candidates = [Path(configured)] if configured else []
+        executable = next((path for path in [*candidates, bundled] if path.is_file()), None)
+        if executable is None:
             pytest.skip('PSEC requires the installed MXC SDK')
-        sandbox = WindowsPsecSandbox(tmp_path / 'workspace', mxc_executable=os.environ.get('IA_MXC_EXECUTABLE') or executable)
+        sandbox = WindowsPsecSandbox(tmp_path / 'workspace', mxc_executable=executable)
     try:
         for path in ('root.py', 'pkg/inner.py', 'pkg/deep/up.PY', '.hidden.py', 'pkg/notes.txt'):
             sandbox.write_text(path, 'x')
