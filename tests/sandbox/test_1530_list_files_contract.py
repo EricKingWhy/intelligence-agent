@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from agent_harness.sandbox.capabilities import probe_docker_capabilities
 from agent_harness.sandbox.docker import DockerSandbox
 from agent_harness.sandbox.local import LocalSubprocessSandbox
 
@@ -16,6 +17,9 @@ def sandbox(request: pytest.FixtureRequest, tmp_path: Path):
     if backend == 'local':
         sandbox = LocalSubprocessSandbox(tmp_path / 'workspace')
     elif backend == 'docker':
+        caps = probe_docker_capabilities()
+        if not caps.available:
+            pytest.skip(caps.reason)
         name = 'issue1530-' + uuid4().hex
         sandbox = DockerSandbox(container_name=name, volume_name=name)
     else:
