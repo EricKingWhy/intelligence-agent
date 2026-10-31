@@ -536,25 +536,26 @@ def test_truncated_backup_is_never_extracted_into_live_tree(
     if truncation == "mid-file":
         # 成员布局：./ 512 | ./d/ 512 | f4 头 512 + 数据 8192 | f3 头 512 + 数据 …
         # 12000 落在 f3 的数据区中间 —— tar 自己会报错，但报错前已经写进活树。
-        _write_snapshot_archive(
-            docker_client, sandbox._volume_name, truncate_at=12000
-        )
+        _write_snapshot_archive(docker_client, sandbox._volume_name, truncate_at=12000)
     else:
         # 9728 = 512 + 512 + 512 + 8192：正好在 f4 成员结束处。tar 认为「归档到此
         # 结束」（rc=0）并原样解出 ./、./d/、f4 —— 只靠退出码完全防不住。
-        _write_snapshot_archive(
-            docker_client, sandbox._volume_name, truncate_at=9728
+        _write_snapshot_archive(docker_client, sandbox._volume_name, truncate_at=9728)
+    backup_bytes = (
+        docker_client.containers.run(
+            "python:3-slim",
+            ["sh", "-c", "stat -c %s /backup/pre.tar"],
+            volumes={
+                _backup_volume_name(sandbox._volume_name): {
+                    "bind": "/backup",
+                    "mode": "ro",
+                }
+            },
+            remove=True,
         )
-    backup_bytes = docker_client.containers.run(
-        "python:3-slim",
-        ["sh", "-c", "stat -c %s /backup/pre.tar"],
-        volumes={
-            _backup_volume_name(sandbox._volume_name): {
-                "bind": "/backup", "mode": "ro",
-            }
-        },
-        remove=True,
-    ).decode().strip()
+        .decode()
+        .strip()
+    )
     assert backup_bytes in ("12000", "9728"), backup_bytes
 
     try:
@@ -576,7 +577,8 @@ def test_truncated_backup_is_never_extracted_into_live_tree(
 
 @pytest.mark.parametrize("truncated", [False, True])
 def test_legacy_backup_without_index_is_verified_by_manifest(
-    docker_client, truncated: bool,
+    docker_client,
+    truncated: bool,
 ) -> None:
     """F-3：升级前留下的备份只有 pre.tar、没有 pre.idx。
 
@@ -587,8 +589,10 @@ def test_legacy_backup_without_index_is_verified_by_manifest(
     sandbox = _sandbox("h1486-noindex")
     live_sha = _seed_four_live_files(docker_client, sandbox._volume_name)
     _write_snapshot_archive(
-        docker_client, sandbox._volume_name,
-        truncate_at=9728 if truncated else None, with_index=False,
+        docker_client,
+        sandbox._volume_name,
+        truncate_at=9728 if truncated else None,
+        with_index=False,
     )
     try:
         if truncated:
@@ -598,9 +602,53 @@ def test_legacy_backup_without_index_is_verified_by_manifest(
             assert _sha_manifest(docker_client, sandbox._volume_name) == live_sha
         else:
             sandbox.ensure_started()
-            assert _sha_manifest(
-                docker_client, sandbox._volume_name
-            ) == _expected_b_manifest()
+            assert (
+                _sha_manifest(docker_client, sandbox._volume_name)
+                == _expected_b_manifest()
+            )
+    finally:
+        sandbox.delete()
+
+
+def test_migration_wait_timeout_stops_helper_and_reports_its_log(
+    docker_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-4：等待超时必须能看见 helper 停在哪一步，且不是直接 SIGKILL。
+
+    用**同一份生产脚本**，只在开头插一句「先喊一声再睡」，把等待上限压到秒级：
+    超时分支必须（a）在报错前先 `stop()`（SIGTERM 后容器不再 running），
+    （b）把 helper 已经打出的 `MIGRATE*` 日志带进异常信息。
+    """
+    import agent_harness.sandbox.docker as docker_module
+
+    sandbox = _sandbox("h1486-timeout")
+    _seed_volume(
+        docker_client, sandbox._volume_name, "printf 'KEEP' > /workspace/keep.txt"
+    )
+    real_script = docker_module._OWNER_MIGRATION_SCRIPT
+    injected = real_script.replace(
+        "D=/tmp/.harness-migration\n",
+        "D=/tmp/.harness-migration\n"
+        "printf 'MIGRATE_TEST sleeping before chown\\n'\n"
+        "sleep 120\n",
+        1,
+    )
+    assert injected != real_script
+    monkeypatch.setattr(docker_module, "_OWNER_MIGRATION_SCRIPT", injected)
+    monkeypatch.setattr(docker_module, "_MIGRATION_WAIT_SECONDS", 2)
+
+    try:
+        with pytest.raises(SandboxHardeningError) as excinfo:
+            sandbox.ensure_started()
+        message = str(excinfo.value)
+        assert "MIGRATE_TEST sleeping before chown" in message, message
+        # 优雅停止：helper 被 stop 后不应再是 running（force remove 之后直接查不到）。
+        with pytest.raises(docker.errors.NotFound):
+            docker_client.containers.get(sandbox._container_name)
+        # 迁移没开始 chown 就被超时拦下：活数据原样。
+        assert _manifest(docker_client, sandbox._volume_name) == (
+            "d 0:0 755 /workspace\nf 0:0 644 /workspace/keep.txt\n"
+        )
     finally:
         sandbox.delete()
 
