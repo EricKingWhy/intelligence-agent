@@ -782,21 +782,33 @@ def test_custom_image_root_user_is_de_privileged(docker_client) -> None:
 
 
 def _commit_image_with_named_user(
-    docker_client, tag: str, *, create_user: bool
+    docker_client,
+    tag: str,
+    *,
+    create_user: bool,
+    user_decl: str = "app:app",
+    setup: str | None = None,
 ) -> str:
-    """提交一个 `USER app:app` 镜像；create_user 决定镜像里到底有没有该用户。"""
+    """提交一个声明了名字用户的镜像。
+
+    `create_user` 决定镜像里到底有没有该用户；`user_decl` 改 `USER` 声明；
+    `setup` 可换成另一套用户/组创建脚本。
+    """
     base = docker_client.containers.run(
         "python:3-slim", ["sleep", "infinity"], detach=True
     )
     try:
-        if create_user:
+        if setup is not None:
+            result = base.exec_run(["sh", "-c", setup])
+            assert result.exit_code == 0, result.output
+        elif create_user:
             result = base.exec_run(
                 ["sh", "-c", "groupadd -g 1500 app && useradd -u 1500 -g 1500 -m app"]
             )
             assert result.exit_code == 0, result.output
         docker_client.api.commit(
             base.id, repository=tag.rsplit(":", 1)[0], tag=tag.rsplit(":", 1)[1],
-            changes=["USER app:app"],
+            changes=[f"USER {user_decl}"],
         )
     finally:
         base.remove(force=True)
@@ -838,6 +850,86 @@ def test_custom_image_named_user_and_group_is_resolved_and_workspace_usable(
         assert "1500:1500 666 /workspace/via_api.txt" in _manifest(
             docker_client, sandbox._volume_name
         )
+    finally:
+        sandbox.delete()
+        docker_client.images.remove(image, force=True)
+
+
+def test_custom_image_nobody_nogroup_is_resolved_by_group_name(docker_client) -> None:
+    """`USER nobody:nogroup`：group 段是**组名**，不是用户名。
+
+    N-1：原先 group 段拿 `id -g nogroup` 查（`id -g` 的参数是用户名），
+    nogroup 不是用户 → 解析失败 → 合法镜像全面无法启动。本例钉住
+    「按组查」的语义：期望 65534:65534 且工作区可用。
+    """
+    image = _commit_custom_image(
+        docker_client, f"agent-harness-test-1486:{uuid4().hex}", "nobody:nogroup"
+    )
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    suffix = uuid4().hex
+    sandbox = DockerSandbox(
+        image=image,
+        container_name=f"agent-harness-h1486-nogroup-{suffix}",
+        volume_name=f"agent-harness-h1486-nogroup-{suffix}",
+    )
+    try:
+        sandbox.ensure_started()
+        attrs = _inspect(docker_client, sandbox._container_name)
+        assert attrs["Config"]["User"] == "65534:65534"
+        assert sandbox.exec("id -u").stdout.strip() == "65534"
+        assert "65534:65534 755 /workspace" in _manifest(
+            docker_client, sandbox._volume_name
+        )
+        sandbox.write_text("nogroup.txt", "ok")
+        assert sandbox.read_text("nogroup.txt") == "ok"
+    finally:
+        sandbox.delete()
+        docker_client.images.remove(image, force=True)
+
+
+def test_custom_image_supplementary_group_is_resolved_by_that_group(
+    docker_client,
+) -> None:
+    """`USER app:builders`（builders 是补充组，不是 app 的主组）取的必须是
+    builders 的 gid。
+
+    N-1 的静默错法：`id -g builders` 在 builders 恰好也是用户名时会给出
+    那个用户的主组（与声明无关）；若不是用户名则直接失败。两种都不是
+    「声明了 builders 组」的语义。这里让 builders 同时是用户名、但主组是
+    另一个组，要求工作区属主落在 builders 组的 1500:2000（而不是 1500:2001）。
+    """
+    image = _commit_image_with_named_user(
+        docker_client,
+        f"agent-harness-test-1486:{uuid4().hex}",
+        create_user=False,
+        user_decl="app:builders",
+        # builders 也是用户名，但它的主组是 allies(2001)：「拿组名去 `id -g`」
+        # 会给 2001，而 group builders 的 gid 是 2000——上面的断言因此有鉴别力。
+        setup=(
+            "groupadd -g 1500 app && groupadd -g 2000 builders"
+            " && groupadd -g 2001 allies"
+            " && useradd -u 1500 -g 1500 -m app"
+            " && useradd -u 1600 -g 2001 -m builders"
+        ),
+    )
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    suffix = uuid4().hex
+    sandbox = DockerSandbox(
+        image=image,
+        container_name=f"agent-harness-h1486-supgrp-{suffix}",
+        volume_name=f"agent-harness-h1486-supgrp-{suffix}",
+    )
+    try:
+        sandbox.ensure_started()
+        attrs = _inspect(docker_client, sandbox._container_name)
+        assert attrs["Config"]["User"] == "1500:2000"
+        manifest = _manifest(docker_client, sandbox._volume_name)
+        assert "1500:2000 755 /workspace" in manifest
+        assert "1500:1500" not in manifest
+        sandbox.write_text("supgrp.txt", "ok")
+        assert sandbox.read_text("supgrp.txt") == "ok"
     finally:
         sandbox.delete()
         docker_client.images.remove(image, force=True)

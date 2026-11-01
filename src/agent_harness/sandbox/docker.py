@@ -729,8 +729,9 @@ class DockerSandbox(Sandbox):
         uid_part, _, gid_part = declared.partition(":")
         if uid_part.isdecimal() and (gid_part or uid_part).isdecimal():
             return declared
-        # 名字（裸名字或 name:group）一律用镜像自身解析出数字 uid/gid，
-        # 保证挂载属主可预测；解析不出就响亮失败，不猜。
+        # 名字（裸名字或 name:group）也用镜像自身解析成数字，保证挂载属主
+        # 可预测：user 段按用户查、group 段按组查（见 `_resolve_image_uid_gid`）；
+        # 解析不出就响亮失败，不猜。
         resolved = self._resolve_image_uid_gid(declared)
         if resolved is None:
             raise SandboxHardeningError(
@@ -740,17 +741,38 @@ class DockerSandbox(Sandbox):
         return resolved
 
     def _resolve_image_uid_gid(self, declared: str) -> str | None:
-        """在镜像内解析 `user` / `user:group` / `uid:group` 为数字 uid:gid。"""
-        user_part, _, group_part = declared.partition(":")
-        user_part = user_part or "0"
-        group_part = group_part or user_part
+        """在镜像内解析 `user` / `user:group` / `uid:group` 为数字 uid:gid。
+
+        user 段用 `id -u`；group 段按**组**查（`getent group`）——`id -g` 的
+        参数是**用户名**，拿组名去查得到的是「叫这个名字的用户的主组」
+        而不是同名组：`USER app:daemon` 会静默拿到 daemon 用户的 gid 而不是
+        daemon 组的 gid；`USER nobody:nogroup` 则直接报错（nogroup 不是用户名）。
+        只有声明里**没有** group 段时，`id -g <user>` 才是该用户主组的正确语义。
+        任一段解析不出都返回 None（调用方响亮失败），不猜数字。
+        """
+        user_part, sep, group_part = declared.partition(":")
+        # 已是数字的段直接用：Docker 允许不存在对应 passwd/group 条目的
+        # 数字 uid/gid，拿去 `id`/`getent` 反而查不到。
+        if user_part.isdecimal():
+            uid_probe = f"uid={user_part}"
+        else:
+            uid_probe = f"uid=$(id -u {shlex.quote(user_part)})"
+        if not sep:
+            # 未声明 group：取该用户的主组，这正是 `id -g <user>` 的语义。
+            gid_probe = f"gid=$(id -g {shlex.quote(user_part)})"
+        elif group_part.isdecimal():
+            gid_probe = f"gid={group_part}"
+        else:
+            # 含 `:` 但 group 段为空（`USER app:`）也走这里：查不到组 → 响亮失败。
+            gid_probe = f"gid=$(getent group {shlex.quote(group_part)} | cut -d: -f3)"
+        script = (
+            f"{uid_probe} && {gid_probe}"
+            ' && [ -n "$uid" ] && [ -n "$gid" ] && echo "$uid:$gid"'
+        )
         try:
             output = self._client.containers.run(
                 self._image,
-                [
-                    "sh", "-c",
-                    f"id -u {shlex.quote(user_part)}; id -g {shlex.quote(group_part)}",
-                ],
+                ["sh", "-c", script],
                 remove=True,
                 entrypoint="",
                 user="0:0",
@@ -761,9 +783,9 @@ class DockerSandbox(Sandbox):
         except Exception as error:  # noqa: BLE001 — 解析失败退回镜像声明
             logger.warning("镜像用户 %r 解析失败：%s", declared, error)
             return None
-        parts = output.decode("utf-8", "replace").split()
-        if len(parts) == 2 and all(part.isdecimal() for part in parts):
-            return f"{parts[0]}:{parts[1]}"
+        uid, _, gid = output.decode("utf-8", "replace").strip().partition(":")
+        if uid.isdecimal() and gid.isdecimal():
+            return f"{uid}:{gid}"
         return None
 
     def _create_hardened_container(self) -> None:
