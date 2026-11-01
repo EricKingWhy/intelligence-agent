@@ -836,8 +836,20 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 #: 落下的是无效 FAIL 收据 ⇒ 硬口径下第一张 PASS 收据无法出生（实测复现：PR #1596 gate0
 #: run 40181451067，6 违规；#1595 run 40179483969 于 09:10 warn-only 放行）。锚点前移 =
 #: 重开一轮采用窗：锚点之前的提交（含全部在途 PR）机械豁免，锚点日期起重新计 7 天宽限。
+#:
+#: 2026-11-01 第三次锚定（#1662，用户裁决 A）：69befba3da74 生于 2026-10-25T17:11:06+08:00，
+#: 7 天窗右端 2026-11-01T09:11Z 已过；#1486 第八棒 tip d97b00f26 于 12:13Z 裸跑 gate0 得 6/7
+#: ——guards 车道的 receipt-present 判红 18 笔代码提交（此前 12 张收据全在窗内，这是第一支
+#: 在到期后撞上死锁的分支）。锚点取 d97b00f26：它是本笔的第一父（第八棒冻结 tip）、也是新
+#: tip 的祖先，锚到它使 merge-base a49a2b9c5 起的全部 19 笔机械豁免；三选一实测（同一脚本
+#: 直接调 `receipt_present_check(bootstrap_sha=…)`）：锚 69befba3d ⇒ 18 违规 / 转硬，锚
+#: a49a2b9c5（merge-base）⇒ 仍 18 违规 / 仅靠 warn-only，锚 d97b00f26 ⇒ 0 违规。宽限窗重
+#: 计到 d97b00f26 的提交时间 2026-11-08T12:00:04Z。**不**锚到 origin/main 2b04fa767：它不是
+#: 本分支 HEAD 的祖先，与 scope 内提交无祖先关系会被 `merge-base --is-ancestor` 判成「早于
+#: 锚点」而把全部提交机械豁免——那是把判据挖空，不是重开采用窗；锚点日期也不得伪造。
+#:
 #: 设计缺陷本体（新分支收据自举）由 follow-up 票处理，本常量不承担该修复。
-_RECEIPT_BOOTSTRAP_SHA = "69befba3da742a1ee8ad3466e4bdc788ca4e1b24"
+_RECEIPT_BOOTSTRAP_SHA = "d97b00f26a43e36fc289c16cf89dbd66e02dda8e"
 # A receipt requires a ledger binding when its tested Gate-0 source contains this marker.
 _LEDGER_BINDING_MARKER = "review-ledger-binding-v1"
 
