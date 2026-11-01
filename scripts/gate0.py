@@ -106,6 +106,8 @@ GUARD_TESTS = (
     "tests/test_event_vocabulary_generated.py",
     "tests/test_verification_map.py",
     "tests/test_exec_bit_matches_shebang.py",
+    # #1662：锚点常量与锚点必须一起传播，否则 receipt-present 对整棵树静默 fail-open。
+    "tests/tooling/test_gate0_bootstrap_anchor.py",
 )
 
 #: 代码面 ↔ 必跑车道的机械映射（issue #292）。`--affected` 读它；`tests/test_verification_map.py` 守它。
@@ -442,7 +444,7 @@ def build_lanes(since: str) -> list[Lane]:
     py = venv_python()
     guard_env = dict(os.environ, PYTHONUTF8="1", PYTHONPATH="")
     lanes.append(Lane(
-        "guards", "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位（4 文件）",
+        "guards", "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位 + 收据锚点（5 文件）",
         [py, "-m", "pytest", *GUARD_TESTS, "-q", "-p", "no:randomly", "-p", "no:cacheprovider"]
         if py else None,
         REPO_ROOT, env=guard_env,
@@ -839,14 +841,35 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 #:
 #: 2026-11-01 第三次锚定（#1662，用户裁决 A）：69befba3da74 生于 2026-10-25T17:11:06+08:00，
 #: 7 天窗右端 2026-11-01T09:11Z 已过；#1486 第八棒 tip d97b00f26 于 12:13Z 裸跑 gate0 得 6/7
-#: ——guards 车道的 receipt-present 判红 18 笔代码提交（此前 12 张收据全在窗内，这是第一支
-#: 在到期后撞上死锁的分支）。锚点取 d97b00f26：它是本笔的第一父（第八棒冻结 tip）、也是新
-#: tip 的祖先，锚到它使 merge-base a49a2b9c5 起的全部 19 笔机械豁免；三选一实测（同一脚本
-#: 直接调 `receipt_present_check(bootstrap_sha=…)`）：锚 69befba3d ⇒ 18 违规 / 转硬，锚
-#: a49a2b9c5（merge-base）⇒ 仍 18 违规 / 仅靠 warn-only，锚 d97b00f26 ⇒ 0 违规。宽限窗重
-#: 计到 d97b00f26 的提交时间 2026-11-08T12:00:04Z。**不**锚到 origin/main 2b04fa767：它不是
-#: 本分支 HEAD 的祖先，与 scope 内提交无祖先关系会被 `merge-base --is-ancestor` 判成「早于
-#: 锚点」而把全部提交机械豁免——那是把判据挖空，不是重开采用窗；锚点日期也不得伪造。
+#: ——guards 车道的 receipt-present 判红 18 笔代码提交（本分支此前没撞上过期：自 merge-base
+#: a49a2b9c5 起 main 上新增的 12 张收据都在旧窗内；这是第一支在到期后撞上死锁的分支）。锚点
+#: 取 d97b00f26：它是本笔的第一父（第八棒冻结 tip）、也是新 tip 的祖先，锚到它使 merge-base
+#: a49a2b9c5 起的全部 19 笔机械豁免；三选一实测（同一脚本直接调
+#: `receipt_present_check(bootstrap_sha=…)`）：锚 69befba3d ⇒ 18 违规 / 转硬，锚
+#: a49a2b9c5（merge-base）⇒ 仍 18 违规 / 仅靠 warn-only（窗到 2026-11-03T16:52Z，两天后同样
+#: 转硬，等于把死锁推迟而非解除），锚 d97b00f26 ⇒ 0 违规。宽限窗重计到 d97b00f26 的提交时间
+#: 2026-11-08T12:00:04Z。**不**锚到 origin/main 2b04fa767：它不是本分支 HEAD 的祖先，与 scope
+#: 内提交无祖先关系会被 `merge-base --is-ancestor` 判成「早于锚点」而把全部提交机械豁免——
+#: 那是把判据挖空，不是重开采用窗；锚点日期也不得伪造。
+#:
+#: ⚠ **全局影响（AC5）**：d97b00f26 是**分支私有**提交（`merge-base --is-ancestor d97b00f26
+#: origin/main` = rc 1），且本常量只随「设锚的那一笔」（738e67333，第一父就是 d97b00f26）
+#: 传播——实测 801 个 ref 里 `scripts/gate0.py` 命中本 tip 版 blob 的只有本分支 1 条，而
+#: 「有常量、缺锚点」这种 fail-open 形状在仓里 **0 例**，合并（而非 cherry-pick / rebase 局部
+#: 摘取）必然把两者一起带来。⇒ **#1486 合并进 main 之前**，其他分支/PR 跑的是**各自树里的旧
+#: 常量**（实测 origin/main、codex/issue-1530、codex/session-delete-projection、claude/1499
+#: 均为 69befba3da74），本笔对他们**没有任何影响**；**合并之后**，从 main 切出的分支把 d97b00f26
+#: 当祖先、窗口正常。真正的残余风险只有两条：① 合并前 fork 且**到 2026-11-08 之后仍未同步 main**
+#: 的分支，会在自己的锚点上复现本次死锁（`69befba3d` 的窗已于 2026-11-01T09:11Z 到期，**这是
+#: 重锚前就存在的状态**，不是本笔引入）；② 用 cherry-pick / rebase / 手工只摘 gate0.py 一处
+#: hunk 的分支会拿到常量却拿不到祖先 ⇒ 该分支 receipt-present 归零（fail-open），直到补上
+#: d97b00f26。以上是**裁决 A（锚点前移重开采用窗）的既有取舍**（2026-10-25 第二次锚定的
+#: 69befba3d 同样是当时的私有 tip，同一取舍已存在一轮），不是本笔擅自扩大的口径；② 也由
+#: follow-up 票（新分支收据自举）一并处理，本常量不承担该修复。
+#:
+#: 交付结构（#1662 P3-2）：**每个裸全量跑过的 tip 各落一份 `docs/gate/<sha>.json`，其后的纯收据
+#: 落盘提交再由下一份收据覆盖**——所以「最终 tip 自身没有同名收据文件」是形状④的正常形态
+#: （`receipt_present_check` 对纯收据落盘提交本来就豁免），不是漏跑。
 #:
 #: 设计缺陷本体（新分支收据自举）由 follow-up 票处理，本常量不承担该修复。
 _RECEIPT_BOOTSTRAP_SHA = "d97b00f26a43e36fc289c16cf89dbd66e02dda8e"

@@ -116,13 +116,14 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - 期望证据：退出 0、无输出。**验证规则本身有效**：往任一 CSS 塞 `#123456` 必须退出 2（否则
   规则可能被写成 no-op，全仓仍绿）。
 
-### ⑦ 机械守卫（生成物同步 + 验证映射 + 索引可执行位）
+### ⑦ 机械守卫（生成物同步 + 验证映射 + 索引可执行位 + 收据锚点）
 
 - 命令：`PYTHONUTF8=1 PYTHONPATH= .venv/Scripts/python.exe -m pytest
   tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py
   tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py
+  tests/tooling/test_gate0_bootstrap_anchor.py
   -q -p no:randomly -p no:cacheprovider`
-- 守卫对象（三类；**清单的唯一真值是 `scripts/gate0.py::GUARD_TESTS`**；「（N 文件）」这个计数
+- 守卫对象（四类；**清单的唯一真值是 `scripts/gate0.py::GUARD_TESTS`**；「（N 文件）」这个计数
   在车道描述与本文两侧都有，由 `tests/test_exec_bit_matches_shebang.py` 一处断言对账 ⇒ 改一处
   忘另一处会红）：
   1. **生成物同步**：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
@@ -165,6 +166,14 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
        **解除条件**：要把 `guards` 升进「每行必列」集合（现为 `diff-check` + `coverage`，见
        `verification.map.tsv` 表头）需一并改整张映射表 + `tests/test_verification_map.py`
        的必列断言 + 本节 —— 那是「哪些车道无条件恒跑」的**规格级**选择，**未获批不做**。
+  4. **收据锚点**（#1662）：`_RECEIPT_BOOTSTRAP_SHA` 必须解析得出、是 HEAD 的祖先，且**每一棵
+     带着这个常量的树都拿得到该锚点**（常量与锚点一起传播）。理由：`receipt_present_check` 把
+     `merge-base --is-ancestor <bootstrap> <c>` 失败一律读作「早于锚点 ⇒ 范围外」，锚点若不在某
+     棵树的历史里，那棵树范围内**全部**提交都被机械豁免——判据看着还在、实际被挖空。第 3 条断言
+     同时是「锚须落在**共享**历史里」的一般形式：锚点随合并进 `origin/main` 后，origin/main 与
+     从它切出的分支都带该常量 ⇒ 自动被要求「锚点是它们的祖先」；合并前锚点按 #1662 裁决 A 是
+     分支私有的，故不另写只认 origin/main 的断言（那在合并前必然红）。
+     变异：常量改成可解析但非祖先的 sha ⇒ 第 2 条红；拼成仓里不存在的 sha ⇒ 第 1 条红。
 - **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
   `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
   读失败日志**别只 grep `missing receipt`**：warn-only（首周宽限）期该子检查的违规行带
@@ -179,8 +188,9 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   tail 之前被回滚掉，净效果不在被测树内 —— ④ 认的是**提交图关系**，不是**内容包含**。
   ⚠ fail-closed 边界：`t..HEAD` **逐笔**判，任一笔含代码（哪怕是"加了又删"）⇒ ④ 对该 `t` 不成立；
   空提交同样不成立（该 `t` 的 ④ 整体失效，不是"多跑一次全量"）。
-- 期望证据：`6 passed`（生成物 2 文件）+ `22 passed`（验证映射守卫，见 §2 ⑭）+
-  `12 passed`（索引可执行位守卫）= **`40 passed`（4 文件）**。
+- 期望证据：`7 passed`（生成物 2 文件）+ `22 passed`（验证映射守卫，见 §2 ⑭）+
+  `12 passed`（索引可执行位守卫）+ `2 passed`（收据锚点守卫，2026-11-01 #1662 实测）
+  = **`43 passed`（5 文件）**。
 - 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
   该文件的主要成本（`--durations` 实测：`test_cli_refuses_an_unmerged_index` 要真造一次
   三方冲突 ⇒ **9.98s**，是本车道最大单项；次之 `test_cli_flags_the_incident_shape_in_a_real_repo`
