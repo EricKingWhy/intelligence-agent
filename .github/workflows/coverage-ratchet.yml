@@ -116,7 +116,8 @@ jobs:
           # 唯一的 CI 侧纯移动声明入口（AC3 第三条）：给 PR 打 `coverage-ratchet:move-only` 即
           # 声明"本 PR 是纯移动/重命名"。**只有说明不够** —— 脚本仍要求 git `-M` 判出 `R100`，
           # 移动 + 修改（`R<100`）照常计入分母，贴标签骗不过去。
-          COVERAGE_RATCHET_MOVE_ONLY_NOTE: ${{ contains(github.event.pull_request.labels.*.name, 'coverage-ratchet:move-only') && format('PR #{0} 显式声明纯移动（coverage-ratchet:move-only 标签）', github.event.pull_request.number) || '' }}
+          COVERAGE_RATCHET_MOVE_ONLY_NOTE: >-
+            ${{ contains(github.event.pull_request.labels.*.name, 'coverage-ratchet:move-only') && format('PR #{0} 显式声明纯移动（coverage-ratchet:move-only 标签）', github.event.pull_request.number) || '' }}
         run: |
           uv run python scripts/check_line_coverage_ratchet.py ratchet \
             --report artifacts/coverage.xml \

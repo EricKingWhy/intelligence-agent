@@ -182,7 +182,7 @@ async def test_memory_v2_real_langfuse_trace_omits_content(tmp_path):
 
     from agent_harness.memory.v2.capability import MemoryV2Service
     from agent_harness.memory.v2.index import InMemoryMemoryV2Index
-    from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
+    from agent_harness.memory.v2.jobs import MemoryV2JobStore
     from agent_harness.memory.v2.store import SqliteMemoryV2Store
     from tests.memory.v2.test_v2_executor import (
         Env,
@@ -196,7 +196,7 @@ async def test_memory_v2_real_langfuse_trace_omits_content(tmp_path):
 
     store = SqliteMemoryV2Store(tmp_path / "memory-v2.db")
     await store.initialize()
-    jobs = SqliteMemoryV2JobStore(tmp_path / "memory-v2.db")
+    jobs = MemoryV2JobStore(tmp_path / "memory-v2.db")
     await jobs.initialize()
     index = InMemoryMemoryV2Index()
     env = Env(store=store, jobs=jobs, index=index, service=MemoryV2Service(store, index))

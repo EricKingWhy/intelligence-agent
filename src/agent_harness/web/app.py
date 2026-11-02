@@ -1749,12 +1749,17 @@ def _registered_tool_names_provider(
     / workspace_registry——否则会在归属对账之前对 workspace `mkdir`。
     存为 `AppState.registered_tool_names` 成员——`session_service()` 与其他
     collaborator 一样**原样搬入**领域层。CLI 侧复用同一容器，两条入口同一判据。
+
+    注册集合使用完整根工具口径 `(True, True)`（Issue #1503 Q2 A），理由与票面验收
+    见 Issue #1503。注册名必须覆盖任一入口 validator 接受的根工具，避免清理合法 ceiling。
     """
 
     async def _names(session_id: str) -> frozenset[str]:
         _, wiring = await get_wiring()
         return root_registry_tool_names(
             settings, wiring, session_id=session_id, session_store=store,
+            include_constraint_tools=True,
+            include_constraint_resolution_tool=True,
         )
 
     return _names
@@ -3846,6 +3851,7 @@ def create_app(
         陈旧键，**不动**消耗事实表 `tool_calls_by_tool` / `tool_attempts_by_tool`，
         也**不落** typed SessionEvent（预算变更本就不进会话真相，不变量 #16/#22）；清除
         痕迹只落一条 `session_budget_events(kind="tool_limits_purged")` 审计并 bump version。
+        根 registry 的工具集合按 Issue #1503 Q2 A 覆盖 Web 根工具，避免清理合法名称的 ceiling。
 
         可选 query `?tool=<name>` 收窄到单名（对应 CLI `--tool`）：服务端仍按根 registry
         权威判 stale，点名**正常注册名 / 从未存在名**都是安全 no-op，只有点名**确实陈旧**

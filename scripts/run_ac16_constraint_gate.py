@@ -637,6 +637,23 @@ _BUDGET_PRESSURE_REPETITIONS = 372
 _BUDGET_PRESSURE_SENTENCE = "本次任务必须保留所有现有行为。"
 
 
+def _read_job_file(database_path: Path, idempotency_key: str) -> dict[str, Any] | None:
+    """按幂等键只读一条 job 文件（#1494 / ADR-0058 D4：`memory-state/jobs/*.json`）。
+
+    只读、不调 `enqueue`：`enqueue` 会替本次 run **造**出一条 job，把判据变成恒真。
+    job_id 由幂等键确定性派生，因此按文件名即可命中，不必扫全目录。
+    """
+    import hashlib
+
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
+    path = database_path.parent / "memory-state" / "jobs" / f"job_{digest}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _read_job_row(database_path: Path, idempotency_key: str) -> dict[str, Any] | None:
     """按幂等键**只读**一条 formation job 行（不存在返回 None）。
 
@@ -644,26 +661,16 @@ def _read_job_row(database_path: Path, idempotency_key: str) -> dict[str, Any] |
     抽取跑完时被置回 NULL，读它只会得到"done ⇒ None"，与"本次 run 没有 job 行"在形状上
     撞车。候选由 invoker 的 per-run 原始输出解析（`extraction_candidates`）。
 
-    用标准库 `sqlite3` 而不是 `SqliteMemoryV2JobStore`：store 没有"按幂等键查"的读接口，
-    唯一能命中的入口是 `enqueue`——而那是 INSERT OR IGNORE，会替本次 run **造**出一行，
-    把判据变成恒真。这里只 SELECT（幂等键有 UNIQUE 约束，命中唯一）。
+    #1494 之后 job 是文件 owner（`memory-state/jobs/<job_id>.json`），只做只读解析：
+    不调 `enqueue`，否则会替本次 run **造**出一条 job，把判据变成恒真。
     """
-    import sqlite3
-
-    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
-    try:
-        cursor = connection.execute(
-            "SELECT job_id, stage, protected_fact_extraction_state FROM memory_v2_jobs "
-            "WHERE idempotency_key=?",
-            (idempotency_key,),
-        )
-        row = cursor.fetchone()
-    finally:
-        connection.close()
-    if row is None:
+    payload = _read_job_file(database_path, idempotency_key)
+    if payload is None:
         return None
-    job_id, _stage, state = row
-    return {"job": job_id, "extraction_state": state or ""}
+    return {
+        "job": payload.get("job_id"),
+        "extraction_state": payload.get("protected_fact_extraction_state") or "",
+    }
 
 
 def _read_extraction_candidates(database_path: Path, idempotency_key: str) -> list[Any] | None:
@@ -676,24 +683,10 @@ def _read_extraction_candidates(database_path: Path, idempotency_key: str) -> li
     每秒捞一次，捞到就留底。捞不到时退回模型原始输出（`extraction_candidates`），
     两者都缺 ⇒ None（未证实，判负）。
     """
-    import sqlite3
-
-    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
-    try:
-        cursor = connection.execute(
-            "SELECT protected_fact_extraction_candidates FROM memory_v2_jobs "
-            "WHERE idempotency_key=?",
-            (idempotency_key,),
-        )
-        row = cursor.fetchone()
-    finally:
-        connection.close()
-    if row is None or row[0] is None:
+    payload = _read_job_file(database_path, idempotency_key)
+    if payload is None:
         return None
-    try:
-        parsed = json.loads(row[0])
-    except (TypeError, ValueError):
-        return None
+    parsed = payload.get("protected_fact_extraction_candidates")
     return parsed if isinstance(parsed, list) else None
 
 
@@ -1923,9 +1916,8 @@ class _RealRunner:
 
         **不调 `runner.drain()`**：`drain()` 有界，超时会 `cancel()` 掉在途服务循环
         （`runner.py:480`），等于把一条正在跑的 formation 连同它的库写入一起杀掉。读库就够。
-        只读还绕开另一件事：`jobs.enqueue` 是 INSERT OR IGNORE，会替本次 run **造**一行——
-        那样"job 存在"就恒真，判据失去牙齿。所以直接按幂等键 SELECT
-        （不新增 store API：`SqliteMemoryV2JobStore.database_path` 是公开属性）。
+        只读还绕开另一件事：`jobs.enqueue` 会替本次 run **造**一行——那样"job 存在"
+        就恒真，判据失去牙齿。所以直接按确定性 job_id 读文件（ADR-0058 D4）。
 
         返回的每个字段都是**可复核的机械事实**：
         - `job`：None = 本次 run 的 job 行不存在（本次 run 不合格/未入队，如 M5 的授权句）。

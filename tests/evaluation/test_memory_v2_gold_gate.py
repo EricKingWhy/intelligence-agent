@@ -158,11 +158,13 @@ def test_seed_memory_tool_reaches_fts_like_service_create(tmp_path):
         await store.initialize()
         markdown = MarkdownMemoryStore(tmp_path / "markdown")
         markdown.load_from_disk()
-        service = MemoryV2Service(store, InMemoryMemoryV2Index(), markdown=markdown)
+        from agent_harness.memory.v2.commit import build_markdown_commit
+        commit = build_markdown_commit(markdown, tmp_path)
+        service = MemoryV2Service(store, InMemoryMemoryV2Index(), commit=commit)
         trusted = TrustedMemoryIdentity("gold-tenant", "gold-user", "gold-project")
         term = "quokka"
 
-        tool = MemoryTool(markdown, service=service)
+        tool = MemoryTool(commit, service=service)
         result = await tool.execute(_MemoryArgs(
             action="add", target="user",
             content=f"The synthetic {term} prefers concise summaries.",

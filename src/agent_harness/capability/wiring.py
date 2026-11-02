@@ -216,7 +216,7 @@ async def _wire_memory_v2(
             RememberMemoryV2Tool,
         )
 
-        markdown = service.markdown
+        commit = service.commit
         wiring.tool_contributors.append(_ToolsProvider([
             RememberMemoryV2Tool(service, sessions, workspace_index=workspace_index),
             ForgetMemoryV2Tool(service, sessions, workspace_index=workspace_index),
@@ -225,11 +225,12 @@ async def _wire_memory_v2(
                 timeout_seconds=settings.memory_search_timeout_seconds,
             ),
             # #1353 M1/M8：markdown 权威面的直接写入工具 + 它的静态 guidance。
-            # markdown 缺席时（纯 SQLite 部署）不注册——没有可写的权威面。
+            # #1494：工具拿的是 commit（唯一内容写者），不是 markdown 引擎本身；
+            # commit 缺席时（纯 SQLite 部署）没有可写的权威面，不注册。
             *([MemoryTool(
-                markdown, sessions, service=service, staged=service.staged,
+                commit, sessions, service=service, staged=service.staged,
                 workspace_index=workspace_index,
-            )] if markdown is not None else []),
+            )] if commit is not None else []),
         ]))
     service.start_tombstone_purger()
     wiring.lifecycle.append(service)

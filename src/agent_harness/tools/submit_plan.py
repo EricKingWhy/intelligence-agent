@@ -52,8 +52,7 @@ from agent_harness.tools.user_input_common import (
 #: 大块文本"输入面）。超限整单拒绝：无事件、无 artifact。
 PLAN_MARKDOWN_MAX_CHARS = 100_000
 
-#: 工具名。装配期需要"只要名字、不要 store"（`SubmitPlanTool(None).name`），
-#: 单源成常量后装配处不再依赖"`name` property 不碰 `_store`"这条隐式契约。
+#: 工具名单源定义；根工具注册表的纯投影直接读取此常量，不构造工具实例。
 SUBMIT_PLAN_TOOL_NAME = "submit_plan"
 
 
@@ -109,11 +108,7 @@ class SubmitPlanTool(Tool):
     plan_mode_exempt: bool = True
 
     def __init__(self, artifact_store: ArtifactStore) -> None:
-        """`artifact_store` 只在 `execute` 期使用（落计划正文）。
-
-        装配期为了拿名字而 `SubmitPlanTool(None)` 的写法依赖这条契约；要名字请用
-        `SUBMIT_PLAN_TOOL_NAME`，别再造一个 `None` 实例。
-        """
+        """The store is used by execute; name projections use SUBMIT_PLAN_TOOL_NAME."""
         self._store = artifact_store
 
     @property

@@ -9,7 +9,6 @@ requires-python = ">=3.11"
 dependencies = [
     "aiosqlite>=0.21.0",
     "anyio>=4.0,<5",
-    "cryptography>=50.0.1",
     "fastapi>=0.159.1",
     # endpoint_guard uses private transport hooks; update only with compatibility tests.
     "httpx2==2.16.0",

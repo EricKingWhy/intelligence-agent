@@ -1,6 +1,6 @@
 """V2 存储层共用的 SQLite 连接策略与时间戳格式。
 
-`SqliteMemoryV2Store`（记录 / outbox）与 `SqliteMemoryV2JobStore`（formation job）
+`SqliteMemoryV2Store`（记录 / outbox）与 `MemoryV2JobStore`（formation job）
 落在**同一个** `memory-v2.db`（PRD §7.2 第 3 条要求复用既有基底），所以"怎么连、
 怎么设超时、怎么写时间戳"必须是同一份实现——两份拷贝迟早漂移成两种并发行为。
 
@@ -54,7 +54,7 @@ async def write_connection(database_path: Path, connection: aiosqlite.Connection
     """写路径的连接：调用方给了就**借用**（它拥有事务），否则自开一个 `BEGIN IMMEDIATE`。
 
     借用之所以存在：记忆记录 + outbox 意图必须与 **formation job 的终态**一起落地。
-    "为什么必须同一次提交"的完整论证只在 `jobs.SqliteMemoryV2JobStore.commit_with_outcome`
+    "为什么必须同一次提交"的完整论证只在 `jobs.MemoryV2JobStore.commit_with_outcome`
     一处（§16.1）；这里只写本函数自己看不出来的那条操作约束：
 
     借用时**不提交也不回滚**——提交是拥有者的事。抛出的异常一律向上传播（拥有者据此回滚）

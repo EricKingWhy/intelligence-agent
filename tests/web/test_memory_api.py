@@ -29,6 +29,7 @@ from agent_harness.identity import (
 from agent_harness.memory.fake_capability import FakeMemoryCapability
 from agent_harness.memory.types import MemoryScope, memory_session_var
 from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.file_state import read_json, write_json
 from agent_harness.memory.v2.tools import _RememberV2Args
 from agent_harness.memory.v2.types import (
     MemoryKind,
@@ -620,19 +621,21 @@ async def test_v2_delete_is_idempotent_erases_index_and_leaves_only_tombstone(me
     ) == []
 
     async with connect(service._store.database_path) as connection:
-        async with connection.execute("PRAGMA table_info(memory_v2_tombstones)") as cursor:
-            columns = await cursor.fetchall()
         async with connection.execute("SELECT * FROM memory_v2_tombstones") as cursor:
-            tombstones = await cursor.fetchall()
+            legacy_tombstones = await cursor.fetchall()
         async with connection.execute("SELECT content FROM memory_v2_records") as cursor:
             records = await cursor.fetchall()
-    assert {row["name"] for row in columns} == {
-        "memory_id", "root_id", "tenant_id", "user_id", "scope", "project_id",
-        "version", "deleted_at", "expires_at", "deletion_reason", "content_hashes",
-        "source_hashes",
+    assert records == []
+    assert legacy_tombstones == [], "墓碑已迁到文件 owner（ADR-0058 D7），旧表不再写入"
+    tombstone = read_json(service._store._tombstones.path_for(record.id))
+    assert tombstone is not None
+    assert set(tombstone) == {
+        "schema", "memory_id", "root_id", "tenant_id", "user_id", "scope",
+        "project_id", "version", "deleted_at", "expires_at", "deletion_reason",
+        "content_hashes", "source_hashes",
     }
-    assert len(tombstones) == 1 and records == []
-    assert "只在删除前存在的正文" not in str(dict(tombstones[0]))
+    assert "只在删除前存在的正文" not in str(tombstone)
+    assert tombstone["content_hashes"] and tombstone["source_hashes"]
 
 
 @pytest.mark.asyncio
@@ -692,14 +695,17 @@ async def test_v2_tombstone_reads_are_authorized_and_content_free(memory_app):
     ).status_code == 404
     assert client.get("/api/memories?status=deleted", headers=_auth(_BOB)).json() == []
 
-    from agent_harness.memory.v2._sqlite import connect
-
-    async with connect(wiring.memory_v2._store.database_path) as connection:
-        await connection.execute(
-            "UPDATE memory_v2_tombstones SET expires_at=? WHERE root_id=?",
-            ("2000-01-01T00:00:00+00:00", first.root_id),
-        )
-        await connection.commit()
+    # 墓碑 owner 已是文件（ADR-0058 D7）：过期判定改写在文件里，旧 SQLite 表不参与。
+    tombstones_dir = wiring.memory_v2._store._tombstones.root.tombstones_dir
+    expired = 0
+    for path in tombstones_dir.glob("*.json"):
+        payload = read_json(path)
+        if payload is None or payload.get("root_id") != first.root_id:
+            continue
+        payload["expires_at"] = "2000-01-01T00:00:00+00:00"
+        write_json(path, payload)
+        expired += 1
+    assert expired == 2
     assert client.get("/api/memories?status=deleted", headers=_auth(_ALICE)).json() == []
     assert client.get(f"/api/memories/{first.id}", headers=_auth(_ALICE)).status_code == 404
     assert client.get(

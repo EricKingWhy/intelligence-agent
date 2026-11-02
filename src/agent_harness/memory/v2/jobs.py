@@ -1,44 +1,38 @@
-"""#298 / MEM-V2-2 的 durable formation job：幂等入队、单属主认领、阶段持久化。
+"""#298 / MEM-V2-2 的 durable formation job；#1494 起由文件承载操作状态。
 
-# 为什么是同一库里的新表（PRD §7.2 第 3 条）
+# 为什么不再放在 memory-v2.db（#1494 / ADR-0056 §3.2 + ADR-0058 D4）
 
-约束是"复用既有 SQLite/Event/Outbox 基底，允许在内加记忆专属表，**不允许**独立队列
-服务或只存在于内存的属主"。所以 job 表与 `memory_v2_records` / `memory_v2_outbox`
-落在同一个 `memory-v2.db`：崩溃之后"这个 run 的记忆作业谁该继续跑"由磁盘回答，
-而不是由某个进程的字典回答——后者重启即失忆，AC6 的四个 kill 窗口一个都过不了。
+ADR-0056 把「job / lease / 幂等」判给非 SQLite 的持久 owner：操作状态与内容的派生层
+（records / outbox / FTS）是两种生命周期，把它们放同一张库里，终态就只能在"同一笔
+SQLite 事务"里达成——而那个事务恰好是 #1494 要拆掉的耦合。现在每个 job 是
+``<workspace>/memory-state/jobs/<job_id>.json``：
 
-# 幂等（R1）
+- **幂等**：`job_id` 由 `idempotency_key` 确定性派生（sha256），文件存在即已入队；
+  同一 key 在物理上不可能产生两个 job。旧 `UNIQUE(idempotency_key)` 的语义完整保留，
+  且不再需要"先查后写"。
+- **单属主**：`claim` 在全局认领锁内选候选、在 job 锁内写 lease（CAS）；`transition`
+  与 `commit_with_outcome` 都在 job 锁内复核 `lease_owner + lease_expires_at`。
+  flock 由内核在进程死亡时释放，因此"属主死了"不需要过期判定就能被接管；lease 仍是
+  判定"还能不能推进"的显式事实（AC4：lease 丢失零 commit）。
+- **阶段与终态**：`stage` / `state` / `outcome` / `reason` 就是文件字段；写入是单文件
+  原子替换（`file_state.write_json`）。
 
-`idempotency_key` 上的 UNIQUE 是唯一去重机制：同一个 key 反复入队（终结路径重入、
-重启后的恢复扫描重入）恒得到同一行、同一个 `job_id`；已经终结的 job 也不会被"重开"。
-入队方因此**不需要**先查后写——先查后写在并发下会漏（两个终结者都查到"不存在"）。
+# 与记录层的关系（ADR-0058 D8）
 
-# 单属主与串行（R11 + AC6）
+records / outbox 仍是 SQLite（可重建的派生态）。`commit_with_outcome` 的顺序是
+**work（记录事务）→ 终态（job 文件）**，并在提交前复核 lease：
 
-认领是一次 `BEGIN IMMEDIATE` 内的 CAS：只有"无属主或 lease 已到期"的行才会被写上属主。
-所以"谁在跑"有唯一答案，而且答案是数据库给的结论，不是进程内纪律。
-lease 到期即视为属主已死 → 另一个 worker 直接接手，这同时就是崩溃恢复入口
-（`list_recoverable` 只是给 runner 一个有序待办视图，真正决定归属的仍是 `claim`）。
-R11 的"按用户串行"在同一处强制：同 (tenant, user) 有在途 lease 时该用户的其它 job
-不被认领；别人的 job 不受影响。
-
-# 阶段与中间态（AC6）
-
-`stage` 只由属主推进，`state` 是该阶段的持久化布局（自由格式 JSON，由后续票填入）。
-崩溃重启的 worker 从 `stage` + `state` 续跑，而不是从零重来。
-硬约束：`state` 只能放 id / 计数 / 结构化决策摘要——**不得**放提示词、模型原始响应、
-隐藏推理、凭据、大块工具输出或 artifact 内容（ticket Must Not Do 与 R2）。
-本模块不校验这一点：这是内部契约而非信任边界，AC9 的探针负责兜底。
-
-# 刻意不做的事
-
-- 不实现心跳续租。lease 时长的约定是"长于 job 的 120 秒硬截止"，见 `DEFAULT_LEASE_SECONDS`。
-- 不在这里写记录行或 outbox（那是 apply 阶段的事，属 MEM-V2-2 的执行器）。
+- work 抛异常 ⇒ 记录事务回滚、零写入、job 保持非终态（与旧实现同语义）；
+- lease 在 work 期间被抢走 ⇒ 提交前复核失败 ⇒ 记录事务回滚、零写入（AC4）；
+- 记录已提交、终态写失败/被杀 ⇒ 恢复扫描重跑：记录写入按调用方给出的确定性
+  `memory_id` 幂等（见 `executor._apply_one`），内容写入按 `jobp_` 回执回放。
+  这里**不冒称**两份载体跨文件原子。
 """
 
 from __future__ import annotations
 
-import json
+import asyncio
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -46,13 +40,20 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
-from uuid import uuid4
 
-import aiosqlite
-
-from agent_harness.memory.v2._sqlite import connect, stamp
+from agent_harness.memory.v2._sqlite import stamp, write_connection
+from agent_harness.memory.v2.file_state import (
+    MEMORY_STATE_DIRECTORY_NAME,
+    CorruptStateFile,
+    MemoryStateRoot,
+    StateFileError,
+    async_file_lock,
+    file_lock,
+    read_json,
+    safe_id,
+    write_json,
+)
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
-from agent_harness.storage.sqlite import retry_on_busy
 
 #: `commit_with_outcome` 里 `work` 的返回类型（调用方自己决定要带回什么）。
 T = TypeVar("T")
@@ -64,27 +65,7 @@ logger = logging.getLogger(__name__)
 #: ponytail: 固定 lease + 无心跳；若将来单 job 预算超过它，再上心跳续租。
 DEFAULT_LEASE_SECONDS = 300.0
 
-_JOB_SCHEMA = """
-CREATE TABLE IF NOT EXISTS memory_v2_jobs (
-    job_id TEXT PRIMARY KEY,
-    idempotency_key TEXT NOT NULL UNIQUE,
-    tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, project_id TEXT,
-    session_id TEXT NOT NULL,
-    run_id TEXT,
-    protected_fact_token_budget INTEGER,
-    protected_fact_extraction_state TEXT NOT NULL DEFAULT 'pending'
-        CHECK (protected_fact_extraction_state IN ('pending', 'started', 'ready', 'done')),
-    protected_fact_extraction_candidates TEXT,
-    stage TEXT NOT NULL, state TEXT NOT NULL,
-    outcome TEXT, reason TEXT,
-    lease_owner TEXT, lease_expires_at TEXT,
-    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS memory_v2_jobs_recoverable
-    ON memory_v2_jobs(stage, lease_expires_at);
-CREATE INDEX IF NOT EXISTS memory_v2_jobs_owner
-    ON memory_v2_jobs(tenant_id, user_id, stage);
-"""
+SCHEMA_VERSION = 1
 
 
 class MemoryJobStage(str, Enum):
@@ -96,8 +77,7 @@ class MemoryJobStage(str, Enum):
     APPLYING = "applying"
     #: 跑完且**成功**——含 `NO_MEMORY` / `NOOP` 这类"安静地什么都没写"（AC2）。
     #: #1461：被审批门拦下的 job 也停在这里——终态 stage 相同，语义由 `outcome` 区分
-    #: COMMITTED / NO_WRITE / BLOCKED。另立一个 stage 会让 `_stage_assignment` 的终态
-    #: 分支（释放 lease、写 outcome）整段跳过，job 就永远终结不了。
+    #: COMMITTED / NO_WRITE / BLOCKED。
     COMPLETED = "completed"
     #: 跑完但失败——不写任何记忆，理由记录在 `reason`。
     DEGRADED = "degraded"
@@ -109,19 +89,6 @@ class MemoryJobStage(str, Enum):
 
 TERMINAL_STAGES: tuple[MemoryJobStage, ...] = (MemoryJobStage.COMPLETED, MemoryJobStage.DEGRADED)
 
-_TERMINAL_VALUES: tuple[str, ...] = tuple(stage.value for stage in TERMINAL_STAGES)
-#: `stage NOT IN (?, ?)` 的占位符，从枚举派生——避免 DDL / SQL 里再抄一份状态名。
-_NOT_TERMINAL = ", ".join("?" for _ in _TERMINAL_VALUES)
-
-#: "这一行仍属于我、且还没终结"的完整谓词。`transition`（UPDATE-CAS）与
-#: `commit_with_outcome`（先 SELECT 再 UPDATE）**各写一遍**就等于把同一条属主规则
-#: 存了两份 —— 两处漂移的后果是"推进被拦、提交被放行"这类只在并发下才现形的洞。
-#: 占位符顺序固定为 `(job_id, worker_id, now_stamp, *_TERMINAL_VALUES)`。
-_OWNED_AND_LIVE = (
-    f"job_id=? AND lease_owner=? AND lease_expires_at > ? "
-    f"AND stage NOT IN ({_NOT_TERMINAL})"
-)
-
 
 class MemoryJobOutcome(str, Enum):
     """成功终态的三种形态（R12：安静成功不能装成错误，也不能装成"写过了"）。"""
@@ -130,9 +97,7 @@ class MemoryJobOutcome(str, Enum):
     COMMITTED = "committed"
     #: 明确不写：`NO_MEMORY`、全部 `NOOP`（无 degraded 事件）。
     NO_WRITE = "no_write"
-    #: #1461：审批门开着，写入被拦下并落进 `memory_v2_blocked` 等人处置。
-    #: 它既不是 `COMMITTED`（一条记录都没写）也不是 `NO_WRITE`（有东西被显性拦下、
-    #: 用户可 promote）——三者混在任一侧都会让"发生了什么"读不出来。
+    #: #1461：审批门开着，写入被拦下并落进 blocked 文件等人处置。
     BLOCKED = "blocked"
 
 
@@ -145,7 +110,7 @@ class ProtectedFactExtractionState(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class MemoryFormationJob:
-    """一行 durable job 的完整视图。"""
+    """一个 durable job 的完整视图。"""
 
     job_id: str
     idempotency_key: str
@@ -153,15 +118,8 @@ class MemoryFormationJob:
     user_id: str
     project_id: str | None
     session_id: str
-    #: 本 job 属于哪一次 run（T7 新增）。**不是**可选的装饰：恢复扫描只能靠
-    #: `(session_id, run_id)` 从会话日志里切出这一次 run 的事件（`build_formation_input`
-    #: 的 `run_events`），没有它就无法在重启后重建模型输入。刻意做成列而不是塞进
-    #: `state`——`state` 会被属主的每次 `transition` 整体覆写（`_stage_assignment`），
-    #: 放那里的标识符会在第一次推进阶段时静默消失，而"恢复时找不到这一轮"表现为
-    #: 一次安静的零写入。
-    #:
-    #: 可空只为一件事：T7 之前入队的行（`_migrate_run_id` 补列时给 NULL）。那批 job
-    #: 没有可重建的事件切片，恢复扫描会跳过并告警，而不是拿一个错的切片去跑。
+    #: 本 job 属于哪一次 run（T7 新增）。恢复扫描只能靠 `(session_id, run_id)` 从会话
+    #: 日志里切出这一次 run 的事件；没有它就无法在重启后重建模型输入。
     run_id: str | None
     stage: MemoryJobStage
     state: dict[str, Any]
@@ -183,169 +141,219 @@ class MemoryFormationJob:
         return TrustedMemoryIdentity(
             tenant_id=self.tenant_id, user_id=self.user_id, project_id=self.project_id)
 
+    @property
+    def is_terminal(self) -> bool:
+        return self.stage.is_terminal
 
-class SqliteMemoryV2JobStore:
-    """formation job 的 SQLite 权威存储（与记录存储共用一个库文件）。"""
 
-    def __init__(self, database_path: str | Path) -> None:
+class _LeaseLost(Exception):
+    """提交前复核失败：lease 已不属于本 worker。记录事务必须回滚（零写入）。"""
+
+
+def job_id_for(idempotency_key: str) -> str:
+    """幂等键 → 确定性 job id（文件名安全）。
+
+    取 sha256 的前 32 个十六进制字符：碰撞概率与 UUIDv4 同量级，换来的性质是"同 key
+    永远同一个 job id"——这正是物理幂等（文件存在即已入队）的前提。
+    """
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
+    return f"job_{digest}"
+
+
+class MemoryV2JobStore:
+    """formation job 的文件权威存储。
+
+    ``database_path`` 只用于 `commit_with_outcome` 打开记录层事务（records / outbox
+    仍是 SQLite 派生态）；job 自身的事实全部在 ``state_root`` 下。
+    """
+
+    def __init__(
+        self, database_path: str | Path, state_root: MemoryStateRoot | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
+        self.root = state_root or MemoryStateRoot(
+            self.database_path.parent / MEMORY_STATE_DIRECTORY_NAME
+        )
 
     async def initialize(self) -> None:
+        self.root.ensure()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with connect(self.database_path) as connection:
-            await connection.execute("PRAGMA journal_mode=WAL")
-            await connection.executescript(_JOB_SCHEMA)
-            await self._migrate_run_id(connection)
-            await self._migrate_protected_fact_extraction(connection)
-            await connection.commit()
+
+    # ------------------------------------------------------------------ 路径
+
+    def path_for(self, job_id: str) -> Path:
+        return self.root.jobs_dir / f"{safe_id(job_id, what='job id')}.json"
+
+    def _lock_path(self, job_id: str) -> Path:
+        return self.root.jobs_dir / safe_id(job_id, what="job id")
+
+    @property
+    def _claim_lock_path(self) -> Path:
+        # 一次认领 = 选候选 + 写 lease。全局一把锁让"同用户只有一个在途 job"在
+        # 跨进程下也成立；认领是低频动作，不值得为它维护按用户的多把锁。
+        return self.root.jobs_dir / "claim"
+
+    # ------------------------------------------------------------------ 读写原语
+
+    def _read(self, job_id: str) -> MemoryFormationJob:
+        payload = read_json(self.path_for(job_id))
+        if payload is None:
+            raise KeyError(job_id)
+        return _to_job(payload)
+
+    def _try_read(self, job_id: str) -> MemoryFormationJob | None:
+        try:
+            return self._read(job_id)
+        except KeyError:
+            return None
+        except (CorruptStateFile, StateFileError) as error:
+            # 损坏文件对恢复扫描等价于「这个 job 现在不可读」：跳过并告警，不能让
+            # 一条坏文件把 claim/list_recoverable/runner.recover 全部打崩（review P2-1）。
+            logger.warning("unreadable job file skipped (%s): %s", job_id, error)
+            return None
+        except (TypeError, ValueError, AttributeError) as error:
+            # 合法 JSON 但结构坏（state 不是对象、字段类型不对）同样是不可读；
+            # `_scan` 已按同类集合跳过，单条读取保持一致（review P3-4a）。
+            logger.warning("malformed job file skipped (%s): %s", job_id, error)
+            return None
+
+    def _write(self, job: MemoryFormationJob, *, updated_at: str) -> MemoryFormationJob:
+        payload = _to_payload(job, updated_at=updated_at)
+        write_json(self.path_for(job.job_id), payload)
+        return _to_job(payload)
+
+    async def _read_async(self, job_id: str) -> MemoryFormationJob:
+        return await asyncio.to_thread(self._read, job_id)
+
+    async def _try_read_async(self, job_id: str) -> MemoryFormationJob | None:
+        return await asyncio.to_thread(self._try_read, job_id)
+
+    async def _write_async(self, job: MemoryFormationJob, *, updated_at: str) -> MemoryFormationJob:
+        return await asyncio.to_thread(self._write, job, updated_at=updated_at)
 
     @staticmethod
-    async def _migrate_run_id(connection: aiosqlite.Connection) -> None:
-        """T7 加法：给 T1 建出的旧表补 `run_id` 列。
+    def _owned_and_live(job: MemoryFormationJob, worker_id: str, now_stamp: str) -> bool:
+        return (
+            job.stage not in TERMINAL_STAGES
+            and job.lease_owner == worker_id
+            and job.lease_expires_at is not None
+            and job.lease_expires_at > now_stamp
+        )
 
-        `CREATE TABLE IF NOT EXISTS` 对**已存在**的表是空操作，所以 T1 期间建过的库
-        （开发/测试机上真实存在）不会因为改了 DDL 就长出这一列——不补的话那些库上
-        每次入队都是 `no such column: run_id`。
+    def _scan(self) -> list[MemoryFormationJob]:
+        directory = self.root.jobs_dir
+        if not directory.exists():
+            return []
+        jobs: list[MemoryFormationJob] = []
+        for path in sorted(directory.glob("*.json")):
+            try:
+                payload = read_json(path)
+                if payload is None:
+                    continue
+                jobs.append(_to_job(payload))
+            except (CorruptStateFile, StateFileError, KeyError, TypeError,
+                    ValueError, AttributeError) as error:
+                logger.warning("unreadable job file skipped (%s): %s", path.name, error)
+        return jobs
 
-        可重入（`PRAGMA table_info` 判缺再补），与 `memory/sqlite_record_store.py` 的
-        既有迁移同款：SQLite 的 DDL 不参与驱动事务，靠"哨兵列存在与否"当完成标记。
+    # ------------------------------------------------------------------ 入队
 
-        列**可空**：`ALTER TABLE ADD COLUMN` 没法先空后填再收紧（同既有迁移的注释）。
-        旧行因此是 `run_id IS NULL`，恢复扫描据此跳过它们（见 runner 的说明）——
-        那批 job 是 T7 之前入队的，本来就没有可重建的事件切片。
-        """
-        async with connection.execute("PRAGMA table_info(memory_v2_jobs)") as cursor:
-            columns = {row[1] for row in await cursor.fetchall()}
-        if "run_id" not in columns:
-            await connection.execute("ALTER TABLE memory_v2_jobs ADD COLUMN run_id TEXT")
-
-    @staticmethod
-    async def _migrate_protected_fact_extraction(
-        connection: aiosqlite.Connection,
-    ) -> None:
-        async with connection.execute("PRAGMA table_info(memory_v2_jobs)") as cursor:
-            columns = {row[1] for row in await cursor.fetchall()}
-        if "protected_fact_token_budget" not in columns:
-            await connection.execute(
-                "ALTER TABLE memory_v2_jobs ADD COLUMN protected_fact_token_budget INTEGER"
-            )
-        if "protected_fact_extraction_state" not in columns:
-            await connection.execute(
-                "ALTER TABLE memory_v2_jobs ADD COLUMN protected_fact_extraction_state "
-                "TEXT NOT NULL DEFAULT 'pending'"
-            )
-        if "protected_fact_extraction_candidates" not in columns:
-            await connection.execute(
-                "ALTER TABLE memory_v2_jobs ADD COLUMN protected_fact_extraction_candidates "
-                "TEXT"
-            )
-
-    # ----------------------------------------------------------------------------------
-    # 入队
-    # ----------------------------------------------------------------------------------
-
-    @retry_on_busy
     async def enqueue(
         self, *, idempotency_key: str, trusted: TrustedMemoryIdentity, session_id: str,
         run_id: str | None = None, protected_fact_token_budget: int | None = None,
         now: datetime | None = None,
     ) -> MemoryFormationJob:
-        """按幂等键入队；键已存在就返回**已有**那一行（含已终结的），不新建。
-
-        `INSERT OR IGNORE` 而非"先 SELECT 再 INSERT"：后者在并发终结下会双方都查到
-        不存在、双双插入，而 UNIQUE 又会把其中一个变成异常——那等于把幂等性交给调用方
-        重试。这里让"重复"成为一个静默成功的返回。
-        """
+        """按幂等键入队；键已存在就返回**已有**那个 job（含已终结的），不新建。"""
         moment = stamp(now)
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            await connection.execute(
-                "INSERT OR IGNORE INTO memory_v2_jobs "
-                "(job_id, idempotency_key, tenant_id, user_id, project_id, session_id, "
-                " run_id, protected_fact_token_budget, stage, state, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)",
-                (str(uuid4()), idempotency_key, trusted.tenant_id, trusted.user_id,
-                 trusted.project_id, session_id, run_id, protected_fact_token_budget,
-                 MemoryJobStage.QUEUED.value, moment, moment))
-            cursor = await connection.execute(
-                "SELECT * FROM memory_v2_jobs WHERE idempotency_key=?", (idempotency_key,))
-            row = await cursor.fetchone()
-            await connection.commit()
-        return _to_job(_require(row, idempotency_key))
+        job_id = job_id_for(idempotency_key)
 
-    # ----------------------------------------------------------------------------------
-    # 认领（单属主 + 按用户串行）
-    # ----------------------------------------------------------------------------------
+        def _enqueue() -> MemoryFormationJob:
+            with file_lock(self._claim_lock_path):
+                existing = self._try_read(job_id)
+                if existing is not None:
+                    return existing
+                job = MemoryFormationJob(
+                    job_id=job_id, idempotency_key=idempotency_key,
+                    tenant_id=trusted.tenant_id, user_id=trusted.user_id,
+                    project_id=trusted.project_id, session_id=session_id, run_id=run_id,
+                    stage=MemoryJobStage.QUEUED, state={}, outcome=None, reason=None,
+                    lease_owner=None, lease_expires_at=None,
+                    created_at=moment, updated_at=moment,
+                    protected_fact_token_budget=protected_fact_token_budget,
+                )
+                return self._write(job, updated_at=moment)
 
-    @retry_on_busy
+        return await asyncio.to_thread(_enqueue)
+
+    # ------------------------------------------------------------------ 认领
+
     async def claim(
         self, *, worker_id: str, lease_seconds: float = DEFAULT_LEASE_SECONDS,
         now: datetime | None = None,
     ) -> MemoryFormationJob | None:
         """认领一个待跑/待恢复的 job；没有可跑的返回 `None`。
 
-        "可跑"= 未终结 ∧（无属主 ∨ lease 已到期）∧ 同用户没有别的在途 lease。
-        最后一条把 R11 的按用户串行也放进同一次 CAS——放进程内存里做会随重启失效，
-        而且两个进程会各串各的。
+        "可跑" = 未终结 ∧（无属主 ∨ lease 已到期）∧ 同用户没有别的在途 lease。
+        候选选择与写入都在认领锁内，写入再叠加 job 锁（固定锁序：认领锁 → job 锁）。
         """
         base = now if now is not None else datetime.now(UTC)
         now_stamp = stamp(base)
         expiry_stamp = stamp(base + timedelta(seconds=lease_seconds))
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            # 候选查询里不需要排除"自己"：候选行的 lease 已被外层条件限定为"无属主或已到期"，
-            # 而下面的自占用子查询要求 lease_owner IS NOT NULL 且未到期，两者不可能同时成立。
-            cursor = await connection.execute(
-                f"SELECT * FROM memory_v2_jobs AS candidate "
-                f"WHERE candidate.stage NOT IN ({_NOT_TERMINAL}) "
-                "  AND (candidate.lease_owner IS NULL OR candidate.lease_expires_at <= ?) "
-                "  AND NOT EXISTS ("
-                "      SELECT 1 FROM memory_v2_jobs AS busy "
-                "      WHERE busy.tenant_id = candidate.tenant_id "
-                "        AND busy.user_id = candidate.user_id "
-                f"        AND busy.stage NOT IN ({_NOT_TERMINAL}) "
-                "        AND busy.lease_owner IS NOT NULL AND busy.lease_expires_at > ?) "
-                "ORDER BY candidate.created_at, candidate.job_id LIMIT 1",
-                (*_TERMINAL_VALUES, now_stamp, *_TERMINAL_VALUES, now_stamp))
-            row = await cursor.fetchone()
-            if row is None:
-                await connection.commit()
-                return None
-            updated = await connection.execute(
-                f"UPDATE memory_v2_jobs SET lease_owner=?, lease_expires_at=?, updated_at=? "
-                f"WHERE job_id=? AND stage NOT IN ({_NOT_TERMINAL}) "
-                "  AND (lease_owner IS NULL OR lease_expires_at <= ?)",
-                (worker_id, expiry_stamp, now_stamp, row["job_id"],
-                 *_TERMINAL_VALUES, now_stamp))
-            if updated.rowcount != 1:
-                # 同一事务里刚选出来的行不可能被别人改走；行数不等于 1 说明前提被破坏，
-                # 宁可什么都不认领也不认领一个自己不拥有的 job。
-                logger.error("Memory V2 job %s could not be claimed after selection", row["job_id"])
-                await connection.commit()
-                return None
-            cursor = await connection.execute(
-                "SELECT * FROM memory_v2_jobs WHERE job_id=?", (row["job_id"],))
-            claimed = await cursor.fetchone()
-            await connection.commit()
-        return _to_job(_require(claimed, str(row["job_id"])))
+
+        def _claim() -> MemoryFormationJob | None:
+            with file_lock(self._claim_lock_path):
+                jobs = self._scan()
+                live_owners = {
+                    (job.tenant_id, job.user_id)
+                    for job in jobs
+                    if job.stage not in TERMINAL_STAGES
+                    and job.lease_owner is not None
+                    and (job.lease_expires_at or "") > now_stamp
+                }
+                candidates = sorted(
+                    (
+                        job for job in jobs
+                        if job.stage not in TERMINAL_STAGES
+                        and (job.lease_owner is None or (job.lease_expires_at or "") <= now_stamp)
+                    ),
+                    key=lambda job: (job.created_at, job.job_id),
+                )
+                for candidate in candidates:
+                    if (candidate.tenant_id, candidate.user_id) in live_owners:
+                        continue
+                    with file_lock(self._lock_path(candidate.job_id)):
+                        current = self._try_read(candidate.job_id)
+                        if current is None:
+                            continue
+                        if not (
+                            current.stage not in TERMINAL_STAGES
+                            and (current.lease_owner is None
+                                 or (current.lease_expires_at or "") <= now_stamp)
+                        ):
+                            continue
+                        claimed = MemoryFormationJob(
+                            **{
+                                **_job_fields(current),
+                                "lease_owner": worker_id,
+                                "lease_expires_at": expiry_stamp,
+                            }
+                        )
+                        return self._write(claimed, updated_at=now_stamp)
+            return None
+
+        return await asyncio.to_thread(_claim)
 
     async def list_recoverable(self, *, limit: int = 100) -> list[MemoryFormationJob]:
         """尚未终结的 job（旧→新）。给 runner 做启动期恢复扫描用的待办视图。"""
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                f"SELECT * FROM memory_v2_jobs WHERE stage NOT IN ({_NOT_TERMINAL}) "
-                "ORDER BY created_at, job_id LIMIT ?",
-                (*_TERMINAL_VALUES, max(0, limit))) as cursor,
-        ):
-            rows = await cursor.fetchall()
-        return [_to_job(row) for row in rows]
+        jobs = [
+            job for job in await asyncio.to_thread(self._scan)
+            if job.stage not in TERMINAL_STAGES
+        ]
+        jobs.sort(key=lambda job: (job.created_at, job.job_id))
+        return jobs[: max(0, limit)]
 
-    # ----------------------------------------------------------------------------------
-    # 阶段推进
-    # ----------------------------------------------------------------------------------
+    # ------------------------------------------------------------------ 阶段推进
 
-    @retry_on_busy
     async def transition(
         self, *, job_id: str, worker_id: str, stage: MemoryJobStage,
         state: dict[str, Any] | None = None, outcome: MemoryJobOutcome | None = None,
@@ -353,11 +361,8 @@ class SqliteMemoryV2JobStore:
     ) -> MemoryFormationJob | None:
         """属主推进阶段（或终结）；不满足前提时返回 `None`，不抛异常。
 
-        → `None` 的三种情形都是**正常竞争结果**而不是错误：属主不是我、我的 lease 已到期、
-        job 已终结。调用方（恢复扫描里的僵尸 worker）据此安静退出即可。
-
         参数纪律（把"调用方写错"和"竞争失败"分开，前者必须响亮）：
-        - 终态 `COMPLETED` 必须给 `outcome`（`reason` 可选，用来记 `NO_MEMORY` 的 skip reason）；
+        - 终态 `COMPLETED` 必须给 `outcome`（`reason` 可选）；
         - 终态 `DEGRADED` 必须给 `reason`，且不得给 `outcome`；
         - 中间态不得给 `outcome` / `reason`。
         """
@@ -373,128 +378,86 @@ class SqliteMemoryV2JobStore:
             raise ValueError("outcome/reason are only meaningful for a terminal stage")
 
         now_stamp = stamp(now)
-        assignments, values = _stage_assignment(
-            stage=stage, state=state, outcome=outcome, reason=reason, now_stamp=now_stamp)
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
-                f"UPDATE memory_v2_jobs SET {', '.join(assignments)} WHERE {_OWNED_AND_LIVE}",
-                [*values, job_id, worker_id, now_stamp, *_TERMINAL_VALUES])
-            moved = cursor.rowcount == 1
-            row = None
-            if moved:
-                rows = await connection.execute(
-                    "SELECT * FROM memory_v2_jobs WHERE job_id=?", (job_id,))
-                row = await rows.fetchone()
-            await connection.commit()
-        return _to_job(row) if row is not None else None
+        async with async_file_lock(self._lock_path(job_id)):
+            job = await self._try_read_async(job_id)
+            if job is None or not self._owned_and_live(job, worker_id, now_stamp):
+                return None
+            return await self._write_async(
+                _advanced(job, stage=stage, state=state, outcome=outcome, reason=reason),
+                updated_at=now_stamp,
+            )
 
-    # 故意不挂 @retry_on_busy（#376-1 复审 F1）：本方法在事务里执行**调用方传入的** `work`
-    # ——executor 的 apply 回调用它改写调用方的 `_RunState`（`discarded` 计数 / `actions` /
-    # `memory_ids`，见 executor.py 的 apply 回调）。整块重跑会把已经记过一次的外部副作用再
-    # 记一次，与"仅 BEGIN IMMEDIATE 可超时、事务未提交、整块重跑等价首次"这个重试前提不同
-    # （其它被包装的写方法体内没有调用方回调）。本方法不是 #376 的 HTTP 失败路径：BEGIN
-    # IMMEDIATE 拿不到锁时异常向上走 executor，被 apply 环节的 `except Exception` 折成
-    # `DegradedReason.APPLY_FAILED`，最终落成**终态** `DEGRADED`（不重认领）。
     async def commit_with_outcome(
         self, *, job_id: str, worker_id: str, outcome: MemoryJobOutcome,
-        work: Callable[[aiosqlite.Connection], Awaitable[T]],
+        work: Callable[[Any], Awaitable[T]],
         state: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
         reason: str | None = None, now: datetime | None = None,
         stage: MemoryJobStage = MemoryJobStage.COMPLETED,
+        before_commit: Callable[[T], Awaitable[None]] | None = None,
     ) -> T | None:
-        """在**一个事务**里执行 `work(connection)` 并写下成功终态（AC6 / AC7）。
+        """执行 `work(connection)`（记录层事务），随后写下成功终态。
 
-        为什么必须同一事务：`work` 写的是记忆记录 + outbox 意图（§6.6 已经要求这两样
-        同事务）。若它们与 job 终态分两次提交，"记录已写、job 仍未终结"的窗口在恢复时与
-        "还没开始写"无法区分——重放就会写出第二条逻辑记忆，AC7 的"零重复"随之失效。
-        合在一个事务里，崩溃只剩下两种结局：**全在**（job 已 COMPLETED，`claim` 不会再
-        认领它）或**全不在**（job 仍非终态，重跑安全）。
+        返回 `None` = 竞争失败（属主不是我 / lease 过期 / 已终结）——此时 `work`
+        **根本不会被执行**，或（提交前复核失败时）其写入被回滚。
 
-        `state` 可以是 callable：`work` 里累积的计数（实际写入的 action、丢弃归因）跑完
-        才知道，而它们要跟终态写进同一行 ⇒ 序列化只能推迟到 `work` 之后。传 dict 就是
-        即时快照，传 callable 就是"落盘那一刻再取"。
+        顺序与保证见模块 docstring。`work` 里必须只用**确定性 id** 写派生层，
+        这样"记录已提交、终态未落"的窗口重跑不会产生第二条逻辑记忆。
 
-        `work` 抛异常 ⇒ 整体回滚：job 保持非终态、零记录写入；调用方据此另开一次提交记
-        降级终态（`transition` 的 `DEGRADED`）。
-        返回 `None` = 竞争失败（属主不是我 / lease 过期 / 已终结）——**此时 `work` 根本不会
-        被执行**，这正是"副作用只在拿到属主时发生"的落点。
-
-        检查放在 `work` 之前（`SELECT 1`）而不是"UPDATE 再看 rowcount"：本事务已持写锁，
-        SELECT 的结论到提交前都成立，而把它提前能让"我不再是属主"这件事**不做任何副作用的
-        准备工作**就退出。终态的赋值片段与 `transition` 共用 `_stage_assignment`。
+        `before_commit`（#1494）在 `work` 之后、**SQLite 事务提交之前**执行：内容发布
+        落在记录层尚未提交的窗口里；发布失败 ⇒ 记录事务回滚、job 不写终态。这就是
+        ADR-0058 D8 的「内容 → records → 终态」；重跑用同一批确定性 id / operation id，
+        不会产生第二次逻辑写入。
         """
         now_stamp = stamp(now)
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
+        async with async_file_lock(self._lock_path(job_id)):
+            job = await self._try_read_async(job_id)
+            if job is None or not self._owned_and_live(job, worker_id, now_stamp):
+                return None
             try:
-                cursor = await connection.execute(
-                    f"SELECT 1 FROM memory_v2_jobs WHERE {_OWNED_AND_LIVE}",
-                    (job_id, worker_id, now_stamp, *_TERMINAL_VALUES))
-                if await cursor.fetchone() is None:
-                    await connection.rollback()
-                    return None
-                result = await work(connection)
-                assignments, values = _stage_assignment(
-                    stage=stage, state=state() if callable(state) else state,
-                    outcome=outcome, reason=reason, now_stamp=now_stamp)
-                updated = await connection.execute(
-                    f"UPDATE memory_v2_jobs SET {', '.join(assignments)} WHERE job_id=?",
-                    [*values, job_id])
-                if updated.rowcount != 1:
-                    raise RuntimeError(f"memory_v2_jobs row vanished for {job_id}")
-            except BaseException:
-                await connection.rollback()
-                raise
-            await connection.commit()
-        return result
+                async with write_connection(self.database_path) as connection:
+                    result = await work(connection)
+                    # 提交前复核：work 期间 lease 被抢走 ⇒ 抛出去触发回滚（零写入）。
+                    latest = await self._try_read_async(job_id)
+                    if latest is None or not self._owned_and_live(latest, worker_id, now_stamp):
+                        raise _LeaseLost
+                    if before_commit is not None:
+                        await before_commit(result)
+            except _LeaseLost:
+                logger.warning("memory job %s lost its lease during apply; rolled back", job_id)
+                return None
+            final_state = state() if callable(state) else state
+            terminal = _advanced(
+                latest, stage=stage, state=final_state, outcome=outcome, reason=reason)
+            written = await self._write_async(terminal, updated_at=now_stamp)
+            if not written.stage.is_terminal:  # pragma: no cover — _advanced 的防线
+                raise RuntimeError(f"memory job {job_id} did not reach a terminal stage")
+            return result
 
-    # ----------------------------------------------------------------------------------
-    # 读
-    # ----------------------------------------------------------------------------------
+    # ------------------------------------------------------------------ 读
 
     async def get(self, job_id: str) -> MemoryFormationJob:
-        async with (
-            connect(self.database_path) as connection,
-            connection.execute(
-                "SELECT * FROM memory_v2_jobs WHERE job_id=?", (job_id,)) as cursor,
-        ):
-            row = await cursor.fetchone()
-        if row is None:
-            raise KeyError(job_id)
-        return _to_job(row)
+        return await self._read_async(job_id)
 
-    @retry_on_busy
+    # ------------------------------------------------------------------ protected fact 提取
+
     async def start_protected_fact_extraction(
         self, *, job_id: str, worker_id: str, now: datetime | None = None,
     ) -> MemoryFormationJob | None:
         """Durably claim the job's single protected-fact model request."""
-        now_stamp = stamp(now if now is not None else datetime.now(UTC))
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
-                f"SELECT * FROM memory_v2_jobs WHERE {_OWNED_AND_LIVE}",
-                (job_id, worker_id, now_stamp, *_TERMINAL_VALUES),
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                await connection.commit()
+        now_stamp = stamp(now)
+        async with async_file_lock(self._lock_path(job_id)):
+            job = await self._try_read_async(job_id)
+            if job is None or not self._owned_and_live(job, worker_id, now_stamp):
                 return None
-            if row["protected_fact_extraction_state"] == "pending":
-                await connection.execute(
-                    f"UPDATE memory_v2_jobs SET protected_fact_extraction_state='started', "
-                    f"protected_fact_extraction_candidates=NULL, updated_at=? "
-                    f"WHERE {_OWNED_AND_LIVE} AND protected_fact_extraction_state='pending'",
-                    (now_stamp, job_id, worker_id, now_stamp, *_TERMINAL_VALUES),
-                )
-                cursor = await connection.execute(
-                    "SELECT * FROM memory_v2_jobs WHERE job_id=?", (job_id,),
-                )
-                row = await cursor.fetchone()
-            await connection.commit()
-        return _to_job(_require(row, job_id))
+            if job.protected_fact_extraction_state is ProtectedFactExtractionState.PENDING:
+                job = MemoryFormationJob(**{
+                    **_job_fields(job),
+                    "protected_fact_extraction_state": ProtectedFactExtractionState.STARTED,
+                    "protected_fact_extraction_candidates": None,
+                })
+                return await self._write_async(job, updated_at=now_stamp)
+            return job
 
-    @retry_on_busy
     async def save_protected_fact_candidates(
         self, *, job_id: str, worker_id: str, candidates: list[dict[str, str]],
         now: datetime | None = None,
@@ -507,104 +470,138 @@ class SqliteMemoryV2JobStore:
             for candidate in candidates
         ):
             raise ValueError("protected fact candidates must contain only source and value")
-        encoded = json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
-        now_stamp = stamp(now if now is not None else datetime.now(UTC))
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            await connection.execute(
-                f"UPDATE memory_v2_jobs SET protected_fact_extraction_state='ready', "
-                f"protected_fact_extraction_candidates=?, updated_at=? "
-                f"WHERE {_OWNED_AND_LIVE} AND protected_fact_extraction_state='started'",
-                (encoded, now_stamp, job_id, worker_id, now_stamp, *_TERMINAL_VALUES),
-            )
-            cursor = await connection.execute(
-                "SELECT * FROM memory_v2_jobs WHERE job_id=? AND lease_owner=?",
-                (job_id, worker_id),
-            )
-            row = await cursor.fetchone()
-            await connection.commit()
-        return _to_job(row) if row is not None else None
+        now_stamp = stamp(now)
+        async with async_file_lock(self._lock_path(job_id)):
+            job = await self._try_read_async(job_id)
+            if job is None or not self._owned_and_live(job, worker_id, now_stamp):
+                return None
+            if job.protected_fact_extraction_state is not ProtectedFactExtractionState.STARTED:
+                return job
+            job = MemoryFormationJob(**{
+                **_job_fields(job),
+                "protected_fact_extraction_state": ProtectedFactExtractionState.READY,
+                "protected_fact_extraction_candidates": list(candidates),
+            })
+            return await self._write_async(job, updated_at=now_stamp)
 
-    @retry_on_busy
     async def finish_protected_fact_extraction(
         self, *, job_id: str, worker_id: str, now: datetime | None = None,
     ) -> bool:
         """Drop raw candidate text after idempotent registration has been attempted."""
-        now_stamp = stamp(now if now is not None else datetime.now(UTC))
-        async with connect(self.database_path) as connection:
-            await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
-                f"UPDATE memory_v2_jobs SET protected_fact_extraction_state='done', "
-                f"protected_fact_extraction_candidates=NULL, updated_at=? "
-                f"WHERE {_OWNED_AND_LIVE} AND protected_fact_extraction_state IN "
-                "('started', 'ready', 'pending')",
-                (now_stamp, job_id, worker_id, now_stamp, *_TERMINAL_VALUES),
-            )
-            await connection.commit()
-        return cursor.rowcount == 1
+        now_stamp = stamp(now)
+        async with async_file_lock(self._lock_path(job_id)):
+            job = await self._try_read_async(job_id)
+            if job is None or not self._owned_and_live(job, worker_id, now_stamp):
+                return False
+            job = MemoryFormationJob(**{
+                **_job_fields(job),
+                "protected_fact_extraction_state": ProtectedFactExtractionState.DONE,
+                "protected_fact_extraction_candidates": None,
+            })
+            await self._write_async(job, updated_at=now_stamp)
+            return True
 
 
-def _stage_assignment(
-    *, stage: MemoryJobStage, state: dict[str, Any] | None,
-    outcome: MemoryJobOutcome | None, reason: str | None, now_stamp: str,
-) -> tuple[list[str], list[Any]]:
-    """`UPDATE memory_v2_jobs SET …` 的赋值片段与参数。
+# ---------------------------------------------------------------------- 纯函数
 
-    `transition` 与 `commit_with_outcome` 共用这一份：状态名、终态字段、lease 释放
-    只在这里写一次，两条入口因此不会漂移（"给了 outcome 却忘了释放 lease"这类错
-    只有一处可能发生）。
 
-    WHERE 子句**不在这里**：`transition` 用一条 UPDATE-CAS 完成，`commit_with_outcome`
-    先 SELECT 确认属主、执行副作用、再写终态——**语句形状**不同。但两者用的是**同一个
-    属主谓词** `_OWNED_AND_LIVE`：那才是会漂移的那一半，所以它被抽了出去。把 WHERE 整体
-    塞进来只会多一条"位置参数必须先 SET 后 WHERE 地对齐"的纪律。
-    """
-    assignments = ["stage=?", "updated_at=?"]
-    values: list[Any] = [stage.value, now_stamp]
+def _advanced(
+    job: MemoryFormationJob, *, stage: MemoryJobStage, state: dict[str, Any] | None,
+    outcome: MemoryJobOutcome | None, reason: str | None,
+) -> MemoryFormationJob:
+    """`transition` 与 `commit_with_outcome` 共用的状态迁移（不含锁与写盘）。"""
+    changes: dict[str, Any] = {"stage": stage}
     if state is not None:
-        assignments.append("state=?")
-        values.append(json.dumps(state, ensure_ascii=False, sort_keys=True))
+        changes["state"] = state
     if stage.is_terminal:
         # 终结时释放 lease：终态 job 不该再占着"该用户的在途槽位"（R11）。
-        assignments.extend([
-            "outcome=?", "reason=?", "lease_owner=NULL", "lease_expires_at=NULL",
-            "protected_fact_extraction_state='done'",
-            "protected_fact_extraction_candidates=NULL",
-        ])
-        values.extend([outcome.value if outcome is not None else None, reason])
-    return assignments, values
+        changes.update({
+            "outcome": outcome, "reason": reason, "lease_owner": None,
+            "lease_expires_at": None,
+            "protected_fact_extraction_state": ProtectedFactExtractionState.DONE,
+            "protected_fact_extraction_candidates": None,
+        })
+    return MemoryFormationJob(**{**_job_fields(job), **changes})
 
 
-def _require(row: Any, key: str) -> Any:
-    """事务内写过的行读不回来 = 前提被破坏，必须响亮而不是返回半成品。"""
-    if row is None:
-        raise RuntimeError(f"memory_v2_jobs row disappeared for {key}")
-    return row
+def _job_fields(job: MemoryFormationJob) -> dict[str, Any]:
+    """dataclass 的字段快照（构造新实例时避免手抄字段名）。"""
+    return {
+        "job_id": job.job_id, "idempotency_key": job.idempotency_key,
+        "tenant_id": job.tenant_id, "user_id": job.user_id,
+        "project_id": job.project_id, "session_id": job.session_id, "run_id": job.run_id,
+        "stage": job.stage, "state": job.state, "outcome": job.outcome,
+        "reason": job.reason, "lease_owner": job.lease_owner,
+        "lease_expires_at": job.lease_expires_at, "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "protected_fact_token_budget": job.protected_fact_token_budget,
+        "protected_fact_extraction_state": job.protected_fact_extraction_state,
+        "protected_fact_extraction_candidates": job.protected_fact_extraction_candidates,
+    }
 
 
-def _to_job(row: Any) -> MemoryFormationJob:
-    raw_candidates = row["protected_fact_extraction_candidates"]
-    return MemoryFormationJob(
-        job_id=row["job_id"],
-        idempotency_key=row["idempotency_key"],
-        tenant_id=row["tenant_id"],
-        user_id=row["user_id"],
-        project_id=row["project_id"],
-        session_id=row["session_id"],
-        run_id=row["run_id"],
-        stage=MemoryJobStage(row["stage"]),
-        state=json.loads(row["state"]),
-        outcome=MemoryJobOutcome(row["outcome"]) if row["outcome"] is not None else None,
-        reason=row["reason"],
-        lease_owner=row["lease_owner"],
-        lease_expires_at=row["lease_expires_at"],
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-        protected_fact_token_budget=row["protected_fact_token_budget"],
-        protected_fact_extraction_state=ProtectedFactExtractionState(
-            row["protected_fact_extraction_state"]
-        ),
-        protected_fact_extraction_candidates=(
-            json.loads(raw_candidates) if raw_candidates is not None else None
-        ),
-    )
+def _to_payload(job: MemoryFormationJob, *, updated_at: str) -> dict[str, Any]:
+    return {
+        "schema": SCHEMA_VERSION,
+        "job_id": job.job_id,
+        "idempotency_key": job.idempotency_key,
+        "tenant_id": job.tenant_id,
+        "user_id": job.user_id,
+        "project_id": job.project_id,
+        "session_id": job.session_id,
+        "run_id": job.run_id,
+        "protected_fact_token_budget": job.protected_fact_token_budget,
+        "protected_fact_extraction_state": job.protected_fact_extraction_state.value,
+        "protected_fact_extraction_candidates": job.protected_fact_extraction_candidates,
+        "stage": job.stage.value,
+        "state": job.state,
+        "outcome": job.outcome.value if job.outcome is not None else None,
+        "reason": job.reason,
+        "lease_owner": job.lease_owner,
+        "lease_expires_at": job.lease_expires_at,
+        "created_at": job.created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _to_job(payload: dict[str, Any]) -> MemoryFormationJob:
+    try:
+        return MemoryFormationJob(
+            job_id=str(payload["job_id"]),
+            idempotency_key=str(payload["idempotency_key"]),
+            tenant_id=str(payload["tenant_id"]),
+            user_id=str(payload["user_id"]),
+            project_id=payload.get("project_id"),
+            session_id=str(payload["session_id"]),
+            run_id=payload.get("run_id"),
+            stage=MemoryJobStage(payload["stage"]),
+            state=dict(payload.get("state") or {}),
+            outcome=(
+                MemoryJobOutcome(payload["outcome"])
+                if payload.get("outcome") is not None else None
+            ),
+            reason=payload.get("reason"),
+            lease_owner=payload.get("lease_owner"),
+            lease_expires_at=payload.get("lease_expires_at"),
+            created_at=str(payload["created_at"]),
+            updated_at=str(payload["updated_at"]),
+            protected_fact_token_budget=payload.get("protected_fact_token_budget"),
+            protected_fact_extraction_state=ProtectedFactExtractionState(
+                payload.get("protected_fact_extraction_state") or "pending"),
+            protected_fact_extraction_candidates=payload.get(
+                "protected_fact_extraction_candidates"),
+        )
+    except (KeyError, ValueError) as error:
+        raise CorruptStateFile(f"invalid job file: {error}") from error
+
+
+__all__ = [
+    "DEFAULT_LEASE_SECONDS",
+    "TERMINAL_STAGES",
+    "MemoryFormationJob",
+    "MemoryJobOutcome",
+    "MemoryJobStage",
+    "MemoryV2JobStore",
+    "ProtectedFactExtractionState",
+    "job_id_for",
+]

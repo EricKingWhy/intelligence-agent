@@ -177,3 +177,29 @@ def test_whole_session_with_yes_executes(_prepared, monkeypatch):
     assert state["limits"] == {_REGISTERED: 9}
     assert state["version"] == before_version + 1
     assert state["events"][-1][0] == "tool_limits_purged"
+
+
+# ── #1503 裁决 Q2 A：CLI 清理口径同样是最宽真实根口径 ─────────────────────
+
+
+def test_root_constraint_ceiling_is_not_purged_by_cli(_prepared, monkeypatch):
+    """`register_constraint` 在 CLI 根**确实注册**（13 名口径），不是陈旧名。
+
+    历史 `_names` 的 12 名口径把它判 stale 并清掉（裁决书 E6 第 4 条实测）。
+    """
+    settings, session_id = _prepared
+    _seed(settings, session_id, {"register_constraint": 2, "read": 9})
+    before = _state(settings, session_id)
+
+    try:
+        _run_cli(
+            monkeypatch,
+            ["budgets", "clear-stale-tools", "--session", session_id, "--yes"],
+        )
+    except SystemExit as exc:
+        assert exc.code in (0, None), f"整会话重整不该被拒绝：exit={exc.code}"
+
+    after = _state(settings, session_id)
+    assert after["limits"] == {"register_constraint": 2, "read": 9}, "一个都不许清"
+    assert after["version"] == before["version"], "无 stale ⇒ 不 bump version"
+    assert after["events"] == before["events"], "无 stale ⇒ 不落审计事件"

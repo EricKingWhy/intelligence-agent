@@ -1,9 +1,9 @@
 """Child process for the #1461 hard-kill test of the blocked-write path (AC7①).
 
-The kill window is *after* `BlockedWriteStore.insert_in` returned but *before*
-`commit_with_outcome` commits: the row exists only inside an open transaction, so a
-real SIGKILL loses it together with the job's terminal state. Recovery must then
-produce exactly one blocked row — never zero (silent drop) and never two (duplicate).
+The kill window is *after* `BlockedWriteStore.insert` returned but *before*
+`commit_with_outcome` writes the job's terminal state: the blocked file exists, the
+job is still non-terminal. A real SIGKILL leaves exactly that on disk; recovery must
+converge to one blocked row — the same deterministic id, never zero and never two.
 
 Same shape as `_protected_fact_extraction_kill_child.py`: the parent prints-barrier
 handshake is the only thing this process does that the parent can observe.
@@ -17,9 +17,11 @@ import sys
 from pathlib import Path
 
 from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.commit import build_markdown_commit
 from agent_harness.memory.v2.executor import MemoryJobExecutor, MemoryModelStage
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
-from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryV2JobStore
+from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.roles import MemoryModelRoles
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.write_approval import BlockedWriteStore
@@ -64,7 +66,7 @@ async def main() -> None:
     root = Path(sys.argv[1])
     session_id = sys.argv[2]
     database = root / "memory-v2.db"
-    jobs = SqliteMemoryV2JobStore(database)
+    jobs = MemoryV2JobStore(database)
     await jobs.initialize()
     # Default lease: every mid-run ownership check (`transition`, `commit_with_outcome`)
     # requires an unexpired lease held by this worker. The parent steals it by claiming
@@ -73,12 +75,16 @@ async def main() -> None:
     if job is None:
         raise AssertionError("the prepared durable job must be claimable")
 
-    service = MemoryV2Service(SqliteMemoryV2Store(database), InMemoryMemoryV2Index())
-    blocked = BlockedWriteStore(database, service)
+    engine = MarkdownMemoryStore(root / "memories")
+    engine.load_from_disk()
+    commit = build_markdown_commit(engine, root)
+    store = SqliteMemoryV2Store(database)
+    service = MemoryV2Service(store, InMemoryMemoryV2Index(), commit=commit)
+    blocked = BlockedWriteStore(service.state_root, service, commit, store)
     await blocked.initialize()
     service.attach_blocked(blocked)
 
-    original = blocked.insert_in
+    original = blocked.insert
 
     async def stop_after_insert(*args, **kwargs):
         result = await original(*args, **kwargs)
@@ -88,7 +94,7 @@ async def main() -> None:
 
     # Instance attribute: this process's executor must see the barrier, and the
     # parent's recovery run (a different process) must not.
-    blocked.insert_in = stop_after_insert  # type: ignore[method-assign]
+    blocked.insert = stop_after_insert  # type: ignore[method-assign]
 
     model = ModelConfig(
         provider="senseaudio",

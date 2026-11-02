@@ -22,7 +22,7 @@
 `BEGIN IMMEDIATE` 持有写锁（WAL 下读者不受影响、写者阻塞）；把 memory-v2 的
 `BUSY_TIMEOUT_MS` 调小让每次尝试快速失败，避免真实 10s 等待拖垮墙钟。
 
-覆盖面：`SqliteMemoryV2Store` 与 `SqliteMemoryV2JobStore` 里**请求 / 后台写路径上、
+覆盖面：`SqliteMemoryV2Store`（记录/派生层）里**请求 / 后台写路径上、
 自开写事务的公开方法**——既含直接 `BEGIN IMMEDIATE` 的（`delete` / `bulk_delete` /
 `update_settings` 等），也含经 `write_connection` 自开事务的（`create` / `update` /
 `invalidate`）。两处**故意不挂**，不是遗漏（复审 F3 / F1）：
@@ -44,7 +44,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import threading
 from pathlib import Path
@@ -53,10 +52,9 @@ import aiosqlite
 import pytest
 import pytest_asyncio
 
-from agent_harness.memory.v2.jobs import MemoryJobOutcome, SqliteMemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryJobOutcome, MemoryV2JobStore
 from agent_harness.memory.v2.store import SqliteMemoryV2Store
 from agent_harness.memory.v2.types import TrustedMemoryIdentity
-from agent_harness.memory.v2.write_approval import StagedWriteStore
 from agent_harness.storage.sqlite import StorageBusyError
 from tests.memory.v2._records import make_draft
 
@@ -109,9 +107,9 @@ async def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SqliteMemory
 
 
 @pytest_asyncio.fixture
-async def jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SqliteMemoryV2JobStore:
+async def jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MemoryV2JobStore:
     monkeypatch.setattr("agent_harness.memory.v2._sqlite.BUSY_TIMEOUT_MS", 50)
-    instance = SqliteMemoryV2JobStore(tmp_path / "memory-v2.db")
+    instance = MemoryV2JobStore(tmp_path / "memory-v2.db")
     await instance.initialize()
     return instance
 
@@ -119,24 +117,6 @@ async def jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SqliteMemoryV
 # --------------------------------------------------------------------------------------
 # 应用层重试：瞬时锁窗口内自愈
 # --------------------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_update_settings_retries_through_transient_lock(store: SqliteMemoryV2Store) -> None:
-    """锁被短暂占用（< 重试预算）→ 退避梯子内锁释放 → 写成功。
-
-    这是 #376 票面 500 的直接解法：`update_settings` 的 `BEGIN IMMEDIATE` 在瞬时
-    竞争窗口内自愈，不再把 `OperationalError` 打到 HTTP 面。
-    """
-    holder = _LockHolder(store.database_path, hold_seconds=0.2)
-    holder.start()
-    try:
-        settings = await store.update_settings(USER_A, recall_enabled=False)
-    finally:
-        holder.stop()
-
-    assert settings.recall_enabled is False
-    assert (await store.get_settings(USER_A)).recall_enabled is False
 
 
 @pytest.mark.asyncio
@@ -156,70 +136,14 @@ async def test_create_retries_through_transient_lock(store: SqliteMemoryV2Store)
     assert (await store.get(created.id, USER_A)).id == created.id
 
 
-@pytest.mark.asyncio
-async def test_enqueue_retries_through_transient_lock(jobs: SqliteMemoryV2JobStore) -> None:
-    """job 存储的写路径同样自愈（formation job 入队是请求/后台热路径）。"""
-    holder = _LockHolder(jobs.database_path, hold_seconds=0.2)
-    holder.start()
-    try:
-        job = await jobs.enqueue(idempotency_key="retry-1", trusted=USER_A, session_id="retry-1")
-    finally:
-        holder.stop()
-
-    assert job.idempotency_key == "retry-1"
-
-
 # --------------------------------------------------------------------------------------
 # 耗尽 → StorageBusyError（结构化错误，web 层据此翻 503）
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_update_settings_exhaustion_raises_storage_busy(store: SqliteMemoryV2Store) -> None:
-    """锁持续占用超过重试预算 → `StorageBusyError`，cause 保留末次 OperationalError。
-
-    耗尽必须是显式新类型而不是继续抛裸 `OperationalError`：web 层按类型把它映射成
-    结构化 503（可重试的暂时故障），500 会把它伪装成服务端 bug。
-    """
-    holder = _LockHolder(store.database_path)
-    holder.start()
-    try:
-        with pytest.raises(StorageBusyError) as excinfo:
-            await store.update_settings(USER_A, recall_enabled=False)
-    finally:
-        holder.stop()
-
-    assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
-
-
 # --------------------------------------------------------------------------------------
 # 不碰非锁错误
 # --------------------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_non_lock_operational_error_is_not_retried(tmp_path: Path, monkeypatch) -> None:
-    """非锁 OperationalError（坏路径等）原样上抛，一次都不重试。
-
-    用「目录当 DB 路径」制造 `unable to open database file`——这不是锁竞争，重试只会
-    白等。断言重试的 sleep 一次都没被调过。
-    """
-    real_sleep = asyncio.sleep
-    sleeps: list[float] = []
-
-    async def _spy_sleep(delay: float) -> None:
-        sleeps.append(delay)
-        await real_sleep(0)
-
-    monkeypatch.setattr(asyncio, "sleep", _spy_sleep)
-
-    store = SqliteMemoryV2Store(tmp_path)  # 目录，不是文件
-    with pytest.raises(sqlite3.OperationalError) as excinfo:
-        await store.update_settings(USER_A, recall_enabled=False)
-
-    assert not isinstance(excinfo.value, StorageBusyError)
-    assert "locked" not in str(excinfo.value).lower()
-    assert sleeps == []
 
 
 # --------------------------------------------------------------------------------------
@@ -238,30 +162,18 @@ async def test_non_lock_operational_error_is_not_retried(tmp_path: Path, monkeyp
                 "invalidate",
                 "delete",
                 "bulk_delete",
-                "update_settings",
-                "purge_expired_tombstones",
+                # #1494：settings / tombstones 已是文件 owner，不再有 SQLite 写事务。
                 "enqueue_active_index_rebuild",
                 "acknowledge",
-            ),
-        ),
-        (
-            SqliteMemoryV2JobStore,
-            (
-                # `commit_with_outcome` **故意不在列**：它执行调用方传入的 `work`，整块
-                # 重跑会重复外部副作用（复审 F1）——由
-                # `test_commit_with_outcome_is_not_retry_wrapped` 反向钉住。
-                "enqueue",
-                "claim",
-                "transition",
-                "start_protected_fact_extraction",
-                "save_protected_fact_candidates",
-                "finish_protected_fact_extraction",
             ),
         ),
     ],
 )
 def test_write_methods_are_retry_wrapped(store_cls, method_names) -> None:
-    """memory-v2 两个 Store 请求 / 后台写路径上的自持写事务方法都必须挂上重试包装。
+    """memory-v2 记录层请求 / 后台写路径上的自持写事务方法都必须挂上重试包装。
+
+    #1494 之后 job / settings / staged / tombstones 都由文件 owner 承载（flock +
+    单文件原子替换），不再有 SQLite 锁竞争形态，因此不在本清单里。
 
     读方法（get / list / latest / pending / get_settings）不在范围内：WAL 下读者不被
     写者阻塞，没有同样的失败形态；`initialize`（装配期 DDL）与 `commit_with_outcome`
@@ -298,19 +210,6 @@ async def test_create_exhaustion_raises_storage_busy(store: SqliteMemoryV2Store)
     assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
 
 
-@pytest.mark.asyncio
-async def test_enqueue_exhaustion_raises_storage_busy(jobs: SqliteMemoryV2JobStore) -> None:
-    """job 存储这一类路径的耗尽分支。"""
-    holder = _LockHolder(jobs.database_path)
-    holder.start()
-    try:
-        with pytest.raises(StorageBusyError):
-            await jobs.enqueue(
-                idempotency_key="exhaust", trusted=USER_A, session_id="exhaust")
-    finally:
-        holder.stop()
-
-
 # --------------------------------------------------------------------------------------
 # 边界：commit_with_outcome 故意不挂重试（复审 F1）
 # --------------------------------------------------------------------------------------
@@ -320,30 +219,15 @@ def test_commit_with_outcome_is_not_retry_wrapped() -> None:
     """`commit_with_outcome` 不得被重试包装：它在事务里执行调用方传入的 `work`，整块
     重跑会重复那份外部副作用。反向断言 `__wrapped__` 缺席，与正向清单互补。"""
     assert getattr(
-        SqliteMemoryV2JobStore.commit_with_outcome, "__wrapped__", None
+        MemoryV2JobStore.commit_with_outcome, "__wrapped__", None
     ) is None, (
         "commit_with_outcome 挂了重试——它执行调用方传入的 work，重跑会重复副作用（#376-1 F1）"
     )
 
 
-def test_approval_transitions_are_not_retry_wrapped() -> None:
-    """`approve` / `reject` 不得被重试包装（#1353 复审 S-P2-1）。
-
-    两者是 get → CAS → `_replay`（**外部 markdown 写**）→ CAS 的长链，不满足
-    「整块重跑等价首次」：第二遍会读到第一遍写的 AWAITING 而提前 blocked，markdown
-    已落盘、状态机卡死。`_set_status` 与 `stage` 是单语句，仍挂装饰器。
-    """
-    for name in ("approve", "reject"):
-        assert getattr(getattr(StagedWriteStore, name), "__wrapped__", None) is None, (
-            f"{name} 挂了重试——它的重放写外部 markdown，整块重跑会把状态机卡在 AWAITING"
-        )
-    for name in ("stage", "_set_status"):
-        assert getattr(getattr(StagedWriteStore, name), "__wrapped__", None) is not None
-
-
 @pytest.mark.asyncio
 async def test_commit_with_outcome_work_runs_once_under_commit_lock_error(
-    jobs: SqliteMemoryV2JobStore, monkeypatch: pytest.MonkeyPatch,
+    jobs: MemoryV2JobStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """锁错误落在 `work` 之后（强制首个 `commit()` 抛 `database is locked`）时，`work`
     只跑一次、异常原样上抛——不重试、不重复副作用。

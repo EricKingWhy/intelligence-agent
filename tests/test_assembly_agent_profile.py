@@ -145,6 +145,27 @@ async def test_root_coding_runtime_can_opt_in_to_constraint_tools(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("artifact_dir", "expected"),
+    [("configured", True), ("", False)],
+    ids=["artifact-store", "no-artifact-store"],
+)
+async def test_root_coding_runtime_rejoins_submit_plan_from_selection(
+    tmp_path, artifact_dir, expected,
+):
+    configured_dir = str(tmp_path / "artifacts") if artifact_dir else ""
+    runtime = await _build_runtime(
+        tmp_path,
+        agent_profile="coding",
+        include_constraint_tools=True,
+        artifact_dir=configured_dir,
+    )
+    tool_names = {tool.name for tool in runtime.registry.list()}
+
+    assert ("submit_plan" in tool_names) is expected
+
+
+@pytest.mark.asyncio
 async def test_root_coding_runtime_injects_the_configured_ask_user_timeout(tmp_path):
     """#1284 P2-1：coding profile 的补注册分支也必须注入 settings 的超时档。
 

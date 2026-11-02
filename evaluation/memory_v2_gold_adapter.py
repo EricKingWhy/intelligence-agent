@@ -55,13 +55,14 @@ from agent_harness.memory.v2.capability import (
     MemoryRejectionReason,
     MemoryV2Service,
 )
+from agent_harness.memory.v2.commit import build_markdown_commit
 from agent_harness.memory.v2.eligibility import (
     MEMORY_OPT_OUT_FIELD,
     decide_run_end_eligibility,
 )
 from agent_harness.memory.v2.executor import MemoryJobExecutor, MemoryModelStage
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index, MemoryV2IndexRelay
-from agent_harness.memory.v2.jobs import MemoryJobStage, SqliteMemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryJobStage, MemoryV2JobStore
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.policy import resolve_evidence_source
 from agent_harness.memory.v2.recall import MemoryV2ContextProvider
@@ -169,12 +170,12 @@ class CaseWorkspace:
         self.db_path = root / "memory_v2.sqlite3"
         self.markdown_dir = root / "markdown"
 
-    async def open(self) -> tuple[MemoryV2Service, SqliteMemoryV2JobStore]:
+    async def open(self) -> tuple[MemoryV2Service, MemoryV2JobStore]:
         """Build the real service over this workspace: SQLite, markdown, index."""
         self.markdown_dir.mkdir(parents=True, exist_ok=True)
         store = SqliteMemoryV2Store(self.db_path)
         await store.initialize()
-        jobs = SqliteMemoryV2JobStore(self.db_path)
+        jobs = MemoryV2JobStore(self.db_path)
         await jobs.initialize()
         index = InMemoryMemoryV2Index()
         markdown = MarkdownMemoryStore(self.markdown_dir)
@@ -183,7 +184,7 @@ class CaseWorkspace:
             store,
             index,
             relay=MemoryV2IndexRelay(store, index),
-            markdown=markdown,
+            commit=build_markdown_commit(markdown, self.root),
         )
         return service, jobs
 
@@ -842,15 +843,16 @@ async def _verify_deleted_memory_erasure(
     markdown is the authoritative surface (#1353 §2): the derived SQLite/index layers
     can be clean while the deleted fact survives there, so check it explicitly.
     """
-    async with connect(database_path) as connection:
-        async with connection.execute(
-            "SELECT COUNT(*) AS count FROM memory_v2_records WHERE root_id=?", (root_id,),
-        ) as cursor:
-            remaining_records = (await cursor.fetchone())["count"]
-        async with connection.execute(
-            "SELECT memory_id FROM memory_v2_tombstones WHERE root_id=?", (root_id,),
-        ) as cursor:
-            tombstone_ids = {row["memory_id"] for row in await cursor.fetchall()}
+    async with connect(database_path) as connection, connection.execute(
+        "SELECT COUNT(*) AS count FROM memory_v2_records WHERE root_id=?", (root_id,),
+    ) as cursor:
+        remaining_records = (await cursor.fetchone())["count"]
+    # #1494 / ADR-0058 D7：墓碑是 memory-state/tombstones/<memory_id>.json。
+    tombstone_ids = set()
+    for path in service.state_root.tombstones_dir.glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("root_id") == root_id:
+            tombstone_ids.add(payload.get("memory_id"))
     if remaining_records != 0 or not memory_ids <= tombstone_ids:
         return False
     index = getattr(service, "_index", None)
@@ -1369,7 +1371,7 @@ async def _execute_wired(
     case: GoldCase,
     workspace: CaseWorkspace,
     service: MemoryV2Service,
-    jobs: SqliteMemoryV2JobStore,
+    jobs: MemoryV2JobStore,
     script: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     session_id = f"gold-{uuid.uuid4().hex}"

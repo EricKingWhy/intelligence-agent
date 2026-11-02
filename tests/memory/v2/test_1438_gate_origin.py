@@ -24,8 +24,9 @@ import pytest_asyncio
 from agent_harness.memory.types import memory_session_var
 from agent_harness.memory.v2 import origin
 from agent_harness.memory.v2.capability import MemoryV2Service
+from agent_harness.memory.v2.commit import build_markdown_commit
 from agent_harness.memory.v2.index import InMemoryMemoryV2Index
-from agent_harness.memory.v2.jobs import SqliteMemoryV2JobStore
+from agent_harness.memory.v2.jobs import MemoryV2JobStore
 from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
 from agent_harness.memory.v2.memory_tool import MemoryTool, _MemoryArgs
 from agent_harness.memory.v2.store import MemorySettingsV2, SqliteMemoryV2Store
@@ -134,7 +135,7 @@ async def foreground_tool(tmp_path):
     await _write_user_turn(sessions, "session-1", "今天天气不错")
     markdown = MarkdownMemoryStore(tmp_path / "memories")
     markdown.load_from_disk()
-    return MemoryTool(markdown, sessions)
+    return MemoryTool(build_markdown_commit(markdown, tmp_path), sessions)
 
 
 @pytest.mark.asyncio
@@ -173,9 +174,10 @@ async def test_foreground_gate_tags_origin_and_restores_it(tmp_path) -> None:
 
     markdown = MarkdownMemoryStore(tmp_path / "memories")
     markdown.load_from_disk()
-    staged = StagedWriteStore(tmp_path / "memory-v2.db", markdown)
+    commit = build_markdown_commit(markdown, tmp_path)
+    staged = StagedWriteStore(commit.root, commit)
     await staged.initialize()
-    tool = MemoryTool(markdown, service=_Service(), staged=staged)
+    tool = MemoryTool(commit, service=_Service(), staged=staged)
     payload = {"target": "memory", "action": "add", "content": "一条事实", "old_text": None}
 
     token = origin.set_origin(origin.BACKGROUND_REVIEW)
@@ -201,20 +203,21 @@ class _OriginRecordingWriter:
         self.inner = inner
         self.origins: list[str] = []
 
-    async def create_in(self, connection, draft, trusted):
+    async def create_in(self, connection, draft, trusted, **kwargs):
         self.origins.append(origin.current_origin())
-        return await self.inner.create_in(connection, draft, trusted)
+        return await self.inner.create_in(connection, draft, trusted, **kwargs)
 
-    async def update_in(self, connection, previous_id, draft, trusted):
+    async def update_in(self, connection, previous_id, draft, trusted, **kwargs):
         self.origins.append(origin.current_origin())
-        return await self.inner.update_in(connection, previous_id, draft, trusted)
+        return await self.inner.update_in(connection, previous_id, draft, trusted, **kwargs)
 
-    async def invalidate_in(self, connection, memory_id, trusted):
+    async def invalidate_in(self, connection, memory_id, trusted, **kwargs):
         self.origins.append(origin.current_origin())
-        return await self.inner.invalidate_in(connection, memory_id, trusted)
+        return await self.inner.invalidate_in(connection, memory_id, trusted, **kwargs)
 
-    async def mirror_committed(self, records, *, invalidated=()):
-        return await self.inner.mirror_committed(records, invalidated=invalidated)
+    async def mirror_committed(self, records, *, invalidated=(), **kwargs):
+        return await self.inner.mirror_committed(
+            records, invalidated=invalidated, **kwargs)
 
 
 @pytest_asyncio.fixture()
@@ -222,7 +225,7 @@ async def executor_env(tmp_path):
     path = tmp_path / "memory-v2.db"
     store = SqliteMemoryV2Store(path)
     await store.initialize()
-    jobs = SqliteMemoryV2JobStore(path)
+    jobs = MemoryV2JobStore(path)
     await jobs.initialize()
     index = InMemoryMemoryV2Index()
     return SimpleNamespace(

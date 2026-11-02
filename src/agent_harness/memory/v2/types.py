@@ -350,3 +350,19 @@ def assert_trusted_identity(record: MemoryRecordV2, trusted: TrustedMemoryIdenti
         raise UntrustedIdentityError("Memory record identity does not match the trusted context")
     if record.scope is MemoryScope.PROJECT and record.project_id != trusted.project_id:
         raise UntrustedIdentityError("Memory record project does not match the trusted context")
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySettingsV2:
+    """四个记忆开关（#1494 起持久化在 `memory-state/settings.json`）。
+
+    定义放在叶子模块（types）而不是 store：settings owner 要读它，store 又要读
+    settings owner——留在 store 会成环。store 仍 re-export 这个名字，既有导入不变。
+    """
+
+    extraction_enabled: bool = True
+    recall_enabled: bool = True
+    #: #1039 / PRD §5.3 第 4 条修订：主端点确定性 provider 类错误是否允许落一次备用。
+    fallback_enabled: bool = True
+    #: #1353 M6：`memory` 工具的写入是否需要人工审批（默认关 = 直接落盘）。
+    write_approval: bool = False

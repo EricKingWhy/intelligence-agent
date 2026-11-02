@@ -104,18 +104,17 @@ async def test_delete_erases_all_versions_and_keeps_only_content_free_tombstones
     assert {item.operation.value for item in pending} == {"delete"}
     assert all(item.record is None for item in pending)
 
-    async with connect(store.database_path) as connection:
-        columns = await connection.execute_fetchall("PRAGMA table_info(memory_v2_tombstones)")
-        names = {row["name"] for row in columns}
-        assert names == {
-            "memory_id", "root_id", "tenant_id", "user_id", "scope", "project_id",
-            "version", "deleted_at", "expires_at", "deletion_reason", "content_hashes",
-            "source_hashes",
-        }
-        rows = await connection.execute_fetchall(
-            "SELECT memory_id, version FROM memory_v2_tombstones ORDER BY version DESC"
-        )
-    serialized = json.dumps([dict(row) for row in rows], ensure_ascii=False)
+    # #1494 / ADR-0058 D7：墓碑是 memory-state/tombstones/<memory_id>.json。
+    rows = []
+    for path in store.state_root.tombstones_dir.glob("*.json"):
+        rows.append(json.loads(path.read_text(encoding="utf-8")))
+    rows.sort(key=lambda row: row["version"], reverse=True)
+    assert {key for key in rows[0]} == {
+        "schema", "memory_id", "root_id", "tenant_id", "user_id", "scope",
+        "project_id", "version", "deleted_at", "expires_at", "deletion_reason",
+        "content_hashes", "source_hashes",
+    }
+    serialized = json.dumps(rows, ensure_ascii=False)
     assert "最初的偏好" not in serialized and "修订后的偏好" not in serialized
     assert "hash-1" not in serialized and "event-1" not in serialized
     assert [(row["memory_id"], row["version"]) for row in rows] == [
@@ -243,9 +242,9 @@ async def test_tombstone_replay_window_and_independent_settings_survive_restart(
     await reopened.initialize()
     settings = await reopened.get_settings(TRUSTED)
     assert settings.extraction_enabled is False and settings.recall_enabled is False
-    assert await reopened.get_settings(TrustedMemoryIdentity("tenant-a", "another-user")) == (
-        type(settings)()
-    )
+    # ADR-0058 D6 / 裁决 7：本机设置没有身份路由——同一台机器上的另一个身份读到
+    # 同一份开关，而不是各自一份默认值。
+    assert await reopened.get_settings(TrustedMemoryIdentity("tenant-a", "another-user")) == settings
     now[0] += timedelta(days=30)
     assert await reopened.purge_expired_tombstones() == 1
     with pytest.raises(KeyError):
@@ -298,6 +297,14 @@ async def test_initialize_adds_enabled_by_default_fallback_column_to_legacy_sett
             "SELECT fallback_enabled FROM memory_v2_settings WHERE tenant_id='tenant-a'")
     assert "fallback_enabled" in {column["name"] for column in columns}
     assert row[0]["fallback_enabled"] == 1
+
+    # #1494 / ADR-0058 D9：旧行由一次性导入搬进文件 owner；缺列按裁决默认读。
+    from agent_harness.memory.v2.commit import build_markdown_commit
+    from agent_harness.memory.v2.legacy_import import import_legacy_state
+    from agent_harness.memory.v2.markdown_store import MarkdownMemoryStore
+    commit = build_markdown_commit(MarkdownMemoryStore(tmp_path / "memories"), tmp_path)
+    imported = await import_legacy_state(store, commit)
+    assert imported["settings"] == 1
 
     settings = await store.get_settings(TRUSTED)
     assert settings.fallback_enabled is True

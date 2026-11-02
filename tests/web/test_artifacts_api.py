@@ -584,6 +584,7 @@ class TestBuildReadArtifactStoreSelection:
             artifact_dir=str(tmp_path / "artifacts"),
             artifact_store_endpoint="https://s3.invalid",
             artifact_store_bucket="b",
+            artifact_store_region="us-east-1",
             artifact_store_access_key="k",
             artifact_store_secret_key="s",
         )

@@ -17,7 +17,7 @@ from agent_harness.memory.v2.jobs import (
     MemoryFormationJob,
     MemoryJobOutcome,
     MemoryJobStage,
-    SqliteMemoryV2JobStore,
+    MemoryV2JobStore,
 )
 from agent_harness.memory.v2.journey import memory_fingerprint
 from agent_harness.memory.v2.notification import (
@@ -148,7 +148,7 @@ def _job(*, job_id: str = "job-1", run_id: str | None = "run-1") -> MemoryFormat
 
 
 async def _runner(tmp_path, sink: RecordingSink, mode: str) -> MemoryJobRunner:
-    jobs = SqliteMemoryV2JobStore(tmp_path / "memory-v2.db")
+    jobs = MemoryV2JobStore(tmp_path / "memory-v2.db")
     await jobs.initialize()
     return MemoryJobRunner(
         jobs=jobs, sessions=JsonlSessionStore(tmp_path / "sessions"), executor=object(),
@@ -237,7 +237,7 @@ async def test_run_one_wires_the_notification_to_the_event_sink(tmp_path) -> Non
     直调 `_notify_human` 的用例证明不了这件事——它们绕过了 `_run_one`。
     """
     sink = RecordingSink()
-    jobs = SqliteMemoryV2JobStore(tmp_path / "memory-v2.db")
+    jobs = MemoryV2JobStore(tmp_path / "memory-v2.db")
     await jobs.initialize()
     record = make_record(memory_id="mem-1", content="用户偏好简洁直接的回答")
     executor = _FakeExecutor(_result(record))
