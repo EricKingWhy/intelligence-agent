@@ -520,6 +520,16 @@ def test_projection_sidecar_write_serializes_with_hard_delete(
     projection_store = BoardProjectionStore(store)
     race = _DeleteRace(store, session, monkeypatch)
     session_lock = race.lock
+    writer_lock_entries: list[str] = []
+    original_enter = _ObservedStoreLock.__enter__
+
+    def observe_enter(lock):
+        result = original_enter(lock)
+        if threading.current_thread().name == "projection-writer":
+            writer_lock_entries.append(session.session_id)
+        return result
+
+    monkeypatch.setattr(_ObservedStoreLock, "__enter__", observe_enter)
     sidecar_write_completed = threading.Event()
     observations: list[tuple[str, bool]] = []
     original_write_sidecar = projection_store._write_sidecar
@@ -568,8 +578,10 @@ def test_projection_sidecar_write_serializes_with_hard_delete(
     assert not race.worker_errors
     assert not race.delete_errors
     assert race.delete_results == [True]
-    assert observations == [("event-tail-read", True), ("sidecar-write", True)], (
-        "尾读必须持 store 锁并先于侧车写入"
+    assert (observations, writer_lock_entries) == (
+        [("event-tail-read", True), ("sidecar-write", True)], [session.session_id]
+    ), (
+        "Validation and persistence must share one store lock acquisition"
     )
     assert sidecar_write_completed.is_set()
 
