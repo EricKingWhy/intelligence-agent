@@ -6,6 +6,7 @@
 渲染器是事件流的纯函数：完整事实源是 Session JSONL，终端只挑人要看的。
 """
 
+import asyncio
 import json
 import logging
 import sys
@@ -234,6 +235,41 @@ def test_preview_window():
     visible, hidden = _preview_window([str(i) for i in range(7)], 5)
     assert visible == ["2", "3", "4", "5", "6"]
     assert hidden == 2
+
+
+def test_local_sandbox_notice_states_no_os_isolation():
+    """#1486 AC3：local 是已批准的默认，但 CLI 必须诚实说明它没有 OS 级隔离。
+
+    文案不许伪装成"已被隔离"：必须同时出现「无 OS 级」「文件」「网络」，
+    并指向有 OS 边界的 Docker 后端。
+    """
+    from agent_harness.cli import local_sandbox_notice
+
+    notice = local_sandbox_notice()
+    assert "无 OS 级" in notice
+    assert "文件" in notice and "网络" in notice
+    assert "Docker" in notice
+    assert "已隔离" not in notice
+
+
+def test_cli_run_prints_local_isolation_notice(tmp_path, monkeypatch, capsys):
+    """`agent-harness run` 走 local 后端时把诚实说明打到 stderr（不污染 stdout 流）。"""
+    import agent_harness.cli as cli_module
+    from agent_harness.config import Settings
+
+    monkeypatch.setattr(
+        "agent_harness.cli.Settings",
+        lambda: Settings(model_api_key="sk-test", workspace_dir=str(tmp_path),
+                         _env_file=None),
+    )
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel([AIMessage(content="ok")], chunk_size=2),
+    )
+    asyncio.run(cli_module.run("打个招呼", write=lambda _text: None))
+
+    err = capsys.readouterr().err
+    assert "无 OS 级" in err
 
 
 def test_emit_stderr_is_muted_gray(capsys):
