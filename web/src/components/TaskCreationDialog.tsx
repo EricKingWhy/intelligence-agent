@@ -160,7 +160,7 @@ function TaskCreationForm({
     (b) => b.backend !== 'windows_psec',
   );
   const sandboxOptions = [
-    { value: 'auto', title: '默认', description: '部署默认（本机）' },
+    { value: 'auto', title: '默认', description: '部署默认（本机，无 OS 级隔离）' },
     ...projectBackends
       .filter((b) => b.available)
       .map((b) => ({
@@ -170,7 +170,12 @@ function TaskCreationForm({
           : b.backend === 'docker'
             ? 'Docker'
             : b.backend,
-        description: undefined,
+        // #1486 AC3：local 无 OS 级隔离必须在 UI 明示（语义与 CLI LOCAL_SANDBOX_NOTICE 一致）。
+        description: b.backend === 'local'
+          ? '无 OS 级文件/网络隔离：以当前用户身份直接读写宿主目录、可触达本机网络'
+          : b.backend === 'docker'
+            ? '容器内运行：非 root、cap_drop=ALL、no-new-privileges'
+            : undefined,
       })),
   ];
   // 不可用的后端不进选项（不画饼）；但若之前选过已变不可用的，后端会 409 结构化报错
@@ -342,6 +347,11 @@ function TaskCreationForm({
                     `${b.backend}（${b.reason ?? '未知原因'}）`).join('、')}
                 </span>
               )}
+              {sandbox === 'auto' || sandbox === 'local' ? (
+                <span className="project-field-hint">
+                  本机：命令以当前用户身份直接读写宿主目录、可触达本机网络，无 OS 级隔离；需要 OS 级边界请选 Docker。
+                </span>
+              ) : null}
               <span className="project-field-hint">
                 目录被其他任务占用时，默认自动建 worktree 并行（可在创建请求里改排队）。
               </span>
