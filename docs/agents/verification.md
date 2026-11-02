@@ -132,7 +132,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
      tui 包内以满足 `rootDir: "."`）与 `docs/EVENT_VOCABULARY.md`
      （`scripts/gen_event_vocabulary.py`）。
   2. **验证映射**：见 §2 ⑭。
-  3. **索引可执行位 ⇔ shebang**（P0-2）—— **本条是这四文件里机制叙述的权威处**，判据
+  3. **索引可执行位 ⇔ shebang**（P0-2）—— **本条是这五文件里机制叙述的权威处**，判据
      `scripts/check_exec_bit.py`（判据脚本与用例只写操作约束 + 指回本处）：
      - **它补的是 `ruff` 的 `EXE001`**（`Shebang is present but file is not executable`）：那条
        规则只在 Unix 生效，而本仓 `core.filemode=false` ⇒ 本地 `ruff check .` **看不见**
@@ -173,7 +173,11 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
      同时是「锚须落在**共享**历史里」的一般形式：锚点随合并进 `origin/main` 后，origin/main 与
      从它切出的分支都带该常量 ⇒ 自动被要求「锚点是它们的祖先」；合并前锚点按 #1662 裁决 A 是
      分支私有的，故不另写只认 origin/main 的断言（那在合并前必然红）。
-     变异：常量改成可解析但非祖先的 sha ⇒ 第 2 条红；拼成仓里不存在的 sha ⇒ 第 1 条红。
+     变异（按断言身份记，不引行号）：常量改成可解析但非祖先的 sha（`2b04fa767…`）⇒ 第 2 条**且**
+     第 3 条红（未提交时第 2 条红 + 「没有任何树含锚点」前置红）；拼成仓里不存在的 sha（`…dda8a`）
+     ⇒ 第 1 条**且**第 3 条红（未提交时连带同一前置红；第 2 条在该用例里不会被求值）；唯一单条红
+     是「另造一个带常量、无锚点的**非 HEAD** ref」⇒ 第 3 条单独红（offenders 指名该 ref，第 2 条
+     仍绿）。实测明细见 `tests/tooling/test_gate0_bootstrap_anchor.py` 模块 docstring。
 - **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
   `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
   读失败日志**别只 grep `missing receipt`**：warn-only（首周宽限）期该子检查的违规行带
