@@ -468,6 +468,32 @@ async def test_cli_pause_then_resume_completes_the_same_run(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_cli_resume_prints_local_isolation_notice(
+    monkeypatch, tmp_path, capsys,
+):
+    """#1486 AC3 / Spec F5：resume 经 AppState 固定 local 后端，必须同样明示。
+
+    修复前只有 `run` 打印，`resume` / `fork` 静默——用户会以为自己有 OS 边界。
+    """
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        "agent_harness.assembly.create_chat_model",
+        lambda config, **kw: ScriptedModel(responses=[_continuation_json()]),
+    )
+    await cli.run("先撞一下 ceiling", run_turns_total=1, write=lambda _t: None)
+    session_id = _only_session_id(settings)
+    capsys.readouterr()
+
+    await resume_command(
+        session_id, run_turns_total=4, expected_version=1, write=lambda _t: None,
+    )
+    err = capsys.readouterr().err
+    assert "无 OS 级" in err
+    assert "Docker" in err
+
+
+@pytest.mark.asyncio
 async def test_cli_resume_rejects_a_stale_version_without_side_effects(monkeypatch, tmp_path):
     """版本过期 ⇒ 领域异常向上抛（`_main_resume` 翻成 exit 1），事件流一字不改。"""
     settings = _settings(tmp_path)
