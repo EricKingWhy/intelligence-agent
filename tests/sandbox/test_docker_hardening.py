@@ -847,8 +847,14 @@ def test_custom_image_named_user_and_group_is_resolved_and_workspace_usable(
         assert sandbox.exec("printf X > /workspace/via_exec.txt").exit_code == 0
         sandbox.write_text("via_api.txt", "ok")
         assert sandbox.read_text("via_api.txt") == "ok"
-        assert "1500:1500 666 /workspace/via_api.txt" in _manifest(
-            docker_client, sandbox._volume_name
+        # 落盘模式 = 0666 & ~umask：write_text 在容器内经 `cat 临时文件 > 目标`
+        # 新建 inode，临时 tar 成员的 0o644 不作用到最终文件。沙箱 umask 000
+        # 得 666、CI runner umask 022 得 644（#1665 CI 红）。属主是确定的，
+        # 模式随执行环境 umask 漂移，故按集合断言而非钉死 666。
+        manifest = _manifest(docker_client, sandbox._volume_name)
+        assert any(
+            f"1500:1500 {mode} /workspace/via_api.txt" in manifest
+            for mode in ("644", "666")
         )
     finally:
         sandbox.delete()
