@@ -89,7 +89,7 @@ LANE_TIMEOUT = 300.0
 #: 原因：把「超预算」等于「失败」会把环境负载导致的慢误判成代码问题，与本项目「不做假绿灯」同理。
 GATE0_BUDGET = 60.0
 
-#: `guards` 车道的用例清单。三条机械守卫，各自守一个**跨面**的不变量。**本清单是唯一真值**；
+#: `guards` 车道的用例清单。四条机械守卫，各自守一个**跨面**的不变量。**本清单是唯一真值**；
 #: 逐条的判据 / 证据 / 实测读数见 `docs/agents/verification.md` §2 ⑦（此处只写「守什么」，
 #: 不复述机制 —— `AGENTS.md` §16.1）：
 #:   ① 生成物同步：`src/.../event.py`（词汇唯一真值）↔ `web/src/generated/event-types.ts`
@@ -99,6 +99,9 @@ GATE0_BUDGET = 60.0
 #:      不能悄悄腐烂。
 #:   ③ 索引可执行位 ⇔ shebang（P0-2）：把 `ruff` 的 `EXE001`（只在 Unix 生效）机械地补回本地
 #:      —— 读索引模式与 blob 头部，不依赖工作树权限、也不依赖 `core.autocrlf`。
+#:   ④ 收据锚点（#1662）：`_RECEIPT_BOOTSTRAP_SHA` 解析得出、是 HEAD 的祖先，且**每一棵带着
+#:      这个常量的树都拿得到该锚点**（常量与锚点一起传播）—— 否则那棵树的 receipt-present
+#:      整体归零（fail-open）。
 #: 车道描述里的「（N 文件）」由 `tests/test_exec_bit_matches_shebang.py` 与
 #: `docs/agents/verification.md` §2 ⑦ 两侧对账（改一处忘另一处会红）。
 GUARD_TESTS = (
@@ -438,8 +441,8 @@ def build_lanes(since: str) -> list[Lane]:
                  if not have_stylelint else "找不到 node"),
     ))
 
-    # ⑤ 机械守卫（生成物同步 / 验证映射 / 索引可执行位）：三类都是**跨面**不变量，各自在别处
-    #    没有第二条能抓（跨 `src`↔`web` 的漂移、map 的腐烂、Unix-only 的 `EXE001`）⇒
+    # ⑤ 机械守卫（生成物同步 / 验证映射 / 索引可执行位 / 收据锚点）：四类都是**跨面**不变量，各自在别处
+    #    没有第二条能抓（跨 `src`↔`web` 的漂移、map 的腐烂、Unix-only 的 `EXE001`、常量与锚点不同步传播）⇒
     #    **与改动面无关**、恒定跑。清单与理由见 `GUARD_TESTS`。
     py = venv_python()
     guard_env = dict(os.environ, PYTHONUTF8="1", PYTHONPATH="")
@@ -859,12 +862,17 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 #: 摘取）必然把两者一起带来。⇒ **#1486 合并进 main 之前**，其他分支/PR 跑的是**各自树里的旧
 #: 常量**（实测 origin/main、codex/issue-1530、codex/session-delete-projection、claude/1499
 #: 均为 69befba3da74），本笔对他们**没有任何影响**；**合并之后**，从 main 切出的分支把 d97b00f26
-#: 当祖先、窗口正常。真正的残余风险只有两条：① 合并前 fork 且**到 2026-11-08 之后仍未同步 main**
+#: 当祖先 ⇒ 不会被 fail-open 挖空；7 天窗仍按 d97b00f26 计（2026-11-08T12:00:04Z），到期后的
+#: 风险见 ① 与设计缺陷本体。真正的残余风险只有两条：① 合并前 fork 且**到 2026-11-08 之后仍未同步 main**
 #: 的分支，会在自己的锚点上复现本次死锁（`69befba3d` 的窗已于 2026-11-01T09:11Z 到期，**这是
 #: 重锚前就存在的状态**，不是本笔引入）；② 用 cherry-pick / rebase / 手工只摘 gate0.py 一处
 #: hunk 的分支会拿到常量却拿不到祖先 ⇒ 该分支 receipt-present 归零（fail-open），直到补上
-#: d97b00f26。以上是**裁决 A（锚点前移重开采用窗）的既有取舍**（2026-10-25 第二次锚定的
-#: 69befba3d 同样是当时的私有 tip，同一取舍已存在一轮），不是本笔擅自扩大的口径；② 也由
+#: d97b00f26。以上取舍属**裁决 A（锚点前移重开采用窗）的必然代价**，不是本笔擅自扩大的口径。
+#: 更正（#1662 R2 P3-B）：上一轮锚点 69befba3d **不是**当时的私有 tip —— 它是 main 第一父链上
+#: 的 #1595 合并提交（`git rev-list --first-parent origin/main` 第 40 位），采纳它的 31bdb7345
+#: 对它是 `merge-base --is-ancestor` rc 0，即被采纳时已是 main 祖先 ⇒ 上一轮**不存在**跨分支
+#: fail-open 这一类风险；本轮因 merge-base a49a2b9c5 之后没有可用的近期 main 祖先，才**首次**
+#: 引入「锚点不在共享历史里」这个取舍。② 也由
 #: follow-up 票（新分支收据自举）一并处理，本常量不承担该修复。
 #:
 #: 交付结构（#1662 P3-2）：**每个裸全量跑过的 tip 各落一份 `docs/gate/<sha>.json`，其后的纯收据
