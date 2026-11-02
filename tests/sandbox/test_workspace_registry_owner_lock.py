@@ -621,15 +621,22 @@ def test_stale_docker_sandbox_cannot_recreate_volume_after_delete_marker(
     class NotFound(Exception):
         pass
 
+    class FakeContainer:
+        def start(self) -> None:
+            self.started = True
+
+        def remove(self, **_kwargs) -> None:
+            pass
+
     class Containers:
-        run_calls = 0
+        create_calls = 0
 
         def get(self, _name: str) -> None:
             raise NotFound
 
-        def run(self, *_args, **_kwargs) -> object:
-            self.run_calls += 1
-            return object()
+        def create(self, *_args, **_kwargs) -> object:
+            self.create_calls += 1
+            return FakeContainer()
 
     containers = Containers()
     monkeypatch.setitem(
@@ -653,13 +660,18 @@ def test_stale_docker_sandbox_cannot_recreate_volume_after_delete_marker(
     sandbox._container_name = mapping["container_name"]
     sandbox._volume_name = mapping["volume_name"]
     sandbox._image = "test-image"
+    # #1486：本用例钉的是 hard-delete 标记门，不是卷属主迁移；替身没有真 daemon，
+    # 迁移置空（真迁移由 tests/sandbox/test_docker_hardening.py 的真实引擎用例覆盖）。
+    monkeypatch.setattr(
+        DockerSandbox, "_migrate_volume_ownership", lambda self, _user: None
+    )
     registry._attach_workspace_restore_guard(sandbox, session_id)
 
     sandbox.ensure_started()
-    assert containers.run_calls == 1
+    assert containers.create_calls == 1
 
     mapping["workspace_delete_in_progress"] = True
     registry._write_mapping(session_id, mapping)
     with pytest.raises(WorkspaceBindingError, match="hard-delete"):
         sandbox.ensure_started()
-    assert containers.run_calls == 1
+    assert containers.create_calls == 1

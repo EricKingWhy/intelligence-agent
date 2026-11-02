@@ -3,7 +3,7 @@
 红阶段（TDD）：`DockerSandbox.resolve_within_workspace` 只做词法规范化，
 不解析容器内符号链接；而 read_text 的 `get_archive`、write_text 的
 `cat >`、copy_in 的 `put_archive(父目录)` 都按容器语义**跟随**链接——
-`/workspace/link -> /etc/x` 一类链接会让"workspace 路径"静默穿透到容器
+`/workspace/link -> /tmp/x` 一类链接会让"workspace 路径"静默穿透到容器
 文件系统的任意位置（宿主侧基类 base.py 用 `Path.resolve()` 跟随链接做
 同一围栏，Docker 后端未对齐）。
 
@@ -25,6 +25,10 @@ AC③ 的工具层配对（PermissionError → `PERMISSION_DENIED` ToolResult）
 需要真实 Docker Engine（python:3-slim + coreutils realpath）。Engine
 不可用时用例**真实失败**（不静默跳过）——票面 AC 明确要求实际容器用例
 而非只 mock SDK（对齐 #1048 AC4 的先例）。
+
+#1486 起容器以非 root（1000:1000）+ cap_drop=ALL 运行，`/etc` 不再可写，
+故"容器内 workspace 之外"的落点改用同样可写的 `/tmp`（同一逃逸面：仍在
+`/workspace` 之外，且能真实观察读写是否穿透）。
 """
 
 from __future__ import annotations
@@ -75,15 +79,15 @@ def test_read_final_symlink_escape_rejected_and_target_unchanged(
 ) -> None:
     sandbox = fenced_sandbox
     sandbox.exec(
-        "printf 'SENTINEL' > /etc/harness-fence-canary && "
-        "ln -sfn /etc/harness-fence-canary /workspace/leak-link"
+        "printf 'SENTINEL' > /tmp/harness-fence-canary && "
+        "ln -sfn /tmp/harness-fence-canary /workspace/leak-link"
     )
 
     with pytest.raises(PermissionError, match="越出 workspace"):
         sandbox.read_text("leak-link")
 
     # 实际目标字节不变（读路径只读，仍按 AC 显式钉住）。
-    result = sandbox.exec("cat /etc/harness-fence-canary")
+    result = sandbox.exec("cat /tmp/harness-fence-canary")
     assert result.exit_code == 0
     assert result.stdout == "SENTINEL"
 
@@ -93,14 +97,14 @@ def test_write_final_symlink_escape_rejected_and_target_bytes_unchanged(
 ) -> None:
     sandbox = fenced_sandbox
     sandbox.exec(
-        "printf 'ORIGINAL' > /etc/harness-fence-canary-w && "
-        "ln -sfn /etc/harness-fence-canary-w /workspace/pwn-link"
+        "printf 'ORIGINAL' > /tmp/harness-fence-canary-w && "
+        "ln -sfn /tmp/harness-fence-canary-w /workspace/pwn-link"
     )
 
     with pytest.raises(PermissionError, match="越出 workspace"):
         sandbox.write_text("pwn-link", "EVIL")
 
-    result = sandbox.exec("cat /etc/harness-fence-canary-w")
+    result = sandbox.exec("cat /tmp/harness-fence-canary-w")
     assert result.exit_code == 0
     assert result.stdout == "ORIGINAL"
 
@@ -111,9 +115,9 @@ def test_intermediate_dir_symlink_escape_rejected_for_read_write_copy(
 ) -> None:
     sandbox = fenced_sandbox
     sandbox.exec(
-        "mkdir -p /etc/harness-fence-dir && "
-        "printf 'SECRET' > /etc/harness-fence-dir/secret.txt && "
-        "ln -sfn /etc/harness-fence-dir /workspace/dir-link"
+        "mkdir -p /tmp/harness-fence-dir && "
+        "printf 'SECRET' > /tmp/harness-fence-dir/secret.txt && "
+        "ln -sfn /tmp/harness-fence-dir /workspace/dir-link"
     )
 
     with pytest.raises(PermissionError, match="越出 workspace"):
@@ -128,9 +132,9 @@ def test_intermediate_dir_symlink_escape_rejected_for_read_write_copy(
         sandbox.copy_in(host_file, "dir-link/copied.txt")
 
     leaked = sandbox.exec(
-        "cat /etc/harness-fence-dir/secret.txt; "
-        "test ! -e /etc/harness-fence-dir/new.txt && printf NO_NEW; "
-        "test ! -e /etc/harness-fence-dir/copied.txt && printf NO_COPY"
+        "cat /tmp/harness-fence-dir/secret.txt; "
+        "test ! -e /tmp/harness-fence-dir/new.txt && printf NO_NEW; "
+        "test ! -e /tmp/harness-fence-dir/copied.txt && printf NO_COPY"
     )
     assert leaked.exit_code == 0
     assert "SECRET" in leaked.stdout
@@ -153,7 +157,7 @@ def test_dangling_outward_link_is_permission_error(fenced_sandbox: object) -> No
     围栏处按解析目标判界（与 base.py 一致）。
     """
     sandbox = fenced_sandbox
-    sandbox.exec("ln -sfn /etc/harness-fence-nothing /workspace/dang-link")
+    sandbox.exec("ln -sfn /tmp/harness-fence-nothing /workspace/dang-link")
 
     with pytest.raises(PermissionError, match="越出 workspace"):
         sandbox.read_text("dang-link")
@@ -245,9 +249,9 @@ def test_path_kind_intermediate_dir_link_fenced(fenced_sandbox: object) -> None:
     """
     sandbox = fenced_sandbox
     sandbox.exec(
-        "mkdir -p /etc/harness-fence-kind && "
-        "printf 'x' > /etc/harness-fence-kind/secret.txt && "
-        "ln -sfn /etc/harness-fence-kind /workspace/pk-dl"
+        "mkdir -p /tmp/harness-fence-kind && "
+        "printf 'x' > /tmp/harness-fence-kind/secret.txt && "
+        "ln -sfn /tmp/harness-fence-kind /workspace/pk-dl"
     )
     assert sandbox.path_kind("pk-dl/secret.txt") is None
 
