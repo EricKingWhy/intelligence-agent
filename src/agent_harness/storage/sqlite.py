@@ -36,7 +36,7 @@ _BUSY_TIMEOUT_MS = 10_000
 
 
 @asynccontextmanager
-async def _connect(database_path: Path) -> AsyncIterator[aiosqlite.Connection]:
+async def connect(database_path: Path) -> AsyncIterator[aiosqlite.Connection]:
     connection = await aiosqlite.connect(database_path)
     try:
         await connection.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
@@ -220,7 +220,7 @@ class SqliteOperationLedger(OperationLedger):
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute("BEGIN IMMEDIATE")
             await self._reject_legacy_schema(connection)
@@ -272,7 +272,7 @@ class SqliteOperationLedger(OperationLedger):
             raise ValueError("A new Operation must start in PENDING")
         if operation.attempt_count is None:
             raise ValueError("A new Operation must have a known attempt count")
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute(
                 """
                 INSERT INTO operations (
@@ -303,7 +303,7 @@ class SqliteOperationLedger(OperationLedger):
     @retry_on_busy
     async def record_attempt(self, session_id: str, tool_call_id: str) -> None:
         """Atomically count an invocation before entering ``Tool.execute``."""
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """
@@ -343,7 +343,7 @@ class SqliteOperationLedger(OperationLedger):
         tool_call_id 由模型生成、只在会话内保证唯一——跨会话复用同一 id
         （"call_1" 是高频模型输出）时单列主键会互相覆盖/撞键。
         """
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 "SELECT * FROM operations WHERE session_id = ? AND tool_call_id = ?",
@@ -364,12 +364,12 @@ class SqliteOperationLedger(OperationLedger):
         reconcile_meta: str | None = None,
     ) -> Operation:
         # 单连接内完成「读 → 校验 → CAS 写 → 校验 → 读回 → 提交」：对外语义不变，
-        # 只把 3 次 _connect 收成 1 次。CAS 仍由 UPDATE 的 `WHERE ... AND state = ?` 加
+        # 只把 3 次 connect 收成 1 次。CAS 仍由 UPDATE 的 `WHERE ... AND state = ?` 加
         # rowcount 检查保证——不引入显式事务，不加行锁（票面 R3）。
         # rowcount 检查与回读必须在 commit 之前（同 delegation_tree 的 #515 P2-B 注）：
         # commit 后的读撞锁会触发整方法重跑，而 UPDATE 已持久化，重跑会读到已迁移
         # 的状态、撞状态机抛伪 ValueError（#544 ③）。
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 "SELECT * FROM operations WHERE session_id = ? AND tool_call_id = ?",
@@ -428,7 +428,7 @@ class SqliteOperationLedger(OperationLedger):
         return self._to_operation(updated_row)
 
     async def list_for_session(self, session_id: str) -> list[Operation]:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """
@@ -443,7 +443,7 @@ class SqliteOperationLedger(OperationLedger):
 
     @retry_on_busy
     async def delete_for_session(self, session_id: str) -> int:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             cursor = await connection.execute(
                 "DELETE FROM operations WHERE session_id = ?", (session_id,)
             )
@@ -511,7 +511,7 @@ class SqliteCheckpointStore(CheckpointStore):
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_CHECKPOINTS_DDL)
             await connection.execute(
@@ -522,7 +522,7 @@ class SqliteCheckpointStore(CheckpointStore):
 
     @retry_on_busy
     async def save(self, checkpoint: Checkpoint) -> None:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute(
                 """
                 INSERT INTO checkpoints (
@@ -540,7 +540,7 @@ class SqliteCheckpointStore(CheckpointStore):
             await connection.commit()
 
     async def list_for_session(self, session_id: str) -> list[Checkpoint]:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """
@@ -555,7 +555,7 @@ class SqliteCheckpointStore(CheckpointStore):
 
     @retry_on_busy
     async def delete_for_session(self, session_id: str) -> int:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             cursor = await connection.execute(
                 "DELETE FROM checkpoints WHERE session_id = ?", (session_id,)
             )
@@ -564,7 +564,7 @@ class SqliteCheckpointStore(CheckpointStore):
         return removed
 
     async def latest(self, session_id: str) -> Checkpoint | None:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """
@@ -596,7 +596,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_SESSION_META_DDL)
             await self._ensure_extra_columns(connection)
@@ -621,7 +621,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
 
     @retry_on_busy
     async def upsert(self, meta: SessionMeta) -> SessionMeta:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute(
                 """
                 INSERT INTO session_meta (
@@ -656,7 +656,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
         return loaded
 
     async def get(self, session_id: str) -> SessionMeta | None:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 "SELECT * FROM session_meta WHERE session_id = ?",
@@ -666,7 +666,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
         return self._to_meta(row) if row is not None else None
 
     async def list_all(self) -> list[SessionMeta]:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 "SELECT * FROM session_meta ORDER BY created_at, session_id"
@@ -676,7 +676,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
 
     async def get_by_client_request_id(self, client_request_id: str) -> list[SessionMeta]:
         """见 `SessionMetaStore.get_by_client_request_id`（#1333）。"""
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 "SELECT * FROM session_meta WHERE client_request_id = ? "
@@ -688,7 +688,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
 
     @retry_on_busy
     async def set_archived(self, session_id: str, archived: bool = True) -> SessionMeta:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             cursor = await connection.execute(
                 "UPDATE session_meta SET archived = ? WHERE session_id = ?",
                 (1 if archived else 0, session_id),
@@ -704,7 +704,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
     async def update_last_checkpoint_seq(
         self, session_id: str, event_seq: int
     ) -> SessionMeta:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             cursor = await connection.execute(
                 "UPDATE session_meta SET last_checkpoint_seq = ? WHERE session_id = ?",
                 (event_seq, session_id),
@@ -719,7 +719,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
     @retry_on_busy
     async def set_project_key(self, session_id: str, project_key: str) -> SessionMeta:
         """见 `SessionMetaStore.set_project_key`（#1191 §三.3）。"""
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             cursor = await connection.execute(
                 "UPDATE session_meta SET project_key = ? WHERE session_id = ?",
                 (project_key, session_id),
@@ -734,7 +734,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
     @retry_on_busy
     async def clear_delegation_parent(self, parent_session_id: str) -> int:
         """见 `SessionMetaStore.clear_delegation_parent`（#172 / ADR-0029 D5）。"""
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             cursor = await connection.execute(
                 """
                 UPDATE session_meta
@@ -749,7 +749,7 @@ class SqliteSessionMetaStore(SessionMetaStore):
 
     @retry_on_busy
     async def cleanup(self, session_id: str) -> None:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute(
                 "DELETE FROM session_meta WHERE session_id = ?",
                 (session_id,),
