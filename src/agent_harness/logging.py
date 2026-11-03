@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 from uuid import uuid4
 
+from agent_harness.redaction import redact_diagnostic_value
+
 SCHEMA_VERSION = "1.0"
 SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 # Keep one active 10 MiB log and five rotated backups per workspace.
@@ -259,7 +261,7 @@ class JsonlFormatter(logging.Formatter):
         if record.exc_info:
             entry["stack_trace"] = self.formatException(record.exc_info)
 
-        cleaned = _drop_none(entry)
+        cleaned = redact_diagnostic_value(_drop_none(entry))
         displayed = {_DISPLAY_KEYS.get(key, key): value for key, value in cleaned.items()}
         # json.dumps 默认不会写真实换行，stack trace 中的换行会被转义为 \n。
         return json.dumps(displayed, ensure_ascii=False, default=str, separators=(",", ":"))

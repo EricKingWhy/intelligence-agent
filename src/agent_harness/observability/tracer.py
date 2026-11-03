@@ -7,8 +7,7 @@
   （项目键 → Langfuse usage_details 键）、latency、fallback 履历；
 - run 终态 → 根观测 update（output / level=ERROR）+ end。
 
-内容边界（D6）：``full`` 原样；``redacted`` 截断——redaction 是本模块
-``_redact`` 单一函数边界，未来接策略不改埋点。所有 span 操作零伪造
+内容边界：``full`` 原样；``redacted`` 脱敏并截断。所有 span 操作零伪造
 （无数据不带键）且绝不抛出：句柄操作失败经 ``sink.report_failure``
 计数进熔断账本后吞掉。
 
@@ -27,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_harness.observability.sink import LangfuseSink, sanitize_memory_metadata
+from agent_harness.redaction import redact_diagnostic_value
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _REDACTED_TEXT_LIMIT = 500
@@ -131,14 +131,16 @@ class RunTracer:
     def _content_fields(self, field: str, value: Any) -> dict[str, Any]:
         if self._metadata_only:
             return {}
-        if getattr(self._sink, "trace_content", "full") == "redacted":
-            return {field: _redact(value)}
+        if getattr(self._sink, "trace_content", "redacted") == "redacted":
+            return {field: _redact(redact_diagnostic_value(value))}
         return {field: value}
 
     def _metadata(self, values: dict[str, Any]) -> dict[str, Any]:
-        if not self._metadata_only:
-            return values
-        return sanitize_memory_metadata(values)
+        if self._metadata_only:
+            return sanitize_memory_metadata(values)
+        if getattr(self._sink, "trace_content", "redacted") == "redacted":
+            return redact_diagnostic_value(values)
+        return values
 
     def _quiet(self, operation: str, fn: Callable[[], Any]) -> Any:
         try:
@@ -166,7 +168,7 @@ class RunTracer:
             trace_meta["turn_index"] = self._turn_index
         with self._sink.trace_attributes(
             session_id=self._session_id, trace_name="agent-run",
-            metadata=trace_meta,
+            metadata=self._metadata(trace_meta),
         ):
             root = self._sink.start_observation(
                 name="agent-run",
@@ -255,6 +257,8 @@ class RunTracer:
         self._quiet("model_call_failed", lambda: generation.update(
             level="ERROR",
             status_message=("model call failed" if self._metadata_only
+                            else redact_diagnostic_value(f"model call failed: {error_type}")
+                            if getattr(self._sink, "trace_content", "redacted") == "redacted"
                             else f"model call failed: {error_type}"),
         ))
         self._quiet("model_call_end", generation.end)
@@ -279,7 +283,10 @@ class RunTracer:
             return
         self._quiet("run_failed", lambda: self._root.update(
             level="ERROR",
-            status_message="agent run failed" if self._metadata_only else reason,
+            status_message=("agent run failed" if self._metadata_only else
+                            redact_diagnostic_value(reason)
+                            if getattr(self._sink, "trace_content", "redacted") == "redacted"
+                            else reason),
         ))
         if self._owns_root:
             self._quiet("run_end", self._root.end)
@@ -313,7 +320,9 @@ class RunTracer:
         return self._quiet(
             "tool_span_started",
             lambda: parent.start_observation(
-                name=tool_name,
+                name=(redact_diagnostic_value(tool_name)
+                      if getattr(self._sink, "trace_content", "redacted") == "redacted"
+                      else tool_name),
                 as_type="agent" if is_delegate else "tool",
                 **self._content_fields("input", args),
                 metadata=self._metadata({
