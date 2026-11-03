@@ -2677,53 +2677,15 @@ class AgentRuntime:
                 # 因此按位置配对 call↔execution——空/重复 id 也不会串对。
                 for call, execution in zip(calls, executions):
                     result = execution.result
-                    content = result.model_dump_json()
                     outcome: str = "success" if result.ok else "failure"
-
-                    # 持久化顺序（延迟事件 → TOOL_RESULT）的单一 owner 是
-                    # ToolExecutor.emit_*（批次 C 候选 3 + ADR-0016 §4.1 拆分）：
-                    # Runtime 只消费已持久化事件并镜像，不再自己 append。
-                    for persisted_event in await self.executor.emit_pending_events_async(
-                        session,
-                        pending_events=execution.pending_events,
-                        run_id=run_id, step_id=step_base + steps,
+                    async for result_event in self.executor.finalize_execution(
+                        session, execution, run_id=run_id, step_id=step_base + steps,
+                        record_result=functools.partial(
+                            self._record_finalized_session_tool_delta, call.name,
+                        ),
                     ):
-                        yield to_agent_event(persisted_event)
-                    result_event = await self.executor.emit_result_event_async(
-                        session, tool_call_id=execution.tool_call_id,
-                        content=content, run_id=run_id, step_id=step_base + steps,
-                        # 预算增量由执行域算好（唯一计数点），这里只原样落盘：
-                        # 0 增量（准入前被拒 / 未执行）同样如实落，账本据此求和。
-                        budget_delta=execution.budget_delta,
-                    )
-                    if (
-                        self._session_budget is not None
-                        and call.name in USER_INPUT_TOOL_NAMES
-                        and isinstance(execution.budget_delta, dict)
-                    ):
-                        delta = execution.budget_delta
-                        calls = delta.get("tool_calls")
-                        attempts = delta.get("tool_attempts")
-                        if (
-                            isinstance(calls, int) and not isinstance(calls, bool)
-                            and isinstance(attempts, int) and not isinstance(attempts, bool)
-                            and delta.get("tool_name") == call.name
-                        ):
-                            try:
-                                await self._session_budget.record_tool_call(
-                                    tool_call_id=execution.tool_call_id,
-                                    tool_name=call.name,
-                                    calls=calls,
-                                    attempts=attempts,
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "澄清工具结果已持久化，但 session 预算记账失败；"
-                                    "隔离该 session 并保留问题卡等待恢复："
-                                    "session_id=%s tool_call_id=%s",
-                                    session.session_id, execution.tool_call_id,
-                                )
-                    yield to_agent_event(result_event)
+                        yield to_agent_event(result_event)
+                    content = result_event.data["content"]
 
                     self._log("tool_operation", f"工具回复 {outcome}",
                               span_id=new_span_id(), parent_span_id=run_span, step=steps,
@@ -3118,6 +3080,35 @@ class AgentRuntime:
                 )
 
         return context
+
+    async def _record_finalized_session_tool_delta(
+        self, tool_name: str, event: SessionEvent,
+    ) -> None:
+        """Forward clarification results after persistence, preserving the ledger boundary."""
+        if self._session_budget is None or tool_name not in USER_INPUT_TOOL_NAMES:
+            return
+        delta = event.data.get("budget_delta")
+        if not isinstance(delta, dict):
+            return
+        calls = delta.get("tool_calls")
+        attempts = delta.get("tool_attempts")
+        if (
+            isinstance(calls, int) and not isinstance(calls, bool)
+            and isinstance(attempts, int) and not isinstance(attempts, bool)
+            and delta.get("tool_name") == tool_name
+        ):
+            try:
+                await self._session_budget.record_tool_call(
+                    tool_call_id=event.data["tool_call_id"], tool_name=tool_name,
+                    calls=calls, attempts=attempts,
+                )
+            except Exception:
+                logger.exception(
+                    "澄清工具结果已持久化，但 session 预算记账失败；"
+                    "隔离该 session 并保留问题卡等待恢复："
+                    "session_id=%s tool_call_id=%s",
+                    event.session_id, event.data["tool_call_id"],
+                )
 
     async def _record_session_tool_deltas(self, events: list[SessionEvent]) -> None:
         """把一批事件里的 `budget_delta` 并进 session 树账（`#318`）。
