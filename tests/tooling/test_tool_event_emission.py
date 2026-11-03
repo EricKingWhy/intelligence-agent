@@ -168,3 +168,75 @@ async def test_batch_abort_attributes_run_id_from_operation_context(tmp_path, mo
     # raw tool result kept in-session. No pending events to flush.
     assert not [e for e in session.events if e.type == TOOL_CALL], \
         "flush 不补 TOOL_CALL（预持久化契约，补发即重复）"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("synchronous", [False, True])
+@pytest.mark.parametrize("ok", [False, True])
+async def test_finalize_execution_preserves_result_sequence_and_budget(
+    tmp_path, synchronous, ok,
+):
+    from agent_harness.tooling.executor import ToolExecution
+    from tests.conftest import make_session
+
+    session = make_session(tmp_path)
+    executor = _executor(EchoTool())
+    executor.emit_call_event(
+        session, tool_call_id="call-final", tool_name="echo", args={},
+        run_id="run-final", step_id=4,
+    )
+    result = (
+        ToolResult.success("done")
+        if ok else ToolResult.failure(message="denied", error_code="PERMISSION_DENIED")
+    )
+    execution = ToolExecution(
+        tool_call_id="call-final", result=result,
+        pending_events=[("artifact/created", {"artifact_id": "saved-artifact"})],
+        budget_delta={"tool_name": "echo", "tool_calls": 1, "tool_attempts": 2},
+    )
+    events = [
+        event async for event in executor.finalize_execution(
+            session, execution, run_id="run-final", step_id=4,
+            synchronous=synchronous,
+        )
+    ]
+    assert [event.type for event in session.events[-3:]] == [
+        TOOL_CALL, "artifact/created", TOOL_RESULT,
+    ]
+    assert [event.type for event in events] == ["artifact/created", TOOL_RESULT]
+    assert [(event.run_id, event.step_id) for event in events] == [
+        ("run-final", 4), ("run-final", 4),
+    ]
+    assert events[-1].data["tool_call_id"] == "call-final"
+    assert json.loads(events[-1].data["content"]) == result.model_dump(mode="json")
+    assert events[-1].data["budget_delta"] == {
+        "tool_name": "echo", "tool_calls": 1, "tool_attempts": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_finalize_execution_forwards_one_durable_budget_delta(tmp_path):
+    from agent_harness.session import JsonlSessionStore
+    from agent_harness.tooling.executor import ToolExecution
+    from tests.conftest import make_session
+
+    session = make_session(tmp_path)
+    executor = _executor(EchoTool())
+    execution = ToolExecution(
+        tool_call_id="counted", result=ToolResult.success("done"),
+        budget_delta={"tool_name": "echo", "tool_calls": 1, "tool_attempts": 2},
+    )
+    forwarded = []
+
+    async def record_result(event):
+        persisted = JsonlSessionStore(root=tmp_path).read_events(session.session_id)
+        assert persisted[-1].event_id == event.event_id
+        forwarded.append(event.data["budget_delta"])
+
+    events = [
+        event async for event in executor.finalize_execution(
+            session, execution, run_id="run", step_id=1, record_result=record_result,
+        )
+    ]
+    assert [event.type for event in events] == [TOOL_RESULT]
+    assert forwarded == [{"tool_name": "echo", "tool_calls": 1, "tool_attempts": 2}]
