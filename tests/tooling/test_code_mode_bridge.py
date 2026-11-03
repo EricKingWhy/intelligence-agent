@@ -258,3 +258,54 @@ async def test_delegated_runtime_keeps_its_model_tool_results(tmp_path):
     assert len(results) == 1
     assert '工具执行被中断' not in results[0].content
     assert results[0].tool_call_id == 'child-model-read'
+
+
+@pytest.mark.asyncio
+async def test_nested_finalization_keeps_artifact_and_result_golden(tmp_path):
+    from agent_harness.storage.artifact import FakeArtifactStore
+    from agent_harness.tooling.overflow import ArtifactOverflowHandler
+
+    class LargeRead(_ProbeTool):
+        async def execute(self, args):
+            return ToolResult.success("\n".join(f"line {index}" for index in range(5000)))
+
+    session = make_session(tmp_path / "sessions")
+    registry = ToolRegistry()
+    registry.register(LargeRead(name="read", description="Read"))
+    registry.register(_Composer(name="exec", description="Compose"))
+    ledger = SqliteOperationLedger(tmp_path / "ledger.db")
+    await ledger.initialize()
+    store = FakeArtifactStore()
+    executor = ToolExecutor(
+        registry, operation_ledger=ledger, overflow_handler=ArtifactOverflowHandler(store),
+    )
+    executor.emit_call_event(
+        session, tool_call_id="outer", tool_name="exec", args={},
+        run_id="run", step_id=1,
+    )
+    execution, = await executor.execute_batch(
+        [{"id": "outer", "name": "exec", "args": {}}],
+        session=session, step_id=1,
+        operation_context=OperationContext(session_id=session.session_id, run_id="run"),
+    )
+    async for _ in executor.finalize_execution(
+        session, execution, run_id="run", step_id=1,
+    ):
+        pass
+    events = session.events[-5:]
+    assert [event.type for event in events] == [
+        "tool/call", "tool/call", "artifact/externalized", "tool/result", "tool/result",
+    ]
+    child_id = events[1].data["tool_call_id"]
+    assert events[2].data["tool_call_id"] == events[3].data["tool_call_id"] == child_id
+    assert events[4].data["tool_call_id"] == "outer"
+    assert events[1].data["parent_exec_call_id"] == "outer"
+    assert events[3].data["parent_exec_call_id"] == "outer"
+    assert {
+        event.data["budget_delta"]["tool_name"]: (
+            event.data["budget_delta"]["tool_calls"],
+            event.data["budget_delta"]["tool_attempts"],
+        )
+        for event in events if event.type == "tool/result"
+    } == {"read": (1, 1), "exec": (1, 1)}
+    assert (await store.load(events[2].data["artifact_id"])).content.startswith("line 0\n")
