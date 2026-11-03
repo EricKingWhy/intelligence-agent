@@ -210,3 +210,20 @@ def test_parse_fork_args() -> None:
     assert args.no_summary is True
     with pytest.raises(SystemExit):
         _parse_fork_args(["sess-1"])  # --from-message 必填
+
+
+@pytest.mark.asyncio
+async def test_fork_prints_local_isolation_notice(tmp_path: Path, capsys) -> None:
+    """#1486 AC3 / Spec F5：fork 也走 local 后端，必须同样明示无 OS 级隔离。
+
+    修复前只有 `run` 打印该说明，`fork` / `resume` 静默——用户会以为自己有
+    OS 边界。
+    """
+    _prepare(tmp_path)
+    await fork_command(
+        "parent", from_message=2, no_summary=True,
+        workspace_dir=str(tmp_path), write=lambda _line: None,
+    )
+    err = capsys.readouterr().err
+    assert "无 OS 级" in err
+    assert "Docker" in err

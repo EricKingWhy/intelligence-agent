@@ -367,24 +367,46 @@ async def test_cancelled_higher_seq_waiter_keeps_memory_ordered(
     seq 的时刻（前置 ①③ 保证没有更低的在途 seq）。
     """
     store = JsonlSessionStore(root=tmp_path)
-    session = Session.start(store)  # seq 0；错峰只加在两个写者上（entry0 睡 30ms）
+    session = Session.start(store)  # seq 0
     session.deliver_to_runtime()
     entered = _record_store_writes(monkeypatch, store)
     entries = _install_staggered_commit(monkeypatch, writers=2)
+    first_written = threading.Event()
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    staggered_commit = _GroupFlush.commit
+
+    def hold_first_commit(self: _GroupFlush, path) -> None:
+        # Commit is entered only after seq allocation and the JSONL write.
+        if not first_written.is_set():
+            first_written.set()
+            if not release_first.wait(timeout=5):
+                raise TimeoutError("first writer was not released")
+            staggered_commit(self, path)
+        else:
+            try:
+                staggered_commit(self, path)
+            finally:
+                second_finished.set()
+
+    monkeypatch.setattr(_GroupFlush, "commit", hold_first_commit)
 
     slow_writer = asyncio.create_task(
         session.append_async(USER_MESSAGE, {"content": "slow"})  # 更低 seq
     )
-    await _until(lambda: "slow" in entered)  # slow 先进 store 写临界区、占定小号
-    cancelled_writer = asyncio.create_task(
-        session.append_async(USER_MESSAGE, {"content": "cancelled"})  # 更高 seq
-    )
-    await _until(lambda: "cancelled" in entered)
-    # 此刻不回循环刻度直接取消：写者的协程停在 shield 上（写仍在工作线程），
-    # 无论该写完成与否，取消都落在等待臂上（两条 F1 路径之一）。
-    cancelled_writer.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await cancelled_writer
+    try:
+        assert await asyncio.to_thread(first_written.wait, 5), "first write did not reach commit"
+        cancelled_writer = asyncio.create_task(
+            session.append_async(USER_MESSAGE, {"content": "cancelled"})  # 更高 seq
+        )
+        await _until(lambda: "cancelled" in entered)
+        assert "cancelled" in entered, "cancelled writer did not enter the store"
+        cancelled_writer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_writer
+        assert await asyncio.to_thread(second_finished.wait, 5), "second write did not finish"
+    finally:
+        release_first.set()
 
     slow_event = await asyncio.wait_for(slow_writer, timeout=5)
     # 取消写者那行写仍在工作线程里跑完（shield 只弃等待）；等它真实落定。

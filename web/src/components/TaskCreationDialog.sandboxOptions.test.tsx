@@ -39,7 +39,15 @@ function render(ui: ReactElement): void {
 
 const query = <T extends Element>(selector: string) => document.body.querySelector<T>(selector);
 
-function openOptions(): string[] {
+interface OptionText {
+  title: string;
+  description: string;
+}
+
+// #1486：标题与描述分开取。`[cmdk-item]` 的 textContent 会把 title 与
+// description 拼在一起（OptionPicker 的 OptionRowContent），拿它做等值比较
+// 会在选项补了描述之后假红。
+function openOptions(): OptionText[] {
   // #1177 §B：运行位置已收进「高级设置」，默认折叠——先展开再点它的触发器。
   const advancedToggle = query<HTMLButtonElement>('.project-advanced-toggle');
   expect(advancedToggle).not.toBeNull();
@@ -47,8 +55,10 @@ function openOptions(): string[] {
   const trigger = query<HTMLButtonElement>('[aria-label="\u8fd0\u884c\u4f4d\u7f6e"]');
   expect(trigger).not.toBeNull();
   act(() => trigger!.click());
-  return Array.from(document.body.querySelectorAll('[cmdk-item]'))
-    .map((item) => item.textContent ?? '');
+  return Array.from(document.body.querySelectorAll('[cmdk-item]')).map((item) => ({
+    title: item.querySelector('.picker-item-title')?.textContent?.trim() ?? '',
+    description: item.querySelector('.picker-item-desc')?.textContent?.trim() ?? '',
+  }));
 }
 
 function dialog(backends: SandboxBackendEntry[]) {
@@ -101,9 +111,23 @@ describe('TaskCreationDialog sandbox options (#1071/#1048)', () => {
     });
 
     const options = openOptions();
-    expect(options.some((title) => title.trim() === '\u672c\u673a')).toBe(true);
-    expect(options.some((title) => title.includes('Docker'))).toBe(true);
-    expect(options.some((title) => title.includes('Windows PSEC'))).toBe(false);
+    const titles = options.map((option) => option.title);
+    // 比的是 title，不是整个 item 的文本：描述里也会出现这些字。
+    expect(titles).toContain('\u672c\u673a');
+    expect(titles).toContain('Docker');
+    expect(titles.some((title) => title.includes('Windows PSEC'))).toBe(false);
+
+    // #1486 AC3：local 无 OS 级隔离必须在选项里明说（与 CLI
+    // LOCAL_SANDBOX_NOTICE 同义）；docker 档的描述必须对得上实现的三项降权。
+    const local = options.find((option) => option.title === '\u672c\u673a');
+    expect(local?.description).toContain('无 OS 级');
+    expect(local?.description).toContain('文件');
+    expect(local?.description).toContain('网络');
+
+    const dockerOption = options.find((option) => option.title === 'Docker');
+    expect(dockerOption?.description).toContain('非 root');
+    expect(dockerOption?.description).toContain('cap_drop=ALL');
+    expect(dockerOption?.description).toContain('no-new-privileges');
   });
 
   it('hides the 运行位置 field when the probe returns no backends', async () => {
