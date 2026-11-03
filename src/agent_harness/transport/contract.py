@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_harness.redaction import redact_secret_values
 from agent_harness.storage.artifact import ARTIFACT_ID_PATTERN, SESSION_KEY_PATTERN
-from agent_harness.storage.sqlite import _connect, retry_on_busy
+from agent_harness.storage.sqlite import connect, retry_on_busy
 
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9._:-]+")
 _LEGACY_SESSION_ID = "legacy-transport"
@@ -143,7 +143,7 @@ class SqliteTransportLedger:
     @retry_on_busy
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("PRAGMA journal_mode=WAL")
             await connection.execute(_TRANSPORT_LEDGER_DDL)
             cursor = await connection.execute("PRAGMA table_info(transport_ledger)")
@@ -174,7 +174,7 @@ class SqliteTransportLedger:
 
     @retry_on_busy
     async def append(self, entry: TransportLedgerEntry) -> None:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             if entry.status in {
                 TransportStatus.SUCCEEDED,
@@ -221,7 +221,7 @@ class SqliteTransportLedger:
 
     @retry_on_busy
     async def delete_for_session(self, session_id: str) -> int:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             cursor = await connection.execute(
                 "DELETE FROM transport_ledger WHERE session_id = ?",
                 (session_id,),
@@ -231,7 +231,7 @@ class SqliteTransportLedger:
         return removed
 
     async def list_for_request(self, request_id: str) -> list[TransportLedgerEntry]:
-        async with _connect(self.database_path) as connection:
+        async with connect(self.database_path) as connection:
             connection.row_factory = aiosqlite.Row
             cursor = await connection.execute(
                 """

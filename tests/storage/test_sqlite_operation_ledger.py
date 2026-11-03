@@ -194,9 +194,9 @@ async def test_operations_schema_contains_frozen_columns(tmp_path: Path) -> None
 async def test_connect_sets_busy_timeout(tmp_path):
     """每操作新连接模式下 busy_timeout 必须随连接设置——默认 0 会让并发写
     立刻抛 database is locked（WAL 是持久 PRAGMA，busy_timeout 不是）。"""
-    from agent_harness.storage.sqlite import _connect
+    from agent_harness.storage.sqlite import connect
 
-    async with _connect(tmp_path / "busy.db") as connection:
+    async with connect(tmp_path / "busy.db") as connection:
         cursor = await connection.execute("PRAGMA busy_timeout")
         (value,) = await cursor.fetchone()
     assert int(value) > 0
@@ -204,14 +204,14 @@ async def test_connect_sets_busy_timeout(tmp_path):
 
 @pytest.mark.asyncio
 async def test_ledger_methods_route_through_shared_connect(tmp_path, monkeypatch):
-    """Ledger 的所有连接必须经 _connect 助手（busy_timeout 在其中设置）——
+    """Ledger 的所有连接必须经 connect 助手（busy_timeout 在其中设置）——
     直接 aiosqlite.connect 会绕过并发保护。"""
     from contextlib import asynccontextmanager
 
     from agent_harness.storage import sqlite as sqlite_mod
 
     used: list[Path] = []
-    real_connect = sqlite_mod._connect
+    real_connect = sqlite_mod.connect
 
     @asynccontextmanager
     async def spy_connect(path):
@@ -219,7 +219,7 @@ async def test_ledger_methods_route_through_shared_connect(tmp_path, monkeypatch
         async with real_connect(path) as connection:
             yield connection
 
-    monkeypatch.setattr(sqlite_mod, "_connect", spy_connect)
+    monkeypatch.setattr(sqlite_mod, "connect", spy_connect)
 
     ledger = SqliteOperationLedger(tmp_path / "state.db")
     await ledger.initialize()
@@ -234,7 +234,7 @@ async def test_ledger_methods_route_through_shared_connect(tmp_path, monkeypatch
         started_at="2026-09-05T00:00:00+00:00",
     )
     await ledger.create(operation)
-    assert used, "Ledger 连接未经过 _connect 助手"
+    assert used, "Ledger 连接未经过 connect 助手"
 
 
 # ── C5（用户拍板，并入 R8-1）：复合主键防跨会话撞键 ──
@@ -272,7 +272,7 @@ async def test_same_tool_call_id_across_sessions_do_not_collide(tmp_path):
 async def test_update_state_opens_single_connection(tmp_path, monkeypatch):
     """一次 update_state 只允许打开 1 个连接（改造前 3：get / UPDATE / get）。
 
-    每次 _connect 都是 aiosqlite.connect + PRAGMA busy_timeout 的真实 IO；
+    每次 connect 都是 aiosqlite.connect + PRAGMA busy_timeout 的真实 IO；
     一次工具调用要经历 2 次迁移（executor.py:322 PENDING->RUNNING、:421 ->终态），
     连接次数直接乘在工具调用的关键路径上。
     """
@@ -281,7 +281,7 @@ async def test_update_state_opens_single_connection(tmp_path, monkeypatch):
     from agent_harness.storage import sqlite as sqlite_mod
 
     opened: list[Path] = []
-    real_connect = sqlite_mod._connect
+    real_connect = sqlite_mod.connect
 
     @asynccontextmanager
     async def spy_connect(path):
@@ -289,7 +289,7 @@ async def test_update_state_opens_single_connection(tmp_path, monkeypatch):
         async with real_connect(path) as connection:
             yield connection
 
-    monkeypatch.setattr(sqlite_mod, "_connect", spy_connect)
+    monkeypatch.setattr(sqlite_mod, "connect", spy_connect)
 
     ledger = SqliteOperationLedger(tmp_path / "state.db")
     await ledger.initialize()

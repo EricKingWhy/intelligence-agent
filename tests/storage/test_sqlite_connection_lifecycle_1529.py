@@ -16,7 +16,7 @@ from agent_harness.transport.contract import (
     TransportStatus,
 )
 from agent_harness.transport.contract import (
-    _connect as transport_connect,
+    connect as transport_connect,
 )
 
 

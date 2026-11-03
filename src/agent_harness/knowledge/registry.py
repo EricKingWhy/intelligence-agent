@@ -12,7 +12,7 @@ from pathlib import Path
 import aiosqlite
 
 from agent_harness.knowledge.types import KnowledgeSource
-from agent_harness.storage.sqlite import _connect
+from agent_harness.storage.sqlite import connect
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS knowledge_sources (
@@ -33,7 +33,7 @@ class SqliteKnowledgeSourceRegistry:
         self.database_path = Path(database_path)
 
     def _connect(self):
-        return _connect(self.database_path)
+        return connect(self.database_path)
 
     async def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
