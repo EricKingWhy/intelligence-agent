@@ -106,6 +106,9 @@ _NOT_STATICALLY_ENUMERABLE: dict[str, str] = {
     # #529：promote_skill / register_skill 的共用基类（只是收敛 diff 留痕逻辑），
     # 本身不单独注册进任何 registry——两个具体子类已在清单里。
     "_PromotionBaseTool": "共用基类，不单独进 registry；对账看 PromoteSkillTool / RegisterSkillTool",
+    # #1532：read_artifact / inspect_artifact 的共用基类（只是收敛检查与结果构造），
+    # 本身不单独注册进任何 registry——两个具体子类已在清单里。
+    "_ArtifactReadTool": "共用基类，不单独进 registry；对账看 ReadArtifactTool / InspectArtifactTool",
 }
 
 #: 未归属任何非-main 档位的**内置工具** → 理由（#238 的显式白名单）。
