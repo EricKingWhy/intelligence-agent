@@ -140,7 +140,8 @@ def test_gate_receipts_are_machine_recorded_and_point_at_their_tree():
             if probe.returncode != 0:
                 archival = _UNVERIFIABLE_HISTORICAL_RECEIPTS.get(sha)
                 assert archival is not None, (
-                    f"{path.name} references an absent object without an approved archive entry"
+                    f"{path.name} references an absent object without an approved archive entry; "
+                    "run python scripts/fetch_gate_receipts.py or use a complete evidence bundle"
                 )
                 assert recorded == archival["tree"], (
                     f"{path.name} does not match the approved historical tree"
