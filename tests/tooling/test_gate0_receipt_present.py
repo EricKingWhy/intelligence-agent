@@ -522,7 +522,8 @@ def test_self_cover_off_rewrites_guards_in_ci(tmp_path, capsys):
 #   · AC1 = HEAD 树里**没有任何覆盖本分支区间的有效收据** ⇒ 本次全绿全量的 HEAD 收据可按形状④
 #     覆盖全部违规（它们都是 HEAD 的祖先、尾判为空），允许自举；
 #   · AC5(ii) = 分支里**已有**有效收据、其后又进代码提交 ⇒ 仍判红（既有用例
-#     `test_gate0_full_gate_cannot_...` 在 test_gate0_receipt_binding.py 钉住）。
+#     `test_full_gate_cannot_attest_missing_receipts_across_code_changes` 在
+#     test_gate0_receipt_binding.py 钉住）。
 
 
 def _full_lane_results(repo: Repo, base: str) -> list:
@@ -539,7 +540,7 @@ def _full_lane_results(repo: Repo, base: str) -> list:
 
 
 def test_multi_code_commit_branch_bootstraps_its_first_receipt_with_zero_receipts(
-    tmp_path, capsys,
+    tmp_path,
 ):
     """AC1：≥2 笔无收据代码提交 + HEAD 树零收据 + 全绿全量跑 ⇒ attested，且收据真的能落成有效。
 
