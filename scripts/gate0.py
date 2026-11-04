@@ -879,7 +879,8 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 #: 落盘提交再由下一份收据覆盖**——所以「最终 tip 自身没有同名收据文件」是形状④的正常形态
 #: （`receipt_present_check` 对纯收据落盘提交本来就豁免），不是漏跑。
 #:
-#: 设计缺陷本体（新分支收据自举）由 follow-up 票处理，本常量不承担该修复。
+#: 设计缺陷本体（新分支收据自举）已由 #1663 修复：见 `receipt_present_check()` 的「首张收据
+#: 自举」分支。本常量只承担采用窗锚点，不承担该修复。
 _RECEIPT_BOOTSTRAP_SHA = "d97b00f26a43e36fc289c16cf89dbd66e02dda8e"
 # A receipt requires a ledger binding when its tested Gate-0 source contains this marker.
 _LEDGER_BINDING_MARKER = "review-ledger-binding-v1"
@@ -1247,6 +1248,15 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
     ⚠ 条件②（c 是 t 的祖先）由 ①+③ 蕴含，删掉不改判定（短路优化）：满足 ① 而不满足 ② 的 t，
     必有 c ∈ `t..HEAD`，而 c ∈ scope 非纯 docs ⇒ ③ 已经 False。用例
     `test_shape4_condition2_is_implied_by_conditions_1_and_3` 把这条链子钉住。
+
+    首张收据自举（#1663，仅 `_allow_current_full_run_receipt=True` 即本地落盘型全量跑时生效）：
+    区间内**没有任何有效收据** ⇒ 本次跑即将落盘的 HEAD 收据就是本分支第一张，按形状④覆盖区间内
+    全部违规（违规全是 HEAD 的祖先，`HEAD..HEAD` 尾判为空）。这修的是「≥2 笔无收据代码提交的
+    分支出生不了第一张 PASS 收据」的自指死锁：逐笔传递（上面 ①②③）要求每笔违规的树 == HEAD 树，
+    只有最后一笔满足 ⇒ 旧判据在多笔分支上不可达。区间内**已有**有效收据时不走这条（已有收据之后
+    又进代码提交 = 陈旧覆盖，仍判红；`test_gate0_receipt_binding.py::test_full_gate_cannot_attest_
+    missing_receipts_across_code_changes` 钉住）。CI / 局部跑拿不到该 flag（不会落盘）⇒ 仍按已
+    提交收据硬口径执法（AC3）。
     """
     repo_root = repo_root or REPO_ROOT
     mb = _git_at(repo_root, "merge-base", "origin/main", "HEAD")
@@ -1288,6 +1298,13 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         scope.append(c)
 
     receipts = head_tree_receipts(repo_root)
+    # #1663 首张收据自举：分支区间里**没有任何**有效收据 ⇒ 本次全绿全量跑即将落盘的那张
+    # HEAD 收据就是本分支的第一张（`write_reading` 键=HEAD）。它按形状④覆盖区间内全部违规：
+    # 每笔违规都是 HEAD 的祖先，且 `HEAD..HEAD` 尾判为空。分支**已有**区间内收据时不开这条，
+    # 否则「已有收据之后的陈旧覆盖」会被一并放开（AC5(ii) / AC6 要挡的同义放松）。
+    in_range_receipts = [
+        t for t in receipts if t in range_set and receipts[t].get("valid", False)
+    ]
     violations = []
     stale_ledger_violations = []
     modified_receipt_violations = []
@@ -1379,15 +1396,29 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         head_sha = head.stdout.strip()
         head_tree_proc = _git_at(repo_root, "rev-parse", f"{head_sha}^{{tree}}")
         head_tree = head_tree_proc.stdout.strip()
-        if head_tree_proc.returncode == 0 and head_tree and all(
+        # ① 逐笔传递（#1555）：每笔违规的树都等于 HEAD 树、或其后的差异仅 docs —— 单笔分支
+        #    （c == HEAD）天然成立。
+        per_commit_transfer = all(
             _git_at(repo_root, "merge-base", "--is-ancestor", sha, head_sha).returncode == 0
             and (
                 _git_at(repo_root, "rev-parse", f"{sha}^{{tree}}").stdout.strip() == head_tree
                 or transfer_diff_docs_only(repo_root, sha, head_sha)
             )
             for sha, _subject in violations
+        )
+        # ② 首张收据自举（#1663）：本分支区间内**零有效收据** ⇒ 本次跑落盘的 HEAD 收据就是本分支
+        #    的第一张，按形状④覆盖区间内全部违规（它们都是 HEAD 的祖先，`HEAD..HEAD` 尾判为空）。
+        #    已有区间内收据时不走这条：那正是「已有收据之后的陈旧覆盖」，必须继续判红（AC5(ii)）。
+        #    CI / 局部跑拿不到 `_allow_current_full_run_receipt=True`（不会落盘），不在此列（AC3）。
+        first_receipt = not in_range_receipts
+        if head_tree_proc.returncode == 0 and head_tree and (
+            per_commit_transfer or first_receipt
         ):
-            detail.append("处置：本次完整 Gate-0 会复核当前 HEAD，并记录绑定该树与台账的新收据")
+            if first_receipt and not per_commit_transfer:
+                detail.append("处置：本次完整 Gate-0 会复核当前 HEAD，并记录本分支第一张 PASS 收据"
+                              "（区间内此前没有任何有效收据）")
+            else:
+                detail.append("处置：本次完整 Gate-0 会复核当前 HEAD，并记录绑定该树与台账的新收据")
             return ReceiptCheckResult(True, "\n".join(detail), warn_only, "attested")
     if violations and not warn_only:
         detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，或从第一父提交传递"
