@@ -891,3 +891,34 @@ def test_bootstrap_stays_red_when_the_receipt_scan_fails_on_a_zero_receipt_branc
     assert after.ok is False, after.detail
     assert after.status == "violations", after.detail
     assert "收据扫描失败" in after.detail, after.detail
+
+def test_bootstrap_stays_red_when_the_landing_history_read_fails(tmp_path):
+    """P1-1（新增的 rev-list 那半边）：落地历史读不出来 ⇒ 不得自举（fail-closed）。
+
+    本轮给 `_in_range_receipt_landings` 加了 `git rev-list base..head` 建集合；它读失败同样抛
+    `OSError`、由调用方转成红。没有这条用例，把那次 `returncode` 检查删掉（或把它写成
+    "失败即空集"）不会有任何测试变红——正是 P1-2 那族"读失败当没有"的形态。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    with _clean_env():
+        assert gate0.head_tree_receipts(str(repo.root)) == {}  # 前提自证：零收据分支
+
+    real = gate0._git_at
+
+    def failing(repo_root, *args, **kwargs):
+        # 只打 `_in_range_receipt_landings` 那次（右端是具体 sha）；判据自身的
+        # `rev-list base..HEAD` 必须放行，否则测的就不是落地历史这一支。
+        if (args[:1] == ("rev-list",) and len(args) == 2 and ".." in str(args[1])
+                and not str(args[1]).endswith("HEAD")):
+            return subprocess.CompletedProcess(args, 128, "", "fatal: simulated rev-list failure")
+        return real(repo_root, *args, **kwargs)
+
+    with mock.patch.object(gate0, "_git_at", failing):
+        after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+
