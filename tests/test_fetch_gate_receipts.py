@@ -54,6 +54,7 @@ def test_fetches_unreferenced_receipt_commit_and_keeps_archived_exception(tmp_pa
     assert git(target, "rev-parse", f"{sha}^{{tree}}") == tree
     assert git(target, "rev-parse", f"refs/gate-evidence/{sha}") == sha
     git(target, "update-ref", "-d", f"refs/gate-evidence/{sha}")
+    git(target, "update-ref", "refs/remotes/audit/receipt", sha)
     run = subprocess.run([sys.executable, str(SCRIPT)], cwd=target, encoding="utf-8", errors="replace", capture_output=True, check=False)
     assert run.returncode == 0, run.stderr
     assert git(target, "rev-parse", f"refs/gate-evidence/{sha}") == sha

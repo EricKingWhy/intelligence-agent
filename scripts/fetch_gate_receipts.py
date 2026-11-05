@@ -29,7 +29,8 @@ def main() -> int:
 
     if not shas:
         raise ValueError("No verifiable gate receipts found")
-    reachable = set(git("rev-list", "--all").stdout.splitlines())
+    # A bundle clone imports branches and tags, plus the documented evidence refs.
+    reachable = set(git("rev-list", "--branches", "--tags", "--glob=refs/gate-evidence/*").stdout.splitlines())
     dangling = sorted(shas - reachable)
     if not dangling:
         return 0
