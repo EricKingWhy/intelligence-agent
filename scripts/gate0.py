@@ -879,8 +879,10 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 #: 落盘提交再由下一份收据覆盖**——所以「最终 tip 自身没有同名收据文件」是形状④的正常形态
 #: （`receipt_present_check` 对纯收据落盘提交本来就豁免），不是漏跑。
 #:
-#: 设计缺陷本体（新分支收据自举）已由 #1663 修复：见 `receipt_present_check()` 的「首张收据
-#: 自举」分支。本常量只承担采用窗锚点，不承担该修复。
+#: **首张**收据自举（新分支出生第一张 PASS 收据）已由 #1663 覆盖：见 `receipt_present_check()`
+#: 的「首张收据自举」分支。同形死锁的**第二代**仍存在——收据落地之后又累计 ≥2 笔无收据提交时
+#: 照旧判红（用户 2026-11-05 裁决 A：只修第一代、残余如实披露，见台账残余行）。本常量只承担
+#: 采用窗锚点，两者都不由它承担。
 _RECEIPT_BOOTSTRAP_SHA = "d97b00f26a43e36fc289c16cf89dbd66e02dda8e"
 # A receipt requires a ledger binding when its tested Gate-0 source contains this marker.
 _LEDGER_BINDING_MARKER = "review-ledger-binding-v1"
@@ -1176,18 +1178,35 @@ def _in_range_receipt_landings(repo_root, base: str, head: str) -> set[str]:
     "本分支还没落过任何收据"不能这么判。这里看的是**落地历史**：一笔提交新增了
     `docs/gate/<sha>.json` ⇒ 该 sha 曾在本区间内落地。删除、改名、改成无效内容都不抹掉这条记录。
 
-    回归到 base 之前的路径不算：只取 `base..head` 内新增的（`--diff-filter=A` 对 merge
-    提交按第一父 diff，与 `commit_file_changes` 同口径）。读出失败 ⇒ 抛 `OSError`，由调用方
-    转成红（fail-closed），不返回"空集"冒充"没落过"。
+    回归到 base 之前的路径不算：只取 `base..head` 内新增的。两处 git 口径是必需的（#1663 R2
+    P1-1 的两条漏检形态，缺一不可）：
+
+    · `-m`：默认 `git log` **不对 merge 提交做 diff**（既不按第一父也不按第二父），于是"收据
+      只在 merge 提交里首次出现"（冲突解决时把 `docs/gate/<sha>.json` 一起带进 merge）看不见。
+      `-m` 让 merge 按**每个父**各出一份 diff；同一笔 merge 可能输出两次，`set` 天然去重。
+      （`--diff-merges=first-parent` 是等价替代，两者语义二选一、不叠加。）
+    · `--no-renames`：默认开改名检测，`docs/gate/staged.json → docs/gate/<sha>.json`（或从
+      `docs/gate/archive/` 恢复）判成 `R100`，既不是 `A` 也不落在 `_RECEIPT_RE` 上 ⇒ 漏检。
+      关掉改名检测后按"删 + 增"输出，新路径成为 `A`。
+
+    另外只收 **`t ∈ base..head`** 的收据：`-m` 也会把"例行 sync merge 从 main 带进来的别人
+    收据"按第一父输出成 `A`（相对本分支第一父确实是新增），但那些文件名指向的提交不在本区间内。
+    不滤掉它们会把"本分支从未落过收据"永远判假 = 首张收据自举（gen-1）死锁复发。
+
+    读出失败 ⇒ 抛 `OSError`，由调用方转成红（fail-closed），不返回"空集"冒充"没落过"。
     """
-    proc = _git_at(repo_root, "log", "--format=", "--name-only", "--diff-filter=A",
-                   f"{base}..{head}", "--", GATE_DIR + "/")
+    proc = _git_at(repo_root, "log", "-m", "--no-renames", "--format=", "--name-only",
+                   "--diff-filter=A", f"{base}..{head}", "--", GATE_DIR + "/")
     if proc.returncode != 0:
         raise OSError((proc.stderr or proc.stdout).strip()[:200] or "git log 失败")
+    rev = _git_at(repo_root, "rev-list", f"{base}..{head}")
+    if rev.returncode != 0:
+        raise OSError((rev.stderr or rev.stdout).strip()[:200] or "git rev-list 失败")
+    range_set = {x for x in rev.stdout.split("\n") if x.strip()}
     landed: set[str] = set()
     for line in proc.stdout.split("\n"):
         m = _RECEIPT_RE.match(line.strip())
-        if m is not None:
+        if m is not None and m.group(1) in range_set:
             landed.add(m.group(1))
     return landed
 
@@ -1472,11 +1491,16 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         if head_tree_proc.returncode == 0 and head_tree and (
             per_commit_transfer or first_receipt
         ):
+            # #1663 R2 P4：这两句只说**判据**，不替落盘结果打包票——读数在 `main()` 里落盘，
+            # 工作树与 HEAD 偏离时会被拒（`worktree_divergence`），`--since/--only/--affected`
+            # 与 CI 则根本不落盘。写成"若落盘成功才…"，避免读者把横幅当既成事实。
             if first_receipt and not per_commit_transfer:
-                detail.append("处置：本次完整 Gate-0 会复核当前 HEAD，并记录本分支第一张 PASS 收据"
+                detail.append("处置：本次完整 Gate-0 若把读数落盘成功（工作树与 HEAD 一致），"
+                              "将复核当前 HEAD 并记录本分支第一张 PASS 收据"
                               "（区间内此前从未落过收据）")
             else:
-                detail.append("处置：本次完整 Gate-0 会复核当前 HEAD，并记录绑定该树与台账的新收据")
+                detail.append("处置：本次完整 Gate-0 若把读数落盘成功（工作树与 HEAD 一致），"
+                              "将复核当前 HEAD 并记录绑定该树与台账的新收据")
             return ReceiptCheckResult(True, "\n".join(detail), warn_only, "attested")
     if violations and _allow_current_full_run_receipt and not receipts_scanned:
         detail.append("收据扫描失败（读不全 HEAD 树里的收据）⇒ 状态未知，不允许首张收据自举")
@@ -2012,7 +2036,8 @@ def _apply_receipt_check(results: list[tuple[Lane, int, float, str]],
     """receipt-present（#1338 改动 3）：折进 guards 车道判定，**不新增车道**（仍是 7 条）。
 
     只在 guards 本身全绿时跑；收据缺失且不在首周 warn-only 内 ⇒ 把该车道改写成失败。
-    一次完整、全绿且确实会落盘的运行可自举当前 HEAD 的首张收据。
+    一次完整、全绿且确实会落盘（`will_record_receipt`）的运行可自举当前 HEAD 的首张收据；
+    落盘本身发生在 `main()`，脏工作树会被拒 ⇒ 横幅只描述判据，不宣称收据已落地（#1663 R2 P4）。
     就地改写 `results`（与原来 main() 里的内联逻辑逐行等价）。
 
     例外（#1602/#1555）：`will_record_receipt=True` 且本次为全绿全量跑时，走
@@ -2050,7 +2075,11 @@ def _apply_receipt_check(results: list[tuple[Lane, int, float, str]],
                     print("self-cover receipt-present (#1602 attested, #1555 bound): 本次本地全量跑"
                           "落盘的 PASS 收据（键=HEAD，绑定该树与台账指纹）覆盖以上全部违规"
                           " ⇒ 不改写 guards 车道。")
-                    print("⚠ receipt-present: this successful full run will record a fresh HEAD receipt")
+                    # #1663 R2 P4：只声明"本跑会核对 HEAD，收据落点是 docs/gate/<tip>.json"，
+                    # 不预先宣称已落盘/一定会落盘（落盘在 main() 里，脏工作树会被拒）。
+                    print("⚠ receipt-present: this successful full run checks HEAD and targets a fresh"
+                          " HEAD receipt at docs/gate/<this tip>.json (written only if the reading"
+                          " lands: clean worktree, no --since/--only/--affected, not CI)")
                     print(check.detail)
                     print("⚠ 该收据文件（docs/gate/<本 tip>.json）必须随代码一起提交；"
                           "漏提交时 CI 侧 receipt-present 仍按硬口径红。")

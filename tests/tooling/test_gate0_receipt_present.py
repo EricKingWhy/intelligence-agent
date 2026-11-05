@@ -750,3 +750,144 @@ def test_bootstrap_stays_red_when_the_receipt_scan_fails(tmp_path):
     assert after.ok is False, after.detail
     assert after.status == "violations", after.detail
     assert "收据扫描失败" in after.detail, after.detail
+
+
+# ── #1663 Fix Round 2：落地历史的 git 口径（merge 落盘 / 改名落盘）与自举前置的覆盖面 ──
+#
+# 第一轮修复把判据从「HEAD 树里现存且有效」换到「区间内落过收据」，但落地历史本身用
+# `git log --name-only --diff-filter=A` 取：默认 `git log` **不对 merge 提交做 diff**，且默认
+# 开改名检测把 `staged.json → <sha>.json` 判成 `R100`。两条形态因此都看不见，删掉/改坏后
+# 自举重开 ⇒ 能落出 PASS 收据（第二轮复审两轴各自端到端跑到）。修法 = `-m` + `--no-renames`
+# **并且**只收 `t ∈ base..head`（否则例行 sync merge 从 main 带进来的别人收据会顶掉首张自举）。
+
+
+def _branch_with_a_receipt_landed_in_a_merge(tmp_path) -> tuple[Repo, str, str]:
+    """收据**只在 merge 提交里首次出现**（冲突解决式落盘 + 其后 1 笔代码提交）。"""
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.git("checkout", "-q", "-b", "side")
+    repo.commit({"src/s.py": "s = 1\n"}, "side work")
+    repo.git("checkout", "-q", "main")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit(repo.receipt(c1), "merge side, landing the receipt in the merge commit")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3")
+    return repo, base, c1
+
+
+def test_bootstrap_stays_red_after_a_receipt_landed_in_a_merge_is_deleted(tmp_path):
+    """P1-1(a)：收据由 **merge 提交**首次带进来（相对第一父是 A），删掉后不得重开自举。
+
+    `git log` 默认不对 merge 做 diff ⇒ 这笔落地对落地历史隐形。修复前：删除后 `attested`
+    （且真落出 PASS 收据）；修复后：`violations`。判据是 `git log -m`。
+    """
+    repo, base, c1 = _branch_with_a_receipt_landed_in_a_merge(tmp_path)
+    before = _bootstrapping_check(repo, base)
+    assert before.warn_only is False, before.detail
+    assert before.ok is False and before.status == "violations", before.detail
+
+    repo.remove(f"docs/gate/{c1}.json", "docs(gate): drop the merge-landed receipt")
+
+    after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+    assert "missing receipt for" in after.detail, after.detail
+
+
+def _branch_with_a_receipt_renamed_into_place(tmp_path) -> tuple[Repo, str, str]:
+    """收据以非 canonical 名提交，再 `git mv` 到 `docs/gate/<sha>.json`，其后 2 笔代码提交。"""
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    staged = next(iter(repo.receipt(c1).values()))
+    repo.commit({"docs/gate/staged.json": staged}, "stage the receipt under a non-receipt name")
+    repo.git("mv", "docs/gate/staged.json", f"docs/gate/{c1}.json")
+    repo.git("commit", "-q", "-m", "rename the staged receipt into place")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3")
+    return repo, base, c1
+
+
+def test_bootstrap_stays_red_after_a_receipt_renamed_into_place_is_tampered(tmp_path):
+    """P1-1(b)：收据以 `R100` 进 canonical 名（改名检测把它判成 R、既不 A 也不匹配收据名），
+    改坏后不得重开自举。
+
+    修复前：`attested`（并落出 PASS 收据）；修复后：`violations`。判据是 `--no-renames`
+    （改名按"删 + 增"输出，新路径成为 A）。
+    """
+    repo, base, c1 = _branch_with_a_receipt_renamed_into_place(tmp_path)
+    before = _bootstrapping_check(repo, base)
+    assert before.warn_only is False, before.detail
+    assert before.ok is False and before.status == "violations", before.detail
+
+    path = repo.root / "docs" / "gate" / f"{c1}.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["passed"] = doc["total"] - 1  # 不再是全绿 ⇒ 该收据 invalid
+    repo.commit({f"docs/gate/{c1}.json": json.dumps(doc)}, "docs(gate): tamper with the renamed receipt")
+
+    after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+
+
+def test_bootstrap_survives_a_routine_sync_merge_that_brings_in_other_receipts(tmp_path):
+    """P1-1 的**反向**守卫：例行 sync merge 从 main 带进别人的收据，本分支仍能自举首张收据。
+
+    判据不能只看"`-m` 让 merge 出 diff"——那会把 main 侧收据（文件名指向的提交不在
+    `merge-base..HEAD` 里）也算成"本分支落过收据" ⇒ 首张收据永远生不出来 = gen-1 死锁复发。
+    所以 `landed` 必须过滤到 `t ∈ base..head`。本用例正是钉这条过滤。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    # main 侧：别的票落了代码 + 收据（真实仓里成百上千张）
+    repo.git("checkout", "-q", "-b", "other-work")
+    other = repo.commit({"src/o.py": "o = 1\n"}, "other ticket code")
+    repo.commit(repo.receipt(other), "other ticket receipt on main")
+    repo.git("update-ref", "refs/remotes/origin/main", repo.git("rev-parse", "HEAD"))
+    # 本票分支：从 base 出发，两笔无收据代码提交
+    repo.git("checkout", "-q", "-b", "ticket", base)
+    repo.commit({"src/t1.py": "t = 1\n"}, "ticket code 1")
+    repo.commit({"src/t2.py": "t = 2\n"}, "ticket code 2")
+    repo.git("merge", "--no-ff", "-q", "-m", "merge origin/main", "origin/main")
+
+    with _clean_env():
+        # 前提自证：HEAD 树里确实有 main 侧带来的收据，且它不在本分支区间内。
+        assert other in gate0.head_tree_receipts(str(repo.root))
+        mb = repo.git("merge-base", "origin/main", "HEAD")
+        assert other not in repo.git("rev-list", f"{mb}..HEAD").split()
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is True, check.detail
+    assert check.status == "attested", check.detail
+
+
+def test_bootstrap_stays_red_when_the_receipt_scan_fails_on_a_zero_receipt_branch(tmp_path):
+    """P3-2：**零收据**分支 + 收据扫描失败 ⇒ 仍不得自举（fail-closed）。
+
+    既有那条扫描失败用例（`test_bootstrap_stays_red_when_the_receipt_scan_fails`）走的是
+    "区间内有收据"路径，`in_range_receipts` 非空就已挡住自举 ⇒ 把 `receipts_scanned` 这一项
+    从前置里删掉（MUT-B）时它照样绿。本用例走零收据路径，直接钉住 `receipts_scanned`。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    with _clean_env():
+        assert gate0.head_tree_receipts(str(repo.root)) == {}  # 前提自证：树里真的零收据
+
+    real = gate0._git_at_bytes
+
+    def failing(repo_root, *args, **kwargs):
+        if args[:1] == ("ls-tree",) and any("docs/gate" in str(a) for a in args):
+            return subprocess.CompletedProcess(args, 128, b"", b"fatal: simulated ls-tree failure")
+        return real(repo_root, *args, **kwargs)
+
+    with mock.patch.object(gate0, "_git_at_bytes", failing):
+        after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+    assert "收据扫描失败" in after.detail, after.detail
