@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import multiprocessing
+import queue
 import threading
 import time
 from pathlib import Path
@@ -69,28 +71,32 @@ async def _drain(queue: asyncio.Queue) -> list[dict]:
 
 def _read_until_pong(ws) -> list[dict]:
     """读到 ``pong`` 栅栏为止，返回途中收到的业务帧（跳过心跳 ``server_ping``）。"""
-    frames: list[dict] = []
-    deadline = time.monotonic() + 2.0
+    result: queue.Queue[list[dict] | Exception] = queue.Queue(maxsize=1)
 
-    for _ in range(50):
-        # Starlette's synchronous receive_text has no timeout. Use its portal
-        # so the calling thread can enforce the deadline even if the loop stalls.
-        pending = ws.portal.start_task_soon(ws._send_rx.receive)
+    def read() -> None:
+        frames: list[dict] = []
         try:
-            message = pending.result(timeout=max(0, deadline - time.monotonic()))
-        except TimeoutError as exc:
-            pending.cancel()
-            raise AssertionError("等待 pong 栅栏超时") from exc
-        ws._raise_on_close(message)
-        frame = json.loads(message["text"])
-        if frame.get("type") == "pong":
-            return frames
-        # 应用层心跳（2s 一次）不是业务帧——`settle` 跨到心跳节拍时它会混进来，
-        # 判据只量**板帧**，跳过它（同 `_recv_ws_frame` 的既有形状）。
-        if frame.get("type") == "server_ping":
-            continue
-        frames.append(frame)
-    raise AssertionError("等待 pong 栅栏时读了 50 帧仍未见到——协议可能变了")
+            for _ in range(50):
+                frame = json.loads(ws.receive_text())
+                if frame.get("type") == "pong":
+                    result.put(frames)
+                    return
+                if frame.get("type") != "server_ping":
+                    frames.append(frame)
+            raise AssertionError("等待 pong 栅栏时读了 50 帧仍未见到——协议可能变了")
+        except Exception as exc:  # noqa: BLE001 - propagate receive failures to the caller
+            result.put(exc)
+
+    # TestClient closes the socket on context exit; the worker must not keep the
+    # process alive if the event loop itself cannot service the close.
+    threading.Thread(target=read, daemon=True, name="board-pong-reader").start()
+    try:
+        outcome = result.get(timeout=2.0)
+    except queue.Empty as exc:
+        raise AssertionError("等待 pong 栅栏超时") from exc
+    if isinstance(outcome, Exception):
+        raise outcome
+    return outcome
 
 
 def test_pong_wait_fails_when_server_stays_silent() -> None:
@@ -101,6 +107,7 @@ def test_pong_wait_fails_when_server_stays_silent() -> None:
 
     finished = threading.Event()
     errors: list[AssertionError] = []
+    previous_readers = set(threading.enumerate())
 
     client = TestClient(silent_app)
     with client.websocket_connect("/") as ws:
@@ -119,6 +126,61 @@ def test_pong_wait_fails_when_server_stays_silent() -> None:
         assert not worker.is_alive(), "pong reader thread did not exit"
         assert len(errors) == 1 and isinstance(errors[0], AssertionError)
         assert "pong" in str(errors[0])
+    readers = [
+        thread for thread in threading.enumerate()
+        if thread not in previous_readers and thread.name == "board-pong-reader"
+    ]
+    for reader in readers:
+        reader.join(timeout=2)
+        assert not reader.is_alive(), "pong reader survived socket closure"
+
+
+def _blocked_portal_probe(connection) -> None:
+    blocked = threading.Event()
+
+    async def stalled_app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+        await receive()
+        blocked.set()
+        time.sleep(6)  # noqa: ASYNC251 - deliberately stall the portal loop
+        await receive()
+
+    client = TestClient(stalled_app)
+    with client.websocket_connect("/") as ws:
+        ws.send_text("stall")
+        if not blocked.wait(3):
+            connection.send("app did not block")
+            return
+        connection.send("blocked")
+        start = time.monotonic()
+        try:
+            _read_until_pong(ws)
+        except AssertionError:
+            connection.send(time.monotonic() - start)
+        else:
+            connection.send("unexpected success")
+
+
+def test_pong_wait_is_bounded_when_portal_loop_stalls() -> None:
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(target=_blocked_portal_probe, args=(child,))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(20), "probe did not start"
+        assert parent.recv() == "blocked"
+        assert parent.poll(4), "pong wait blocked on the stalled portal"
+        elapsed = parent.recv()
+        assert isinstance(elapsed, float) and elapsed < 4
+        process.join(10)
+        assert process.exitcode == 0, "probe did not cleanly exit"
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        parent.close()
 
 
 def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
