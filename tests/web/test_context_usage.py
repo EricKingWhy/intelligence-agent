@@ -85,6 +85,7 @@ async def _completed_session(port: int, task: str = "首轮", *, timeout: float 
     import httpx2
 
     sid = None
+    terminal = False
     client = httpx2.AsyncClient(timeout=None)
     try:
         try:
@@ -100,11 +101,13 @@ async def _completed_session(port: int, task: str = "首轮", *, timeout: float 
                     if sid is None:
                         sid = frame.get("session_id")
                     if frame.get("type") in ("run/completed", "run/failed"):
+                        terminal = True
                         break
         except TimeoutError as exc:
             raise AssertionError(f"SSE session did not complete within {timeout}s") from exc
     finally:
         await client.aclose()
+    assert terminal, "SSE ended before a terminal event"
     assert sid
     return sid
 
@@ -130,6 +133,37 @@ async def test_completed_session_times_out_on_silent_sse_and_closes_connection()
         with pytest.raises(AssertionError, match="SSE"):
             await _completed_session(port, timeout=0.2)
         await asyncio.wait_for(disconnected.wait(), timeout=2)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_completed_session_requires_terminal_event(terminal):
+    async def incomplete_sse(reader, writer):
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            body = b'data: {"session_id":"s1","type":"run/started"}\n\n'
+            if terminal:
+                body += b'data: {"session_id":"s1","type":"run/completed"}\n\n'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: "
+                + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(incomplete_sse, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        if terminal:
+            assert await _completed_session(port, timeout=2) == "s1"
+        else:
+            with pytest.raises(AssertionError, match="terminal"):
+                await _completed_session(port, timeout=2)
     finally:
         server.close()
         await server.wait_closed()

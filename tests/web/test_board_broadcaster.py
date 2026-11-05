@@ -72,13 +72,14 @@ def _read_until_pong(ws) -> list[dict]:
     frames: list[dict] = []
     deadline = time.monotonic() + 2.0
 
-    async def receive() -> dict:
-        return await asyncio.wait_for(ws._send_rx.receive(), timeout=max(0, deadline - time.monotonic()))
-
     for _ in range(50):
+        # Starlette's synchronous receive_text has no timeout. Use its portal
+        # so the calling thread can enforce the deadline even if the loop stalls.
+        pending = ws.portal.start_task_soon(ws._send_rx.receive)
         try:
-            message = ws.portal.call(receive)
+            message = pending.result(timeout=max(0, deadline - time.monotonic()))
         except TimeoutError as exc:
+            pending.cancel()
             raise AssertionError("等待 pong 栅栏超时") from exc
         ws._raise_on_close(message)
         frame = json.loads(message["text"])
