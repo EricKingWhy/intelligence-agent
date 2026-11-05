@@ -921,4 +921,3 @@ def test_bootstrap_stays_red_when_the_landing_history_read_fails(tmp_path):
     assert after.warn_only is False, after.detail
     assert after.ok is False, after.detail
     assert after.status == "violations", after.detail
-
