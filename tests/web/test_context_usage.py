@@ -80,30 +80,59 @@ async def _get(port: int, path: str) -> tuple[int, dict]:
         return response.status_code, payload
 
 
-async def _completed_session(port: int, task: str = "首轮") -> str:
+async def _completed_session(port: int, task: str = "首轮", *, timeout: float = 30.0) -> str:
     """创建一个跑完的会话，返回 session_id（消费 SSE 流到终态）。"""
     import httpx2
 
     sid = None
     client = httpx2.AsyncClient(timeout=None)
     try:
-        async with client.stream(
-            "POST", f"http://127.0.0.1:{port}/api/sessions", json={"task": task},
-        ) as response:
-            assert response.status_code == 200
-            async for line in response.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                import json
-                frame = json.loads(line.removeprefix("data:").strip())
-                if sid is None:
-                    sid = frame.get("session_id")
-                if frame.get("type") in ("run/completed", "run/failed"):
-                    break
+        try:
+            async with asyncio.timeout(timeout), client.stream(
+                "POST", f"http://127.0.0.1:{port}/api/sessions", json={"task": task},
+            ) as response:
+                assert response.status_code == 200
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    import json
+                    frame = json.loads(line.removeprefix("data:").strip())
+                    if sid is None:
+                        sid = frame.get("session_id")
+                    if frame.get("type") in ("run/completed", "run/failed"):
+                        break
+        except TimeoutError as exc:
+            raise AssertionError(f"SSE session did not complete within {timeout}s") from exc
     finally:
         await client.aclose()
     assert sid
     return sid
+
+
+@pytest.mark.asyncio
+async def test_completed_session_times_out_on_silent_sse_and_closes_connection():
+    disconnected = asyncio.Event()
+
+    async def silent_sse(reader, writer):
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            disconnected.set()
+
+    server = await asyncio.start_server(silent_sse, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        with pytest.raises(AssertionError, match="SSE"):
+            await _completed_session(port, timeout=0.2)
+        await asyncio.wait_for(disconnected.wait(), timeout=2)
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 async def _wait_idle(port: int, session_id: str, *, timeout: float = 10.0) -> None:
