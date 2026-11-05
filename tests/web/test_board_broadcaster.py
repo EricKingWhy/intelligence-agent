@@ -30,6 +30,7 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agent_harness.config import Settings
@@ -69,8 +70,18 @@ async def _drain(queue: asyncio.Queue) -> list[dict]:
 def _read_until_pong(ws) -> list[dict]:
     """读到 ``pong`` 栅栏为止，返回途中收到的业务帧（跳过心跳 ``server_ping``）。"""
     frames: list[dict] = []
+    deadline = time.monotonic() + 2.0
+
+    async def receive() -> dict:
+        return await asyncio.wait_for(ws._send_rx.receive(), timeout=max(0, deadline - time.monotonic()))
+
     for _ in range(50):
-        frame = json.loads(ws.receive_text())
+        try:
+            message = ws.portal.call(receive)
+        except TimeoutError as exc:
+            raise AssertionError("等待 pong 栅栏超时") from exc
+        ws._raise_on_close(message)
+        frame = json.loads(message["text"])
         if frame.get("type") == "pong":
             return frames
         # 应用层心跳（2s 一次）不是业务帧——`settle` 跨到心跳节拍时它会混进来，
@@ -79,6 +90,34 @@ def _read_until_pong(ws) -> list[dict]:
             continue
         frames.append(frame)
     raise AssertionError("等待 pong 栅栏时读了 50 帧仍未见到——协议可能变了")
+
+
+def test_pong_wait_fails_when_server_stays_silent() -> None:
+    async def silent_app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+        await receive()
+
+    finished = threading.Event()
+    errors: list[AssertionError] = []
+
+    client = TestClient(silent_app)
+    with client.websocket_connect("/") as ws:
+        def read() -> None:
+            try:
+                _read_until_pong(ws)
+            except AssertionError as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=read, daemon=True)
+        worker.start()
+        assert finished.wait(4), "waiting for pong did not terminate"
+        worker.join(timeout=1)
+        assert not worker.is_alive(), "pong reader thread did not exit"
+        assert len(errors) == 1 and isinstance(errors[0], AssertionError)
+        assert "pong" in str(errors[0])
 
 
 def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
@@ -110,7 +149,23 @@ def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
             quiet += 1
             if quiet >= 2:
                 return frames
-    return frames
+    raise AssertionError("board stream did not become quiet after 8 rounds")
+
+
+def test_drain_fails_if_stream_never_becomes_quiet() -> None:
+    async def busy_app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+        while True:
+            message = await receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            await send({"type": "websocket.send", "text": '{"type":"board_snapshot"}'})
+            await send({"type": "websocket.send", "text": '{"type":"pong"}'})
+
+    client = TestClient(busy_app)
+    with client.websocket_connect("/") as ws, pytest.raises(AssertionError, match="quiet"):
+        _drain_blocking(ws, settle=0)
 
 
 # ── ① 节流帧数上下界（AC-14 ①）─────────────────────────────────────────────
