@@ -861,6 +861,44 @@ def test_custom_image_named_user_and_group_is_resolved_and_workspace_usable(
         docker_client.images.remove(image, force=True)
 
 
+def test_custom_image_empty_group_segment_uses_primary_group(docker_client) -> None:
+    """`USER app:`（冒号后为空）：按「未声明组」处理，取该用户的主组。
+
+    R-1（#1664）：N-1 的 `3119b9acf` 把组段改成 `getent group <group>` 之后，
+    空组段被送进 `getent group ''` → 空输出 → `SandboxHardeningError`，把基线
+    可用的 `USER app:` 变成了响亮失败。空组段的语义同「未声明组」
+    （runc `GetExecUser` 的判据是 `groupArg != ""`；moby/sys/user
+    `parseGroupArg("")` 返回 nil），故应回落 `id -g app` = 主组。
+    """
+    image = _commit_image_with_named_user(
+        docker_client,
+        f"agent-harness-test-1486:{uuid4().hex}",
+        create_user=True,
+        user_decl="app:",
+    )
+    from agent_harness.sandbox.docker import DockerSandbox
+
+    suffix = uuid4().hex
+    sandbox = DockerSandbox(
+        image=image,
+        container_name=f"agent-harness-h1486-emptygrp-{suffix}",
+        volume_name=f"agent-harness-h1486-emptygrp-{suffix}",
+    )
+    try:
+        sandbox.ensure_started()
+        attrs = _inspect(docker_client, sandbox._container_name)
+        assert attrs["Config"]["User"] == "1500:1500"
+        assert sandbox.exec("id -u").stdout.strip() == "1500"
+        assert "1500:1500 755 /workspace" in _manifest(
+            docker_client, sandbox._volume_name
+        )
+        sandbox.write_text("emptygrp.txt", "ok")
+        assert sandbox.read_text("emptygrp.txt") == "ok"
+    finally:
+        sandbox.delete()
+        docker_client.images.remove(image, force=True)
+
+
 def test_custom_image_nobody_nogroup_is_resolved_by_group_name(docker_client) -> None:
     """`USER nobody:nogroup`：group 段是**组名**，不是用户名。
 
