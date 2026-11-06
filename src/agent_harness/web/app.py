@@ -107,6 +107,7 @@ from agent_harness.sandbox import (
     default_backend_for_platform,
     probe_all_capabilities,
 )
+from agent_harness.sandbox.docker import SandboxHardeningError
 from agent_harness.session import JsonlSessionStore, SessionEvent
 from agent_harness.session.board_projection import get_board_projection_store
 from agent_harness.session.cwd import session_cwd
@@ -184,6 +185,7 @@ from agent_harness.web.domain_errors import (
     MEMORY_REASON_CODE_HEADER,
     http_error,
     model_http_error,
+    sandbox_hardening_http_error,
     sandbox_unavailable_http_error,
     storage_http_error,
     storage_http_status,
@@ -2746,6 +2748,11 @@ def create_app(
     # 此处将其接入全局异常处理，使所有写磁盘的 API 路径（会话创建、事件落盘、
     # artifact 写入等）都能返回明确的 503 而非泛化的 500。未识别的 OSError /
     # sqlite3.Error 交还通用 500 处理（不洗成 4xx/5xx 的误报）。
+    @app.exception_handler(SandboxHardeningError)
+    async def _sandbox_hardening_error(request: Any, exc: SandboxHardeningError):
+        error = sandbox_hardening_http_error(exc)
+        return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+
     @app.exception_handler(OSError)
     async def _oserror_to_storage_status(request: Any, exc: OSError):
         status = storage_http_status(exc)
