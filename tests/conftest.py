@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import faulthandler
+import math
 import os
+import sys
+import threading
 from collections.abc import Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,12 +28,81 @@ def register_workspace_from_build_kwargs(kwargs: Mapping[str, Any]) -> None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addini(
+        "test_timeout",
+        "Hard per-test deadline in seconds; timed-out tests terminate the pytest process.",
+        default="180",
+    )
     parser.addoption(
         "--require-live-services",
         action="store_true",
         default=False,
         help="fail when a selected live_services/qiniu test is skipped or not executed",
     )
+
+
+def _test_timeout(item: pytest.Item) -> tuple[float, str]:
+    marker = item.get_closest_marker("test_timeout")
+    if marker is None:
+        raw_seconds = item.config.getini("test_timeout")
+        reason = "suite default"
+    else:
+        if len(marker.args) != 1 or set(marker.kwargs) != {"reason"}:
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout requires one seconds argument and a reason= value"
+            )
+        raw_seconds = marker.args[0]
+        reason = marker.kwargs["reason"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise pytest.UsageError(f"{item.nodeid}: test_timeout reason must be non-empty text")
+
+    try:
+        seconds = float(raw_seconds)
+    except (TypeError, ValueError) as exc:
+        raise pytest.UsageError(f"{item.nodeid}: invalid test_timeout value {raw_seconds!r}") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise pytest.UsageError(f"{item.nodeid}: test_timeout must be a positive finite number")
+    return seconds, reason
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        _test_timeout(item)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> Iterator[None]:
+    seconds, reason = _test_timeout(item)
+
+    def terminate_expired_test() -> None:
+        message = (
+            f"[pytest deadline] {item.nodeid} exceeded {seconds:g}s ({reason}); "
+            "terminating process.\n"
+        )
+        capture_manager = item.config.pluginmanager.getplugin("capturemanager")
+        if capture_manager is not None:
+            try:
+                capture_manager.suspend()
+            except BaseException as capture_error:  # noqa: BLE001
+                # The watchdog must still terminate if capture restoration fails.
+                message += f"[pytest deadline] capture restore error: {capture_error!r}\n"
+        try:
+            os.write(2, message.encode("utf-8", "backslashreplace"))
+        except OSError:
+            pass
+        try:
+            faulthandler.dump_traceback(file=sys.__stderr__, all_threads=True)
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            pass
+        os._exit(1)
+
+    timer = threading.Timer(seconds, terminate_expired_test)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

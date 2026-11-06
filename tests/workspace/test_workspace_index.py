@@ -1124,6 +1124,10 @@ class TestHeaderReader:
         (empty / "events.jsonl").write_text("", encoding="utf-8")
         assert store.read_started_header("empty-dir") is None
 
+    @pytest.mark.test_timeout(
+        600,
+        reason="10k JSONL fsync: 295.12s Windows; 91.12s Gate-1 Linux",
+    )
     def test_does_not_read_event_bodies(self, tmp_path: Path, monkeypatch) -> None:
         """AC14 硬证据：正文有一万条事件，读取只碰第 1 行。"""
         store = JsonlSessionStore(tmp_path / "sessions")

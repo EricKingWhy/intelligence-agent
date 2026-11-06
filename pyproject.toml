@@ -77,6 +77,8 @@ pythonpath = ["."]
 # Python 运行时）：其中 pywin32 的 test_addtask.py 在收集期就把解释器打成访问违例、
 # 零用例执行，输出里没有任何失败签名（#856）。
 testpaths = ["tests"]
+# CI longest observed item is 91.12s; Windows fsync outlier is item-overridden with evidence.
+test_timeout = "180"
 # 集成测试默认不跑（烧 token、依赖真实 LLM）。
 # 手动跑：uv run pytest -m integration
 # testpaths 只兜住「不给路径」的调用；显式 `pytest .` 仍从 rootdir 走，所以按路径追加
@@ -91,4 +93,5 @@ markers = [
     "integration: 端到端集成测试（需要真实 LLM API key、烧 token）",
     "live_services: integration test that intentionally reads credentials for real services",
     "qiniu: 七牛云 S3 集成测试（需要真实对象存储凭证）",
+    "test_timeout(seconds, reason): hard per-test deadline with a required evidence-based exception reason",
 ]

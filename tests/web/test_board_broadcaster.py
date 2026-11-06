@@ -183,6 +183,73 @@ def test_pong_wait_is_bounded_when_portal_loop_stalls() -> None:
         parent.close()
 
 
+def _permanently_stalled_portal_probe(connection, portal_blocked, operation: str) -> None:
+    async def stalled_app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+        loop = asyncio.get_running_loop()
+
+        def block_portal() -> None:
+            portal_blocked.set()
+            time.sleep(3600)
+
+        blocker = threading.Timer(0.2, lambda: loop.call_soon_threadsafe(block_portal))
+        blocker.daemon = True
+        blocker.start()
+        await receive()
+
+    client = TestClient(stalled_app)
+    websocket_context = client.websocket_connect("/")
+    websocket = websocket_context.__enter__()
+    if not portal_blocked.wait(5):
+        connection.send("portal did not block")
+        return
+
+    if operation == "send_text":
+        connection.send("send_text_started")
+        websocket.send_text("probe")
+        connection.send("send_text_returned")
+    elif operation == "context_exit":
+        connection.send("context_exit_started")
+        websocket_context.__exit__(None, None, None)
+        connection.send("context_exit_returned")
+    else:
+        raise ValueError(f"unknown probe operation: {operation}")
+
+
+@pytest.mark.parametrize(
+    ("operation", "started"),
+    [("send_text", "send_text_started"), ("context_exit", "context_exit_started")],
+)
+def test_permanent_portal_stall_is_confined_to_a_supervised_child(
+    operation: str, started: str,
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    portal_blocked = context.Event()
+    process = context.Process(
+        target=_permanently_stalled_portal_probe,
+        args=(child, portal_blocked, operation),
+    )
+    try:
+        process.start()
+        child.close()
+        assert parent.poll(20), "permanent-stall probe did not reach the client operation"
+        assert parent.recv() == started
+        assert portal_blocked.wait(5), "ASGI portal did not enter its permanent stall"
+        assert not parent.poll(1), f"{operation} unexpectedly returned with a blocked portal"
+    finally:
+        child.close()
+        if process.pid is not None:
+            if process.is_alive():
+                process.terminate()
+            process.join(5)
+        parent.close()
+
+    assert not process.is_alive(), "permanent-stall child survived its supervisor"
+    assert process.exitcode is not None and process.exitcode != 0
+
+
 def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
     """把 WS 上"当前该到的"业务帧收干净（**静默判定**，不是固定轮数）。
 
