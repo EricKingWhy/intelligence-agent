@@ -251,7 +251,16 @@ def test_setup_logging_rotates_and_retains_a_finite_number_of_stack_traces(
 
     log_files = list(log_path.parent.glob("agent.jsonl*"))
     assert len(log_files) == 3
-    assert all(path.stat().st_size <= 1024 for path in log_files)
+    # stdlib 只保证 "st_size <= maxBytes + 单条记录字节数"：RotatingFileHandler.
+    # shouldRollover 拿字节偏移 self.stream.tell() 加字符长度 len(msg) 与 maxBytes 比较，
+    # 而 JsonlFormatter 是 ensure_ascii=False + 中文字段名，每条记录的字节数大于字符数，
+    # 因此临界点上文件可以超过 maxBytes 一条记录（#1676）。上界按落盘内容实测，不假设
+    # st_size <= maxBytes；"完全不轮转"仍由上面的 3 个文件断言区分。
+    for path in log_files:
+        records = path.read_bytes().splitlines(keepends=True)
+        assert path.stat().st_size <= handler.maxBytes + max(
+            (len(record) for record in records), default=0
+        )
     entries = [entry for path in log_files for entry in read_jsonl(path)]
     assert 0 < len(entries) < 20
     assert all(
