@@ -102,6 +102,7 @@ Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上�
 from __future__ import annotations
 
 import errno
+import re
 import sqlite3
 
 from fastapi import HTTPException
@@ -511,11 +512,16 @@ _SANDBOX_ERROR_STATUS: dict[type[Exception], int] = {
 
 def sandbox_hardening_http_error(exc: SandboxHardeningError) -> HTTPException:
     """Report a failed sandbox hardening without falling back to another backend."""
+    reasons = {"hardening_failed", "migration_failed", "migration_wait_failed", "migration_helper_start_failed"}
+    volume = exc.volume_name
+    if not isinstance(volume, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", volume):
+        volume = None
     return HTTPException(
         status_code=_SANDBOX_ERROR_STATUS[type(exc)],
         detail={
-            "message": str(exc),
-            "reason": "sandbox_hardening_failed",
+            "message": "Sandbox hardening failed",
+            "reason": exc.reason if exc.reason in reasons else "hardening_failed",
+            "volume": volume,
             "remediation": "检查 Docker 卷权限及迁移日志，保留现有卷，修复问题后重试。",
         },
     )

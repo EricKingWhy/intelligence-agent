@@ -566,6 +566,11 @@ printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
 class SandboxHardeningError(RuntimeError):
     """容器未满足基础降权档，且无法在不破坏数据的前提下自动处置。"""
 
+    def __init__(self, message: str, *, volume_name: str | None = None, reason: str = "hardening_failed") -> None:
+        super().__init__(message)
+        self.volume_name = volume_name
+        self.reason = reason
+
 
 class DockerSandbox(Sandbox):
     """Run Coding Tools inside an isolated Docker container."""
@@ -937,7 +942,8 @@ class DockerSandbox(Sandbox):
         except Exception as error:
             self._remove_helper_containers()
             raise SandboxHardeningError(
-                f"无法启动卷属主迁移容器（{self._volume_name}）：{error}"
+                f"无法启动卷属主迁移容器（{self._volume_name}）：{error}",
+                volume_name=self._volume_name, reason="migration_helper_start_failed",
             ) from error
         try:
             # 无上界等待会让会话启动在 daemon 卡住 / 超大卷时永久挂住（复核
@@ -960,7 +966,8 @@ class DockerSandbox(Sandbox):
             raise SandboxHardeningError(
                 f"卷 {self._volume_name} 属主迁移等待失败"
                 f"（>{_MIGRATION_WAIT_SECONDS}s 或 daemon 异常）：{error}"
-                + (f" | helper 日志：{detail}" if detail else "")
+                + (f" | helper 日志：{detail}" if detail else ""),
+                volume_name=self._volume_name, reason="migration_wait_failed",
             ) from error
         finally:
             with suppress(Exception):
@@ -972,7 +979,8 @@ class DockerSandbox(Sandbox):
             )
             raise SandboxHardeningError(
                 f"卷 {self._volume_name} 属主迁移失败（exit={exit_code}）："
-                f"{detail or logs.strip()[-500:]}"
+                f"{detail or logs.strip()[-500:]}",
+                volume_name=self._volume_name, reason="migration_failed",
             )
         # 迁移成功：备份卷整个删掉（里面只剩备份 tar，没有别的用途）。
         try:
