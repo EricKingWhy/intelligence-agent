@@ -977,10 +977,14 @@ class DockerSandbox(Sandbox):
             detail = " | ".join(
                 line for line in logs.splitlines() if line.startswith("MIGRATE")
             )
+            reason = {
+                89: "migration_backup_restore_failed",
+                96: "migration_rollback_failed",
+            }.get(exit_code, "migration_failed")
             raise SandboxHardeningError(
                 f"卷 {self._volume_name} 属主迁移失败（exit={exit_code}）："
                 f"{detail or logs.strip()[-500:]}",
-                volume_name=self._volume_name, reason="migration_failed",
+                volume_name=self._volume_name, reason=reason,
             )
         # 迁移成功：备份卷整个删掉（里面只剩备份 tar，没有别的用途）。
         try:

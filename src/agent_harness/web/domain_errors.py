@@ -117,6 +117,7 @@ from agent_harness.model.config import (
     ModelClientConstructionError,
     UnsupportedReasoningEffort,
 )
+from agent_harness.redaction import redact_diagnostic_value
 from agent_harness.sandbox.capabilities import (
     SandboxUnavailableError,
     probe_all_capabilities,
@@ -512,9 +513,13 @@ _SANDBOX_ERROR_STATUS: dict[type[Exception], int] = {
 
 def sandbox_hardening_http_error(exc: SandboxHardeningError) -> HTTPException:
     """Report a failed sandbox hardening without falling back to another backend."""
-    reasons = {"hardening_failed", "migration_failed", "migration_wait_failed", "migration_helper_start_failed"}
+    reasons = {
+        "hardening_failed", "migration_failed", "migration_wait_failed", "migration_helper_start_failed",
+        "migration_rollback_failed", "migration_backup_restore_failed",
+    }
     volume = exc.volume_name
-    if not isinstance(volume, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", volume):
+    if (not isinstance(volume, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", volume)
+            or redact_diagnostic_value(volume) != volume):
         volume = None
     return HTTPException(
         status_code=_SANDBOX_ERROR_STATUS[type(exc)],
@@ -522,7 +527,7 @@ def sandbox_hardening_http_error(exc: SandboxHardeningError) -> HTTPException:
             "message": "Sandbox hardening failed",
             "reason": exc.reason if exc.reason in reasons else "hardening_failed",
             "volume": volume,
-            "remediation": "检查 Docker 卷权限及迁移日志，保留现有卷，修复问题后重试。",
+            "remediation": "Preserve the volume and backup; verify recovery state before retrying.",
         },
     )
 

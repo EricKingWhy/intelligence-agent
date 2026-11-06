@@ -92,7 +92,9 @@ def test_unavailable_and_unexpected_errors_keep_existing_status(tmp_path, monkey
 
 @pytest.mark.parametrize(
     ("phase", "expected_reason"),
-    [("start", "migration_helper_start_failed"), ("wait", "migration_wait_failed"), ("exit", "migration_failed")],
+    [("start", "migration_helper_start_failed"), ("wait", "migration_wait_failed"),
+     ("exit", "migration_failed"), ("rollback", "migration_rollback_failed"),
+     ("restore", "migration_backup_restore_failed")],
 )
 def test_real_migration_failure_is_safe_and_cleans_up(tmp_path, monkeypatch, phase, expected_reason):
     import docker
@@ -102,7 +104,7 @@ def test_real_migration_failure_is_safe_and_cleans_up(tmp_path, monkeypatch, pha
     def wait(**kwargs):
         if phase == "wait":
             raise TimeoutError("token=secret123 /workspace/private-file")
-        return {"StatusCode": 1}
+        return {"StatusCode": {"rollback": 96, "restore": 89}.get(phase, 1)}
 
     helper = SimpleNamespace(
         wait=wait,
@@ -142,12 +144,16 @@ def test_real_migration_failure_is_safe_and_cleans_up(tmp_path, monkeypatch, pha
     assert response.json()["detail"]["reason"] == expected_reason
     assert "secret123" not in response.text
     assert "/workspace/private-file" not in response.text
-    assert removed == {"start": ["main"], "wait": ["stop", "helper", "main"], "exit": ["helper", "main"]}[phase]
+    if phase in {"rollback", "restore", "wait"}:
+        assert "before retry" in response.json()["detail"]["remediation"]
+    assert removed == (["main"] if phase == "start" else
+                       ["stop", "helper", "main"] if phase == "wait" else ["helper", "main"])
 
 
-def test_untrusted_metadata_is_not_echoed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("volume", ["/private/path", "sk-proj-0123456789abcdef0123456789abcdef"])
+def test_untrusted_metadata_is_not_echoed(tmp_path, monkeypatch, volume):
     def fail_create(self, *args, **kwargs):
-        raise SandboxHardeningError("secret", volume_name="/private/path", reason="secret-category")
+        raise SandboxHardeningError("secret", volume_name=volume, reason="secret-category")
 
     monkeypatch.setattr(WorkspaceRegistry, "create", fail_create)
     app = create_app(
@@ -161,3 +167,21 @@ def test_untrusted_metadata_is_not_echoed(tmp_path, monkeypatch):
     assert response.json()["detail"]["reason"] == "hardening_failed"
     assert "secret" not in response.text
     assert "/private/path" not in response.text
+    assert volume not in response.text
+
+
+def test_long_valid_volume_is_reported(tmp_path, monkeypatch):
+    volume = "agent-harness-" + "a" * 128
+
+    def fail_create(self, *args, **kwargs):
+        raise SandboxHardeningError("private", volume_name=volume, reason="migration_failed")
+
+    monkeypatch.setattr(WorkspaceRegistry, "create", fail_create)
+    app = create_app(
+        Settings(_env_file=None, workspace_dir=str(tmp_path), model_api_key="sk-test"),
+        allow_testserver=True,
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/api/sessions?launch=false", json={"sandbox_backend": "local"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["volume"] == volume
