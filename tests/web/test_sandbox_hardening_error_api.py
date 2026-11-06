@@ -31,7 +31,7 @@ def test_create_reports_volume_hardening_failure(tmp_path, monkeypatch):
 
     assert response.status_code == 409
     detail = response.json()["detail"]
-    assert detail["volume"] == "test-volume"
+    assert detail["volume"] is None
     assert detail["reason"] == "migration_failed"
     assert "secret123" not in response.text
     assert "/workspace/private-file" not in response.text
@@ -60,7 +60,7 @@ def test_resume_reports_hardening_failure(tmp_path, monkeypatch):
 
     assert response.status_code == 409
     detail = response.json()["detail"]
-    assert detail["volume"] == "resume-volume"
+    assert detail["volume"] is None
     assert detail["reason"] == "migration_failed"
     assert "private migration log" not in response.text
     assert detail["remediation"]
@@ -140,7 +140,7 @@ def test_real_migration_failure_is_safe_and_cleans_up(tmp_path, monkeypatch, pha
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.post("/api/sessions?launch=false", json={"sandbox_backend": "local"})
     assert response.status_code == 409
-    assert response.json()["detail"]["volume"] == "test-volume"
+    assert response.json()["detail"]["volume"] is None
     assert response.json()["detail"]["reason"] == expected_reason
     assert "secret123" not in response.text
     assert "/workspace/private-file" not in response.text
@@ -150,7 +150,8 @@ def test_real_migration_failure_is_safe_and_cleans_up(tmp_path, monkeypatch, pha
                        ["stop", "helper", "main"] if phase == "wait" else ["helper", "main"])
 
 
-@pytest.mark.parametrize("volume", ["/private/path", "sk-proj-0123456789abcdef0123456789abcdef"])
+@pytest.mark.parametrize("volume", ["/private/path", "sk-proj-0123456789abcdef0123456789abcdef",
+                                    "ghp_123456789012345678901234567890123456"])
 def test_untrusted_metadata_is_not_echoed(tmp_path, monkeypatch, volume):
     def fail_create(self, *args, **kwargs):
         raise SandboxHardeningError("secret", volume_name=volume, reason="secret-category")
@@ -170,7 +171,7 @@ def test_untrusted_metadata_is_not_echoed(tmp_path, monkeypatch, volume):
     assert volume not in response.text
 
 
-def test_long_valid_volume_is_reported(tmp_path, monkeypatch):
+def test_long_valid_volume_is_not_exposed(tmp_path, monkeypatch):
     volume = "agent-harness-" + "a" * 128
 
     def fail_create(self, *args, **kwargs):
@@ -184,4 +185,5 @@ def test_long_valid_volume_is_reported(tmp_path, monkeypatch):
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.post("/api/sessions?launch=false", json={"sandbox_backend": "local"})
     assert response.status_code == 409
-    assert response.json()["detail"]["volume"] == volume
+    assert response.json()["detail"]["volume"] is None
+    assert volume not in response.text

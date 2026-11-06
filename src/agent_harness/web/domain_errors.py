@@ -102,7 +102,6 @@ Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上�
 from __future__ import annotations
 
 import errno
-import re
 import sqlite3
 
 from fastapi import HTTPException
@@ -117,7 +116,6 @@ from agent_harness.model.config import (
     ModelClientConstructionError,
     UnsupportedReasoningEffort,
 )
-from agent_harness.redaction import redact_diagnostic_value
 from agent_harness.sandbox.capabilities import (
     SandboxUnavailableError,
     probe_all_capabilities,
@@ -517,16 +515,12 @@ def sandbox_hardening_http_error(exc: SandboxHardeningError) -> HTTPException:
         "hardening_failed", "migration_failed", "migration_wait_failed", "migration_helper_start_failed",
         "migration_rollback_failed", "migration_backup_restore_failed",
     }
-    volume = exc.volume_name
-    if (not isinstance(volume, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", volume)
-            or redact_diagnostic_value(volume) != volume):
-        volume = None
     return HTTPException(
         status_code=_SANDBOX_ERROR_STATUS[type(exc)],
         detail={
             "message": "Sandbox hardening failed",
             "reason": exc.reason if exc.reason in reasons else "hardening_failed",
-            "volume": volume,
+            "volume": None,
             "remediation": "Preserve the volume and backup; verify recovery state before retrying.",
         },
     )
