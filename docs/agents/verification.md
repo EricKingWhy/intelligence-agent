@@ -570,20 +570,17 @@ teardown 可能不跑，后续用例不继续**；换来的是“退出码可靠
 回收（看门狗 abort 前终止已登记的子进程），另开专项票做子进程追踪，不在本票范围。
 
 **默认值**：`pyproject.toml` `[tool.pytest.ini_options]` 里 `test_timeout = "300"`。
-实测依据（2026-11-07，本机 venv + wt-1514，`043342a5`）：
-- 全量套件总耗时约 285s（#1615 沙箱实测，9530 passed，`284.97s`），
-  单个用例远小于 300s；
-- 单文件最慢实测：`tests/workspace/test_workspace_index.py` 52 条共 `21.58s`，
-  其中最慢单条 `TestHeaderReader::test_does_not_read_event_bodies` 为 `19.27s`；
-- 并发 join 用例实测 <0.2s（`_WORKER_WAIT_SECONDS=60s` 约 300 倍余量）。
-即 300s 约为最慢单条实测（19.27s）的 15 倍余量，正常用例不会被误杀。
-复跑命令（重测最慢单条）：`pytest --durations=10`（全量）或
+实测依据（2026-11-07，Gate-1 与 Windows venv）：
+- Gate-1 run `42253777049` 的 JUnit 报告覆盖 10,018 个测试；最长单条 91.12s，次长 26.16s。
+- Windows 上 `TestHeaderReader::test_does_not_read_event_bodies` 执行 10,000 次 JSONL fsync 实测 295.12s。
+- 默认 300s 约为 Gate-1 最长单条的 3.3 倍；Windows fsync 用例单独使用 600s 的有理由例外。
+复跑命令（重测默认耗时）：`pytest --durations=10`（全量）或
 `pytest tests/workspace/test_workspace_index.py --durations=5`。
 
-**例外**：逐用例放宽/关闭用 `@pytest.mark.test_timeout(N)`（`0` = 不设上限）。
-正常慢用例（fsync 密集、Windows、真实容器）按基线合理例外，**不为过门削弱
-持久化断言**；例外必须写清理由（marker 处注释），不得批量放宽。
-当前无用例使用该 marker（默认值 300s 已覆盖全量）；新增例外时同步更新本节。
+**例外**：逐用例放宽使用 `@pytest.mark.test_timeout(seconds, reason=...)`。`seconds` 必须是正有限数，`reason` 必须非空；不允许用 `0` 或无穷值关闭看门狗。
+正常慢用例（fsync 密集、Windows、真实容器）按基线加理由放宽，**不为过门削弱
+持久化断言**；不得批量放宽。
+当前 `tests/workspace/test_workspace_index.py::TestHeaderReader::test_does_not_read_event_bodies` 使用 600s 例外：Windows 10,000 次 JSONL fsync 实测 295.12s，理由写在 marker 中。新增例外时同步更新本节。
 
 **与 CI job 30 分钟上限的区别**：job 上限只保证“整套最终会结束”，挂死的
 单测要等 30 分钟才收场且无法归因到 nodeid。单测超时把归因点提前到具体

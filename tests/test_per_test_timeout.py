@@ -132,7 +132,7 @@ def test_marker_can_relax_the_timeout_for_a_genuinely_slow_case(
         import time
         import pytest
 
-        @pytest.mark.test_timeout(30)
+        @pytest.mark.test_timeout(30, reason="slow probe")
         def test_slow_but_legitimate():
             time.sleep(0.5)
             assert True
@@ -182,7 +182,7 @@ def test_marker_both_forms_reports_usage_error(tmp_path: Path) -> None:
         """
         import pytest
 
-        @pytest.mark.test_timeout(30, seconds=60)
+        @pytest.mark.test_timeout(30, seconds=60, reason="ambiguous probe")
         def test_dual_form_marker():
             assert True
         """,
@@ -203,7 +203,7 @@ def test_marker_non_numeric_value_reports_usage_error(tmp_path: Path) -> None:
         """
         import pytest
 
-        @pytest.mark.test_timeout(seconds="abc")
+        @pytest.mark.test_timeout(seconds="abc", reason="invalid-value probe")
         def test_bad_marker_value():
             assert True
         """,
@@ -211,8 +211,8 @@ def test_marker_non_numeric_value_reports_usage_error(tmp_path: Path) -> None:
         timeout=20,
     )
     assert result.returncode != 0, "非数字 marker 值必须让退出码非零"
-    assert "必须是数字" in result.stdout + result.stderr, (
-        "非数字 marker 值应报 UsageError（“必须是数字”），而不是裸 ValueError：\n"
+    assert "seconds must be numeric" in result.stdout + result.stderr, (
+        "non-numeric marker values must raise UsageError rather than a raw ValueError:\n"
         f"stdout={result.stdout}\nstderr={result.stderr}"
     )
 
@@ -225,7 +225,7 @@ def test_marker_keyword_form_is_accepted(tmp_path: Path) -> None:
         import time
         import pytest
 
-        @pytest.mark.test_timeout(seconds=30)
+        @pytest.mark.test_timeout(seconds=30, reason="slow keyword probe")
         def test_slow_but_legitimate():
             time.sleep(0.5)
             assert True
@@ -238,28 +238,44 @@ def test_marker_keyword_form_is_accepted(tmp_path: Path) -> None:
     )
 
 
-def test_marker_zero_disables_the_watchdog(tmp_path: Path) -> None:
-    """例外也可以是"关掉"：需要跑满任意长的用例显式声明。"""
+def test_marker_zero_is_rejected(tmp_path: Path) -> None:
     result = _run_probe(
         tmp_path,
         """
         import time
         import pytest
 
-        @pytest.mark.test_timeout(0)
+        @pytest.mark.test_timeout(0, reason="zero-value probe")
         def test_unbounded_on_purpose():
-            time.sleep(0.5)
             assert True
         """,
         "-o", "test_timeout=0.2",
         timeout=20,
     )
-    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0, "zero must not disable the per-test deadline"
+    assert "positive finite number" in result.stdout + result.stderr
+
+
+def test_marker_requires_a_reason(tmp_path: Path) -> None:
+    result = _run_probe(
+        tmp_path,
+        """
+        import pytest
+
+        @pytest.mark.test_timeout(30)
+        def test_missing_reason():
+            assert True
+        """,
+        "-o", "test_timeout=300",
+        timeout=20,
+    )
+    assert result.returncode != 0, "an explicit override must carry its evidence reason"
+    assert "requires a non-empty reason" in result.stdout + result.stderr
 
 
 def test_default_timeout_is_configured_and_positive(pytestconfig: pytest.Config) -> None:
     """默认值必须真的配在 pyproject 里（否则机制只在 `-o` 下才存在）。"""
     value = float(pytestconfig.getini("test_timeout"))
     assert value > 0, "默认单测超时未配置：整套仍只能靠 CI job 上限收场"
-    # 实测依据：全量套件最长正常用例远小于它（读数见 report）。给个下限防手滑。
-    assert value >= 60, f"默认 {value}s 太紧，会把合法的慢用例打成假红"
+    # Keep a margin above the measured 91.12s Gate-1 slowest item.
+    assert value >= 120, f"default {value}s is too close to the measured slowest test"

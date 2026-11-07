@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import threading
@@ -36,7 +37,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     # `[tool.pytest.ini_options].test_timeout`，这里只登记 ini 键与 marker。
     parser.addini(
         "test_timeout",
-        "每个用例的硬超时秒数（0 = 不设上限）；超时按 thread 方法终止整个进程",
+        "Hard per-test deadline in seconds; timed-out tests terminate the pytest process.",
         default="300",
     )
 
@@ -46,7 +47,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
     config.addinivalue_line(
         "markers",
-        "test_timeout(seconds): 覆盖本用例的单测级超时上限（0 = 不设上限）",
+        "test_timeout(seconds, reason): finite positive per-test deadline override with an evidence-based reason",
     )
     if _stderr_fd is None:
         _stderr_fd = os.dup(_raw_stderr())
@@ -75,32 +76,51 @@ def _raw_stderr() -> int:
         return sys.__stderr__.fileno()
 
 
-def _effective_timeout(item: pytest.Item) -> float:
+def _effective_timeout(item: pytest.Item) -> tuple[float, str]:
     marker = item.get_closest_marker("test_timeout")
     if marker is not None:
-        # 位置式与关键字式都认，但二者并存是二义性——报 UsageError，不静默取其一。
         if marker.args and "seconds" in marker.kwargs:
             raise pytest.UsageError(
                 f"{item.nodeid}: test_timeout marker 不要同时给位置参数和 "
                 "seconds= 关键字（二义性）"
             )
-        # 位置式与关键字式都认：marker 注册签名是 test_timeout(seconds)，
-        # 只认位置参数会让 @pytest.mark.test_timeout(seconds=30) 被误导性报错。
+        if len(marker.args) > 1 or set(marker.kwargs) - {"seconds", "reason"}:
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout accepts one seconds value and reason= only"
+            )
         raw = marker.args[0] if marker.args else marker.kwargs.get("seconds")
+        reason = marker.kwargs.get("reason")
         if raw is None:
             raise pytest.UsageError(
-                f"{item.nodeid}: test_timeout marker 需要一个秒数（0 = 不设上限）"
+                f"{item.nodeid}: test_timeout marker requires one seconds value"
             )
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
+        if not isinstance(reason, str) or not reason.strip():
             raise pytest.UsageError(
-                f"{item.nodeid}: test_timeout marker 的秒数必须是数字，收到 {raw!r}"
-            ) from None
-    return float(item.config.getini("test_timeout") or 0.0)
+                f"{item.nodeid}: test_timeout marker requires a non-empty reason= value"
+            )
+    else:
+        raw = item.config.getini("test_timeout")
+        reason = "suite default"
+
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise pytest.UsageError(
+            f"{item.nodeid}: test_timeout seconds must be numeric, got {raw!r}"
+        ) from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise pytest.UsageError(
+            f"{item.nodeid}: test_timeout must be a positive finite number"
+        )
+    return seconds, reason
 
 
-def _abort(item: pytest.Item, timeout: float) -> None:
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        _effective_timeout(item)
+
+
+def _abort(item: pytest.Item, timeout: float, reason: str) -> None:
     """超时点：点 nodeid + 全线程栈 + 原因，然后硬退出。
 
     为什么是 ``os._exit`` 而不是抛异常：挂死多半发生在 ``await`` / 阻塞 IO 里，
@@ -120,8 +140,8 @@ def _abort(item: pytest.Item, timeout: float) -> None:
         os.write(
             fd,
             (
-                f"\n[test-timeout] {item.nodeid} 超过 {timeout:g}s 未返回；"
-                "按 thread 方法终止整个进程（teardown 可能未执行）\n"
+                f"\n[test-timeout] {item.nodeid} exceeded {timeout:g}s ({reason}); "
+                "terminating the process (pytest teardown may not run)\n"
             ).encode("utf-8", "backslashreplace"),
         )
         faulthandler.dump_traceback(file=fd, all_threads=True)
@@ -136,11 +156,10 @@ def pytest_runtest_protocol(
     """包住 setup+call+teardown：挂死在任何阶段都归因到该用例。"""
     global _dog
 
-    timeout = _effective_timeout(item)
-    if timeout > 0:
-        _dog = threading.Timer(timeout, _abort, args=(item, timeout))
-        _dog.daemon = True
-        _dog.start()
+    timeout, reason = _effective_timeout(item)
+    _dog = threading.Timer(timeout, _abort, args=(item, timeout, reason))
+    _dog.daemon = True
+    _dog.start()
     try:
         return (yield)
     finally:
