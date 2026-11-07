@@ -66,11 +66,57 @@ async def _drain(queue: asyncio.Queue) -> list[dict]:
     return frames
 
 
-def _read_until_pong(ws) -> list[dict]:
-    """读到 ``pong`` 栅栏为止，返回途中收到的业务帧（跳过心跳 ``server_ping``）。"""
+def _receive_text_within(ws, timeout: float) -> str:
+    """收一条文本帧，**单次 receive 自带时间界**（#1514，原 #1514 验收框 ①）。
+
+    starlette `TestClient` 的 ``receive_text()`` 没有 timeout 参数，且它是
+    ``portal.call(self._send_rx.receive)``——读循环真断了（或对端永不发帧）时**永久
+    阻塞**，用例挂死而不是失败。这里在 portal 的循环里包一层 ``wait_for``：
+    超时后 ``session.__exit__`` 仍能正常收尾（实测：取消的是那次 receive，
+    anyio 内存流不受影响）。
+
+    报错自带等待点与已等时长，便于把"协议变了"和"链路断了"分开。
+
+    依赖 starlette ``WebSocketTestSession`` 的内部属性（``portal``、``_send_rx``、
+    ``_raise_on_close``），升级 starlette 时复核。
+    """
+    portal = getattr(ws, "portal", None)
+    if portal is None:  # pragma: no cover - 只可能是别的 ws 实现
+        raise AssertionError("ws 无 portal：该替身不支持有界 receive")
+    send_rx = getattr(ws, "_send_rx", None)
+    if send_rx is None:  # pragma: no cover - 只可能是别的 ws 实现
+        raise AssertionError("ws 无 _send_rx：该替身不支持有界 receive")
+
+    async def _bounded() -> str:
+        message = await asyncio.wait_for(send_rx.receive(), timeout)
+        ws._raise_on_close(message)
+        return message["text"]
+
+    try:
+        return portal.call(_bounded)
+    except TimeoutError:
+        raise AssertionError(
+            f"等 WS 文本帧超时（{timeout:g}s）：对端未在时限内发帧"
+            "（读循环可能已断，或协议已变）"
+        ) from None
+
+
+def _read_until_pong(ws, timeout: float = 5.0) -> list[dict]:
+    """读到 ``pong`` 栅栏为止，返回途中收到的业务帧（跳过心跳 ``server_ping``）。
+
+    两道界：#1514 前只有 50 **帧**上限——帧不来时它一个也不会有，于是单次
+    ``receive_text`` 永久阻塞；现在每次 receive 都有 ``timeout`` 时间界。
+    总等待上限：最坏 50 帧 × 单次 ``timeout``（默认 5.0s）≈ 250s，仍在 300s
+    单测看门狗内；trickle 型对端（每 ~5s 来一帧、永无 pong）会走到 50 帧上限才报错。
+    """
     frames: list[dict] = []
     for _ in range(50):
-        frame = json.loads(ws.receive_text())
+        try:
+            frame = json.loads(_receive_text_within(ws, timeout))
+        except AssertionError as exc:
+            raise AssertionError(
+                f"等 pong 栅栏失败（已等 {timeout:g}s，已收 {len(frames)} 个业务帧）：{exc}"
+            ) from None
         if frame.get("type") == "pong":
             return frames
         # 应用层心跳（2s 一次）不是业务帧——`settle` 跨到心跳节拍时它会混进来，
@@ -81,7 +127,7 @@ def _read_until_pong(ws) -> list[dict]:
     raise AssertionError("等待 pong 栅栏时读了 50 帧仍未见到——协议可能变了")
 
 
-def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
+def _drain_blocking(ws, settle: float = 0.35, timeout: float = 5.0) -> list[dict]:
     """把 WS 上"当前该到的"业务帧收干净（**静默判定**，不是固定轮数）。
 
     两个坑，都是实测踩出来的：
@@ -102,7 +148,7 @@ def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
     for _ in range(8):
         time.sleep(settle)
         ws.send_text(json.dumps({"type": "ping"}))
-        batch = _read_until_pong(ws)
+        batch = _read_until_pong(ws, timeout=timeout)
         if batch:
             frames.extend(batch)
             quiet = 0

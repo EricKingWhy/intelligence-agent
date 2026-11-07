@@ -44,6 +44,11 @@ from agent_harness.tooling.approve_policy import (
 from agent_harness.tooling.contract import PermissionPolicy, ToolPermission
 from agent_harness.tools import BashTool
 
+#: #1514：worker 线程 join 的有界等待秒数。实测本文件并发用例 <0.1s，
+#: 60s 约 600 倍余量；取值与 tests/storage/test_session_archive.py 的
+#: 同名常量一致（两文件同为线程并发用例），不是凭空定的统一秒数。
+_WORKER_WAIT_SECONDS = 60
+
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
@@ -240,7 +245,12 @@ class TestConcurrentWrites:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            # #1514：裸 join 会让挂死的 worker 把整套拖到 job 总超时才收场。
+            # 有界 join + 存活断言：线程未退出即有界失败并点名线程。
+            thread.join(timeout=_WORKER_WAIT_SECONDS)
+            assert not thread.is_alive(), (
+                f"线程 {thread.name} 在 {_WORKER_WAIT_SECONDS}s 内未退出（挂死？）"
+            )
 
         assert failures == []
         assert sorted(r.id for r in store.load()) == sorted(

@@ -174,13 +174,35 @@ async def _start_run_get_session_id(port: int, task: str) -> str:
     raise AssertionError("首帧未带 session_id")
 
 
-async def _recv_until(ws, predicate, timeout: float = 8.0) -> list[dict]:
-    """持续收 WS 文本帧直到 predicate(累计帧列表) 为真或超时。"""
+async def _recv_until(
+    ws,
+    predicate,
+    timeout: float = 8.0,
+    *,
+    partial_ok: bool = False,
+) -> list[dict]:
+    """持续收 WS 文本帧直到 ``predicate(累计帧列表)`` 为真；超时**默认失败**。
+
+    #1514（原 #1514 验收框 ①）：超时后吞掉 ``TimeoutError`` 返回半截帧，等于把
+    "等待失败"伪装成"收齐了"，调用方拿到空列表还以为链路正常——失败点无法归因。
+    所以默认超时抛 ``AssertionError``，并报出**等待点**（predicate 源码）、已收帧数
+    和已收帧类型。
+
+    两处例外照旧保留（`partial_ok=True` 显式声明）：
+    - 用短窗口断言"**没有**帧"（截断后不得再推、退订后不得再收）——那里"超时"
+      正是期望结果，不是失败；
+    - 任何确实要靠"收满 N 秒再说"的判据，调用方自己写清楚。
+
+    单次 ``receive_text`` 自带 ``timeout``（httpx2 的签名），外层 ``wait_for`` 只是
+    兜底：两者都给界，才不会出现"外层算着 8s、单次 receive 却永不返回"。
+    """
+    import inspect
+
     frames: list[dict] = []
 
     async def _drain() -> None:
         while True:
-            raw = await ws.receive_text()
+            raw = await ws.receive_text(timeout=timeout)
             frames.append(json.loads(raw))
             if predicate(frames):
                 return
@@ -188,7 +210,16 @@ async def _recv_until(ws, predicate, timeout: float = 8.0) -> list[dict]:
     try:
         await asyncio.wait_for(_drain(), timeout=timeout)
     except TimeoutError:
-        pass
+        if not partial_ok:
+            try:
+                where = inspect.getsource(predicate).strip().splitlines()[0]
+            except (OSError, TypeError):  # pragma: no cover - C 层 lambda 等
+                where = repr(predicate)
+            raise AssertionError(
+                f"等 WS 帧超时（{timeout:g}s）：predicate 始终不成立"
+                f"（等待点：{where}；已收 {len(frames)} 帧，"
+                f"类型 {[f.get('type') for f in frames]}）"
+            ) from None
     return frames
 
 
@@ -863,9 +894,11 @@ async def test_ws_truncation_on_active_run_leaves_no_subscriber(tmp_path, monkey
                 "超限分支不得留下订阅者——客户端会断开去重建，没人消费这些队列"
 
             # 旁证（用户可见后果）：这条连接上不该再有 event 帧——relay 没起。
+            # 这里"超时"就是期望结果 ⇒ 显式 opt-in 要半截帧。
             after = await _recv_until(
                 ws, lambda fs: any(f.get("type") == "event" for f in fs),
                 timeout=0.5,
+                partial_ok=True,
             )
             assert not [f for f in after if f.get("type") == "event"], \
                 "截断后不得继续推增量事件（客户端已去重建）"
