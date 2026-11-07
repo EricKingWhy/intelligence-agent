@@ -123,6 +123,33 @@ def _receive_text_within(ws, timeout: float) -> str:
     return outcome
 
 
+def _send_text_within(ws, text: str, timeout: float) -> None:
+    """Bound synchronous TestClient sends; permanent stalls require process supervision."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a positive finite number")
+
+    result: queue.Queue[Exception | None] = queue.Queue(maxsize=1)
+
+    def send() -> None:
+        try:
+            ws.send_text(text)
+        except Exception as exc:  # noqa: BLE001 - propagate send failures
+            result.put(exc)
+        else:
+            result.put(None)
+
+    worker = threading.Thread(target=send, daemon=True, name="board-send")
+    worker.start()
+    try:
+        outcome = result.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(
+            f"WebSocket send exceeded its {timeout:g}s wall-clock deadline"
+        ) from None
+    if outcome is not None:
+        raise outcome
+
+
 def _read_until_pong(
     ws,
     timeout: float = 5.0,
@@ -285,6 +312,21 @@ def _permanently_stalled_portal_probe(connection, portal_blocked, operation: str
             time.sleep(3600)
         else:
             connection.send(("receive_returned", 0.0, False))
+    elif operation == "drain_send":
+        connection.send("drain_started")
+        started = time.monotonic()
+        try:
+            _drain_blocking(websocket, settle=0, timeout=0.5)
+        except AssertionError:
+            elapsed = time.monotonic() - started
+            worker_alive = any(
+                thread.name == "board-send" and thread.is_alive()
+                for thread in threading.enumerate()
+            )
+            connection.send(("drain_timed_out", elapsed, worker_alive))
+            time.sleep(3600)
+        else:
+            connection.send(("drain_returned", 0.0, False))
     else:
         raise ValueError(f"unknown probe operation: {operation}")
 
@@ -295,6 +337,7 @@ def _permanently_stalled_portal_probe(connection, portal_blocked, operation: str
         ("send_text", "send_text_started"),
         ("context_exit", "context_exit_started"),
         ("receive", "receive_started"),
+        ("drain_send", "drain_started"),
     ],
 )
 def test_permanent_portal_stall_is_confined_to_a_supervised_child(
@@ -313,10 +356,10 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
         assert parent.poll(20), "permanent-stall probe did not reach the client operation"
         assert parent.recv() == started
         assert portal_blocked.wait(5), "ASGI portal did not enter its permanent stall"
-        if operation == "receive":
-            assert parent.poll(3), "receive helper missed its caller-side deadline"
+        if operation in {"receive", "drain_send"}:
+            assert parent.poll(3), f"{operation} missed its caller-side deadline"
             result, elapsed, worker_alive = parent.recv()
-            assert result == "receive_timed_out"
+            assert result == f"{operation.removesuffix('_send')}_timed_out"
             assert isinstance(elapsed, float) and elapsed < 1.5
             assert worker_alive, "probe did not reproduce the uncollectable receive worker"
             assert process.is_alive(), "probe escaped before parent cleanup"
@@ -363,7 +406,11 @@ def _drain_blocking(ws, settle: float = 0.35, timeout: float = 30.0) -> list[dic
         time.sleep(min(settle, remaining))
         if time.monotonic() >= deadline:
             raise AssertionError(f"board stream exceeded its {timeout:g}s total deadline")
-        ws.send_text(json.dumps({"type": "ping"}))
+        _send_text_within(
+            ws,
+            json.dumps({"type": "ping"}),
+            timeout=deadline - time.monotonic(),
+        )
         batch = _read_until_pong(ws, timeout=timeout, deadline=deadline)
         if batch:
             frames.extend(batch)
