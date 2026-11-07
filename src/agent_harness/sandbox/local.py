@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import logging
 import os
 import shutil
@@ -37,6 +36,7 @@ from agent_harness.sandbox.base import (
     ShellFamily,
 )
 from agent_harness.sandbox.decoding import StreamDecoder, platform_fallback_encoding
+from agent_harness.sandbox.paths import glob_match
 
 #: LocalSubprocess 的默认命令超时（秒）。None 表示不超时。
 DEFAULT_EXEC_TIMEOUT: float = 60.0
@@ -106,21 +106,11 @@ class _CappedCapture:
 def _glob_match(rel_path: str, pattern: str) -> bool:
     """对 workspace 相对路径做 glob 匹配，支持 ** 递归。
 
-    pathlib.PurePath.match 不支持顶级 ** 前缀跨多段目录匹配，
-    所以这里把 ** 模式规范化后用 fnmatch 逐段处理。
+    纯匹配策略在 `sandbox.paths.glob_match`（三 backend 共用）；本处只提供本后端的
+    basename 口径：宿主的 `Path(...).name`（`rel_path` 由 `list_files` 以 `as_posix()`
+    生产，故实际等价于 POSIX 口径；保留宿主 `Path` 是与收敛前逐字同义）。
     """
-    if pattern in ("", "*"):
-        return True
-    if "**" in pattern:
-        # 把 "**/" 收敛成 ""，让 fnmatch 对完整相对路径匹配剩余字面段。
-        # 简化策略：如果模式含 **，剥掉 **/ 后对路径末尾段做匹配。
-        normalized = pattern.replace("**/", "").replace("**", "*")
-        return fnmatch.fnmatch(rel_path, normalized) or fnmatch.fnmatch(
-            Path(rel_path).name, normalized
-        )
-    return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
-        Path(rel_path).name, pattern
-    )
+    return glob_match(rel_path, pattern, basename=lambda path: Path(path).name)
 
 
 class LocalSubprocessSandbox(Sandbox):

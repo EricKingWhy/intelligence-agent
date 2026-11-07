@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
+from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
 
 
@@ -45,3 +47,39 @@ def is_absolute_path(value: str) -> bool:
     if os.name == "nt":
         return PureWindowsPath(value).is_absolute()
     return os.path.isabs(value)
+
+
+def glob_match(
+    rel_path: str,
+    pattern: str,
+    *,
+    basename: Callable[[str], str],
+) -> bool:
+    """对 workspace 相对路径做 glob 匹配，支持 `**` 递归（三 backend 共用的**唯一**纯策略）。
+
+    `basename` 是本函数**唯一**的平台/后端参数：三后端的 `rel_path` 都由各自的路径解析
+    域生产，只有"从相对路径里取最后一段"这一步的口径不同，所以由调用方注入：
+
+    - `LocalSubprocessSandbox` → 宿主 `Path(...).name`；
+    - `DockerSandbox` → `PurePosixPath(...).name`（容器内语义，不吃宿主 `\\`）；
+    - `WindowsPsecSandbox` → `ntpath.basename`（nt 语义，吃 `\\`）。
+
+    **为什么不能统一**（具体反例，不是"无法合并"一句带过）：
+    `rel_path=r"pkg\\inner.py"` 时 `ntpath.basename` 得 `inner.py`、`PurePosixPath` 得
+    `pkg\\inner.py`（宿主 `Path` 跟随宿主：POSIX 上同 `PurePosixPath`，Windows 上同
+    `ntpath`）；`basename("a/b/")` 在 `ntpath` 是 `""`、在 pathlib 是 `"b"`。
+    把三者中任一语义强加给另外两个，都会改掉后者的既有 `list_files` 结果。
+
+    **大小写不在这里分支**：沿用 `fnmatch.fnmatch`（它经 `os.path.normcase`），所以折叠
+    规则跟随**宿主进程**——这正是三处现行行为。Docker backend 的匹配也跑在宿主 Python
+    里（`find` 只负责列文件名），所以容器内 POSIX 路径在 Windows 宿主上同样被折叠。
+
+    `**` 的收敛方式沿用现状：`"**/"` → `""`，`"**"` → `"*"`；完整相对路径与 basename
+    各匹配一次，任一命中即算命中。
+    """
+    if pattern in ("", "*"):
+        return True
+    effective = pattern.replace("**/", "").replace("**", "*") if "**" in pattern else pattern
+    return fnmatch.fnmatch(rel_path, effective) or fnmatch.fnmatch(
+        basename(rel_path), effective
+    )
