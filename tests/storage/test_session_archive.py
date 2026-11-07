@@ -630,7 +630,13 @@ class TestConcurrencyAndCrash:
         for t in workers:
             t.start()
         for t in workers:
-            t.join()
+            # #1514：裸 join 会让挂死的 worker 把整套拖到 job 总超时才收场。
+            # 有界 join + 存活断言：线程未退出即有界失败并点名线程（实测本用例 <0.2s，
+            # 60s 是本文件既有的 _WORKER_WAIT_SECONDS 约定，约 300 倍余量）。
+            t.join(timeout=_WORKER_WAIT_SECONDS)
+            assert not t.is_alive(), (
+                f"worker 线程 {t.name} 在 {_WORKER_WAIT_SECONDS}s 内未退出（挂死？）"
+            )
         assert not errors
         rows = archive.get_messages("c")
         assert len(rows) == threads * per_thread
@@ -920,7 +926,11 @@ class TestStoreObserverWiring:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            # #1514：同上，裸 join 改有界 join + 存活断言（_WORKER_WAIT_SECONDS=60s）。
+            thread.join(timeout=_WORKER_WAIT_SECONDS)
+            assert not thread.is_alive(), (
+                f"线程 {thread.name} 在 {_WORKER_WAIT_SECONDS}s 内未退出（挂死？）"
+            )
 
         assert errors == []
         assert len(results) == 8

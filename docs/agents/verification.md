@@ -547,3 +547,36 @@ F1–F5 补齐证据）。
 的隔离要求）。⇒ 本票的 Gate-0 读数只覆盖 `diff-check` / `ruff` / `guards` / `coverage` 四条，
 `oxlint` / `tsc` **如实标注 blocked（本机无 `web/node_modules`）**，由协调员在云端沙箱补跑
 （`docs/agents/verification.md` §5 的沙箱说明）。本节只记这一次的事实，不改任何门禁口径。
+
+---
+
+## 7. 单测超时（#1514，并入 #1515）
+
+**机制**：不装 `pytest-timeout`（票面禁自动新增依赖；已查未装）。用 stdlib
+看门狗：`tests/conftest.py::pytest_runtest_protocol` 包住 setup+call+teardown，
+每用例起一个 `threading.Timer`；到点写 nodeid + 全线程栈（`faulthandler`）
+到真实 stderr fd（`os.dup` 的副本，因 pytest 做 fd 级 capture），然后
+`os._exit(1)`。语义 = `pytest-timeout` 的 `thread` 方法：**超时终止整个进程，
+teardown 可能不跑，后续用例不继续**；换来的是“退出码可靠非零 + 立即归因”。
+不要把这条理解成“超时后 suite 照常继续”——那是 `signal` 方法的语义，
+本机制不承诺。
+
+**默认值**：`pyproject.toml` `[tool.pytest.ini_options]` 里 `test_timeout = "300"`。
+实测依据（2026-11-07，本机 venv + wt-1514，`043342a5`）：
+- 全量套件总耗时约 285s（#1615 沙箱实测，9530 passed，`284.97s`），
+  单个用例远小于 300s；
+- 单文件最慢实测：`tests/workspace/test_workspace_index.py` 52 条共 `21.58s`，
+  其中最慢单条 `TestHeaderReader::test_does_not_read_event_bodies` 为 `19.27s`；
+- 并发 join 用例实测 <0.2s（`_WORKER_WAIT_SECONDS=60s` 约 300 倍余量）。
+即 300s 约为最慢单条实测（19.27s）的 15 倍余量，正常用例不会被误杀。
+复跑命令（重测最慢单条）：`pytest --durations=10`（全量）或
+`pytest tests/workspace/test_workspace_index.py --durations=5`。
+
+**例外**：逐用例放宽/关闭用 `@pytest.mark.test_timeout(N)`（`0` = 不设上限）。
+正常慢用例（fsync 密集、Windows、真实容器）按基线合理例外，**不为过门削弱
+持久化断言**；例外必须写清理由（marker 处注释），不得批量放宽。
+当前无用例使用该 marker（默认值 300s 已覆盖全量）；新增例外时同步更新本节。
+
+**与 CI job 30 分钟上限的区别**：job 上限只保证“整套最终会结束”，挂死的
+单测要等 30 分钟才收场且无法归因到 nodeid。单测超时把归因点提前到具体
+nodeid（超时点即打印 nodeid + 全线程栈），不等 job 上限。
