@@ -175,6 +175,27 @@ def test_hanging_fixture_teardown_reports_its_nodeid_and_exits_nonzero(
     assert "test-timeout" in result.stdout + result.stderr
 
 
+def test_marker_both_forms_reports_usage_error(tmp_path: Path) -> None:
+    """位置参数与 seconds= 关键字并存是二义性：报 UsageError，不静默取其一。"""
+    result = _run_probe(
+        tmp_path,
+        """
+        import pytest
+
+        @pytest.mark.test_timeout(30, seconds=60)
+        def test_dual_form_marker():
+            assert True
+        """,
+        "-o", "test_timeout=300",
+        timeout=20,
+    )
+    assert result.returncode != 0, "双形式 marker 必须让退出码非零"
+    assert "不要同时给位置参数" in result.stdout + result.stderr, (
+        "双形式 marker 应报 UsageError（“不要同时给位置参数”），而不是静默取其一：\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
 def test_marker_non_numeric_value_reports_usage_error(tmp_path: Path) -> None:
     """非数字 marker 值报 UsageError（而非裸 ValueError），且退出码非零。"""
     result = _run_probe(
