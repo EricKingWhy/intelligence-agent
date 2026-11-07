@@ -1673,7 +1673,7 @@ class DockerSandbox(Sandbox):
     def list_files(self, pattern: str) -> list[str]:
         """枚举容器 workspace 内匹配 glob 模式的文件，返回相对 /workspace 路径（排序）。
 
-        用 exec("find . -type f -printf '%P\n'") 拿文件列表后 Python 侧 fnmatch 过滤。
+        用 exec("find . -type f -printf '%P\n'") 拿文件列表后 Python 侧经 `_glob_match_posix` 过滤。
         """
         effective = pattern if pattern else "*"
         result = self.exec("find . -type f -printf '%P\n'")

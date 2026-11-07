@@ -11,8 +11,11 @@
    `windows_psec` 用 `ntpath.basename`。三 backend 的 `list_files` 实际产出的
    `rel_path` 都是 POSIX 风格（`local` 用 `rel.as_posix()`、`docker` 取 `find -printf '%P'`、
    `psec` 用 `f"{prefix}/{name}"`）⇒ 对**真实输入**三者一致；差异只在
-   「`rel_path` 含反斜杠」这条潜伏形态上（最后两例锁定它）。
+   「`rel_path` 含反斜杠」这条潜伏形态上（`backslash-pattern` / `drive-letter-backslash`
+   与文件末尾的机制锁用例）。
 3. `**` 的收敛方式（`pattern.replace("**/", "").replace("**", "*")`）三处逐字相同。
+
+矩阵共 19 个不同用例（每行 `dimension` 标签互不相同），× 3 backend = 57 例。
 
 矩阵的用途：后续「等价纯匹配策略复用」以此为判定基准；无法合并的分支必须有
 本文件里的具体反例，不能一句「无法合并」带过。
@@ -21,12 +24,14 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from agent_harness.sandbox import docker as docker_backend
 from agent_harness.sandbox import local as local_backend
 from agent_harness.sandbox import windows_psec as psec_backend
+from agent_harness.sandbox.windows_psec import WindowsPsecSandbox
 
 IS_WINDOWS = os.name == "nt"
 
@@ -44,8 +49,9 @@ MATRIX = [
     ("pkg/inner.py", "*.py", "extension", True, True),
     ("pkg/inner.py", "*.txt", "extension-miss", False, False),
     ("pkg/inner.py", "pkg/*.py", "relative-dir-prefix", True, True),
+    ("pkg/deep/inner.py", "pkg/*.py", "dir-star-crosses-slash", True, True),
     ("pkg/inner.py", "inner.py", "bare-basename", True, True),
-    ("pkg/inner.py", "*.py", "relative-path", True, True),
+    ("pkg/deep/inner.py", "inner.py", "bare-basename-deep", True, True),
     ("pkg/deep/nest/a.py", "**/*.py", "double-star-deep", True, True),
     ("root.py", "**/*.py", "double-star-top-level", True, True),
     ("pkg/notes.txt", "**/*.py", "double-star-miss", False, False),
@@ -53,6 +59,7 @@ MATRIX = [
     ("pkg/deep/up.PY", "*.PY", "case-exact", True, True),
     ("pkg/inner.py", r"pkg\*.py", "backslash-pattern", False, True),
     ("C:/outside/a.py", "*.py", "drive-letter-path", True, True),
+    (r"C:\outside\a.py", "*.py", "drive-letter-backslash", True, True),
     ("../evil.py", "*.py", "traversal-shaped-path", True, True),
     (".hidden.py", "*.py", "dotfile", True, True),
     ("pkg/.cache/x.py", "**/*.py", "hidden-dir", True, True),
@@ -121,9 +128,11 @@ def test_three_backends_route_list_files_through_the_shared_matcher(
 
     做法：把每个 backend 模块命名空间里的 `glob_match` 换成间谍（各 backend 用
     `from ... import glob_match` 绑定到自己的模块全局），再走**真实**的 `list_files`。
-    local backend 在本机可实跑并断言命中的相对路径与 pattern；docker / psec 的
-    `list_files` 需要容器 / Windows 主机（见 `test_1530_list_files_contract.py` 的
-    fixture：本机 skip、Windows 上真跑），本处只断言它们的 matcher 确实转调共享实现。
+
+    docker / psec 的 `list_files` 不需要容器 / Windows 主机：前者只依赖 `self.exec()`
+    拿 `find` 输出，后者只依赖 `self._root_handle()` / `self._collect_files()`。故用
+    `object.__new__` 注入这两个边界依赖（仓内先例：`tests/sandbox/test_exec_hardening.py`），
+    `list_files` 本体是真实调用。这样「`list_files` 绕过 matcher」的接线回归才抓得住。
     """
     import agent_harness.sandbox.paths as paths_module
 
@@ -137,22 +146,59 @@ def test_three_backends_route_list_files_through_the_shared_matcher(
     for module in (local_backend, docker_backend, psec_backend):
         monkeypatch.setattr(module, "glob_match", spy, raising=True)
 
-    from agent_harness.sandbox import LocalSubprocessSandbox
+    from agent_harness.sandbox import DockerSandbox, LocalSubprocessSandbox
 
+    # --- local：真 workspace 上的真 list_files ---
     sandbox = LocalSubprocessSandbox(workspace_root=tmp_path / "workspace")
     sandbox.write_text("pkg/inner.py", "x")
     sandbox.write_text("pkg/deep/up.PY", "x")
 
-    expected = ["pkg/deep/up.PY"] * IS_WINDOWS + ["pkg/inner.py"]
+    # sorted() 之后的大小写折叠结果：Windows 上两个都命中，且按字典序 deep 在前。
+    expected = ["pkg/deep/up.PY", "pkg/inner.py"] if IS_WINDOWS else ["pkg/inner.py"]
     assert sorted(sandbox.list_files("**/*.py")) == expected
 
     assert {rel for rel, _ in calls} == {"pkg/deep/up.PY", "pkg/inner.py"}, calls
     assert {pattern for _, pattern in calls} == {"**/*.py"}, calls
     calls.clear()
 
-    # docker / psec：matcher 就是共享实现 + 各自 basename 口径（真实 list_files 需容器 / Windows）。
+    # --- docker：stub exec 提供 find 输出，list_files 本体真跑 ---
+    docker = object.__new__(DockerSandbox)
+    docker.exec = lambda *args, **kwargs: SimpleNamespace(
+        exit_code=0, stdout="pkg/inner.py\npkg/deep/up.PY\nroot.py\n"
+    )
+    expected_docker = (
+        ["pkg/deep/up.PY", "pkg/inner.py", "root.py"]
+        if IS_WINDOWS
+        else ["pkg/inner.py", "root.py"]
+    )
+    assert docker.list_files("**/*.py") == expected_docker
+    assert {rel for rel, _ in calls} == {"pkg/inner.py", "pkg/deep/up.PY", "root.py"}, calls
+    assert {pattern for _, pattern in calls} == {"**/*.py"}, calls
+    calls.clear()
+
+    # --- psec：stub _root_handle / _collect_files，list_files 本体真跑 ---
+    psec = object.__new__(WindowsPsecSandbox)
+    psec._root_handle = lambda: 0
+    psec._collect_files = lambda handle, prefix, results: results.extend(
+        ["pkg/inner.py", "pkg/deep/up.PY", "pkg/notes.txt"]
+    )
+    expected_psec = (
+        ["pkg/deep/up.PY", "pkg/inner.py"]
+        if IS_WINDOWS
+        else ["pkg/inner.py"]
+    )
+    assert psec.list_files("**/*.py") == expected_psec
+    assert {rel for rel, _ in calls} == {"pkg/inner.py", "pkg/deep/up.PY", "pkg/notes.txt"}, calls
+    assert {pattern for _, pattern in calls} == {"**/*.py"}, calls
+
+    # 越界闸仍在匹配**之前**：matcher 没被调用就抛了。
+    calls.clear()
+    with pytest.raises(PermissionError):
+        psec.list_files("../x.py")
+    assert calls == []
+
+    # matcher 就是共享实现 + 各自 basename 口径（反斜杠基线差异）。
     assert docker_backend._glob_match_posix("pkg/inner.py", "**/*.py") is True
     assert psec_backend._glob_match("pkg/inner.py", "**/*.py") is True
-    assert [pattern for _, pattern in calls] == ["**/*.py", "**/*.py"], calls
     assert docker_backend._glob_match_posix(r"pkg\inner.py", "inner.py") is False
     assert psec_backend._glob_match(r"pkg\inner.py", "inner.py") is True
