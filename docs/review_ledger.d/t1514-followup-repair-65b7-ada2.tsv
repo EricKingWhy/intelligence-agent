@@ -1,0 +1,1 @@
+2026-11-08	#1514 repair re-review: Standards/Spec confirmed receive supervision, total pong/drain deadlines, private-API note, and 120s default floor; finite discovery found unbounded drain ping send, fixed in ada2. Final review found only a P4 worker-message mismatch, fixed in 6be24b4f6.	65b7dcbea29efd16c17fcd1506b3c3614e99ffb8..ada2d4f7f7bf48a5024f1a733939efefab992cb1
