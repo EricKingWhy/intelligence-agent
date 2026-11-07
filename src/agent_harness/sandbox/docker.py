@@ -747,7 +747,8 @@ class DockerSandbox(Sandbox):
         参数是**用户名**，拿组名去查得到的是「叫这个名字的用户的主组」
         而不是同名组：`USER app:daemon` 会静默拿到 daemon 用户的 gid 而不是
         daemon 组的 gid；`USER nobody:nogroup` 则直接报错（nogroup 不是用户名）。
-        只有声明里**没有** group 段时，`id -g <user>` 才是该用户主组的正确语义。
+        只有声明里**没有** group 段（`USER app`，含空组段 `USER app:`）时，
+        `id -g <user>` 才是该用户主组的正确语义。
         任一段解析不出都返回 None（调用方响亮失败），不猜数字。
         """
         user_part, sep, group_part = declared.partition(":")
@@ -757,13 +758,15 @@ class DockerSandbox(Sandbox):
             uid_probe = f"uid={user_part}"
         else:
             uid_probe = f"uid=$(id -u {shlex.quote(user_part)})"
-        if not sep:
-            # 未声明 group：取该用户的主组，这正是 `id -g <user>` 的语义。
+        if not sep or not group_part:
+            # 未声明 group（`USER app`）或 group 段为空（`USER app:`）：两者都是
+            # 「没有指定组」，取该用户的主组，这正是 `id -g <user>` 的语义。
+            # 空组段不是「查不到组」——Docker/runc 的判据是「组段非空才覆盖 gid」
+            # （runc `GetExecUser` 的 `if groupArg != ""`），故不按解析失败处理。
             gid_probe = f"gid=$(id -g {shlex.quote(user_part)})"
         elif group_part.isdecimal():
             gid_probe = f"gid={group_part}"
         else:
-            # 含 `:` 但 group 段为空（`USER app:`）也走这里：查不到组 → 响亮失败。
             gid_probe = f"gid=$(getent group {shlex.quote(group_part)} | cut -d: -f3)"
         script = (
             f"{uid_probe} && {gid_probe}"
