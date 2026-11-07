@@ -361,7 +361,8 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
             result, elapsed, worker_alive = parent.recv()
             assert result == f"{operation.removesuffix('_send')}_timed_out"
             assert isinstance(elapsed, float) and elapsed < 1.5
-            assert worker_alive, "probe did not reproduce the uncollectable receive worker"
+            worker_name = "board-receive" if operation == "receive" else "board-send"
+            assert worker_alive, f"probe did not reproduce the uncollectable {worker_name} worker"
             assert process.is_alive(), "probe escaped before parent cleanup"
         else:
             assert not parent.poll(1), f"{operation} unexpectedly returned with a blocked portal"
