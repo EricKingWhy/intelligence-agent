@@ -10,8 +10,9 @@
 
 机制选型（为什么不装 pytest-timeout）：票面禁止自动新增依赖，且先查已装能力——
 `pytest-timeout` **未安装**；pytest 9.1.1 自带的 `faulthandler_timeout` 只能
-dump 全线程栈、**不带 nodeid**，且默认不退出进程。故用 20 行 hook
-（`tests/conftest.py::pytest_runtest_protocol`）：stdlib 看门狗线程 + `faulthandler`
+dump 全线程栈、**不带 nodeid**，且默认不退出进程。故用一个约 20 行的 hook 本体
+（`tests/conftest.py::pytest_runtest_protocol`，另加少量辅助函数如
+`_effective_timeout` / `_abort`）：stdlib 看门狗线程 + `faulthandler`
 + `os._exit(1)`，与其他插件的 `pytest_runtest_protocol` 包装顺序无耦合。
 
 `os._exit` 的代价照实说：`thread` 方法会终止整个进程、可能不跑 teardown——这正是
@@ -91,6 +92,36 @@ def test_never_returning_test_reports_its_nodeid_and_exits_nonzero(
     assert "test-timeout" in result.stdout + result.stderr
 
 
+def test_hanging_fixture_setup_reports_its_nodeid_and_exits_nonzero(
+    tmp_path: Path,
+) -> None:
+    """setup 期挂死同样归因：看门狗包住 setup+call+teardown，不只包 call 期。"""
+    result = _run_probe(
+        tmp_path,
+        """
+        import time
+        import pytest
+
+        @pytest.fixture
+        def hanging_fixture():
+            time.sleep(3600)
+            yield
+
+        def test_uses_hanging_fixture(hanging_fixture):
+            assert True
+        """,
+        "-o", "test_timeout=1",
+        timeout=20,
+    )
+
+    assert result.returncode != 0, "setup 期挂死必须让退出码非零"
+    assert "test_uses_hanging_fixture" in result.stdout + result.stderr, (
+        "setup 期挂死的归因必须点名用例 nodeid：\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+    assert "test-timeout" in result.stdout + result.stderr
+
+
 def test_marker_can_relax_the_timeout_for_a_genuinely_slow_case(
     tmp_path: Path,
 ) -> None:
@@ -111,6 +142,27 @@ def test_marker_can_relax_the_timeout_for_a_genuinely_slow_case(
     )
     assert result.returncode == 0, (
         f"marker 例外未生效：{result.stdout}\n{result.stderr}"
+    )
+
+
+def test_marker_keyword_form_is_accepted(tmp_path: Path) -> None:
+    """marker 的关键字式（注册签名 `test_timeout(seconds)`）同样生效，不误导报错。"""
+    result = _run_probe(
+        tmp_path,
+        """
+        import time
+        import pytest
+
+        @pytest.mark.test_timeout(seconds=30)
+        def test_slow_but_legitimate():
+            time.sleep(0.5)
+            assert True
+        """,
+        "-o", "test_timeout=0.2",
+        timeout=20,
+    )
+    assert result.returncode == 0, (
+        f"关键字式 marker 未被接受：{result.stdout}\n{result.stderr}"
     )
 
 

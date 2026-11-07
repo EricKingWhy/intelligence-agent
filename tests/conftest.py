@@ -78,11 +78,19 @@ def _raw_stderr() -> int:
 def _effective_timeout(item: pytest.Item) -> float:
     marker = item.get_closest_marker("test_timeout")
     if marker is not None:
-        if not marker.args:
+        # 位置式与关键字式都认：marker 注册签名是 test_timeout(seconds)，
+        # 只认位置参数会让 @pytest.mark.test_timeout(seconds=30) 被误导性报错。
+        raw = marker.args[0] if marker.args else marker.kwargs.get("seconds")
+        if raw is None:
             raise pytest.UsageError(
                 f"{item.nodeid}: test_timeout marker 需要一个秒数（0 = 不设上限）"
             )
-        return float(marker.args[0])
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout marker 的秒数必须是数字，收到 {raw!r}"
+            ) from None
     return float(item.config.getini("test_timeout") or 0.0)
 
 
@@ -99,8 +107,10 @@ def _abort(item: pytest.Item, timeout: float) -> None:
     """
     import faulthandler
 
-    fd = _stderr_fd if _stderr_fd is not None else _raw_stderr()
     try:
+        # fd 解析也在 try 内：若 _raw_stderr() 抛异常（sys.__stderr__ 为 None），
+        # Timer 线程不能静默死亡、让看门狗失效——finally 的 os._exit 必须跑到。
+        fd = _stderr_fd if _stderr_fd is not None else _raw_stderr()
         os.write(
             fd,
             (
@@ -161,6 +171,14 @@ def pytest_runtest_makereport(
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # 关掉 pytest_configure 里 dup 的 stderr fd 副本（一 fd 泄漏到进程结束）。
+    global _stderr_fd
+    if _stderr_fd is not None:
+        try:
+            os.close(_stderr_fd)
+        except OSError:
+            pass
+        _stderr_fd = None
     if not session.config.getoption("--require-live-services"):
         return
     required = session.config._required_live_nodes

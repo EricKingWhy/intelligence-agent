@@ -561,6 +561,14 @@ teardown 可能不跑，后续用例不继续**；换来的是“退出码可靠
 不要把这条理解成“超时后 suite 照常继续”——那是 `signal` 方法的语义，
 本机制不承诺。
 
+**不可共存**：本机制名义上复用 pytest-timeout 的 ini/marker 名（`test_timeout`），
+二者不可共存——`parser.addini` 重复注册是静默覆盖、无告警；装 pytest-timeout
+前须先移除本机制。
+
+**孤儿子进程**：`os._exit` 不跑 teardown，fixture 派生的外部子进程（如测试起
+的服务器进程）不会被回收、会成为孤儿残留，由 CI job 结束时清理；如需进程级
+回收（看门狗 abort 前终止已登记的子进程），另开专项票做子进程追踪，不在本票范围。
+
 **默认值**：`pyproject.toml` `[tool.pytest.ini_options]` 里 `test_timeout = "300"`。
 实测依据（2026-11-07，本机 venv + wt-1514，`043342a5`）：
 - 全量套件总耗时约 285s（#1615 沙箱实测，9530 passed，`284.97s`），

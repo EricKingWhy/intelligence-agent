@@ -76,11 +76,16 @@ def _receive_text_within(ws, timeout: float) -> str:
     anyio 内存流不受影响）。
 
     报错自带等待点与已等时长，便于把"协议变了"和"链路断了"分开。
+
+    依赖 starlette ``WebSocketTestSession`` 的内部属性（``portal``、``_send_rx``、
+    ``_raise_on_close``），升级 starlette 时复核。
     """
     portal = getattr(ws, "portal", None)
     if portal is None:  # pragma: no cover - 只可能是别的 ws 实现
         raise AssertionError("ws 无 portal：该替身不支持有界 receive")
     send_rx = getattr(ws, "_send_rx", None)
+    if send_rx is None:  # pragma: no cover - 只可能是别的 ws 实现
+        raise AssertionError("ws 无 _send_rx：该替身不支持有界 receive")
 
     async def _bounded() -> str:
         message = await asyncio.wait_for(send_rx.receive(), timeout)
@@ -101,6 +106,8 @@ def _read_until_pong(ws, timeout: float = 5.0) -> list[dict]:
 
     两道界：#1514 前只有 50 **帧**上限——帧不来时它一个也不会有，于是单次
     ``receive_text`` 永久阻塞；现在每次 receive 都有 ``timeout`` 时间界。
+    总等待上限：最坏 50 帧 × 单次 ``timeout``（默认 5.0s）≈ 250s，仍在 300s
+    单测看门狗内；trickle 型对端（每 ~5s 来一帧、永无 pong）会走到 50 帧上限才报错。
     """
     frames: list[dict] = []
     for _ in range(50):

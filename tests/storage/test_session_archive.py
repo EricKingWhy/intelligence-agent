@@ -49,6 +49,8 @@ CJK_VENDOR = REPO_ROOT / "native" / "fts5_cjk" / "vendor"
 
 # 全量长跑（数十分钟、数百失败用例）时 5s 会让 worker 就绪等待假红；这里判的是
 # handle 曲线而不是时延，给足等待时间不放松断言。
+# 取值与 tests/tooling/test_approve_policy.py 的同名常量一致（#1514）：
+# 两文件同为线程并发用例，改动时同步。
 _WORKER_WAIT_SECONDS = 60
 
 
