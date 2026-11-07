@@ -78,6 +78,12 @@ def _raw_stderr() -> int:
 def _effective_timeout(item: pytest.Item) -> float:
     marker = item.get_closest_marker("test_timeout")
     if marker is not None:
+        # 位置式与关键字式都认，但二者并存是二义性——报 UsageError，不静默取其一。
+        if marker.args and "seconds" in marker.kwargs:
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout marker 不要同时给位置参数和 "
+                "seconds= 关键字（二义性）"
+            )
         # 位置式与关键字式都认：marker 注册签名是 test_timeout(seconds)，
         # 只认位置参数会让 @pytest.mark.test_timeout(seconds=30) 被误导性报错。
         raw = marker.args[0] if marker.args else marker.kwargs.get("seconds")

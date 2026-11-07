@@ -145,6 +145,57 @@ def test_marker_can_relax_the_timeout_for_a_genuinely_slow_case(
     )
 
 
+def test_hanging_fixture_teardown_reports_its_nodeid_and_exits_nonzero(
+    tmp_path: Path,
+) -> None:
+    """teardown 期挂死同样归因：看门狗在 yield 前武装、finally 里才取消，yield 包含 teardown。"""
+    result = _run_probe(
+        tmp_path,
+        """
+        import time
+        import pytest
+
+        @pytest.fixture
+        def hanging_teardown_fixture():
+            yield
+            time.sleep(3600)
+
+        def test_uses_hanging_teardown_fixture(hanging_teardown_fixture):
+            assert True
+        """,
+        "-o", "test_timeout=1",
+        timeout=20,
+    )
+
+    assert result.returncode != 0, "teardown 期挂死必须让退出码非零"
+    assert "test_uses_hanging_teardown_fixture" in result.stdout + result.stderr, (
+        "teardown 期挂死的归因必须点名用例 nodeid：\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+    assert "test-timeout" in result.stdout + result.stderr
+
+
+def test_marker_non_numeric_value_reports_usage_error(tmp_path: Path) -> None:
+    """非数字 marker 值报 UsageError（而非裸 ValueError），且退出码非零。"""
+    result = _run_probe(
+        tmp_path,
+        """
+        import pytest
+
+        @pytest.mark.test_timeout(seconds="abc")
+        def test_bad_marker_value():
+            assert True
+        """,
+        "-o", "test_timeout=300",
+        timeout=20,
+    )
+    assert result.returncode != 0, "非数字 marker 值必须让退出码非零"
+    assert "必须是数字" in result.stdout + result.stderr, (
+        "非数字 marker 值应报 UsageError（“必须是数字”），而不是裸 ValueError：\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
 def test_marker_keyword_form_is_accepted(tmp_path: Path) -> None:
     """marker 的关键字式（注册签名 `test_timeout(seconds)`）同样生效，不误导报错。"""
     result = _run_probe(
