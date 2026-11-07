@@ -69,6 +69,12 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+# #1514（并入 #1515）：单测级可归因超时。pytest-timeout 未安装且本票不加依赖，
+# 机制在 tests/conftest.py::pytest_runtest_protocol（stdlib 看门狗 + faulthandler）。
+# 语义 = pytest-timeout 的 thread 方法：超时终止整个进程，不承诺后续用例继续跑。
+# Per-test overrides require finite positive seconds and an evidence-based reason.
+# See docs/agents/verification.md for the default and measured exceptions.
+test_timeout = "300"
 # 让项目根进入 sys.path，使 tests/ 下的测试辅助模块（如 scripted_model）
 # 能以 tests.xxx 形式被跨文件导入；否则只有 src 在路径上。
 pythonpath = ["."]
@@ -77,8 +83,6 @@ pythonpath = ["."]
 # Python 运行时）：其中 pywin32 的 test_addtask.py 在收集期就把解释器打成访问违例、
 # 零用例执行，输出里没有任何失败签名（#856）。
 testpaths = ["tests"]
-# CI longest observed item is 91.12s; Windows fsync outlier is item-overridden with evidence.
-test_timeout = "180"
 # 集成测试默认不跑（烧 token、依赖真实 LLM）。
 # 手动跑：uv run pytest -m integration
 # testpaths 只兜住「不给路径」的调用；显式 `pytest .` 仍从 rootdir 走，所以按路径追加
@@ -93,5 +97,4 @@ markers = [
     "integration: 端到端集成测试（需要真实 LLM API key、烧 token）",
     "live_services: integration test that intentionally reads credentials for real services",
     "qiniu: 七牛云 S3 集成测试（需要真实对象存储凭证）",
-    "test_timeout(seconds, reason): hard per-test deadline with a required evidence-based exception reason",
 ]

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import multiprocessing
 import queue
 import threading
@@ -69,34 +70,66 @@ async def _drain(queue: asyncio.Queue) -> list[dict]:
     return frames
 
 
-def _read_until_pong(ws) -> list[dict]:
-    """读到 ``pong`` 栅栏为止，返回途中收到的业务帧（跳过心跳 ``server_ping``）。"""
-    result: queue.Queue[list[dict] | Exception] = queue.Queue(maxsize=1)
+def _receive_text_in_portal(ws, timeout: float) -> str:
+    """Apply a cancellable timeout while the TestClient portal is responsive."""
+    portal = getattr(ws, "portal", None)
+    if portal is None:
+        raise AssertionError("WebSocket test session has no portal")
+    send_rx = getattr(ws, "_send_rx", None)
+    if send_rx is None:
+        raise AssertionError("WebSocket test session has no receive stream")
 
-    def read() -> None:
-        frames: list[dict] = []
+    async def bounded_receive() -> str:
+        message = await asyncio.wait_for(send_rx.receive(), timeout)
+        ws._raise_on_close(message)
+        return message["text"]
+
+    try:
+        return portal.call(bounded_receive)
+    except TimeoutError:
+        raise AssertionError(f"WebSocket receive timed out after {timeout:g}s") from None
+
+
+def _receive_text_within(ws, timeout: float) -> str:
+    """Bound the caller's wall-clock wait even when the portal loop is blocked."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a positive finite number")
+
+    result: queue.Queue[str | Exception] = queue.Queue(maxsize=1)
+
+    def receive() -> None:
         try:
-            for _ in range(50):
-                frame = json.loads(ws.receive_text())
-                if frame.get("type") == "pong":
-                    result.put(frames)
-                    return
-                if frame.get("type") != "server_ping":
-                    frames.append(frame)
-            raise AssertionError("等待 pong 栅栏时读了 50 帧仍未见到——协议可能变了")
-        except Exception as exc:  # noqa: BLE001 - propagate receive failures to the caller
+            # Let portal-side cancellation fire before the independent wall-clock guard.
+            result.put(_receive_text_in_portal(ws, timeout * 0.8))
+        except Exception as exc:  # noqa: BLE001 - propagate receive failures
             result.put(exc)
 
-    # TestClient closes the socket on context exit; the worker must not keep the
-    # process alive if the event loop itself cannot service the close.
-    threading.Thread(target=read, daemon=True, name="board-pong-reader").start()
+    worker = threading.Thread(target=receive, daemon=True, name="board-receive")
+    worker.start()
     try:
-        outcome = result.get(timeout=2.0)
-    except queue.Empty as exc:
-        raise AssertionError("等待 pong 栅栏超时") from exc
+        outcome = result.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(f"WebSocket receive exceeded its {timeout:g}s wall-clock deadline") from None
     if isinstance(outcome, Exception):
         raise outcome
     return outcome
+
+
+def _read_until_pong(ws, timeout: float = 5.0) -> list[dict]:
+    """Read through a pong fence, ignoring heartbeat frames."""
+    frames: list[dict] = []
+    for _ in range(50):
+        try:
+            frame = json.loads(_receive_text_within(ws, timeout))
+        except AssertionError as exc:
+            raise AssertionError(
+                f"pong fence failed after {timeout:g}s with {len(frames)} business frames: {exc}"
+            ) from None
+        if frame.get("type") == "pong":
+            return frames
+        if frame.get("type") != "server_ping":
+            frames.append(frame)
+    raise AssertionError("pong fence did not arrive within 50 frames")
 
 
 def test_pong_wait_fails_when_server_stays_silent() -> None:
@@ -113,7 +146,7 @@ def test_pong_wait_fails_when_server_stays_silent() -> None:
     with client.websocket_connect("/") as ws:
         def read() -> None:
             try:
-                _read_until_pong(ws)
+                _read_until_pong(ws, timeout=1.0)
             except AssertionError as exc:
                 errors.append(exc)
             finally:
@@ -128,7 +161,7 @@ def test_pong_wait_fails_when_server_stays_silent() -> None:
         assert "pong" in str(errors[0])
     readers = [
         thread for thread in threading.enumerate()
-        if thread not in previous_readers and thread.name == "board-pong-reader"
+        if thread not in previous_readers and thread.name == "board-receive"
     ]
     for reader in readers:
         reader.join(timeout=2)
@@ -155,7 +188,7 @@ def _blocked_portal_probe(connection) -> None:
         connection.send("blocked")
         start = time.monotonic()
         try:
-            _read_until_pong(ws)
+            _read_until_pong(ws, timeout=2.0)
         except AssertionError:
             connection.send(time.monotonic() - start)
         else:
@@ -248,9 +281,7 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
 
     assert not process.is_alive(), "permanent-stall child survived its supervisor"
     assert process.exitcode is not None and process.exitcode != 0
-
-
-def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
+def _drain_blocking(ws, settle: float = 0.35, timeout: float = 5.0) -> list[dict]:
     """把 WS 上"当前该到的"业务帧收干净（**静默判定**，不是固定轮数）。
 
     两个坑，都是实测踩出来的：
@@ -271,7 +302,7 @@ def _drain_blocking(ws, settle: float = 0.35) -> list[dict]:
     for _ in range(8):
         time.sleep(settle)
         ws.send_text(json.dumps({"type": "ping"}))
-        batch = _read_until_pong(ws)
+        batch = _read_until_pong(ws, timeout=timeout)
         if batch:
             frames.extend(batch)
             quiet = 0

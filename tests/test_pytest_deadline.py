@@ -37,5 +37,5 @@ def test_item_deadline_reports_nodeid_and_exits_nonzero() -> None:
         )
 
     assert result.returncode == 1, result.stdout + result.stderr
-    assert f"[pytest deadline] {nodeid}" in result.stderr
+    assert f"[test-timeout] {nodeid}" in result.stderr
     assert "in test_stalled" in result.stderr

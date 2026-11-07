@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import faulthandler
 import math
 import os
 import sys
 import threading
-from collections.abc import Iterator, Mapping, MutableMapping
+from collections.abc import Generator, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -28,81 +27,145 @@ def register_workspace_from_build_kwargs(kwargs: Mapping[str, Any]) -> None:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addini(
-        "test_timeout",
-        "Hard per-test deadline in seconds; timed-out tests terminate the pytest process.",
-        default="180",
-    )
     parser.addoption(
         "--require-live-services",
         action="store_true",
         default=False,
         help="fail when a selected live_services/qiniu test is skipped or not executed",
     )
+    # #1514（并入 #1515）：单测级可归因超时。默认值写在 pyproject 的
+    # `[tool.pytest.ini_options].test_timeout`，这里只登记 ini 键与 marker。
+    parser.addini(
+        "test_timeout",
+        "Hard per-test deadline in seconds; timed-out tests terminate the pytest process.",
+        default="300",
+    )
 
 
-def _test_timeout(item: pytest.Item) -> tuple[float, str]:
+def pytest_configure(config: pytest.Config) -> None:
+    global _stderr_fd
+
+    config.addinivalue_line(
+        "markers",
+        "test_timeout(seconds, reason): finite positive per-test deadline override with an evidence-based reason",
+    )
+    if _stderr_fd is None:
+        _stderr_fd = os.dup(_raw_stderr())
+
+
+#: 一次运行里同时只有一个用例在跑 ⇒ 同一时刻最多一个看门狗。
+_dog: threading.Timer | None = None
+
+#: 进程启动时的 stderr fd 副本。pytest 默认做 **fd 级** capture（把 fd 1/2 重定向到
+#: 临时文件），所以超时点若写 `sys.stderr` 或 fd 2，归因信息会随 capture 一起丢掉——
+#: 而 `os._exit` 又不会让 pytest 有机会把 capture 刷出来。pytest 自带的 faulthandler
+#: 插件正是为此 `os.dup(stderr_fileno)`（`_pytest/faulthandler.py::pytest_configure`），
+#: 这里照抄同一条做法。
+_stderr_fd: int | None = None
+
+
+def _raw_stderr() -> int:
+    """取真实 stderr 的 fd（xdist 会把 `sys.stderr` 换成非文件对象）。"""
+    try:
+        fileno = sys.stderr.fileno()
+        if fileno == -1:
+            raise AttributeError()
+        return fileno
+    except (AttributeError, ValueError):
+        assert sys.__stderr__ is not None
+        return sys.__stderr__.fileno()
+
+
+def _effective_timeout(item: pytest.Item) -> tuple[float, str]:
     marker = item.get_closest_marker("test_timeout")
-    if marker is None:
-        raw_seconds = item.config.getini("test_timeout")
-        reason = "suite default"
-    else:
-        if len(marker.args) != 1 or set(marker.kwargs) != {"reason"}:
+    if marker is not None:
+        if marker.args and "seconds" in marker.kwargs:
             raise pytest.UsageError(
-                f"{item.nodeid}: test_timeout requires one seconds argument and a reason= value"
+                f"{item.nodeid}: test_timeout marker 不要同时给位置参数和 "
+                "seconds= 关键字（二义性）"
             )
-        raw_seconds = marker.args[0]
-        reason = marker.kwargs["reason"]
+        if len(marker.args) > 1 or set(marker.kwargs) - {"seconds", "reason"}:
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout accepts one seconds value and reason= only"
+            )
+        raw = marker.args[0] if marker.args else marker.kwargs.get("seconds")
+        reason = marker.kwargs.get("reason")
+        if raw is None:
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout marker requires one seconds value"
+            )
         if not isinstance(reason, str) or not reason.strip():
-            raise pytest.UsageError(f"{item.nodeid}: test_timeout reason must be non-empty text")
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout marker requires a non-empty reason= value"
+            )
+    else:
+        raw = item.config.getini("test_timeout")
+        reason = "suite default"
 
     try:
-        seconds = float(raw_seconds)
+        seconds = float(raw)
     except (TypeError, ValueError) as exc:
-        raise pytest.UsageError(f"{item.nodeid}: invalid test_timeout value {raw_seconds!r}") from exc
+        raise pytest.UsageError(
+            f"{item.nodeid}: test_timeout seconds must be numeric, got {raw!r}"
+        ) from exc
     if not math.isfinite(seconds) or seconds <= 0:
-        raise pytest.UsageError(f"{item.nodeid}: test_timeout must be a positive finite number")
+        raise pytest.UsageError(
+            f"{item.nodeid}: test_timeout must be a positive finite number"
+        )
     return seconds, reason
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
-        _test_timeout(item)
+        _effective_timeout(item)
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> Iterator[None]:
-    seconds, reason = _test_timeout(item)
+def _abort(item: pytest.Item, timeout: float, reason: str) -> None:
+    """超时点：点 nodeid + 全线程栈 + 原因，然后硬退出。
 
-    def terminate_expired_test() -> None:
-        message = (
-            f"[pytest deadline] {item.nodeid} exceeded {seconds:g}s ({reason}); "
-            "terminating process.\n"
+    为什么是 ``os._exit`` 而不是抛异常：挂死多半发生在 ``await`` / 阻塞 IO 里，
+    异常抛不进那段栈；``pytest-timeout`` 的 ``thread`` 方法同样是终止整个进程
+    （官方文档：会结束进程、可能不跑 teardown）。选它换来的是"退出码可靠非零 +
+    立即归因"。
+
+    写的是 ``_stderr_fd``（pytest 做 fd 级 capture，``sys.stderr`` 此时指向临时文件，
+    而 ``os._exit`` 不会给它刷出的机会）。
+    """
+    import faulthandler
+
+    try:
+        # fd 解析也在 try 内：若 _raw_stderr() 抛异常（sys.__stderr__ 为 None），
+        # Timer 线程不能静默死亡、让看门狗失效——finally 的 os._exit 必须跑到。
+        fd = _stderr_fd if _stderr_fd is not None else _raw_stderr()
+        os.write(
+            fd,
+            (
+                f"\n[test-timeout] {item.nodeid} exceeded {timeout:g}s ({reason}); "
+                "terminating the process (pytest teardown may not run)\n"
+            ).encode("utf-8", "backslashreplace"),
         )
-        capture_manager = item.config.pluginmanager.getplugin("capturemanager")
-        if capture_manager is not None:
-            try:
-                capture_manager.suspend()
-            except BaseException as capture_error:  # noqa: BLE001
-                # The watchdog must still terminate if capture restoration fails.
-                message += f"[pytest deadline] capture restore error: {capture_error!r}\n"
-        try:
-            os.write(2, message.encode("utf-8", "backslashreplace"))
-        except OSError:
-            pass
-        try:
-            faulthandler.dump_traceback(file=sys.__stderr__, all_threads=True)
-        except (AttributeError, OSError, RuntimeError, ValueError):
-            pass
+        faulthandler.dump_traceback(file=fd, all_threads=True)
+    finally:
         os._exit(1)
 
-    timer = threading.Timer(seconds, terminate_expired_test)
-    timer.daemon = True
-    timer.start()
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_protocol(
+    item: pytest.Item,
+) -> Generator[None, object, object]:
+    """包住 setup+call+teardown：挂死在任何阶段都归因到该用例。"""
+    global _dog
+
+    timeout, reason = _effective_timeout(item)
+    _dog = threading.Timer(timeout, _abort, args=(item, timeout, reason))
+    _dog.daemon = True
+    _dog.start()
     try:
-        yield
+        return (yield)
     finally:
-        timer.cancel()
+        if _dog is not None:
+            _dog.cancel()
+            _dog = None
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -133,6 +196,14 @@ def pytest_runtest_makereport(
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # 关掉 pytest_configure 里 dup 的 stderr fd 副本（一 fd 泄漏到进程结束）。
+    global _stderr_fd
+    if _stderr_fd is not None:
+        try:
+            os.close(_stderr_fd)
+        except OSError:
+            pass
+        _stderr_fd = None
     if not session.config.getoption("--require-live-services"):
         return
     required = session.config._required_live_nodes

@@ -547,3 +547,41 @@ F1–F5 补齐证据）。
 的隔离要求）。⇒ 本票的 Gate-0 读数只覆盖 `diff-check` / `ruff` / `guards` / `coverage` 四条，
 `oxlint` / `tsc` **如实标注 blocked（本机无 `web/node_modules`）**，由协调员在云端沙箱补跑
 （`docs/agents/verification.md` §5 的沙箱说明）。本节只记这一次的事实，不改任何门禁口径。
+
+---
+
+## 7. 单测超时（#1514，并入 #1515）
+
+**机制**：不装 `pytest-timeout`（票面禁自动新增依赖；已查未装）。用 stdlib
+看门狗：`tests/conftest.py::pytest_runtest_protocol` 包住 setup+call+teardown，
+每用例起一个 `threading.Timer`；到点写 nodeid + 全线程栈（`faulthandler`）
+到真实 stderr fd（`os.dup` 的副本，因 pytest 做 fd 级 capture），然后
+`os._exit(1)`。语义 = `pytest-timeout` 的 `thread` 方法：**超时终止整个进程，
+teardown 可能不跑，后续用例不继续**；换来的是“退出码可靠非零 + 立即归因”。
+不要把这条理解成“超时后 suite 照常继续”——那是 `signal` 方法的语义，
+本机制不承诺。
+
+**不可共存**：本机制名义上复用 pytest-timeout 的 ini/marker 名（`test_timeout`），
+二者不可共存——`parser.addini` 重复注册是静默覆盖、无告警；装 pytest-timeout
+前须先移除本机制。
+
+**孤儿子进程**：`os._exit` 不跑 teardown，fixture 派生的外部子进程（如测试起
+的服务器进程）不会被回收、会成为孤儿残留，由 CI job 结束时清理；如需进程级
+回收（看门狗 abort 前终止已登记的子进程），另开专项票做子进程追踪，不在本票范围。
+
+**默认值**：`pyproject.toml` `[tool.pytest.ini_options]` 里 `test_timeout = "300"`。
+实测依据（2026-11-07，Gate-1 与 Windows venv）：
+- Gate-1 run `42253777049` 的 JUnit 报告覆盖 10,018 个测试；最长单条 91.12s，次长 26.16s。
+- Windows 上 `TestHeaderReader::test_does_not_read_event_bodies` 执行 10,000 次 JSONL fsync 实测 295.12s。
+- 默认 300s 约为 Gate-1 最长单条的 3.3 倍；Windows fsync 用例单独使用 600s 的有理由例外。
+复跑命令（重测默认耗时）：`pytest --durations=10`（全量）或
+`pytest tests/workspace/test_workspace_index.py --durations=5`。
+
+**例外**：逐用例放宽使用 `@pytest.mark.test_timeout(seconds, reason=...)`。`seconds` 必须是正有限数，`reason` 必须非空；不允许用 `0` 或无穷值关闭看门狗。
+正常慢用例（fsync 密集、Windows、真实容器）按基线加理由放宽，**不为过门削弱
+持久化断言**；不得批量放宽。
+当前 `tests/workspace/test_workspace_index.py::TestHeaderReader::test_does_not_read_event_bodies` 使用 600s 例外：Windows 10,000 次 JSONL fsync 实测 295.12s，理由写在 marker 中。新增例外时同步更新本节。
+
+**与 CI job 30 分钟上限的区别**：job 上限只保证“整套最终会结束”，挂死的
+单测要等 30 分钟才收场且无法归因到 nodeid。单测超时把归因点提前到具体
+nodeid（超时点即打印 nodeid + 全线程栈），不等 job 上限。
