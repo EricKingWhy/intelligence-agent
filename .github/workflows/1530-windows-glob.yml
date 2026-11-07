@@ -1,0 +1,93 @@
+# .github/workflows/1530-windows-glob.yml —— #1530 AC3 的 **Windows 实跑取证**
+#
+# 为什么存在
+#
+# #1530 的 AC3 要求「跨平台实跑证据不以 Linux 单测代替 Windows」。本项目的施工机是
+# Linux 云电脑（云端 Docker 沙箱也是 Linux）⇒ 本机无法执行 Windows 侧的路径语义。
+# 仓库是 public，GitHub 托管的 `windows-latest` runner 免费，跑的是**同一份仓库代码的同一批
+# 用例**，因此可以把「本机跑不了的 Windows 分支」补上（与 #830 的 mm08-* 同一处置）。
+#
+# 它跑什么（只跑本票沙箱 glob 测试）
+#
+#   job `glob-matrix`（Python 3.13 + uv，与 gate0.yml 的环境对齐）
+#     1. `pytest tests/sandbox/test_glob_expectation_matrix.py -q`
+#        —— 19 行 × 3 backend = 57 矩阵例 + 2 条机制锁 + 1 条 AC2 接线用例 = 60 例，
+#        在 Windows 宿主上真跑（`Path` 绑定 ntpath，大小写折叠跟随宿主）。
+#     2. `pytest tests/sandbox/test_1530_list_files_contract.py -q`
+#        —— 三 backend `list_files` 契约测试。psec 参数需要 `wxc-exec.exe`：
+#        本 job 先在 `desktop/` 跑 `npm ci`（装 `@microsoft/mxc-sdk`，见
+#        `desktop/package.json:18`），使 `desktop/node_modules/@microsoft/mxc-sdk/bin/x64/wxc-exec.exe`
+#        落盘；若 `npm ci` 失败，该步 `continue-on-error`，契约测试的 psec 参数按
+#        fixture 逻辑 skip（读数如实记为「psec skip」，不冒充成全覆盖）。
+#        docker 参数在 Windows runner 上按 `probe_docker_capabilities()` 的结果跑或 skip。
+#
+# 触发与边界
+#
+#   `on:` 挂 **`workflow_dispatch`**（手动触发，任意分支/ref）+ **`push`**（仅本票特性
+#   分支 `claude/issue-1530-glob-matcher`，且 `paths` 只盯本 workflow 文件自身）。
+#   加 `push` 的唯一目的是把 Windows 实跑取证真跑一次并留证（GitHub 的
+#   `workflow_dispatch` 要求 workflow 文件在**默认分支**，本票不 push main ⇒ 只能靠 push
+#   本分支触发，见 mm08-windows-verify.yml 同一注释）。不挂 pull_request / schedule，
+#   不做常驻 CI、不设为 main 必需状态检查。**本 job 是一次性取证工具，取读数后从 PR 里撤掉**
+#   （协调员决定，见 progress.md：矩阵的 Windows 列在 Linux 上已有 ntpath 模拟覆盖，
+#   Windows 实跑是一次性确认模拟与现实一致，确认后 Linux CI 覆盖已足够；常驻一个
+#   Windows job 只跑 2 个测试文件，CI 负载与收益不成比例）。
+#   **CI 里不含任何密钥**。
+#   第三方 action 一律**完整 SHA + 版本注释**（与仓库既有工作流一致，tag 可变、有投毒面；
+#   升级走 Dependabot）。
+name: 1530-windows-glob
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/issue-1530-glob-matcher
+    paths:
+      - .github/workflows/1530-windows-glob.yml
+
+permissions:
+  contents: read
+
+jobs:
+  glob-matrix:
+    name: glob 矩阵与 list_files 契约（Windows 实跑）
+    runs-on: windows-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 装 Python 3.13（与 gate0.yml 对齐）
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: 装 uv 0.10.9（与 gate0.yml 对齐）
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.10.9'
+          cache-dependency-glob: uv.lock
+
+      - name: 装后端依赖（dev 组 + 全部 extras，对齐本地 .venv）
+        run: uv sync --locked --all-extras
+
+      - name: 环境记录
+        run: |
+          .venv\Scripts\python.exe --version
+          Write-Output "platform=$([System.Environment]::OSVersion.VersionString)"
+          Write-Output "os.name 应为 nt，Path 绑定 ntpath"
+
+      - name: 跑 glob 期望矩阵（60 例，Windows 宿主真跑）
+        run: .venv\Scripts\python.exe -m pytest tests/sandbox/test_glob_expectation_matrix.py -q -p no:randomly -p no:cacheprovider
+
+      - name: 装 Node 22（desktop 的 engines 要求 >=22.13）
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: 装 desktop 依赖（npm ci，取 wxc-exec.exe 供 psec 契约测试）
+        working-directory: desktop
+        continue-on-error: true
+        run: npm ci --no-audit --no-fund
+
+      - name: 跑 list_files 契约测试（psec 需 wxc-exec.exe，否则按 fixture skip）
+        run: .venv\Scripts\python.exe -m pytest tests/sandbox/test_1530_list_files_contract.py -q -p no:randomly -p no:cacheprovider
