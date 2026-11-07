@@ -277,5 +277,5 @@ def test_default_timeout_is_configured_and_positive(pytestconfig: pytest.Config)
     """默认值必须真的配在 pyproject 里（否则机制只在 `-o` 下才存在）。"""
     value = float(pytestconfig.getini("test_timeout"))
     assert value > 0, "默认单测超时未配置：整套仍只能靠 CI job 上限收场"
-    # 实测依据：全量套件最长正常用例远小于它（读数见 report）。给个下限防手滑。
-    assert value >= 60, f"默认 {value}s 太紧，会把合法的慢用例打成假红"
+    # Keep a margin above the measured 91.12s Gate-1 slowest item.
+    assert value >= 120, f"default {value}s is too close to the measured slowest test"

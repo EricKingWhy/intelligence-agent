@@ -71,7 +71,7 @@ async def _drain(queue: asyncio.Queue) -> list[dict]:
 
 
 def _receive_text_in_portal(ws, timeout: float) -> str:
-    """Apply a cancellable timeout while the TestClient portal is responsive."""
+    """Apply an async timeout while the TestClient portal is responsive."""
     portal = getattr(ws, "portal", None)
     if portal is None:
         raise AssertionError("WebSocket test session has no portal")
@@ -91,7 +91,14 @@ def _receive_text_in_portal(ws, timeout: float) -> str:
 
 
 def _receive_text_within(ws, timeout: float) -> str:
-    """Bound the caller's wall-clock wait even when the portal loop is blocked."""
+    """Keep the caller bounded if the portal itself cannot service its timeout.
+
+    Starlette's private ``portal``, ``_send_rx`` and ``_raise_on_close`` members are
+    used here; re-check this helper when upgrading Starlette. A permanently blocked
+    portal cannot cancel the daemon worker's synchronous ``portal.call``. Tests that
+    exercise that case must run in a child process supervised and terminated by the
+    pytest parent.
+    """
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be a positive finite number")
 
@@ -99,7 +106,6 @@ def _receive_text_within(ws, timeout: float) -> str:
 
     def receive() -> None:
         try:
-            # Let portal-side cancellation fire before the independent wall-clock guard.
             result.put(_receive_text_in_portal(ws, timeout * 0.8))
         except Exception as exc:  # noqa: BLE001 - propagate receive failures
             result.put(exc)
@@ -109,21 +115,39 @@ def _receive_text_within(ws, timeout: float) -> str:
     try:
         outcome = result.get(timeout=timeout)
     except queue.Empty:
-        raise AssertionError(f"WebSocket receive exceeded its {timeout:g}s wall-clock deadline") from None
+        raise AssertionError(
+            f"WebSocket receive exceeded its {timeout:g}s wall-clock deadline"
+        ) from None
     if isinstance(outcome, Exception):
         raise outcome
     return outcome
 
 
-def _read_until_pong(ws, timeout: float = 5.0) -> list[dict]:
-    """Read through a pong fence, ignoring heartbeat frames."""
+def _read_until_pong(
+    ws,
+    timeout: float = 5.0,
+    *,
+    deadline: float | None = None,
+) -> list[dict]:
+    """Read through a pong fence within one total budget, ignoring heartbeats."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a positive finite number")
+
+    deadline = deadline if deadline is not None else time.monotonic() + timeout
     frames: list[dict] = []
     for _ in range(50):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"pong fence exceeded its {timeout:g}s total deadline "
+                f"after {len(frames)} business frames"
+            )
         try:
-            frame = json.loads(_receive_text_within(ws, timeout))
+            frame = json.loads(_receive_text_within(ws, remaining))
         except AssertionError as exc:
             raise AssertionError(
-                f"pong fence failed after {timeout:g}s with {len(frames)} business frames: {exc}"
+                f"pong fence failed before its {timeout:g}s total deadline "
+                f"with {len(frames)} business frames: {exc}"
             ) from None
         if frame.get("type") == "pong":
             return frames
@@ -246,13 +270,32 @@ def _permanently_stalled_portal_probe(connection, portal_blocked, operation: str
         connection.send("context_exit_started")
         websocket_context.__exit__(None, None, None)
         connection.send("context_exit_returned")
+    elif operation == "receive":
+        connection.send("receive_started")
+        started = time.monotonic()
+        try:
+            _receive_text_within(websocket, timeout=0.5)
+        except AssertionError:
+            elapsed = time.monotonic() - started
+            worker_alive = any(
+                thread.name == "board-receive" and thread.is_alive()
+                for thread in threading.enumerate()
+            )
+            connection.send(("receive_timed_out", elapsed, worker_alive))
+            time.sleep(3600)
+        else:
+            connection.send(("receive_returned", 0.0, False))
     else:
         raise ValueError(f"unknown probe operation: {operation}")
 
 
 @pytest.mark.parametrize(
     ("operation", "started"),
-    [("send_text", "send_text_started"), ("context_exit", "context_exit_started")],
+    [
+        ("send_text", "send_text_started"),
+        ("context_exit", "context_exit_started"),
+        ("receive", "receive_started"),
+    ],
 )
 def test_permanent_portal_stall_is_confined_to_a_supervised_child(
     operation: str, started: str,
@@ -270,7 +313,15 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
         assert parent.poll(20), "permanent-stall probe did not reach the client operation"
         assert parent.recv() == started
         assert portal_blocked.wait(5), "ASGI portal did not enter its permanent stall"
-        assert not parent.poll(1), f"{operation} unexpectedly returned with a blocked portal"
+        if operation == "receive":
+            assert parent.poll(3), "receive helper missed its caller-side deadline"
+            result, elapsed, worker_alive = parent.recv()
+            assert result == "receive_timed_out"
+            assert isinstance(elapsed, float) and elapsed < 1.5
+            assert worker_alive, "probe did not reproduce the uncollectable receive worker"
+            assert process.is_alive(), "probe escaped before parent cleanup"
+        else:
+            assert not parent.poll(1), f"{operation} unexpectedly returned with a blocked portal"
     finally:
         child.close()
         if process.pid is not None:
@@ -281,7 +332,7 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
 
     assert not process.is_alive(), "permanent-stall child survived its supervisor"
     assert process.exitcode is not None and process.exitcode != 0
-def _drain_blocking(ws, settle: float = 0.35, timeout: float = 5.0) -> list[dict]:
+def _drain_blocking(ws, settle: float = 0.35, timeout: float = 30.0) -> list[dict]:
     """把 WS 上"当前该到的"业务帧收干净（**静默判定**，不是固定轮数）。
 
     两个坑，都是实测踩出来的：
@@ -296,13 +347,24 @@ def _drain_blocking(ws, settle: float = 0.35, timeout: float = 5.0) -> list[dict
 
     语义 = "等到安静为止"，与调用方此前是否发过 ping 无关（第一轮会吃掉遗留的
     pong）。断言"没有帧"（``== []``）时也成立：连续两轮空才是真的空。
+
+    The complete drain shares one deadline across all rounds.
     """
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a positive finite number")
+
+    deadline = time.monotonic() + timeout
     frames: list[dict] = []
     quiet = 0
     for _ in range(8):
-        time.sleep(settle)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"board stream exceeded its {timeout:g}s total deadline")
+        time.sleep(min(settle, remaining))
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"board stream exceeded its {timeout:g}s total deadline")
         ws.send_text(json.dumps({"type": "ping"}))
-        batch = _read_until_pong(ws, timeout=timeout)
+        batch = _read_until_pong(ws, timeout=timeout, deadline=deadline)
         if batch:
             frames.extend(batch)
             quiet = 0
@@ -327,6 +389,61 @@ def test_drain_fails_if_stream_never_becomes_quiet() -> None:
     client = TestClient(busy_app)
     with client.websocket_connect("/") as ws, pytest.raises(AssertionError, match="quiet"):
         _drain_blocking(ws, settle=0)
+
+
+@pytest.mark.parametrize("waiter", ["pong", "drain"])
+def test_trickling_frames_respect_the_overall_wait_deadline(waiter: str) -> None:
+    async def trickling_app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+
+        async def send_frames() -> None:
+            while True:
+                await send({"type": "websocket.send", "text": '{"type":"board_snapshot"}'})
+                await asyncio.sleep(0.05)
+
+        sender = asyncio.create_task(send_frames())
+        try:
+            while True:
+                message = await receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+        finally:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+
+    client = TestClient(trickling_app)
+    with client.websocket_connect("/") as ws:
+        started = time.monotonic()
+        with pytest.raises(AssertionError, match="deadline"):
+            if waiter == "pong":
+                ws.send_text(json.dumps({"type": "ping"}))
+                _read_until_pong(ws, timeout=0.4)
+            else:
+                _drain_blocking(ws, settle=0, timeout=0.4)
+        assert time.monotonic() - started < 1.5
+
+
+def test_drain_uses_one_deadline_across_multiple_pong_rounds() -> None:
+    async def trickling_app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+        while True:
+            message = await receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            for _ in range(3):
+                await asyncio.sleep(0.1)
+                await send({"type": "websocket.send", "text": '{"type":"board_snapshot"}'})
+            await asyncio.sleep(0.1)
+            await send({"type": "websocket.send", "text": '{"type":"pong"}'})
+
+    client = TestClient(trickling_app)
+    with client.websocket_connect("/") as ws:
+        started = time.monotonic()
+        with pytest.raises(AssertionError, match="deadline"):
+            _drain_blocking(ws, settle=0, timeout=0.6)
+        assert time.monotonic() - started < 1.5
 
 
 # ── ① 节流帧数上下界（AC-14 ①）─────────────────────────────────────────────
