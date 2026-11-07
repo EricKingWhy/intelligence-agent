@@ -120,6 +120,7 @@ from agent_harness.sandbox.capabilities import (
     SandboxUnavailableError,
     probe_all_capabilities,
 )
+from agent_harness.sandbox.docker import SandboxHardeningError
 from agent_harness.session.errors import (
     ActiveRunConflict,
     ApprovalAlreadyResolved,
@@ -504,7 +505,25 @@ def model_http_error(exc: Exception) -> HTTPException:
 #: 结构化诊断同形；`detail` 由下面的函数统一构造）。
 _SANDBOX_ERROR_STATUS: dict[type[Exception], int] = {
     SandboxUnavailableError: 409,
+    SandboxHardeningError: 409,
 }
+
+
+def sandbox_hardening_http_error(exc: SandboxHardeningError) -> HTTPException:
+    """Report a failed sandbox hardening without falling back to another backend."""
+    reasons = {
+        "hardening_failed", "migration_failed", "migration_wait_failed", "migration_helper_start_failed",
+        "migration_rollback_failed", "migration_backup_restore_failed",
+    }
+    return HTTPException(
+        status_code=_SANDBOX_ERROR_STATUS[type(exc)],
+        detail={
+            "message": "Sandbox hardening failed",
+            "reason": exc.reason if exc.reason in reasons else "hardening_failed",
+            "volume": None,
+            "remediation": "Preserve the volume and backup; verify recovery state before retrying.",
+        },
+    )
 
 
 def sandbox_unavailable_http_error(
