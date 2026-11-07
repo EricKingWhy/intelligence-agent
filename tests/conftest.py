@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping, MutableMapping
+import sys
+import threading
+from collections.abc import Generator, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,121 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="fail when a selected live_services/qiniu test is skipped or not executed",
     )
+    # #1514（并入 #1515）：单测级可归因超时。默认值写在 pyproject 的
+    # `[tool.pytest.ini_options].test_timeout`，这里只登记 ini 键与 marker。
+    parser.addini(
+        "test_timeout",
+        "每个用例的硬超时秒数（0 = 不设上限）；超时按 thread 方法终止整个进程",
+        default="300",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    global _stderr_fd
+
+    config.addinivalue_line(
+        "markers",
+        "test_timeout(seconds): 覆盖本用例的单测级超时上限（0 = 不设上限）",
+    )
+    if _stderr_fd is None:
+        _stderr_fd = os.dup(_raw_stderr())
+
+
+#: 一次运行里同时只有一个用例在跑 ⇒ 同一时刻最多一个看门狗。
+_dog: threading.Timer | None = None
+
+#: 进程启动时的 stderr fd 副本。pytest 默认做 **fd 级** capture（把 fd 1/2 重定向到
+#: 临时文件），所以超时点若写 `sys.stderr` 或 fd 2，归因信息会随 capture 一起丢掉——
+#: 而 `os._exit` 又不会让 pytest 有机会把 capture 刷出来。pytest 自带的 faulthandler
+#: 插件正是为此 `os.dup(stderr_fileno)`（`_pytest/faulthandler.py::pytest_configure`），
+#: 这里照抄同一条做法。
+_stderr_fd: int | None = None
+
+
+def _raw_stderr() -> int:
+    """取真实 stderr 的 fd（xdist 会把 `sys.stderr` 换成非文件对象）。"""
+    try:
+        fileno = sys.stderr.fileno()
+        if fileno == -1:
+            raise AttributeError()
+        return fileno
+    except (AttributeError, ValueError):
+        assert sys.__stderr__ is not None
+        return sys.__stderr__.fileno()
+
+
+def _effective_timeout(item: pytest.Item) -> float:
+    marker = item.get_closest_marker("test_timeout")
+    if marker is not None:
+        # 位置式与关键字式都认，但二者并存是二义性——报 UsageError，不静默取其一。
+        if marker.args and "seconds" in marker.kwargs:
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout marker 不要同时给位置参数和 "
+                "seconds= 关键字（二义性）"
+            )
+        # 位置式与关键字式都认：marker 注册签名是 test_timeout(seconds)，
+        # 只认位置参数会让 @pytest.mark.test_timeout(seconds=30) 被误导性报错。
+        raw = marker.args[0] if marker.args else marker.kwargs.get("seconds")
+        if raw is None:
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout marker 需要一个秒数（0 = 不设上限）"
+            )
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            raise pytest.UsageError(
+                f"{item.nodeid}: test_timeout marker 的秒数必须是数字，收到 {raw!r}"
+            ) from None
+    return float(item.config.getini("test_timeout") or 0.0)
+
+
+def _abort(item: pytest.Item, timeout: float) -> None:
+    """超时点：点 nodeid + 全线程栈 + 原因，然后硬退出。
+
+    为什么是 ``os._exit`` 而不是抛异常：挂死多半发生在 ``await`` / 阻塞 IO 里，
+    异常抛不进那段栈；``pytest-timeout`` 的 ``thread`` 方法同样是终止整个进程
+    （官方文档：会结束进程、可能不跑 teardown）。选它换来的是"退出码可靠非零 +
+    立即归因"。
+
+    写的是 ``_stderr_fd``（pytest 做 fd 级 capture，``sys.stderr`` 此时指向临时文件，
+    而 ``os._exit`` 不会给它刷出的机会）。
+    """
+    import faulthandler
+
+    try:
+        # fd 解析也在 try 内：若 _raw_stderr() 抛异常（sys.__stderr__ 为 None），
+        # Timer 线程不能静默死亡、让看门狗失效——finally 的 os._exit 必须跑到。
+        fd = _stderr_fd if _stderr_fd is not None else _raw_stderr()
+        os.write(
+            fd,
+            (
+                f"\n[test-timeout] {item.nodeid} 超过 {timeout:g}s 未返回；"
+                "按 thread 方法终止整个进程（teardown 可能未执行）\n"
+            ).encode("utf-8", "backslashreplace"),
+        )
+        faulthandler.dump_traceback(file=fd, all_threads=True)
+    finally:
+        os._exit(1)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_protocol(
+    item: pytest.Item,
+) -> Generator[None, object, object]:
+    """包住 setup+call+teardown：挂死在任何阶段都归因到该用例。"""
+    global _dog
+
+    timeout = _effective_timeout(item)
+    if timeout > 0:
+        _dog = threading.Timer(timeout, _abort, args=(item, timeout))
+        _dog.daemon = True
+        _dog.start()
+    try:
+        return (yield)
+    finally:
+        if _dog is not None:
+            _dog.cancel()
+            _dog = None
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
@@ -60,6 +177,14 @@ def pytest_runtest_makereport(
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # 关掉 pytest_configure 里 dup 的 stderr fd 副本（一 fd 泄漏到进程结束）。
+    global _stderr_fd
+    if _stderr_fd is not None:
+        try:
+            os.close(_stderr_fd)
+        except OSError:
+            pass
+        _stderr_fd = None
     if not session.config.getoption("--require-live-services"):
         return
     required = session.config._required_live_nodes
