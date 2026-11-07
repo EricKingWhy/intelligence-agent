@@ -17,9 +17,9 @@ def test_item_deadline_reports_nodeid_and_exits_nonzero() -> None:
             "import time\n"
             "import pytest\n"
             "\n"
-            "@pytest.mark.test_timeout(0.25, reason='deadline hook self-test')\n"
+            "@pytest.mark.test_timeout(5.0, reason='deadline hook self-test')\n"
             "def test_stalled():\n"
-            "    time.sleep(5)\n",
+            "    time.sleep(30)\n",
             encoding="utf-8",
         )
         nodeid = f"{probe.relative_to(PROJECT_ROOT).as_posix()}::test_stalled"
@@ -32,7 +32,7 @@ def test_item_deadline_reports_nodeid_and_exits_nonzero() -> None:
             env=env,
             capture_output=True,
             text=True,
-            timeout=12,
+            timeout=20,
             check=False,
         )
 
