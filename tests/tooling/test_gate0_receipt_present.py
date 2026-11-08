@@ -513,3 +513,411 @@ def test_self_cover_off_rewrites_guards_in_ci(tmp_path, capsys):
         gate0._apply_receipt_check(results, will_record_receipt=False)
     assert results[0][1] == 1
     assert "missing receipt for" in results[0][3]
+
+
+# ── #1663：≥2 笔无收据代码提交的分支，首张 PASS 收据如何出生 ──
+#
+# 死锁（issue #1663）：attested 分支要求**每一笔**违规提交的树都等于 HEAD 树（或其后仅 docs）⇒
+# 只有最后一笔代码提交满足；≥2 笔时首张 PASS 收据永远生不出来。修复的鉴别点：
+#   · AC1 = HEAD 树里**没有任何覆盖本分支区间的有效收据** ⇒ 本次全绿全量的 HEAD 收据可按形状④
+#     覆盖全部违规（它们都是 HEAD 的祖先、尾判为空），允许自举；
+#   · AC5(ii) = 分支里**已有**有效收据、其后又进代码提交 ⇒ 仍判红（既有用例
+#     `test_full_gate_cannot_attest_missing_receipts_across_code_changes` 在
+#     test_gate0_receipt_binding.py 钉住）。
+
+
+def _full_lane_results(repo: Repo, base: str) -> list:
+    """裸全量跑的 7 条车道结果（coverage 输出供 `write_reading` 取台账 base / 计数）。"""
+    coverage_output = (
+        f"覆盖区间: {base}..HEAD\n"
+        "提交总数 2 / 已审查 2 / 待判定 0\n"
+    )
+    return [
+        (gate0.Lane(lane.name, "desc", [], str(repo.root)), 0, 0.1,
+         coverage_output if lane.name == "coverage" else "")
+        for lane in gate0.build_lanes("")
+    ]
+
+
+def test_multi_code_commit_branch_bootstraps_its_first_receipt_with_zero_receipts(
+    tmp_path,
+):
+    """AC1：≥2 笔无收据代码提交 + HEAD 树零收据 + 全绿全量跑 ⇒ attested，且收据真的能落成有效。
+
+    修复前红：`receipt_present_check(..., _allow_current_full_run_receipt=True)` 返回
+    `violations`，`_apply_receipt_check` 把 guards 改写为 rc=1（死锁本体）。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    head = repo.git("rev-parse", "HEAD")
+    with mock.patch.object(gate0, "REPO_ROOT", str(repo.root)), \
+            mock.patch.object(gate0, "receipt_bootstrap_sha", lambda repo_root=None: base), _clean_env():
+        # 前提自证：构造的正是「≥2 笔 + 树内零收据 + 转硬口径」。
+        assert gate0.head_tree_receipts(str(repo.root)) == {}
+        check = gate0.receipt_present_check(
+            str(repo.root), bootstrap_sha=base, _allow_current_full_run_receipt=True,
+        )
+        assert check.warn_only is False, check.detail
+        assert check.ok is True, check.detail
+        assert check.status == "attested", check.detail
+
+        results = _full_lane_results(repo, base)
+        gate0._apply_receipt_check(results, will_record_receipt=True)
+        assert all(rc == 0 for _lane, rc, _s, _o in results), results
+
+        path = gate0.write_reading(
+            head=head, tree=repo.git("rev-parse", f"{head}^{{tree}}"), argv=[], wall=0.5,
+            results=results, affected=None, changed=[], worktree={"untracked": []},
+        )
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert doc["result"] == "PASS"
+    repo.commit({f"docs/gate/{head}.json": Path(path).read_text(encoding="utf-8")},
+                "docs(gate): first receipt for the branch")
+
+    # 被测逻辑一律在干净 env 里调（#668：GIT_DIR 优先级高于 `-C <tmp>`，见 `_check` 的 docstring）。
+    with _clean_env():
+        receipts = gate0.head_tree_receipts(str(repo.root))
+        assert receipts[head]["valid"], receipts[head]["reason"]
+        after = gate0.receipt_present_check(str(repo.root), bootstrap_sha=base)
+    assert after.ok is True, after.detail
+    assert after.status == "clear", after.detail
+
+
+def test_multi_code_commit_bootstrap_ignores_receipts_from_before_the_branch_base(tmp_path):
+    """AC1 的真实形态：HEAD 树里有**区间外**的历史收据，不影响首张收据自举。
+
+    真实仓库 HEAD 树里有一千多张历史收据（都早于 merge-base）。判据必须只看
+    `merge-base..HEAD` 里的收据；把 `in_range_receipts` 写成 `receipts` ⇒ 本用例红、
+    且真仓上永远自举不了。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit(repo.receipt(base), "docs(gate): historical receipt, before the branch base")
+    origin = repo.git("rev-parse", "HEAD")
+    repo.git("update-ref", "refs/remotes/origin/main", origin)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+
+    with mock.patch.object(gate0, "REPO_ROOT", str(repo.root)), \
+            mock.patch.object(gate0, "receipt_bootstrap_sha", lambda repo_root=None: base), _clean_env():
+        assert list(gate0.head_tree_receipts(str(repo.root))) == [base]  # 前提：树里确实有收据
+        assert base not in repo.git("rev-list", f"{origin}..HEAD").split()  # 且它在区间外
+        check = gate0.receipt_present_check(
+            str(repo.root), bootstrap_sha=base, _allow_current_full_run_receipt=True,
+        )
+    assert check.warn_only is False, check.detail
+    assert check.ok is True, check.detail
+    assert check.status == "attested", check.detail
+
+
+def test_multi_code_commit_bootstrap_requires_full_successful_recording_run(
+    tmp_path,
+):
+    """AC2/AC3：零收据分支也不能靠不完整 / 不绿 / 不落盘的跑自举（fail-closed 不放松）。
+
+    判别力：若把自举写成无条件（不看 `will_record_receipt` / 全绿），CI 臂会转绿 ⇒ 本用例红。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+
+    with mock.patch.object(gate0, "REPO_ROOT", str(repo.root)), \
+            mock.patch.object(gate0, "receipt_bootstrap_sha", lambda repo_root=None: base), _clean_env():
+        # 本地跑完已把收据落到工作树、但**没随代码提交** ⇒ CI 侧（will_record_receipt=False）
+        # 仍按已提交收据执法：`head_tree_receipts` 读 HEAD 树，看不见未跟踪文件。
+        gate0.write_reading(
+            head=repo.git("rev-parse", "HEAD"),
+            tree=repo.git("rev-parse", "HEAD^{tree}"), argv=[], wall=0.5,
+            results=_full_lane_results(repo, base), affected=None, changed=[],
+            worktree={"untracked": []},
+        )
+        assert (repo.root / "docs" / "gate" / f"{repo.git('rev-parse', 'HEAD')}.json").is_file()
+        assert gate0.head_tree_receipts(str(repo.root)) == {}
+
+        # CI / 局部跑：不落盘 ⇒ 无法自举。
+        ci_results = _full_lane_results(repo, base)
+        gate0._apply_receipt_check(ci_results, will_record_receipt=False)
+        guards = next(r for r in ci_results if r[0].name == "guards")
+        assert guards[1] == 1
+        assert "missing receipt for" in guards[3]
+
+        # 全量但有一条车道不绿（pytest 本体红 / 其它车道红）⇒ 本次跑落不出 PASS 收据。
+        failed_results = _full_lane_results(repo, base)
+        failed_results = [
+            (lane, 1 if lane.name == "ruff" else rc, secs, out)
+            for lane, rc, secs, out in failed_results
+        ]
+        gate0._apply_receipt_check(failed_results, will_record_receipt=True)
+        guards = next(r for r in failed_results if r[0].name == "guards")
+        assert guards[1] == 1
+        assert "missing receipt for" in guards[3]
+
+        # 只跑局部车道（--only guards）⇒ 不是全量、不会落盘 ⇒ 不能自举。
+        only_guards = [
+            (gate0.Lane("guards", "desc", [], str(repo.root)), 0, 0.1, ""),
+        ]
+        gate0._apply_receipt_check(only_guards, will_record_receipt=True)
+        assert only_guards[0][1] == 1
+        assert "missing receipt for" in only_guards[0][3]
+
+
+# ── #1663 修复轮：自举前置不得由分支自己制造（P1-1 / P1-2）
+
+
+def _branch_with_one_receipt_and_two_code_commits(tmp_path) -> tuple[Repo, str, str]:
+    """AC5(ii) 同形现场：1 张覆盖 c1 的有效收据 + 其后 2 笔无收据代码提交 ⇒ 判红。"""
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3")
+    return repo, base, c1
+
+
+def _bootstrapping_check(repo: Repo, base: str):
+    with mock.patch.object(gate0, "REPO_ROOT", str(repo.root)), \
+            mock.patch.object(gate0, "receipt_bootstrap_sha", lambda repo_root=None: base), \
+            _clean_env():
+        return gate0.receipt_present_check(
+            str(repo.root), bootstrap_sha=base, _allow_current_full_run_receipt=True,
+        )
+
+
+def test_bootstrap_stays_red_after_the_in_range_receipt_is_deleted(tmp_path):
+    """P1-1：删掉区间内那张收据**不能**把 AC5(ii) 的红变成绿。
+
+    判据必须落在"区间内是否落过收据"（落地历史）而不是"HEAD 树里现存多少张有效收据"——
+    后者由分支自己说了算：`git rm docs/gate/<sha>.json` 一笔就能清零。
+    修复前：删除后 `attested`（把"陈旧覆盖"放行）。修复后：仍 `violations`。
+    """
+    repo, base, c1 = _branch_with_one_receipt_and_two_code_commits(tmp_path)
+    before = _bootstrapping_check(repo, base)
+    assert before.ok is False and before.status == "violations", before.detail
+
+    repo.remove(f"docs/gate/{c1}.json", "docs(gate): drop the receipt")
+
+    after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+    assert "missing receipt for" in after.detail, after.detail
+
+
+def test_bootstrap_stays_red_after_the_in_range_receipt_is_tampered(tmp_path):
+    """P1-1（改坏版）：把区间内收据改成 `passed != total` 使其 invalid 也不得放行自举。
+
+    修复前：改坏后该收据从 `in_range_receipts` 里消失 ⇒ `attested`。修复后：落地历史仍在
+    ⇒ `violations`。
+    """
+    repo, base, c1 = _branch_with_one_receipt_and_two_code_commits(tmp_path)
+    assert _bootstrapping_check(repo, base).status == "violations"
+
+    path = repo.root / "docs" / "gate" / f"{c1}.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["passed"] = doc["total"] - 1  # 不再是全绿 ⇒ 该收据 invalid
+    repo.commit({f"docs/gate/{c1}.json": json.dumps(doc)}, "docs(gate): tamper with the receipt")
+
+    after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+
+
+def test_bootstrap_stays_red_when_the_receipt_scan_fails(tmp_path):
+    """P1-2：收据扫描读失败 ≠ 树里没有收据，不得据此自举（fail-closed）。
+
+    `head_tree_receipts()` 拿不到 `ls-tree ... docs/gate/` 时返回 `{}`（契约：当它不存在）；
+    新消费点若把该 `{}` 读成"零收据 ⇒ 可以出生第一张"，一次瞬时读失败就能让一条真有违规的
+    分支变绿并落 PASS 收据。修复前：`attested`；修复后：`violations`（且 detail 说明扫描失败）。
+    """
+    repo, base, _c1 = _branch_with_one_receipt_and_two_code_commits(tmp_path)
+    assert _bootstrapping_check(repo, base).status == "violations"
+
+    real = gate0._git_at_bytes
+
+    def failing(repo_root, *args, **kwargs):
+        if args[:1] == ("ls-tree",) and any("docs/gate" in str(a) for a in args):
+            return subprocess.CompletedProcess(args, 128, b"", b"fatal: simulated ls-tree failure")
+        return real(repo_root, *args, **kwargs)
+
+    with mock.patch.object(gate0, "_git_at_bytes", failing):
+        after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+    assert "收据扫描失败" in after.detail, after.detail
+
+
+# ── #1663 Fix Round 2：落地历史的 git 口径（merge 落盘 / 改名落盘）与自举前置的覆盖面 ──
+#
+# 第一轮修复把判据从「HEAD 树里现存且有效」换到「区间内落过收据」，但落地历史本身用
+# `git log --name-only --diff-filter=A` 取：默认 `git log` **不对 merge 提交做 diff**，且默认
+# 开改名检测把 `staged.json → <sha>.json` 判成 `R100`。两条形态因此都看不见，删掉/改坏后
+# 自举重开 ⇒ 能落出 PASS 收据（第二轮复审两轴各自端到端跑到）。修法 = `-m` + `--no-renames`
+# **并且**只收 `t ∈ base..head`（否则例行 sync merge 从 main 带进来的别人收据会顶掉首张自举）。
+
+
+def _branch_with_a_receipt_landed_in_a_merge(tmp_path) -> tuple[Repo, str, str]:
+    """收据**只在 merge 提交里首次出现**（冲突解决式落盘 + 其后 1 笔代码提交）。"""
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.git("checkout", "-q", "-b", "side")
+    repo.commit({"src/s.py": "s = 1\n"}, "side work")
+    repo.git("checkout", "-q", "main")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit(repo.receipt(c1), "merge side, landing the receipt in the merge commit")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3")
+    return repo, base, c1
+
+
+def test_bootstrap_stays_red_after_a_receipt_landed_in_a_merge_is_deleted(tmp_path):
+    """P1-1(a)：收据由 **merge 提交**首次带进来（相对第一父是 A），删掉后不得重开自举。
+
+    `git log` 默认不对 merge 做 diff ⇒ 这笔落地对落地历史隐形。修复前：删除后 `attested`
+    （且真落出 PASS 收据）；修复后：`violations`。判据是 `git log -m`。
+    """
+    repo, base, c1 = _branch_with_a_receipt_landed_in_a_merge(tmp_path)
+    before = _bootstrapping_check(repo, base)
+    assert before.warn_only is False, before.detail
+    assert before.ok is False and before.status == "violations", before.detail
+
+    repo.remove(f"docs/gate/{c1}.json", "docs(gate): drop the merge-landed receipt")
+
+    after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+    assert "missing receipt for" in after.detail, after.detail
+
+
+def _branch_with_a_receipt_renamed_into_place(tmp_path) -> tuple[Repo, str, str]:
+    """收据以非 canonical 名提交，再 `git mv` 到 `docs/gate/<sha>.json`，其后 2 笔代码提交。"""
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    staged = next(iter(repo.receipt(c1).values()))
+    repo.commit({"docs/gate/staged.json": staged}, "stage the receipt under a non-receipt name")
+    repo.git("mv", "docs/gate/staged.json", f"docs/gate/{c1}.json")
+    repo.git("commit", "-q", "-m", "rename the staged receipt into place")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3")
+    return repo, base, c1
+
+
+def test_bootstrap_stays_red_after_a_receipt_renamed_into_place_is_tampered(tmp_path):
+    """P1-1(b)：收据以 `R100` 进 canonical 名（改名检测把它判成 R、既不 A 也不匹配收据名），
+    改坏后不得重开自举。
+
+    修复前：`attested`（并落出 PASS 收据）；修复后：`violations`。判据是 `--no-renames`
+    （改名按"删 + 增"输出，新路径成为 A）。
+    """
+    repo, base, c1 = _branch_with_a_receipt_renamed_into_place(tmp_path)
+    before = _bootstrapping_check(repo, base)
+    assert before.warn_only is False, before.detail
+    assert before.ok is False and before.status == "violations", before.detail
+
+    path = repo.root / "docs" / "gate" / f"{c1}.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["passed"] = doc["total"] - 1  # 不再是全绿 ⇒ 该收据 invalid
+    repo.commit({f"docs/gate/{c1}.json": json.dumps(doc)}, "docs(gate): tamper with the renamed receipt")
+
+    after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+
+
+def test_bootstrap_survives_a_routine_sync_merge_that_brings_in_other_receipts(tmp_path):
+    """P1-1 的**反向**守卫：例行 sync merge 从 main 带进别人的收据，本分支仍能自举首张收据。
+
+    判据不能只看"`-m` 让 merge 出 diff"——那会把 main 侧收据（文件名指向的提交不在
+    `merge-base..HEAD` 里）也算成"本分支落过收据" ⇒ 首张收据永远生不出来 = gen-1 死锁复发。
+    所以 `landed` 必须过滤到 `t ∈ base..head`。本用例正是钉这条过滤。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    # main 侧：别的票落了代码 + 收据（真实仓里成百上千张）
+    repo.git("checkout", "-q", "-b", "other-work")
+    other = repo.commit({"src/o.py": "o = 1\n"}, "other ticket code")
+    repo.commit(repo.receipt(other), "other ticket receipt on main")
+    repo.git("update-ref", "refs/remotes/origin/main", repo.git("rev-parse", "HEAD"))
+    # 本票分支：从 base 出发，两笔无收据代码提交
+    repo.git("checkout", "-q", "-b", "ticket", base)
+    repo.commit({"src/t1.py": "t = 1\n"}, "ticket code 1")
+    repo.commit({"src/t2.py": "t = 2\n"}, "ticket code 2")
+    repo.git("merge", "--no-ff", "-q", "-m", "merge origin/main", "origin/main")
+
+    with _clean_env():
+        # 前提自证：HEAD 树里确实有 main 侧带来的收据，且它不在本分支区间内。
+        assert other in gate0.head_tree_receipts(str(repo.root))
+        mb = repo.git("merge-base", "origin/main", "HEAD")
+        assert other not in repo.git("rev-list", f"{mb}..HEAD").split()
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is True, check.detail
+    assert check.status == "attested", check.detail
+
+
+def test_bootstrap_stays_red_when_the_receipt_scan_fails_on_a_zero_receipt_branch(tmp_path):
+    """P3-2：**零收据**分支 + 收据扫描失败 ⇒ 仍不得自举（fail-closed）。
+
+    既有那条扫描失败用例（`test_bootstrap_stays_red_when_the_receipt_scan_fails`）走的是
+    "区间内有收据"路径，`in_range_receipts` 非空就已挡住自举 ⇒ 把 `receipts_scanned` 这一项
+    从前置里删掉（MUT-B）时它照样绿。本用例走零收据路径，直接钉住 `receipts_scanned`。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    with _clean_env():
+        assert gate0.head_tree_receipts(str(repo.root)) == {}  # 前提自证：树里真的零收据
+
+    real = gate0._git_at_bytes
+
+    def failing(repo_root, *args, **kwargs):
+        if args[:1] == ("ls-tree",) and any("docs/gate" in str(a) for a in args):
+            return subprocess.CompletedProcess(args, 128, b"", b"fatal: simulated ls-tree failure")
+        return real(repo_root, *args, **kwargs)
+
+    with mock.patch.object(gate0, "_git_at_bytes", failing):
+        after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail
+    assert "收据扫描失败" in after.detail, after.detail
+
+def test_bootstrap_stays_red_when_the_landing_history_read_fails(tmp_path):
+    """P1-1（新增的 rev-list 那半边）：落地历史读不出来 ⇒ 不得自举（fail-closed）。
+
+    本轮给 `_in_range_receipt_landings` 加了 `git rev-list base..head` 建集合；它读失败同样抛
+    `OSError`、由调用方转成红。没有这条用例，把那次 `returncode` 检查删掉（或把它写成
+    "失败即空集"）不会有任何测试变红——正是 P1-2 那族"读失败当没有"的形态。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    with _clean_env():
+        assert gate0.head_tree_receipts(str(repo.root)) == {}  # 前提自证：零收据分支
+
+    real = gate0._git_at
+
+    def failing(repo_root, *args, **kwargs):
+        # 只打 `_in_range_receipt_landings` 那次（右端是具体 sha）；判据自身的
+        # `rev-list base..HEAD` 必须放行，否则测的就不是落地历史这一支。
+        if (args[:1] == ("rev-list",) and len(args) == 2 and ".." in str(args[1])
+                and not str(args[1]).endswith("HEAD")):
+            return subprocess.CompletedProcess(args, 128, "", "fatal: simulated rev-list failure")
+        return real(repo_root, *args, **kwargs)
+
+    with mock.patch.object(gate0, "_git_at", failing):
+        after = _bootstrapping_check(repo, base)
+    assert after.warn_only is False, after.detail
+    assert after.ok is False, after.detail
+    assert after.status == "violations", after.detail

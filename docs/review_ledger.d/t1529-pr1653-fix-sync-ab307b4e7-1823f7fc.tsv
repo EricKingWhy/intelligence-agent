@@ -1,0 +1,1 @@
+2026-11-03	机械归属（非审查主张）：#1529 PR #1653 fix 轮 sync merge；父一 ab307b4e7（本线 tip）/父二 1823f7fc（origin/main，#1650 merge）；merge-base efbbe1cf1；git show --cc 文件表 2 项（docs/SDD_TICKET_TRACKER.md、docs/phase_status/2026-10.md）；三棵树互不相等（merge 3a8d6f15 ≠ 父一 31b9b910 ≠ 父二 586bee5b）；文档冲突按并集解决，两侧行集合缺失 0。	ab307b4e723204d12074d4811e0659fe8fc760e4..e44a896ba3406b3ad003846d8c7b5c47f285ee3e

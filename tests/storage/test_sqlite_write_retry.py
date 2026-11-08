@@ -456,7 +456,7 @@ async def test_update_state_retry_rereads_from_clean_state(tmp_path, monkeypatch
         args_identity="{}", state=OperationState.PENDING,
     ))
 
-    real_connect = storage_sqlite._connect
+    real_connect = storage_sqlite.connect
     selects = {"n": 0}
 
     @asynccontextmanager
@@ -474,7 +474,7 @@ async def test_update_state_retry_rereads_from_clean_state(tmp_path, monkeypatch
             connection.execute = execute
             yield connection
 
-    monkeypatch.setattr("agent_harness.storage.sqlite._connect", poisoned_connect)
+    monkeypatch.setattr("agent_harness.storage.sqlite.connect", poisoned_connect)
 
     updated = await store.update_state("s-i544", "call_1", OperationState.RUNNING)
     assert updated.state is OperationState.RUNNING
