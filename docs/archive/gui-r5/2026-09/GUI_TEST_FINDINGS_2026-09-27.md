@@ -48,7 +48,7 @@
 - 现象：新会话发送「写一个 FizzBuzz 脚本并运行验证」，运行立即失败；聊天区只有用户消息孤零零挂着，**没有错误文案、没有重试入口**，仅页头状态徽章变红色「失败」。
 - 根因数据（后端事件里有、UI 没渲染）：`model/failed {"message": "模型供应商账户不可用（欠费 / 配额耗尽 / 账户被冻结），请到供应商控制台检查计费与配额", "reason": "provider_account_unavailable"}` + `run/failed`（含 Langfuse trace_url）。
 - 缓解线索：错误详情其实在右侧 **Inspector 面板的事件时间线里可见**（run/failed 行显示了完整中文原因）——但 Inspector 默认收起，普通用户找不到。
-- 截图：`t03_send_failed_no_error.png`、`t04_running_auto_approved_bash.png`（Inspector 时间线可见于暗色主题截图）
+- 截图：`screenshots/t03_send_failed_no_error.png`、`screenshots/t04_running_auto_approved_bash.png`（Inspector 时间线可见于暗色主题截图）
 
 #### F9【P1】失败后无法从 UI 恢复：被自动改坏的模型默认值 + 换模型才能重试
 - 新会话继承 F2 中被自动改成 qwen3.8-27b 的模型，而该供应商账户不可用；手动切回 qwen-plus 后发送成功（回答"2"正常）。与 F8 叠加后，普通用户极可能卡死且不知原因。
@@ -58,7 +58,7 @@
 - 无障碍树中该弹窗的 listbox **不包含任何选项节点**，屏幕阅读器用户无法选择权限档。
 - 键盘 ArrowDown 后焦点圈套在**整个选项组**上而非单个选项；按 Enter 直接命中**最后一项「完全访问」**。所幸升级有二次确认（"确认升级？" + 升级/取消——好设计），Esc 可取消。
 - 成熟产品参考：VS Code 设置、Linear、Raycast 的单选列表总是标当前项且键盘高亮画在单项上；ARIA combobox/listbox 模式要求选项可被辅助技术枚举。
-- 截图：`t04_permission_dialog.png`
+- 截图：`screenshots/t04_permission_dialog.png`
 
 #### F11【P1·安全相关】默认权限状态下 bash 工具未经审批直接执行
 - 权限档为"默认"（按钮只显示"权限"）的新会话里，agent 执行 `bash echo gui-test-ok` **未弹出任何审批卡片直接执行成功**（162ms，回答正确）；会话 `session/started` 事件里 `"auto_approve": true`。
@@ -82,7 +82,7 @@
 
 #### F5【P2】首帧主题与持久化主题不一致 + 首次加载弹层自动展开
 - 本浏览器实例首次导航：暗色主题 + "工具调用如何批准?"权限弹层无交互自动展开；两次刷新后为亮色（localStorage `ahi.theme=light`）且弹层不出现。UI 状态（主题/会话/设置）异步恢复导致首帧与最终状态不一致。
-- 截图：`t01_first_load_dark_popup.png` vs `t01_reload_light_no_popup.png`
+- 截图：`screenshots/t01_first_load_dark_popup.png` vs `screenshots/t01_reload_light_no_popup.png`
 
 #### F6【观察】记忆系统持续降级运行
 - 事件流多次 `memory/degraded`：extraction/consolidation `heuristic_fallback: NotFoundError`、formation `provider_error`。同时记忆形成功能实际有产出（自动运行后形成了 2 条记忆，见记忆管理弹窗）。降级提示未在 UI 上呈现给用户。
@@ -193,13 +193,13 @@
 ## 六、证据文件
 
 `screenshots/`：
-- `t01_first_load_dark_popup.png` — 首访：暗色+权限弹层自动展开（F5）
-- `t01_reload_light_no_popup.png` — 刷新后：亮色+无弹层（F5 对照）
-- `t03_send_failed_no_error.png` — 运行失败聊天区无错误（F8）
-- `t04_permission_dialog.png` — 权限弹窗无选中指示（F10/A1）
-- `t04_running_auto_approved_bash.png` — bash 自动执行+运行态（F11）
-- `t05_auto_restored_session.png` — 自动恢复会话+侧栏高亮错位（F1/F4）
-- `t13_memory_dialog.png` — 记忆弹窗+A3 竖排文字（F6 观察的 UI 侧）
+- `screenshots/t01_first_load_dark_popup.png` — 首访：暗色+权限弹层自动展开（F5）
+- `screenshots/t01_reload_light_no_popup.png` — 刷新后：亮色+无弹层（F5 对照）
+- `screenshots/t03_send_failed_no_error.png` — 运行失败聊天区无错误（F8）
+- `screenshots/t04_permission_dialog.png` — 权限弹窗无选中指示（F10/A1）
+- `screenshots/t04_running_auto_approved_bash.png` — bash 自动执行+运行态（F11）
+- `screenshots/t05_auto_restored_session.png` — 自动恢复会话+侧栏高亮错位（F1/F4）
+- `screenshots/t13_memory_dialog.png` — 记忆弹窗+A3 竖排文字（F6 观察的 UI 侧）
 
 ---
 
