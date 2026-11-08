@@ -42,6 +42,7 @@
   "s3": {
     "sdk": {
       "endpoint_url": "https://s3.example.test",
+      "region_name": "test-region-1",
       "credential_configured": true,
       "signature_version": "s3v4",
       "addressing_style": "path"

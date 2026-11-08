@@ -154,6 +154,8 @@ async def test_s3_and_minio_text_metadata_boundary(monkeypatch: pytest.MonkeyPat
             assert kwargs["aws_secret_access_key"] == secret
             assert kwargs["config"].signature_version == "s3v4"
             assert kwargs["config"].s3 == {"addressing_style": "path"}
+            if name == "s3":
+                assert kwargs["region_name"] == "test-region-1"
 
         if name == "s3":
             assert "Metadata" in put_request
