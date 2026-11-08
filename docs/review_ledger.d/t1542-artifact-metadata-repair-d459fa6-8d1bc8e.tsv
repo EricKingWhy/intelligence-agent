@@ -1,0 +1,1 @@
+2026-11-08	#1542 修复轮双轴复审（范围 d459fa6..8d1bc8e5d）：Spec 与 Standards 均 APPROVE，P0–P4=0；上一轮 P3 已由 region_name 断言和原始 SDK 配置证据闭合，无剩余 finding。	d459fa632466a8c13346c7e0e48dfdc0100b0f6c..8d1bc8e5d57eb3c718d3b5afb2df97918777629b
