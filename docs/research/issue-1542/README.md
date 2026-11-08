@@ -121,4 +121,5 @@
 - `PYTHONUTF8=1`、`PYTHONPATH=<当前 worktree>/src` 下运行 `python -m pytest tests/storage -q -rs -p no:randomly`：**169 passed / 81 skipped，9.31s**。跳过原因为 Windows 不允许 `?` 文件名，以及 CJK tokenizer 缺少 gcc/源码；本票新增用例在通过的集合中。
 - `python -m ruff check tests/storage/test_remote_artifact_metadata_contract.py`：**All checks passed**。
 - 本票新增测试与既有 S3 测试定向组合：**14 passed**。
+- Gate-0：代码与双轴审查台账树 `a6bbd22e5ee045d375390d44729397adf1b880d8` / tree `b12e9fe1117fd68255ecba54d97b30adebc0eab0` **7/7 PASS，54.01s**；收据 `docs/gate/a6bbd22e5ee045d375390d44729397adf1b880d8.json`。随后仅追加进度文档。
 - 未使用 Docker 或真实存储服务；离线后端调用两个 Provider 的真实公开方法。
