@@ -122,4 +122,5 @@
 - `python -m ruff check tests/storage/test_remote_artifact_metadata_contract.py`：**All checks passed**。
 - 本票新增测试与既有 S3 测试定向组合：**14 passed**。
 - Gate-0：代码与双轴审查台账树 `a6bbd22e5ee045d375390d44729397adf1b880d8` / tree `b12e9fe1117fd68255ecba54d97b30adebc0eab0` **7/7 PASS，54.01s**；收据 `docs/gate/a6bbd22e5ee045d375390d44729397adf1b880d8.json`。随后仅追加进度文档。
+- 发布前最终 Gate-0 在 `03532fe218ac17aca579448b9a3eb14adebed7c2` / tree `226a090a00171ad4b7aba1e5c24cb2ef36d43048` **7/7 PASS，38.7s**；收据 `docs/gate/03532fe218ac17aca579448b9a3eb14adebed7c2.json`。
 - 未使用 Docker 或真实存储服务；离线后端调用两个 Provider 的真实公开方法。
