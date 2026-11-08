@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "fetch_gate_receipts.py"
 
 
@@ -83,12 +85,14 @@ def test_fetches_unreferenced_receipt_commit_and_keeps_archived_exception(tmp_pa
     assert git(clone, "rev-parse", f"refs/gate-evidence/{sha}^{{tree}}") == tree
 
 
-def test_branch_reachable_receipt_gets_no_new_evidence_ref(tmp_path: Path) -> None:
-    """A receipt already reachable from a branch survives without a synthetic evidence ref.
+@pytest.mark.parametrize("holder", ["branch", "tag"])
+def test_ref_reachable_receipt_gets_no_new_evidence_ref(tmp_path: Path, holder: str) -> None:
+    """A receipt already reachable from a branch or a tag survives without a synthetic evidence ref.
 
-    `--branches --tags` is what tells the script "this one is already safe". Dropping either
-    half turns every receipt behind a plain branch into a dangling one and rebuilds
-    `refs/gate-evidence/*` for it — the 300-ref drift a real repository hit.
+    `--branches --tags` is what tells the script "this one is already safe". Dropping `--branches`
+    rebuilds `refs/gate-evidence/*` for the branch-reachable receipts: 243 dangling in a real
+    clone, or 299 (9 -> 308 evidence refs) when `--tags` is gone too. Dropping only `--tags` is
+    not observable in that clone today; the tag variant here pins it.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -103,8 +107,8 @@ def test_branch_reachable_receipt_gets_no_new_evidence_ref(tmp_path: Path) -> No
     git(repo, "commit", "-m", "receipt")
     sha = git(repo, "rev-parse", "HEAD")
     tree = git(repo, "rev-parse", "HEAD^{tree}")
-    # Park the receipt commit on a local branch, then move the checked-out branch past it.
-    git(repo, "branch", "evidence-holder", sha)
+    # Park the receipt commit on a branch/tag, then move the checked-out branch past it.
+    git(repo, "branch" if holder == "branch" else "tag", "evidence-holder", sha)
     git(repo, "reset", "--hard", "HEAD~1")
     receipts = repo / "docs" / "gate"
     receipts.mkdir(parents=True)

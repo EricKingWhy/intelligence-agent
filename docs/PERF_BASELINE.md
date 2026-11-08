@@ -1319,3 +1319,32 @@ PYTHONUTF8=1 PYTHONPATH="$W;$W\\src" /d/intelligence-agent-backend/.venv/Scripts
 | §2 的窄 chunk 耗时里改造前的二次项被常数项淹没（4.27×/4.68×），只有 §1c/§4 能直读超线性 | 要在 width=10 上也直读二次，需把 N 拉到 ≫16k（本票不为此加档：16k 已是票面指定的上界） |
 | §4 的 8000 档两臂都跳（1.6 MB 分配/GC 悬崖），该点不可作形态判据 | 换更大内存 / 预热后重跑，或按流式分片喂语料——本票不做 |
 | 计数口径只覆盖 `content`：`tool_call_chunks` 的 args 拼接不在内（注释已记） | 出现"args 拼接本身成为热点"的实测证据 ⇒ 另开票（同文件与 #247 冲突，须等其合并后） |
+
+### #1517 — 尾窗用例的 CPU 争抢读数（测试预算，非产品 SLA）
+
+**口径**：这两条**同步**挂载用例（`StepDetail.window.test.tsx` 的 `DIFFS / ARTIFACTS`、`App.contextFullRouting.test.tsx`
+的 `context 暂停`）在 jsdom 里一次渲染 500 行 React 树，墙钟只由 CPU 决定，没有 `waitFor` 可等。
+约束：4 vCPU / 8 GiB，`taskset -c 0,1`（2 核）+ N 个同核 Python 自旋进程（burner），`--maxWorkers=1`。
+命令：
+
+```bash
+cd web && taskset -c 0,1 node node_modules/vitest/vitest.mjs run --maxWorkers=1 --reporter=json \
+  --outputFile=<out>.json src/components/StepDetail.window.test.tsx src/App.contextFullRouting.test.tsx
+```
+
+| 场景 | 规模 | 指标（该用例 duration） | 改造前 | 改造后 | 日期 | 证据 |
+|---|---|---|---|---|---|---|
+| 空载 | 13 例 | DIFFS/ARTIFACTS ms | 2319（20s 预算，passed，base `2f81d78df`） | 2358（60s 预算，passed，tip `0b37bb034`） | 2026-11-08 | `fixround-logs/{base_idle_v505,tip_final_idle}.json` |
+| 8 路同核争抢 | 13 例 | DIFFS/ARTIFACTS ms | **28621（timed out in 20000ms，base）** | 17716（passed，tip `0b37bb034`） | 2026-11-08 | `fixround-logs/{base_b8_v505,tip_b8_1}.json` |
+| 12 路同核争抢 | 单用例 | DIFFS/ARTIFACTS ms | **36521（timed out in 20000ms）** | 26831（passed，tip `03d86566e`） | 2026-11-08 | `ac2-res/{diffart_b12,c60_12_b12}.json` |
+| 16 路同核争抢 | 13 例 | DIFFS/ARTIFACTS ms | — | 36056（passed，tip `0b37bb034`）；同配置另一次 44597（passed，tip `03d86566e`） | 2026-11-08 | `fixround-logs/tip_b16.json`、`ac2-res/c60_16_b16.json` |
+| 空载 | 13 例 | App「context 暂停」ms | 407（passed，base） | 437（passed，tip） | 2026-11-08 | `fixround-logs/{base_idle_v505,tip_final_idle}.json` |
+| 8 路同核争抢 | 13 例 | App「context 暂停」ms | 2997（passed，base） | 4001（passed，tip） | 2026-11-08 | `fixround-logs/{base_b8_v505,tip_b8_1}.json` |
+| 12 路同核争抢 | 单用例 | App「context 暂停」ms | **5659（timed out in 5000ms）** | 未在本轴按同口径复跑（票目录复跑表：App 全文件 12 路 4 passed ×2，最重用例 5.7–6.7s） | 2026-11-08 | `ac2-res/app_b12.json` |
+
+**读法**：两棵树在空载下读数在噪声内（2319 vs 2358 ms、407 vs 437 ms）⇒ 不是行为回归；耗时随争抢路数
+单调放大且无平台期 ⇒ 归因是 CPU 争抢（调度层）。改造只给这两条用例显式预算（App 5s→20s、
+StepDetail 20s→60s），断言一条未动；60s 不是"实测最坏值"（16 路 36.1s / 44.6s），更小机器或更重负载仍会压线。
+「改造前」列 = 未加预算的树：base 两行是材料基线 `2f81d78df`，12 路两行是本分支修前树 `822b66354`（同样 20s 预算）。
+原始 JSON 与 `.meta.json`（含 `child_maxrss_kb`）在 #1517 票目录 `evidence/`：`ac2-res/`（12/16 路）与
+`fixround-logs/`（空闲 / 8 路 / 16 路）。⚠ **诚实边界**：vitest 的 JSON 不带 tree 字段，跑次的树归属来自票目录运行脚本 + 文件时间戳（`ac2-res/` 05:42–05:48、`fixround-logs/` 09:14–09:40，均早于对应提交落笔），不是“在每个 commit 上各检出一遍复跑”；commit 列标的是该跑次所用**树内容**。
