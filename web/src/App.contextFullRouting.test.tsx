@@ -184,7 +184,11 @@ afterEach(async () => {
 });
 
 describe('#1197 项 2 — 上下文满时走一句话弹窗，不走技术屏', () => {
-  it('context 暂停 ⇒ 一句话弹窗，且技术屏的每一处误导文案都不在', async () => {
+  /* 逐条断言是**同步**的（挂载后读 textContent），不是轮询式等待，所以 `waitFor` 帮不上忙；
+     成本全在 `mountWith` 把整棵 App 在 jsdom 里同步渲染一次（#1517 实测：2 vCPU 空闲
+     0.43s、同核 8 路争抢 2.2s、12 路 4.4–5.7s）。5s 是 vitest 的**默认** testTimeout，
+     不是本用例的产品预算；给这条最重的挂载显式预算，断言一条不动。 */
+  it('context 暂停 ⇒ 一句话弹窗，且技术屏的每一处误导文案都不在', { timeout: 20000 }, async () => {
     const el = await mountWith(contextPaused());
     const text = el.textContent ?? '';
     const body = document.body.textContent ?? '';
