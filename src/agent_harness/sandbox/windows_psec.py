@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import ctypes
-import fnmatch
 import json
 import ntpath
 import os
@@ -20,6 +19,7 @@ from agent_harness.sandbox.capabilities import (
     require_available,
 )
 from agent_harness.sandbox.local import LocalSubprocessSandbox
+from agent_harness.sandbox.paths import glob_match
 
 _FILE_OPEN = 1
 _FILE_CREATE = 2
@@ -1406,18 +1406,12 @@ def _file_identity(handle: int) -> dict[str, str]:
 
 
 def _glob_match(rel_path: str, pattern: str) -> bool:
-    if pattern in ("", "*"):
-        return True
-    if "**" in pattern:
-        normalized = pattern.replace("**/", "").replace("**", "*")
-        return fnmatch.fnmatch(rel_path, normalized) or fnmatch.fnmatch(
-            ntpath.basename(rel_path),
-            normalized,
-        )
-    return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
-        ntpath.basename(rel_path),
-        pattern,
-    )
+    """对 workspace 相对路径做 glob 匹配（纯策略见 `sandbox.paths.glob_match`）。
+
+    basename 用 `ntpath.basename`：本后端的路径解析域是 nt 语义，含反斜杠的相对路径
+    必须按反斜杠切段。
+    """
+    return glob_match(rel_path, pattern, basename=ntpath.basename)
 
 
 def _relative_components(

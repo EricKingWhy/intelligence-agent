@@ -1,0 +1,1 @@
+2026-11-08	#1530 Spec 修复轮复审（fresh，未读 Standards 输出）：只增 POSIX 与 Windows 盘符反斜杠绝对 pattern 样本；独立复核无新发现，P0–P4=0；Docker runtime 仍待 PR CI。明细见月档 #1530。	33877e1e15d6bc1cd7e3d4a5864a2293bf4521b9..c6e56eff072ea6f740fc3c455d315dba7bdeee43
