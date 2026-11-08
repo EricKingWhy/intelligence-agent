@@ -1346,5 +1346,5 @@ cd web && taskset -c 0,1 node node_modules/vitest/vitest.mjs run --maxWorkers=1 
 单调放大且无平台期 ⇒ 归因是 CPU 争抢（调度层）。改造只给这两条用例显式预算（App 5s→20s、
 StepDetail 20s→60s），断言一条未动；60s 不是"实测最坏值"（16 路 36.1s / 44.6s），更小机器或更重负载仍会压线。
 「改造前」列的两种树：base 两行是材料基线 `2f81d78df`，12 路两行是本分支修前树 `822b66354`；两棵树的预算形态相同——`StepDetail` 的 `DIFFS / ARTIFACTS` 自 `d3676182f` 起已是 `{ timeout: 20000 }`，`App` 的「context 暂停」未设显式预算（走 vitest 5s 默认，`grep -c timeout` = 0）。改造只发生在 tip 一侧（App 5s→20s、StepDetail 20s→60s）。
-原始 JSON 与 `.meta.json`（含 `child_maxrss_kb`）在 #1517 票目录 `evidence/`：`ac2-res/`（12/16 路）与
-`fixround-logs/`（空闲 / 8 路 / 16 路）。⚠ **诚实边界**：vitest 的 JSON 不带 tree 字段，跑次的树归属来自票目录运行脚本 + 文件时间戳（`ac2-res/` 05:11–05:50、`fixround-logs/` 09:14–09:40，均早于 `03d86566e` / `0b37bb034` 两次改预算的提交；12 路「改造前」所用树 `822b66354` 的两份测试文件与 base 逐字节相同——`StepDetail` 的 20s 自 `d3676182f` 起就在），不是“在每个 commit 上各检出一遍复跑”；commit 列标的是该跑次所用**树内容**。
+原始 JSON 在 #1517 票目录 `evidence/`：`ac2-res/`（12/16 路）与 `fixround-logs/`（空闲 / 8 路 / 16 路）；
+`.meta.json`（含 `child_maxrss_kb`）只随 `fixround-logs/` 落盘（`ac2-res/` 下 0 个）。⚠ **诚实边界**：vitest 的 JSON 不带 tree 字段，跑次的树归属来自票目录运行脚本 + JSON `startTime`（本节表内跑次：`ac2-res/` 05:10–05:49、`fixround-logs/` 09:14–09:40；`ac2-res/` 各跑次均早于 `03d86566e`（05:51，唯一改了预算值的提交），`fixround-logs/` 各跑次用的是含同一预算的树、早于 `0b37bb034`（09:42，仅改注释、预算值未变）；12 路「改造前」所用树 `822b66354` 的两份测试文件与 base 逐字节相同——`StepDetail` 的 20s 自 `d3676182f` 起就在），不是“在每个 commit 上各检出一遍复跑”；commit 列标的是该跑次所用**树内容**。
