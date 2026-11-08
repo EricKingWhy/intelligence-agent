@@ -1,0 +1,1 @@
+2026-11-06	#1517 bundle audit-ref retention: independent Standards PASS; Spec/Correctness no P0-P2; reviewed scripts/fetch_gate_receipts.py and tests/test_fetch_gate_receipts.py; original 2-vCPU investigation remains open.	b39f44ba950cb82d62d44166dec1dba4ea6f3a1e..022f99d2322d
