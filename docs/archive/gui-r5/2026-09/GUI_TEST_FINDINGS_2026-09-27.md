@@ -34,7 +34,7 @@
   - `16:15:59 UTC user/message {"content":"当前项目是个什么项目？"}` → run/started → 7 轮模型调用 + 11 次工具调用 → run/completed（16:17:02）
   - 本页面网络记录：`GET /api/sessions/0adc85eb…/queue` 之后自动 `POST /api/sessions/0adc85eb…/messages` ×2，请求体带 `"mode":"queue"`。
 - 影响：4 天前遗留的排队消息在用户下次打开页面时被**静默执行**，消耗真实模型 API 费用；用户无感知、无确认步骤。若遗留消息含写操作，等同无人监督执行。
-- 截图：`gui-test-screenshots/t05_auto_restored_session.png`
+- 截图：`screenshots/t05_auto_restored_session.png`
 
 #### F2【P0·安全相关】同一加载过程自动改写会话模型与权限，最终停在 danger-full-access + 自动批准
 - 现象：与 F1 同一加载过程，页面自动发出 `POST /model` ×1（qwen-plus→qwen3.8-27b）与 `POST /permission` ×6，权限在 danger-full-access → workspace-write → danger-full-access → read-only → workspace-write → danger-full-access 间循环改写（16:15:07–16:15:28 UTC），全部 `auto_approve: true`，最终停在 `danger-full-access + auto_approve=true`。
@@ -192,7 +192,7 @@
 
 ## 六、证据文件
 
-`gui-test-screenshots/`：
+`screenshots/`：
 - `t01_first_load_dark_popup.png` — 首访：暗色+权限弹层自动展开（F5）
 - `t01_reload_light_no_popup.png` — 刷新后：亮色+无弹层（F5 对照）
 - `t03_send_failed_no_error.png` — 运行失败聊天区无错误（F8）

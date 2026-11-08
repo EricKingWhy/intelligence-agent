@@ -81,7 +81,7 @@ Unreleased 条目。测试：`tests/session/test_permission_mode_persistence.py`
 
 - **GUI 证据入库**（`497b5952`，12 文件）：`GUI_BUG_LIST_2026-09-28.md`、
   `GUI_BUG_LIST_2026-09-28_R5.md`、`GUI_TEST_FINDINGS_2026-09-27.md`、
-  `GUI_TEST_REPORT_2026-09-28.md`、`GUI_TEST_REPORT_2026-09-28_R5.md`、`gui-test-screenshots/`×7。
+  `GUI_TEST_REPORT_2026-09-28.md`、`GUI_TEST_REPORT_2026-09-28_R5.md`、`screenshots/`×7。
   凭证扫描（sk-/api_key/Bearer/env 键赋值）：唯一命中是 "task-only" 误撞 `sk-` 正则，零真实凭证。
   **`SDD_FLOW_REVIEW_2026-09-27.md` 未获用户指示，保持未跟踪。**
 - **CI 修复**（`73b87693`）：服务端 gate0 首跑红 = ruff F841（`test_cli_fork.py:145` 未用变量）
