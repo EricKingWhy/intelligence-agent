@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONFTEST = Path(__file__).resolve().parent / "conftest.py"
 
 
 def test_item_deadline_reports_nodeid_and_exits_nonzero() -> None:
-    with tempfile.TemporaryDirectory(prefix="_pytest_deadline_", dir=PROJECT_ROOT / "tests") as temp:
+    """挂死探针必须在**仓外**临时目录跑（与 `test_per_test_timeout.py::_run_probe` 同款）。
+
+    探针含 `sleep(30)`，写进仓库 `tests/` 时一旦硬杀（CI `cancel-in-progress`、OOM、
+    VM 重置）就会留下可被整套收集的残留 ⇒ 下一次全量/覆盖率作业被它整进程打死。
+    复制 `conftest.py` 过去，机制照样随目录生效。
+    """
+    with tempfile.TemporaryDirectory(prefix="_pytest_deadline_") as temp:
         probe_dir = Path(temp)
+        shutil.copy(CONFTEST, probe_dir / "conftest.py")
         probe = probe_dir / "test_deadline_probe.py"
         probe.write_text(
             "import time\n"
@@ -22,13 +31,17 @@ def test_item_deadline_reports_nodeid_and_exits_nonzero() -> None:
             "    time.sleep(30)\n",
             encoding="utf-8",
         )
-        nodeid = f"{probe.relative_to(PROJECT_ROOT).as_posix()}::test_stalled"
-        env = os.environ.copy()
+        nodeid = "test_deadline_probe.py::test_stalled"
+        env = dict(os.environ)
         env.pop("PYTEST_ADDOPTS", None)
         env.pop("PYTEST_PLUGINS", None)
+        # 工作树优先：venv 的 intelligence_agent.pth 指向主仓 src，不盖住会读到别的树。
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(PROJECT_ROOT / "src"), env.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", nodeid.split("::", 1)[0]],
-            cwd=PROJECT_ROOT,
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", nodeid],
+            cwd=probe_dir,
             env=env,
             capture_output=True,
             text=True,

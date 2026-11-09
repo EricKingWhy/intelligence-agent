@@ -39,7 +39,8 @@ def _run_probe(
 ) -> subprocess.CompletedProcess[str]:
     """在临时目录里跑一个探针文件（conftest 复制过去，机制随目录生效）。
 
-    不写进仓库 `tests/`：探针含 `sleep(3600)`，残留会被整套收集。
+    不写进仓库 `tests/`：探针含 `sleep(3600)`，硬杀/取消时残留会被整套收集
+    （`test_pytest_deadline.py` 同样复制到仓外临时目录）。
     """
     shutil.copy(CONFTEST, tmp_path / "conftest.py")
     (tmp_path / "test_probe.py").write_text(
@@ -211,8 +212,8 @@ def test_marker_non_numeric_value_reports_usage_error(tmp_path: Path) -> None:
         timeout=20,
     )
     assert result.returncode != 0, "非数字 marker 值必须让退出码非零"
-    assert "seconds must be numeric" in result.stdout + result.stderr, (
-        "non-numeric marker values must raise UsageError rather than a raw ValueError:\n"
+    assert "必须是数字" in result.stdout + result.stderr, (
+        "非数字 marker 值应报 UsageError（“必须是数字”），而不是裸 ValueError：\n"
         f"stdout={result.stdout}\nstderr={result.stderr}"
     )
 
@@ -252,8 +253,8 @@ def test_marker_zero_is_rejected(tmp_path: Path) -> None:
         "-o", "test_timeout=0.2",
         timeout=20,
     )
-    assert result.returncode != 0, "zero must not disable the per-test deadline"
-    assert "positive finite number" in result.stdout + result.stderr
+    assert result.returncode != 0, "marker 0 必须不能关闭单测看门狗"
+    assert "正有限数" in result.stdout + result.stderr
 
 
 def test_marker_requires_a_reason(tmp_path: Path) -> None:
@@ -269,13 +270,85 @@ def test_marker_requires_a_reason(tmp_path: Path) -> None:
         "-o", "test_timeout=300",
         timeout=20,
     )
-    assert result.returncode != 0, "an explicit override must carry its evidence reason"
-    assert "requires a non-empty reason" in result.stdout + result.stderr
+    assert result.returncode != 0, "显式覆盖必须带上它的证据理由"
+    assert "非空的 reason=" in result.stdout + result.stderr
+
+
+def test_ini_zero_or_inf_cannot_disable_the_watchdog(tmp_path: Path) -> None:
+    """ini 级逃生口同样被拒：`-o test_timeout=0` / `inf` 不得静默关闭看门狗。
+
+    这是旧语义（`0 = 不设上限`）的反转；不锁住的话实现里 `... or 0.0` 之类
+    的回退会悄悄复活逃生口。
+    """
+    body = """
+        def test_ok():
+            assert True
+    """
+    for value in ("0", "inf"):
+        result = _run_probe(tmp_path, body, "-o", f"test_timeout={value}", timeout=20)
+        assert result.returncode != 0, f"ini test_timeout={value} 不得被接受"
+        assert "正有限数" in result.stdout + result.stderr, (
+            f"ini test_timeout={value} 应报 UsageError：\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+
+def test_empty_ini_value_is_reported_as_non_numeric(tmp_path: Path) -> None:
+    """空 ini 值必须报「必须是数字」，**不得**被静默当成 `0.0` 再当成「无上限」。
+
+    钉的是 `getini(...)` 后的 `or 0.0` 回退：它把「没配」和「配了 0」混成同一个值，
+    正是旧逃生口的形状。回归锁 = 报错文案必须点出**值本身**有问题。
+    """
+    result = _run_probe(
+        tmp_path,
+        """
+        def test_ok():
+            assert True
+        """,
+        "-o", "test_timeout=",
+        timeout=20,
+    )
+    assert result.returncode != 0, "空 ini 值不得被接受"
+    assert "必须是数字" in result.stdout + result.stderr, (
+        "空 ini 值应报「秒数必须是数字」（不得静默按 0.0 处理）：\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
+def test_bad_marker_is_rejected_even_when_deselected(tmp_path: Path) -> None:
+    """全量预校验对 `-m` 反选的条目**不豁免**（fail-closed）。
+
+    有意为之：marker 写错就是代码缺陷，不该因为本地用 `-m not …` 跑子集就漏过去。
+    删掉 `pytest_collection_modifyitems` 时这条必须变红——反选条目不会进
+    `pytest_runtest_protocol`，只有收集期预校验能拦到它。断言看**报错文案**而不是
+    只看 rc：全被反选时 pytest 自己也会给 rc=5。
+    """
+    result = _run_probe(
+        tmp_path,
+        """
+        import pytest
+
+        @pytest.mark.integration
+        @pytest.mark.test_timeout(30)
+        def test_deselected_but_invalid():
+            assert True
+
+        def test_valid():
+            assert True
+        """,
+        "-m", "not integration",
+        timeout=20,
+    )
+    assert "reason=" in result.stdout + result.stderr, (
+        "反选不得豁免坏 marker；预期收集期 UsageError：\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
 
 
 def test_default_timeout_is_configured_and_positive(pytestconfig: pytest.Config) -> None:
     """默认值必须真的配在 pyproject 里（否则机制只在 `-o` 下才存在）。"""
     value = float(pytestconfig.getini("test_timeout"))
     assert value > 0, "默认单测超时未配置：整套仍只能靠 CI job 上限收场"
-    # Keep a margin above the measured 91.12s Gate-1 slowest item.
-    assert value >= 120, f"default {value}s is too close to the measured slowest test"
+    # 只防"手滑写成 <120s"这一族：实测最长单条在 Gate-1 是 91.12s、本机慢盘 426.93s，
+    # 120 对后者并不构成余量（600s 例外由 test_workspace_index 的 marker 单独承担）。
+    assert value >= 120, f"默认 {value}s 低于 120s 手滑下限"

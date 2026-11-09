@@ -561,6 +561,18 @@ teardown 可能不跑，后续用例不继续**；换来的是“退出码可靠
 不要把这条理解成“超时后 suite 照常继续”——那是 `signal` 方法的语义，
 本机制不承诺。
 
+**平台适配（#1515 AC1）**：`signal` 方法依赖 `signal.setitimer` + `SIGALRM`，
+二者在 Windows 上**不存在**（Python 文档：`SIGALRM` 仅 Unix）⇒ 要在 Windows
+开发者机上同样生效，只能选 **Timer 线程**法（本机制），这是选型的硬约束，
+不是风格偏好。代价是超时点只能终止整个进程（见上段），无法像 signal 法那样
+只打断当前用例。
+
+Windows 可复跑命令（PowerShell，仓库根；`.venv\Scripts\python.exe`）：
+`$env:PYTHONUTF8=1; .venv\Scripts\python.exe -m pytest tests\test_per_test_timeout.py tests\test_pytest_deadline.py -q -p no:randomly --basetemp=$env:TEMP\pptt`
+期望 13 passed；超时归因探针在输出里给出 `[test-timeout] …exceeded Ns`。
+**读数状态：无 Windows 落盘读数**——本仓 Windows 作业（`mm08-windows-verify.yml`
+等）不跑后端 pytest，该命令只有在 Windows 机上手工执行才能取证。
+
 **不可共存**：本机制名义上复用 pytest-timeout 的 ini/marker 名（`test_timeout`），
 二者不可共存——`parser.addini` 重复注册是静默覆盖、无告警；装 pytest-timeout
 前须先移除本机制。
@@ -570,17 +582,33 @@ teardown 可能不跑，后续用例不继续**；换来的是“退出码可靠
 回收（看门狗 abort 前终止已登记的子进程），另开专项票做子进程追踪，不在本票范围。
 
 **默认值**：`pyproject.toml` `[tool.pytest.ini_options]` 里 `test_timeout = "300"`。
-实测依据（2026-11-07，Gate-1 与 Windows venv）：
+实测依据（2026-11-07，Gate-1 与 Windows venv；2026-11-09 补本机 Linux 读数）：
 - Gate-1 run `42253777049` 的 JUnit 报告覆盖 10,018 个测试；最长单条 91.12s，次长 26.16s。
-- Windows 上 `TestHeaderReader::test_does_not_read_event_bodies` 执行 10,000 次 JSONL fsync 实测 295.12s。
-- 默认 300s 约为 Gate-1 最长单条的 3.3 倍；Windows fsync 用例单独使用 600s 的有理由例外。
-复跑命令（重测默认耗时）：`pytest --durations=10`（全量）或
+- **本机 Linux 慢盘实测 426.93s**（2026-11-09，`--durations=1`，同一用例；此前两次为
+  409.31s / 418.11s）⇒ 默认 300s 在慢盘上**会误杀**该用例，600s 例外确有必要，
+  但对慢盘只是约 1.4 倍余量——**该用例在慢盘上贴近 600s**。
+- Windows 上 295.12s 为**单机手测读数、无落盘日志**（`grep -rn 295.12` 只命中散文），
+  600s 相对它是约 2 倍余量。
+- 默认 300s 约为 Gate-1 最长单条的 3.3 倍（CI 机器口径；不要把它当成所有机器都成立）。
+复跑命令（重测耗时）：`pytest --durations=10`（全量）或
 `pytest tests/workspace/test_workspace_index.py --durations=5`。
 
 **例外**：逐用例放宽使用 `@pytest.mark.test_timeout(seconds, reason=...)`。`seconds` 必须是正有限数，`reason` 必须非空；不允许用 `0` 或无穷值关闭看门狗。
+**ini 键同样被拒**：`-o test_timeout=0` / `inf`（及 `nan`、负数）在收集期报
+`UsageError: … test_timeout 必须是正有限数`，rc=4，**整个 session 收集失败**而不是单条失败——
+这是对旧语义（`0 = 不设上限`）的有意反转（向后不兼容，已登记于 PR 的 Merge Danger）。
+非数字（如 `-o test_timeout=abc`）报「秒数必须是数字」。两条都有探针锁住
+（`tests/test_per_test_timeout.py::test_ini_zero_or_inf_cannot_disable_the_watchdog` 等）。
+**反选 / 跳过不豁免**：`_effective_timeout` 在 `pytest_collection_modifyitems` 里对**全部**
+已收集条目预校验，因此 `-m "not integration"` 反选的条目若 marker 写坏照样 rc=4
+（fail-closed：marker 写错就是代码缺陷）。回归锁：
+`tests/test_per_test_timeout.py::test_bad_marker_is_rejected_even_when_deselected`。
+`@pytest.mark.skip` 的条目仍会被 `pytest_runtest_protocol` 求值（skip 在 setup 期发生），
+故没有单独的收集期探针。
 正常慢用例（fsync 密集、Windows、真实容器）按基线加理由放宽，**不为过门削弱
 持久化断言**；不得批量放宽。
-当前 `tests/workspace/test_workspace_index.py::TestHeaderReader::test_does_not_read_event_bodies` 使用 600s 例外：Windows 10,000 次 JSONL fsync 实测 295.12s，理由写在 marker 中。新增例外时同步更新本节。
+当前 `tests/workspace/test_workspace_index.py::TestHeaderReader::test_does_not_read_event_bodies` 使用 600s 例外：
+本机 Linux 慢盘 426.93s（2026-11-09 实测）、Gate-1 Linux 91.12s、Windows 手测 295.12s（无落盘），理由写在 marker 中。新增例外时同步更新本节。
 
 **与 CI job 30 分钟上限的区别**：job 上限只保证“整套最终会结束”，挂死的
 单测要等 30 分钟才收场且无法归因到 nodeid。单测超时把归因点提前到具体

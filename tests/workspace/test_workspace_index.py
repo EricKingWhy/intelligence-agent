@@ -1126,7 +1126,10 @@ class TestHeaderReader:
 
     @pytest.mark.test_timeout(
         600,
-        reason="10k JSONL fsync: 295.12s Windows; 91.12s Gate-1 Linux",
+        reason=(
+            "10k JSONL fsync: 426.93s local Linux slow disk (2026-11-09, --durations=1); "
+            "91.12s Gate-1 Linux; 295.12s Windows (manual, no log)"
+        ),
     )
     def test_does_not_read_event_bodies(self, tmp_path: Path, monkeypatch) -> None:
         """AC14 硬证据：正文有一万条事件，读取只碰第 1 行。"""

@@ -37,7 +37,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     # `[tool.pytest.ini_options].test_timeout`，这里只登记 ini 键与 marker。
     parser.addini(
         "test_timeout",
-        "Hard per-test deadline in seconds; timed-out tests terminate the pytest process.",
+        "每个用例的硬超时秒数（须为正有限数）；超时按 thread 方法终止整个进程",
         default="300",
     )
 
@@ -47,7 +47,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
     config.addinivalue_line(
         "markers",
-        "test_timeout(seconds, reason): finite positive per-test deadline override with an evidence-based reason",
+        "test_timeout(seconds, reason): 覆盖本用例的单测级超时上限，秒数须为正有限数且 reason= 非空",
     )
     if _stderr_fd is None:
         _stderr_fd = os.dup(_raw_stderr())
@@ -86,17 +86,17 @@ def _effective_timeout(item: pytest.Item) -> tuple[float, str]:
             )
         if len(marker.args) > 1 or set(marker.kwargs) - {"seconds", "reason"}:
             raise pytest.UsageError(
-                f"{item.nodeid}: test_timeout accepts one seconds value and reason= only"
+                f"{item.nodeid}: test_timeout 只接受一个秒数和一个 reason= 关键字"
             )
         raw = marker.args[0] if marker.args else marker.kwargs.get("seconds")
         reason = marker.kwargs.get("reason")
         if raw is None:
             raise pytest.UsageError(
-                f"{item.nodeid}: test_timeout marker requires one seconds value"
+                f"{item.nodeid}: test_timeout marker 需要一个秒数"
             )
         if not isinstance(reason, str) or not reason.strip():
             raise pytest.UsageError(
-                f"{item.nodeid}: test_timeout marker requires a non-empty reason= value"
+                f"{item.nodeid}: test_timeout marker 需要一个非空的 reason= 理由"
             )
     else:
         raw = item.config.getini("test_timeout")
@@ -106,11 +106,11 @@ def _effective_timeout(item: pytest.Item) -> tuple[float, str]:
         seconds = float(raw)
     except (TypeError, ValueError) as exc:
         raise pytest.UsageError(
-            f"{item.nodeid}: test_timeout seconds must be numeric, got {raw!r}"
+            f"{item.nodeid}: test_timeout 的秒数必须是数字，收到 {raw!r}"
         ) from exc
     if not math.isfinite(seconds) or seconds <= 0:
         raise pytest.UsageError(
-            f"{item.nodeid}: test_timeout must be a positive finite number"
+            f"{item.nodeid}: test_timeout 必须是正有限数（0 与无穷值都不能关闭看门狗）"
         )
     return seconds, reason
 
@@ -140,8 +140,8 @@ def _abort(item: pytest.Item, timeout: float, reason: str) -> None:
         os.write(
             fd,
             (
-                f"\n[test-timeout] {item.nodeid} exceeded {timeout:g}s ({reason}); "
-                "terminating the process (pytest teardown may not run)\n"
+                f"\n[test-timeout] {item.nodeid} 超过 {timeout:g}s 未返回（{reason}）；"
+                "按 thread 方法终止整个进程（teardown 可能未执行）\n"
             ).encode("utf-8", "backslashreplace"),
         )
         faulthandler.dump_traceback(file=fd, all_threads=True)

@@ -156,7 +156,13 @@ def _read_until_pong(
     *,
     deadline: float | None = None,
 ) -> list[dict]:
-    """Read through a pong fence within one total budget, ignoring heartbeats."""
+    """Read through a pong fence within one total budget, ignoring heartbeats.
+
+    两个参数的关系（不给调用方留坑）：传了 ``deadline`` 时**只有它**决定何时放弃
+    （绝对 ``time.monotonic()`` 时刻，跨轮共享），``timeout`` 只用于入参校验与报错文案；
+    调用方必须让二者一致（``deadline ≈ now + timeout``），否则报错里的秒数会与真实用时无关。
+    不传 ``deadline`` 时等价于 ``deadline = time.monotonic() + timeout``。
+    """
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be a positive finite number")
 
@@ -316,7 +322,9 @@ def _permanently_stalled_portal_probe(connection, portal_blocked, operation: str
         connection.send("drain_started")
         started = time.monotonic()
         try:
-            _drain_blocking(websocket, settle=0, timeout=0.5)
+            # settle 吃掉大部分预算：正确的 send 预算必须用**剩余时间**（0.5s），
+            # 用整轮 timeout（2.0s）会把总耗时拖到 ~3.5s（回归判据见父进程断言）。
+            _drain_blocking(websocket, settle=1.5, timeout=2.0)
         except AssertionError:
             elapsed = time.monotonic() - started
             worker_alive = any(
@@ -360,12 +368,29 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
             assert parent.poll(3), f"{operation} missed its caller-side deadline"
             result, elapsed, worker_alive = parent.recv()
             assert result == f"{operation.removesuffix('_send')}_timed_out"
-            assert isinstance(elapsed, float) and elapsed < 1.5
+            assert isinstance(elapsed, float)
+            # drain_send：settle=1.5 吃掉大部分预算 ⇒ send 必须按**剩余时间**（0.5s）封顶，
+            # 用整轮 timeout（2.0s）会拖到 ~3.5s。上界取 1.2× 预算，给调度留余量。
+            limit = 1.5 if operation == "receive" else 2.4
+            assert elapsed < limit, (
+                f"{operation} overran its budget: {elapsed:.2f}s (limit {limit}s)"
+            )
             worker_name = "board-receive" if operation == "receive" else "board-send"
+            # 若未来把 worker 做成可回收，本断言要随语义一起改（当前契约 = 必须残留）。
             assert worker_alive, f"probe did not reproduce the uncollectable {worker_name} worker"
             assert process.is_alive(), "probe escaped before parent cleanup"
-        else:
-            assert not parent.poll(1), f"{operation} unexpectedly returned with a blocked portal"
+        elif parent.poll(1):
+            # 子进程在 portal 卡死期间死掉时，pipe 先 EOF ⇒ 必须与"意外返回"分开报。
+            try:
+                outcome = parent.recv()
+            except EOFError:
+                raise AssertionError(
+                    f"{operation} child crashed while the portal was blocked "
+                    f"(exitcode={process.exitcode}); it did not return"
+                ) from None
+            raise AssertionError(
+                f"{operation} unexpectedly returned with a blocked portal: {outcome!r}"
+            )
     finally:
         child.close()
         if process.pid is not None:
@@ -376,6 +401,8 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
 
     assert not process.is_alive(), "permanent-stall child survived its supervisor"
     assert process.exitcode is not None and process.exitcode != 0
+
+
 def _drain_blocking(ws, settle: float = 0.35, timeout: float = 30.0) -> list[dict]:
     """把 WS 上"当前该到的"业务帧收干净（**静默判定**，不是固定轮数）。
 
@@ -421,6 +448,88 @@ def _drain_blocking(ws, settle: float = 0.35, timeout: float = 30.0) -> list[dic
             if quiet >= 2:
                 return frames
     raise AssertionError("board stream did not become quiet after 8 rounds")
+
+
+def test_drain_waits_for_a_frame_that_lands_one_round_late() -> None:
+    """「连续两轮空才算静默」的回归锁（`quiet >= 2` **不得**退回 `>= 1`）。
+
+    形状 = docstring 里那个实测坑：帧在出站队列里排到**下一轮**才刷出，单轮读到
+    0 帧就返回 ⇒ 断言恒真（假绿）。这里第一轮只回 pong、第二轮才发板帧；`>= 1`
+    会在第一轮返回 `[]`，本用例的断言随即失败。
+    """
+    pings = 0
+
+    async def late_frame_app(scope, receive, send):
+        nonlocal pings
+        await receive()
+        await send({"type": "websocket.accept"})
+        while True:
+            message = await receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            pings += 1
+            if pings == 2:
+                await send({"type": "websocket.send", "text": '{"type":"board_snapshot"}'})
+            await send({"type": "websocket.send", "text": '{"type":"pong"}'})
+
+    client = TestClient(late_frame_app)
+    with client.websocket_connect("/") as ws:
+        frames = _drain_blocking(ws, settle=0, timeout=5.0)
+
+    assert [frame["type"] for frame in frames] == ["board_snapshot"], (
+        f"晚到一轮的帧被当成静默丢掉了：{frames}"
+    )
+
+
+def test_drain_does_not_oversleep_past_its_deadline() -> None:
+    """`settle` 必须被剩余预算钳制（`time.sleep(min(settle, remaining))`）。
+
+    不钳制时 `settle=5.0` 会在 deadline 早已过去后仍睡满 5s，总耗时无界地拖长，
+    调用方的 caller-side deadline 名存实亡。
+    """
+    async def silent_app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+        while True:
+            message = await receive()
+            if message["type"] == "websocket.disconnect":
+                return
+
+    client = TestClient(silent_app)
+    with client.websocket_connect("/") as ws:
+        started = time.monotonic()
+        with pytest.raises(AssertionError, match="deadline"):
+            _drain_blocking(ws, settle=5.0, timeout=0.2)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 1.5, f"drain 睡过了自己的 deadline：{elapsed:.2f}s（预算 0.2s）"
+
+
+def test_drain_does_not_reset_the_pong_budget_each_round() -> None:
+    """每轮 pong 等待必须吃**同一条**绝对 deadline，不得每轮重新计时。
+
+    pong 每轮固定迟到 0.3s、总预算 0.5s：正确实现第二轮只剩 0.2s ⇒ 超期抛错；
+    若 `_drain_blocking` 不把 `deadline` 传给 `_read_until_pong`，第二轮又拿满
+    0.5s ⇒ pong 到达、被当成成功返回。
+    """
+    async def slow_pong_app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+        while True:
+            message = await receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            await asyncio.sleep(0.3)
+            await send({"type": "websocket.send", "text": '{"type":"pong"}'})
+
+    client = TestClient(slow_pong_app)
+    with client.websocket_connect("/") as ws:
+        started = time.monotonic()
+        with pytest.raises(AssertionError, match="deadline"):
+            _drain_blocking(ws, settle=0, timeout=0.5)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 1.5, f"跨轮 deadline 未共享：{elapsed:.2f}s"
 
 
 def test_drain_fails_if_stream_never_becomes_quiet() -> None:

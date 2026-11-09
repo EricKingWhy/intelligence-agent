@@ -12,8 +12,15 @@
 本文件用**替身 ws** 直接钉这两条语义（不启服务器，跑得快且不怕负载）：
 被违反时必须在有限时间内抛出、且错误里带得出等待点，而不是返回半截结果。
 
-变异判据（改完必须复跑，见回报）：把 `_receive_text_within` 的 `wait_for` 去掉、
-或把 `_recv_until` 的 `partial_ok` 默认改回 True，本文件必须红。
+变异判据（改完必须复跑，见回报）：
+
+- `_receive_text_within`：去掉 **worker 线程 + `result.get(timeout=…)`** 那层（内层
+  `wait_for` 只挡得住"portal 还能跑"的情况，portal 本身卡死时它是冗余的），
+  `test_drain_blocking_is_bounded_end_to_end_when_no_frame_ever_arrives` 与
+  `tests/web/test_board_broadcaster.py` 的
+  `test_pong_wait_is_bounded_when_portal_loop_stalls` /
+  `test_permanent_portal_stall_is_confined_to_a_supervised_child[receive…]` 必须红；
+- `_recv_until`：把 `partial_ok` 默认改回 True，本文件必须红。
 """
 
 from __future__ import annotations
@@ -70,7 +77,12 @@ def test_read_until_pong_fails_within_a_bound_instead_of_hanging() -> None:
 
 
 def test_drain_blocking_is_bounded_end_to_end_when_no_frame_ever_arrives() -> None:
-    """整条 `_drain_blocking` 也必须有界（每轮 receive 有界 ⇒ 总时长有界）。"""
+    """整条 `_drain_blocking` 也必须有界（每轮 receive 有界 ⇒ 总时长有界）。
+
+    钉的是 `_receive_text_within` 的 worker + `result.get` 那层：内层 `wait_for`
+    在替身 ws 上也会超时，所以真正兜住"portal 卡死"的是外层；把它拆掉后本用例
+    会在 `settle=0` 的轮次里永久阻塞（父进程超时兜底 → 红）。
+    """
     ws = _SilentWs()
     started = time.monotonic()
     with pytest.raises(AssertionError):
