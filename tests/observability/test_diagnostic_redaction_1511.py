@@ -60,3 +60,32 @@ def test_jsonl_redacts_oauth_authentication_and_cli_arguments(tmp_path):
         "fake_access_123", "fake_client_456", "fake_basic_789", "fake_cli_123",
         "fake_refresh_123", "fake secret words",
     ))
+
+
+def test_jsonl_redacts_camel_case_oauth_fields_and_basic_equals(tmp_path):
+    path = setup_logging(workspace_dir=str(tmp_path / "workspace"))
+    log_event(
+        logging.getLogger("redaction-test"), "error", "failed",
+        session_id="session-1511-camel", run_id="run-1511-camel",
+        details={
+            "oauth": {
+                "clientSecret": "fake_client_secret_camel_1511",
+                "accessToken": "fake_access_token_camel_1511",
+            },
+            "json": '{"oauth":{"clientSecret":"fake_json_client_secret_1511",'
+                    '"accessToken":"fake_json_access_token_1511"}}',
+            "message": "Authorization=Basic fake_basic_equals_1511",
+        },
+    )
+    text = path.read_text(encoding="utf-8")
+
+    assert all(secret not in text for secret in (
+        "fake_client_secret_camel_1511",
+        "fake_access_token_camel_1511",
+        "fake_json_client_secret_1511",
+        "fake_json_access_token_1511",
+        "fake_basic_equals_1511",
+    ))
+    entry = json.loads(text)
+    assert entry["session_id(会话ID)"] == "session-1511-camel"
+    assert entry["run_id(运行ID)"] == "run-1511-camel"
