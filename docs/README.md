@@ -39,5 +39,6 @@
   权威，执行其中任何步骤前必须回到 `docs/SDD_WORKFLOW_PROTOCOL.md` 和 `AGENTS.md` 核验。
 
 归档内容保留历史语境，不应被当成当前指令。旧路径不保留 stub；旧路径映射见 `docs/archive/gui-r5/`、`docs/archive/handoffs/`、
-`docs/archive/integration-prompts/` 的 `README.md`，以及 `docs/archive/gate-unverifiable/` 的
-`manifest.json`；仓库外保存的旧 URL 需通过映射或 Git 历史定位。
+`docs/archive/integration-prompts/` 的 `README.md`、
+`docs/archive/gate-unverifiable/` 的 `manifest.json`，以及 `docs/archive/agents-rules-baseline-2026-10-03/` 的
+`README.md` / `manifest.json`；仓库外保存的旧 URL 需通过映射或 Git 历史定位。
