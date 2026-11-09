@@ -1,0 +1,1 @@
+2026-11-08	#1511 修复后双轴独立复审：Standards PASS；Correctness/Spec PASS；初审 P2（真实 Langfuse 序列化未覆盖裸 key/PEM）已补测；P0–P4=0。详见月档 #1511。	2680bb8889d71c58d6dfecf472cf0b1e1e120614..0696950dc0860ac46e14da41e724958603ecbc3d
