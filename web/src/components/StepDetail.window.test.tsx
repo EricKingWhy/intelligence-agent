@@ -140,7 +140,12 @@ describe('F5 尾窗：出口能到达全部条目（AC4）', () => {
     expect(rows('.detail-tool-row')).toBe(N);
   });
 
-  it('DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N', { timeout: 20000 }, () => {
+  /* #1517：这条用例要连做 10 次全量重渲染（本树实测：DIFFS 50→250→450→500 共 4 次，
+     ARTIFACTS 20→120→220→320→420→500 共 6 次）。60s 不是「实测最坏值」：16 路同核争抢
+     曾实测 44.6s（读数见 `docs/PERF_BASELINE.md` 的 #1517 节；同配置复核 36.1s），
+     取约 1.3×；更小机器或更重负载会继续压线。5s / 20s / 60s 都与断言无关，断言本身
+     一条没动——这是 CPU 预算，不是产品 SLA。 */
+  it('DIFFS / ARTIFACTS：默认先裁、点出口才涨，最终行数 = N', { timeout: 60000 }, () => {
     render(<ChangesTab tools={mkTools(N, 'diff')} sessionId="f5" />);
     const beforeDiffs = rows('.step');
     /* `before < N` 才是 AC4 的区分点：只断言「最终 = N」在改造前**也成立**
