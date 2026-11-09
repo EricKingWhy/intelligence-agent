@@ -193,13 +193,13 @@
 ## 六、证据文件
 
 `screenshots/`：
-- `screenshots/t01_first_load_dark_popup.png` — 首访：暗色+权限弹层自动展开（F5）
-- `screenshots/t01_reload_light_no_popup.png` — 刷新后：亮色+无弹层（F5 对照）
-- `screenshots/t03_send_failed_no_error.png` — 运行失败聊天区无错误（F8）
-- `screenshots/t04_permission_dialog.png` — 权限弹窗无选中指示（F10/A1）
-- `screenshots/t04_running_auto_approved_bash.png` — bash 自动执行+运行态（F11）
-- `screenshots/t05_auto_restored_session.png` — 自动恢复会话+侧栏高亮错位（F1/F4）
-- `screenshots/t13_memory_dialog.png` — 记忆弹窗+A3 竖排文字（F6 观察的 UI 侧）
+- `t01_first_load_dark_popup.png` — 首访：暗色+权限弹层自动展开（F5）
+- `t01_reload_light_no_popup.png` — 刷新后：亮色+无弹层（F5 对照）
+- `t03_send_failed_no_error.png` — 运行失败聊天区无错误（F8）
+- `t04_permission_dialog.png` — 权限弹窗无选中指示（F10/A1）
+- `t04_running_auto_approved_bash.png` — bash 自动执行+运行态（F11）
+- `t05_auto_restored_session.png` — 自动恢复会话+侧栏高亮错位（F1/F4）
+- `t13_memory_dialog.png` — 记忆弹窗+A3 竖排文字（F6 观察的 UI 侧）
 
 ---
 

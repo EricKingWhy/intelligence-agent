@@ -38,5 +38,6 @@
 - `docs/integration/`：历史集成资料与少量专项材料的混合目录；本阶段未重排。它不是当前流程
   权威，执行其中任何步骤前必须回到 `docs/SDD_WORKFLOW_PROTOCOL.md` 和 `AGENTS.md` 核验。
 
-归档内容保留历史语境，不应被当成当前指令。旧路径不保留 stub；完整旧路径映射见各归档目录的 `README.md`，
-仓库外保存的旧 URL 需通过映射或 Git 历史定位。
+归档内容保留历史语境，不应被当成当前指令。旧路径不保留 stub；旧路径映射见 `docs/archive/gui-r5/`、`docs/archive/handoffs/`、
+`docs/archive/integration-prompts/` 的 `README.md`，以及 `docs/archive/gate-unverifiable/` 的
+`manifest.json`；仓库外保存的旧 URL 需通过映射或 Git 历史定位。
