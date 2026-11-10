@@ -569,7 +569,7 @@ teardown 可能不跑，后续用例不继续**；换来的是“退出码可靠
 
 Windows 可复跑命令（PowerShell，仓库根；`.venv\Scripts\python.exe`）：
 `$env:PYTHONUTF8=1; .venv\Scripts\python.exe -m pytest tests\test_per_test_timeout.py tests\test_pytest_deadline.py -q -p no:randomly --basetemp=$env:TEMP\pptt`
-期望 13 passed；超时归因探针在输出里给出 `[test-timeout] …exceeded Ns`。
+期望 **14 passed**（`tests/test_per_test_timeout.py` 13 + `tests/test_pytest_deadline.py` 1，2026-11-09 修复轮实测）；超时归因探针在输出里给出 `[test-timeout] <nodeid> 超过 Ns 未返回（reason）`。
 **读数状态：无 Windows 落盘读数**——本仓 Windows 作业（`mm08-windows-verify.yml`
 等）不跑后端 pytest，该命令只有在 Windows 机上手工执行才能取证。
 
