@@ -881,8 +881,8 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 #:
 #: **首张**收据自举（新分支出生第一张 PASS 收据）已由 #1663 覆盖：见 `receipt_present_check()`
 #: 的「首张收据自举」分支。同形死锁的**第二代**（收据落地之后台账继续漂移、又累计无收据提交）
-#: 由 #1692 覆盖：`receipt_present_check()` 的「第二代自举」分支——只放行含 stale-ledger 违规的
-#: 现场，收据新鲜、仅其后又进代码提交的分支照旧判红。本常量只承担采用窗锚点，两者都不由它承担。
+#: 由 #1692 覆盖：`receipt_present_check()` 的「第二代自举」分支——只放行含 stale-ledger 违规、
+#: 且区间内落过的收据在 HEAD 树里全部仍在的现场。本常量只承担采用窗锚点，两者都不由它承担。
 _RECEIPT_BOOTSTRAP_SHA = "d97b00f26a43e36fc289c16cf89dbd66e02dda8e"
 # A receipt requires a ledger binding when its tested Gate-0 source contains this marker.
 _LEDGER_BINDING_MARKER = "review-ledger-binding-v1"
@@ -1321,12 +1321,21 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
     `test_gate0_receipt_present.py` 的删/改两条用例钉住。CI / 局部跑拿不到该 flag（不会落盘）
     ⇒ 仍按已提交收据硬口径执法（AC3）。
 
-    第二代自举（#1692，同一 flag 门槛）：区间内**已有**扫描有效的收据、且本次违反里**至少一笔
+    第二代自举（#1692，同一 flag 门槛）：区间内**已有**扫描有效的收据、本次违反里**至少一笔
     是 stale-ledger**（候选收据存在，只是其绑定的台账指纹被其后新增的台账行改掉）、落地历史
-    可读 ⇒ 本次跑落盘的 HEAD 收据按形状④刷新这些 stale 覆盖。这一条修的是「收据落地 → 台账
-    漂移 → 又进无收据代码提交」的自锁；它**不**放行"收据新鲜、只是其后又进代码提交"的完整性
-    形状（那批没有 stale 违规，7 条 `test_bootstrap_stays_red_*` 与 AC5(ii) 继续判红）。
-    stale 这个鉴别项不是装饰：票面方向 1 的「区间内至少有张在场收据」字面无法区分这两者。
+    可读、**且区间内落过的每一张收据在 HEAD 树里都还在** ⇒ 本次跑落盘的 HEAD 收据按形状④
+    刷新这些 stale 覆盖。这一条修的是「收据落地 → 台账漂移 → 又进无收据代码提交」的自锁。
+
+    ⚠ 有效范围（如实披露）：`attested` 是**整跑级**结论，一次放行覆盖本次全部违规，所以
+    "落过就必须还在"是必需的合取项——否则只要另有一张在场收据制造 stale，删掉/藏掉自己落过的
+    收据就能把 6/7 洗成 7/7。反过来，只要例行台账归属行（每张票都做）落地，收据就会 stale，
+    此时本判据实际只要求「本次完整全绿全量跑」，并不再单独区分"收据新鲜、其后又进代码提交"
+    的完整性形状——stale 不是完整性形状的替身，这条放宽面由
+    `test_second_receipt_bootstrap_attests_after_a_routine_ledger_row` 登记为语义。
+    删掉 / 改坏区间内收据的现场没有本地自举出口（保留的完整性角，见
+    `test_second_receipt_bootstrap_requires_an_in_range_valid_receipt`）；票面方向 1 的
+    「区间内至少有张在场收据」字面过宽，会把 7 条 `test_bootstrap_stays_red_*` 的 before 态
+    一并翻绿。
     """
     repo_root = repo_root or REPO_ROOT
     mb = _git_at(repo_root, "merge-base", "origin/main", "HEAD")
@@ -1371,7 +1380,7 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
     # #1663 首张收据自举：分支区间里**从未落过**收据 ⇒ 本次全绿全量跑即将落盘的那张 HEAD 收据
     # 就是本分支的第一张（`write_reading` 键=HEAD）。它按形状④覆盖区间内全部违规：每笔违规都是
     # HEAD 的祖先，且 `HEAD..HEAD` 尾判为空。分支**已有**收据时不开这条，否则「已有收据之后的
-    # 陈旧覆盖」会被一并放开（AC5(ii) / AC6 要挡的同义放松）。
+    # 陈旧覆盖」会被一并放开（#1663 AC5(ii) / AC6 要挡的同义放松）。
     # 这里的 `in_range_receipts` 只是"现存且有效"的那一份，**不能单独当自举前置**（#1663 P1-1）：
     # 删掉 / 改坏即可清零。真正的前置见下方 `_in_range_receipt_landings` + `receipts_scanned`。
     in_range_receipts = [
@@ -1484,28 +1493,34 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         #      · `receipts_scanned`：HEAD 收据扫描成功。读失败 ⇒ 状态未知 ⇒ 判红（#1663 P1-2，
         #        不能把「读不到」当「没有」）；
         #      · 区间内**没有**收据落盘提交：删掉/改坏那张收据也抹不掉落地历史（#1663 P1-1），
-        #        那正是「已有收据之后的陈旧覆盖」，必须继续判红（AC5(ii)）。
+        #        那正是「已有收据之后的陈旧覆盖」，必须继续判红（#1663 AC5(ii)）。
         #    `in_range_receipts`（现存且有效）一并要求，挡住"收据在 base 之前落地、文件名却指向
         #    区间内提交"这种病态构造。
         #    CI / 局部跑拿不到 `_allow_current_full_run_receipt=True`（不会落盘），不在此列（AC3）。
-        first_receipt = False
-        if receipts_scanned and not in_range_receipts:
-            try:
-                first_receipt = not _in_range_receipt_landings(repo_root, base, head_sha)
-            except OSError:
-                first_receipt = False  # 落地历史读不出来 ⇒ 判不了"从未落过" ⇒ fail-closed
         # ③ 第二代自举（#1692）：区间内已有收据、且本次全绿全量跑要落盘的 HEAD 收据能按形状④
         #    刷新它们——只放行**台账漂移**这一可机械判定的形状：至少一笔违规是 stale-ledger
-        #    （候选收据存在且扫描有效，只是它绑定的台账指纹被其后新增的台账行改掉）。收据新鲜、
-        #    只是其后又进无收据代码提交的分支（AC5(ii) / 7 条 `test_bootstrap_stays_red_*` 的
-        #    before 态）没有 stale 违规 ⇒ 仍判红；票面方向 1 的「区间内至少有张在场收据」字面
-        #    过宽，会把这批完整性用例一并翻绿。
+        #    （候选收据存在且扫描有效，只是它绑定的台账指纹被其后新增的台账行改掉）。票面方向 1
+        #    的「区间内至少有张在场收据」字面过宽，会把 7 条 `test_bootstrap_stays_red_*` 的
+        #    before 态一并翻绿。
+        #    另加合取项「落过就必须还在」：`attested` 是整跑结论，一次放行覆盖本次**全部**违规；
+        #    没有这一条时，只要另有一张在场收据制造 stale，删掉/藏掉自己落过的收据（乃至已提交
+        #    的 FAIL 收据）就能把 6/7 洗成 7/7 并落 PASS 收据。判据只验「还在不在」，不验是否仍
+        #    有效——stale 收据本就不是有效收据，拿 `in_range_receipts` 作包含域会让第二代现场
+        #    自己判红（修复失效）。
+        first_receipt = False
         second_receipt = False
-        if receipts_scanned and in_range_receipts and stale_ledger_violations:
+        if receipts_scanned:
             try:
-                second_receipt = bool(_in_range_receipt_landings(repo_root, base, head_sha))
+                landed = _in_range_receipt_landings(repo_root, base, head_sha)
             except OSError:
-                second_receipt = False  # 落地历史读不出来 ⇒ fail-closed
+                landed = None  # 落地历史读不出来 ⇒ 两支都判不了 ⇒ fail-closed
+            if landed is not None:
+                first_receipt = not in_range_receipts and not landed
+                # `bool(landed)` 是防御性冗余：`in_range_receipts` 非空已蕴含区间内有落地提交。
+                second_receipt = (
+                    bool(in_range_receipts) and bool(stale_ledger_violations)
+                    and bool(landed) and not (landed - set(receipts))
+                )
         if head_tree_proc.returncode == 0 and head_tree and (
             per_commit_transfer or first_receipt or second_receipt
         ):
@@ -1516,7 +1531,8 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
                 detail.append("处置：本次完整 Gate-0 若把读数落盘成功（工作树与 HEAD 一致），"
                               "将复核当前 HEAD 并记录本分支第一张 PASS 收据"
                               "（区间内此前从未落过收据）")
-            elif second_receipt and not (per_commit_transfer or first_receipt):
+            # `first_receipt`（区间内无收据）与 `second_receipt`（区间内有收据）互斥。
+            elif second_receipt and not per_commit_transfer:
                 detail.append("处置：本次完整 Gate-0 若把读数落盘成功（工作树与 HEAD 一致），"
                               "将复核当前 HEAD 并记录绑定当前台账指纹的 PASS 收据，"
                               "刷新区间内因台账漂移而 stale 的旧收据")
@@ -1525,7 +1541,8 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
                               "将复核当前 HEAD 并记录绑定该树与台账的新收据")
             return ReceiptCheckResult(True, "\n".join(detail), warn_only, "attested")
     if violations and _allow_current_full_run_receipt and not receipts_scanned:
-        detail.append("收据扫描失败（读不全 HEAD 树里的收据）⇒ 状态未知，不允许首张收据自举")
+        detail.append("收据扫描失败（读不全 HEAD 树里的收据）⇒ 状态未知，"
+                      "不允许自举（首张 / 台账漂移刷新）")
     if violations and not warn_only:
         detail.append("处置：按 SDD §8.1 落盘 docs/gate/<被测树 sha>.json，或从第一父提交传递"
                       "读数（仅限 docs-only 改动），或在分支冻结 tip 上跑一次全量（其后仅 docs / 收据提交）")
