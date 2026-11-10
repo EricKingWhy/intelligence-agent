@@ -1333,7 +1333,10 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
     的完整性形状——stale 不是完整性形状的替身，这条放宽面由
     `test_second_receipt_bootstrap_attests_after_a_routine_ledger_row` 登记为语义。
     删掉 / 改坏区间内收据的现场没有本地自举出口（保留的完整性角，见
-    `test_second_receipt_bootstrap_requires_an_in_range_valid_receipt`）；票面方向 1 的
+    `test_second_receipt_bootstrap_requires_an_in_range_valid_receipt` /
+    `..._requires_an_in_range_valid_receipt_on_tamper` /
+    `..._stays_red_when_a_landed_receipt_was_deleted` /
+    `..._stays_red_when_a_landed_receipt_was_tampered`）；票面方向 1 的
     「区间内至少有张在场收据」字面过宽，会把 7 条 `test_bootstrap_stays_red_*` 的 before 态
     一并翻绿。
     """
@@ -1502,11 +1505,14 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         #    （候选收据存在且扫描有效，只是它绑定的台账指纹被其后新增的台账行改掉）。票面方向 1
         #    的「区间内至少有张在场收据」字面过宽，会把 7 条 `test_bootstrap_stays_red_*` 的
         #    before 态一并翻绿。
-        #    另加合取项「落过就必须还在」：`attested` 是整跑结论，一次放行覆盖本次**全部**违规；
-        #    没有这一条时，只要另有一张在场收据制造 stale，删掉/藏掉自己落过的收据（乃至已提交
-        #    的 FAIL 收据）就能把 6/7 洗成 7/7 并落 PASS 收据。判据只验「还在不在」，不验是否仍
-        #    有效——stale 收据本就不是有效收据，拿 `in_range_receipts` 作包含域会让第二代现场
-        #    自己判红（修复失效）。
+        #    另加合取项「落过的收据都还在、且仍是首次落地的内容」：`attested` 是整跑结论，一次
+        #    放行覆盖本次**全部**违规；没有这一条时，只要另有一张在场收据制造 stale，删掉/藏掉
+        #    自己落过的收据（乃至已提交的 FAIL 收据）就能把 6/7 洗成 7/7 并落 PASS 收据。
+        #    「还在」按 key 判（`set(receipts)`），但 key 判不出「原地改坏」——收据文件仍在、
+        #    只是 `passed != total`，所以再要求每张落过的收据仍与**首次落盘时的内容**一致
+        #    （复用 `_receipt_matches_first_landing`）。两处都只验「没被动过」，不验是否仍有效：
+        #    stale 收据本就不是有效收据，拿 `in_range_receipts` 作包含域会让第二代现场自己判红
+        #    （修复失效）。
         first_receipt = False
         second_receipt = False
         if receipts_scanned:
@@ -1520,6 +1526,7 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
                 second_receipt = (
                     bool(in_range_receipts) and bool(stale_ledger_violations)
                     and bool(landed) and not (landed - set(receipts))
+                    and all(_receipt_matches_first_landing(repo_root, t) for t in landed)
                 )
         if head_tree_proc.returncode == 0 and head_tree and (
             per_commit_transfer or first_receipt or second_receipt

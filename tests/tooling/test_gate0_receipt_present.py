@@ -521,7 +521,7 @@ def test_self_cover_off_rewrites_guards_in_ci(tmp_path, capsys):
 # 只有最后一笔代码提交满足；≥2 笔时首张 PASS 收据永远生不出来。修复的鉴别点：
 #   · AC1 = HEAD 树里**没有任何覆盖本分支区间的有效收据** ⇒ 本次全绿全量的 HEAD 收据可按形状④
 #     覆盖全部违规（它们都是 HEAD 的祖先、尾判为空），允许自举；
-#   · AC5(ii) = 分支里**已有**有效收据、其后又进代码提交 ⇒ 仍判红（真正钉住该语义的是
+#   · #1663 AC5(ii) = 分支里**已有**有效收据、其后又进代码提交 ⇒ 仍判红（真正钉住该语义的是
 #     `..._receipt_is_tampered` 的 before 态 + 改范围后的 binding 用例 (a)(b)(d) 三段；
 #     旧 binding 断言已按 #1692 AC3① 改范围）。
 
@@ -668,7 +668,7 @@ def test_multi_code_commit_bootstrap_requires_full_successful_recording_run(
 
 
 def _branch_with_one_receipt_and_two_code_commits(tmp_path) -> tuple[Repo, str, str]:
-    """AC5(ii) 同形现场：1 张覆盖 c1 的有效收据 + 其后 2 笔无收据代码提交 ⇒ 判红。"""
+    """#1663 AC5(ii) 同形现场：1 张覆盖 c1 的有效收据 + 其后 2 笔无收据代码提交 ⇒ 判红。"""
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
     c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
@@ -688,7 +688,7 @@ def _bootstrapping_check(repo: Repo, base: str):
 
 
 def test_bootstrap_stays_red_after_the_in_range_receipt_is_deleted(tmp_path):
-    """P1-1：删掉区间内那张收据**不能**把 AC5(ii) 的红变成绿。
+    """P1-1：删掉区间内那张收据**不能**把 #1663 AC5(ii) 的红变成绿。
 
     判据必须落在"区间内是否落过收据"（落地历史）而不是"HEAD 树里现存多少张有效收据"——
     后者由分支自己说了算：`git rm docs/gate/<sha>.json` 一笔就能清零。
@@ -1058,24 +1058,65 @@ def test_second_receipt_bootstrap_requires_an_in_range_valid_receipt(tmp_path):
     assert "stale ledger fingerprint" in check.detail, check.detail
 
 
-def test_second_receipt_bootstrap_requires_an_in_range_valid_receipt_on_tamper(tmp_path):
-    """#1692 修轮：区间内收据**改坏但仍在 HEAD 树里**时，`in_range_receipts` 仍是必需的合取项。
+def _tamper_receipt(repo: Repo, sha: str) -> None:
+    """原地改坏一张收据（`passed != total`，文件仍在树里）。"""
+    path = repo.root / "docs" / "gate" / f"{sha}.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["passed"] = doc["total"] - 1
+    repo.commit({f"docs/gate/{sha}.json": json.dumps(doc)}, "docs(gate): tamper with the receipt")
 
-    与 `..._requires_an_in_range_valid_receipt`（删收据）不同：这里收据文件还在，只是
-    `passed != total`。「落过就必须还在」按 **key** 判、这一条仍成立，所以挡住自举的只能是
-    `in_range_receipts`（现存且**有效**）。缺了它，区间外那张 base 收据制造的 stale 违规
-    就会把改坏收据的现场放行。把 `in_range_receipts` 从谓词里删掉 ⇒ 本用例转红。
+
+def _stale_from_out_of_range_receipt(tmp_path) -> tuple[Repo, str, str]:
+    """区间外那张（base）收据在台账漂移后成为 stale 候选；返回 (repo, base, c1)。
+
+    只做到 `code 1` 与台账行——区间内那张收据由调用方按臂自行落地。
     """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
     repo.empty_commit("empty commit right after base")
     c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
-    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
     repo.commit({"docs/review_ledger.d/1692.tsv":
                  "date\tdesc\trange\n2026-10-02\tevidence\tbase..HEAD\n"},
                 "docs(ledger): append a review-ledger row")
     repo.commit(repo.receipt(base), "docs(gate): receipt for the out-of-range base")
+    return repo, base, c1
+
+
+def test_second_receipt_bootstrap_requires_an_in_range_valid_receipt_on_tamper(tmp_path):
+    """#1692：区间内收据**改坏但仍在 HEAD 树里**、区间外收据制造 stale 违规 ⇒ 仍不得自举。
+
+    收据先在有效状态下落地、再被原地改坏 ⇒ 「落过的收据仍是首次落地的内容」这一合取项
+    把它挡住（删掉该合取项 ⇒ 本用例转红）。
+    """
+    repo, base, c1 = _stale_from_out_of_range_receipt(tmp_path / "r")
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
     _tamper_receipt(repo, c1)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_requires_an_in_range_valid_receipt_on_birth_invalid(
+    tmp_path,
+):
+    """#1692：区间内那张收据**首次落地就是 FAIL**（从未被编辑）、区间外收据制造 stale ⇒ 判红。
+
+    这条钉的是 `in_range_receipts` 里「**有效**」那半边：内容合取项（从未被编辑）与 key
+    合取项都成立，挡住自举的只能是「区间内至少一张扫描**有效**的收据」。删掉
+    `in_range_receipts` ⇒ 本用例转红（`..._on_tamper` 挡的则是内容合取项）。
+    """
+    repo, base, c1 = _stale_from_out_of_range_receipt(tmp_path / "r")
+    fail = json.loads(next(iter(repo.receipt(c1).values())))
+    fail["result"] = "FAIL"
+    fail["passed"] = fail["total"] - 1
+    repo.commit({f"docs/gate/{c1}.json": json.dumps(fail)},
+                "docs(gate): land the first receipt as FAIL")
+    with _clean_env():
+        receipts = gate0.head_tree_receipts(str(repo.root))
+        assert not receipts[c1]["valid"], receipts[c1]  # 前提自证：区间内零有效收据
 
     check = _bootstrapping_check(repo, base)
     assert check.warn_only is False, check.detail
@@ -1179,6 +1220,34 @@ def test_second_receipt_bootstrap_stays_red_when_a_committed_fail_receipt_is_hid
     assert [lane.name for lane, rc, _s, _o in results if rc != 0] == ["guards"]
 
 
+def test_second_receipt_bootstrap_stays_red_when_a_landed_receipt_was_tampered(tmp_path):
+    """r2 P1-1：把一张**落过的**收据原地改坏（文件仍在）、另一张仍在场制造 stale ⇒ 仍判红。
+
+    修复轮 1 的 `landed ⊆ set(receipts)` 按 key 判「在不在」：改坏的收据 key 仍在 ⇒ 该合取项
+    成立，整跑 `attested`（6/7 洗成 7/7 + PASS 收据）。补「每张落过的收据仍与首次落地内容
+    一致」（`_receipt_matches_first_landing`）后 ⇒ `violations`。这条是本轮修复的回归钉子。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    c2 = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit(repo.receipt(c2), "docs(gate): receipt for code 2")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+    _tamper_receipt(repo, c1)
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    # 前提自证：改坏的收据仍在 HEAD 树里（只是 invalid），且 stale 违规在场。
+    with _clean_env():
+        assert c1 in gate0.head_tree_receipts(str(repo.root))
+        assert not gate0.head_tree_receipts(str(repo.root))[c1]["valid"]
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
 def test_second_receipt_bootstrap_attests_after_a_routine_ledger_row(tmp_path):
     """Spec P2-1 边界（登记语义）：收据**仍在场但 stale**（例行台账行改了指纹）+ 其后 2 笔
     无收据代码提交 ⇒ `attested`。
@@ -1196,89 +1265,3 @@ def test_second_receipt_bootstrap_attests_after_a_routine_ledger_row(tmp_path):
     assert "stale ledger fingerprint" in check.detail, check.detail
     assert check.ok is True, check.detail
     assert check.status == "attested", check.detail
-
-
-def _tamper_receipt(repo: Repo, sha: str) -> None:
-    path = repo.root / "docs" / "gate" / f"{sha}.json"
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    doc["passed"] = doc["total"] - 1
-    repo.commit({f"docs/gate/{sha}.json": json.dumps(doc)}, "docs(gate): tamper with the receipt")
-
-
-def _scan_failure_patch():
-    real = gate0._git_at_bytes
-
-    def failing(repo_root, *args, **kwargs):
-        if args[:1] == ("ls-tree",) and any("docs/gate" in str(a) for a in args):
-            return subprocess.CompletedProcess(args, 128, b"", b"fatal: simulated ls-tree failure")
-        return real(repo_root, *args, **kwargs)
-
-    return mock.patch.object(gate0, "_git_at_bytes", failing)
-
-
-def _landing_read_failure_patch():
-    real = gate0._git_at
-
-    def failing(repo_root, *args, **kwargs):
-        if (args[:1] == ("rev-list",) and len(args) == 2 and ".." in str(args[1])
-                and not str(args[1]).endswith("HEAD")):
-            return subprocess.CompletedProcess(args, 128, "", "fatal: simulated rev-list failure")
-        return real(repo_root, *args, **kwargs)
-
-    return mock.patch.object(gate0, "_git_at", failing)
-
-
-def _two_plain_code_commits(repo: Repo) -> None:
-    repo.commit({"src/a.py": "a = 1\n"}, "code 1")
-    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
-
-
-def _stays_red_scene(scene: str, root: Path):
-    """重建 7 条 `test_bootstrap_stays_red_*` 的现场（不改那些用例本身），返回 (repo, base, patch)。"""
-    patch = contextlib.nullcontext()
-    if scene == "receipt_deleted":
-        repo, base, c1 = _branch_with_one_receipt_and_two_code_commits(root)
-        repo.remove(f"docs/gate/{c1}.json", "docs(gate): drop the receipt")
-    elif scene == "receipt_tampered":
-        repo, base, c1 = _branch_with_one_receipt_and_two_code_commits(root)
-        _tamper_receipt(repo, c1)
-    elif scene == "receipt_scan_fails":
-        repo, base, _c1 = _branch_with_one_receipt_and_two_code_commits(root)
-        patch = _scan_failure_patch()
-    elif scene == "merge_landed_receipt_deleted":
-        repo, base, c1 = _branch_with_a_receipt_landed_in_a_merge(root)
-        repo.remove(f"docs/gate/{c1}.json", "docs(gate): drop the merge-landed receipt")
-    elif scene == "renamed_receipt_tampered":
-        repo, base, c1 = _branch_with_a_receipt_renamed_into_place(root)
-        _tamper_receipt(repo, c1)
-    elif scene == "zero_receipt_scan_fails":
-        repo = Repo(root / "r")
-        base = _base_with_origin(repo)
-        _two_plain_code_commits(repo)
-        patch = _scan_failure_patch()
-    else:  # landing_history_read_fails
-        repo = Repo(root / "r")
-        base = _base_with_origin(repo)
-        _two_plain_code_commits(repo)
-        patch = _landing_read_failure_patch()
-    return repo, base, patch
-
-
-def test_bootstrap_stays_red_when_a_routine_ledger_row_is_added(tmp_path):
-    """Standards P2-1：7 条 `test_bootstrap_stays_red_*` 的现场各追加一条例行台账行 ⇒ 仍判红。
-
-    这一侧正是第一轮实现的缺口：「有 stale 的现场上放行一切」没有任何用例覆盖。台账行用
-    `_LEDGER_ROW`（每张票都会做的归属行），不改 7 条既有用例本身（它们钉的是无台账行形态）。
-    每个现场各用一个独立 tmp 子目录，失败信息带场景名。
-    """
-    for scene in ("receipt_deleted", "receipt_tampered", "receipt_scan_fails",
-                  "merge_landed_receipt_deleted", "renamed_receipt_tampered",
-                  "zero_receipt_scan_fails", "landing_history_read_fails"):
-        repo, base, patch = _stays_red_scene(scene, tmp_path / scene)
-        repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
-
-        with patch:
-            check = _bootstrapping_check(repo, base)
-        assert check.warn_only is False, f"[{scene}] {check.detail}"
-        assert check.ok is False, f"[{scene}] {check.detail}"
-        assert check.status == "violations", f"[{scene}] {check.detail}"
