@@ -1085,10 +1085,9 @@ def _stale_from_out_of_range_receipt(tmp_path) -> tuple[Repo, str, str]:
 def test_second_receipt_bootstrap_requires_an_in_range_valid_receipt_on_tamper(tmp_path):
     """#1692：区间内收据**改坏但仍在 HEAD 树里**、区间外收据制造 stale 违规 ⇒ 仍不得自举。
 
-    本条与 `..._on_birth_invalid` 各自钉 `in_range_receipts` 的一半：本条钉「收据在 HEAD 里
-    但无效」，那条钉「首次落地即无效」。两者都不依赖内容合取项（改坏后 `in_range_receipts`
-    已空，第二代自举本来就恒假）；内容合取项的真实钉子见
-    `..._stays_red_when_a_landed_receipt_was_tampered`。
+    本条是**纵深防御**：`in_range_receipts` / 内容项 / 路径项任一条单独在位都判红
+    （M2 / M9 / M10 单删皆绿，三者全删才红）；`in_range_receipts` 的同族另一半见
+    `..._on_birth_invalid`。
     """
     repo, base, c1 = _stale_from_out_of_range_receipt(tmp_path)
     repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
@@ -1155,9 +1154,10 @@ def test_second_receipt_bootstrap_requires_a_trustworthy_receipt_scan(tmp_path):
 #
 # 第一轮实现只要求「至少一笔违规是 stale-ledger」，但 attested 是**整跑级**结论：一次放行
 # 覆盖同一次跑的全部违规。于是「另有一张收据在场制造 stale」+「删掉 / 藏掉自己落过的收据」
-# 的组合会被一并放行（审查 Standards P1-1 的三组复现）。修法 = 补「落过就必须还在」：
-# `landed - set(receipts)` 为空才放行（只判在不在，不判是否仍有效——stale 收据本来就不是
-# 有效收据，拿 `in_range_receipts` 当包含域会把三单本身判红、修复失效，见 Spec P2-1 ①）。
+# 的组合会被一并放行（审查 Standards P1-1 的三组复现）。修法（经三轮）= 内容合取项（首次落地
+# 内容）+ 路径历史合取项（第一父链上无 D/M），只判「没被动过」、不判是否仍有效——stale 收据本来
+# 就不是有效收据，拿 `in_range_receipts` 当包含域会把三单本身判红、修复失效（见 Spec P2-1 ①）。
+# r1 的 key 子集判据（`landed - set(receipts)`）经 M6 实测冗余，已于 r3 删除。
 
 
 _LEDGER_ROW = {"docs/review_ledger.d/ticket.tsv":
@@ -1226,8 +1226,9 @@ def test_second_receipt_bootstrap_stays_red_when_a_landed_receipt_was_tampered(t
     """r2 P1-1：把一张**落过的**收据原地改坏（文件仍在）、另一张仍在场制造 stale ⇒ 仍判红。
 
     修复轮 1 的 `landed ⊆ set(receipts)` 按 key 判「在不在」：改坏的收据 key 仍在 ⇒ 该合取项
-    成立，整跑 `attested`（6/7 洗成 7/7 + PASS 收据）。补「每张落过的收据仍与首次落地内容
-    一致」（`_receipt_matches_first_landing`）后 ⇒ `violations`。这条是本轮修复的回归钉子。
+    成立，整跑 `attested`（6/7 洗成 7/7 + PASS 收据）。r2 时代本条是内容合取项的钉子（当时
+    M9 单删即红）；r3 加路径项后改由 `_receipt_path_was_touched` 捕获（M10 单删才红），内容项
+    退为纵深防御。保留本条以钉住「改坏 ⇒ `violations`」这一行为。
     """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
@@ -1256,8 +1257,9 @@ def test_second_receipt_bootstrap_stays_red_when_a_deleted_receipt_is_readded_ve
     """r3 P1-1(g)：删掉落过的收据、下一笔又用**原字节**加回、另一张仍在场制造 stale ⇒ 判红。
 
     内容合取项（blob == 首次落地 blob）在恢复原字节后成立，key 合取项也只问在不在 ⇒ 修复轮 2
-    仍可整跑洗白（base `violations`、tip `attested`）。补「收据路径在区间内未被 D/M/R 触碰」
-    后 ⇒ `violations`：中间那笔删除仍在路径历史上。
+    仍可整跑洗白（base `violations`、tip `attested`）。补「收据路径在第一父链上未被 D 或 M
+    触碰」后 ⇒ `violations`：中间那笔删除仍在路径历史上。（改名按 `--no-renames` 拆成 D+A，
+    由 D 覆盖；`R` 在该口径下不产出，本判据不依赖它。）
     """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
@@ -1342,7 +1344,8 @@ def test_second_receipt_bootstrap_stays_red_when_a_merge_landed_receipt_is_tampe
     """r3 P2-1 反向守卫：merge 落地后**又被改坏**仍是 `violations`（`-m` 不误伤 fail-closed）。
 
     现场：c1 收据正常落地（后因例行台账行变 stale）+ c2 收据在 merge 里首次落地后再被改坏。
-    内容合取项开 `-m` 后能看见 merge 落地那笔 A，改坏 ⇒ blob 不等 ⇒ 不得自举。
+    改坏 = 一笔 `M` ⇒ 路径合取项与内容合取项**任一在位**都能挡住；本条是纵深防御的组合钉，
+    `-m` 的必要性由 `..._sees_a_receipt_first_landed_in_a_merge`（M11 ⇒ 单独转红）钉住。
     """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
@@ -1385,3 +1388,84 @@ def test_second_receipt_bootstrap_attests_after_a_routine_ledger_row(tmp_path):
     assert "stale ledger fingerprint" in check.detail, check.detail
     assert check.ok is True, check.detail
     assert check.status == "attested", check.detail
+
+
+def _branch_with_a_sync_merge_keeping_its_own_receipt_bytes(tmp_path) -> tuple[Repo, str, str]:
+    """分支落收据 A → 台账行 → 无收据代码；origin/main 在同一路径重跑落字节 B；`-s ours` 合并。
+
+    `wall_seconds` 不同 ⇒ 同路径不同字节 ⇒ 真实的多跑一次全量的现场。分支从没动过那张收据：
+    HEAD blob == 首次落地 blob，第一父链上零 D/M。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    receipt_a = next(iter(repo.receipt(c1).values()))
+    repo.commit({f"docs/gate/{c1}.json": receipt_a}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+    repo.git("checkout", "-q", "main")
+    rerun = json.loads(receipt_a)
+    rerun["wall_seconds"] = 61.0
+    repo.commit({f"docs/gate/{c1}.json": json.dumps(rerun)},
+                "docs(gate): origin/main re-ran gate0 on the same tree")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    repo.git("checkout", "-q", "branch")
+    repo.git("merge", "--no-ff", "--no-commit", "-s", "ours", "origin/main")
+    repo.commit({}, "Merge remote-tracking branch 'origin/main' into branch")
+    return repo, base, c1
+
+
+def test_second_receipt_bootstrap_survives_a_sync_merge_keeping_its_own_receipt(tmp_path):
+    """r4 P1-1：sync merge 保留本侧收据字节的合法 gen-2 形状 ⇒ `attested`（跨全部父会误判）。
+
+    `git log -m` 会让 merge 相对第二父也出一份 diff，`-s ours` 保留本侧字节时那正是
+    `M docs/gate/<sha>.json` ⇒ 只看「跨父」会把没动过的收据判成动过（r2 `attested` →
+    r3 `violations` 的退化）。加 `--first-parent` 后只看本分支交付面 ⇒ 恢复 `attested`。
+    """
+    repo, base, c1 = _branch_with_a_sync_merge_keeping_its_own_receipt_bytes(tmp_path)
+
+    with _clean_env():
+        # 前提自证：HEAD blob 仍是首次落地的字节，内容项也认为没动过。
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is True, check.detail
+    assert check.status == "attested", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_the_path_history_read_fails(tmp_path):
+    """r4 P2-1：路径历史（`--diff-filter=DMR` 那次 `git log`）读不出来 ⇒ 不得自举（fail-closed）。
+
+    现场同 `..._readded_verbatim`（删掉再加回原字节 ⇒ 只有路径项看得见），再把那次 `git log`
+    打成 rc=128。没有这条用例时把 `returncode != 0` 改成忽略（fail-open）不会有任何测试变红。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    c2 = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit(repo.receipt(c2), "docs(gate): receipt for code 2")
+    repo.remove(f"docs/gate/{c1}.json", "docs(gate): drop the receipt for code 1")
+    repo.commit({f"docs/gate/{c1}.json": original},
+                "docs(gate): re-add the identical receipt")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+
+    real = gate0._git_at
+
+    def failing(repo_root, *args, **kwargs):
+        # 只打路径历史那一路；`_in_range_receipt_landings` 的 `git log` 必须放行，否则测的
+        # 就不是这个分支（它走同一个 `_git_at`）。
+        if args[:1] == ("log",) and "--diff-filter=DMR" in args:
+            return subprocess.CompletedProcess(args, 128, "", "fatal: simulated log failure")
+        return real(repo_root, *args, **kwargs)
+
+    with mock.patch.object(gate0, "_git_at", failing):
+        check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail

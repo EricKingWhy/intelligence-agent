@@ -1255,16 +1255,22 @@ def _receipt_matches_first_landing(
 
 
 def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) -> bool:
-    """该收据路径在 `base..head` 内是否被删除 / 修改 / 改名过（只新增不算）。
+    """该收据路径在 `base..head` 的**第一父链**上是否被 D 或 M 触碰过（只新增不算）。
 
     内容合取项（blob == 首次落地 blob）挡不住「改坏 / 删掉之后再写回原字节」：抹掉中间那几笔
-    就等于把「收据曾被动过」从审计链上洗掉。这里独立看**路径历史**，任一笔 D/M/R 都算动过。
-    `-m` / `--no-renames` 与 `_in_range_receipt_landings` 同口径（merge 落地、改名都要看得见）。
+    就等于把「收据曾被动过」从审计链上洗掉。这里独立看**路径历史**，任一笔 D/M 都算动过。
+    改名由 `--no-renames` 拆成 D+A，由 D 覆盖；`R` 在该口径下永不产出，过滤里的 `R` 只为与
+    `_in_range_receipt_landings` 的参数形态一致，本判据不依赖它。
+
+    `--first-parent` 与 `-m` 的用途在这里与 `_in_range_receipt_landings` **不同**，不要统一：
+    那处要「merge 落地可见性」（每一父都看），这里只问「本分支动过没有」——sync merge 保留本侧
+    字节时，merge 相对第二父的差异本身就是一笔 `M`，跨父看会把合法形状误判成动过。分支在 merge
+    提交里真改坏收据时，第一父 diff 就是 `M`，照样抓到。
     读失败 ⇒ True（按"动过"处理，fail-closed）。
     """
     proc = _git_at(
-        repo_root, "log", "-m", "--no-renames", "--diff-filter=DMR", "--format=%H",
-        f"{base}..{head}", "--", f"docs/gate/{tested_sha}.json",
+        repo_root, "log", "-m", "--first-parent", "--no-renames", "--diff-filter=DMR",
+        "--format=%H", f"{base}..{head}", "--", f"docs/gate/{tested_sha}.json",
     )
     return proc.returncode != 0 or bool(proc.stdout.strip())
 
@@ -1347,7 +1353,8 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
 
     第二代自举（#1692，同一 flag 门槛）：区间内**已有**扫描有效的收据、本次违反里**至少一笔
     是 stale-ledger**（候选收据存在，只是其绑定的台账指纹被其后新增的台账行改掉）、落地历史
-    可读、**且区间内落过的每一张收据都还在、且路径在区间内未被删除 / 修改 / 改名** ⇒ 本次跑
+    可读、**且区间内落过的每一张收据都还在、且路径在第一父链上未被 D 或 M 触碰**（改名按
+    `--no-renames` 拆成 D+A，由 D 覆盖）⇒ 本次跑
     落盘的 HEAD 收据按形状④刷新这些 stale 覆盖。这一条修的是「收据落地 → 台账漂移 → 又进
     无收据代码提交」的自锁。
 
@@ -1541,9 +1548,10 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         #        （乃至已提交的 FAIL 收据）就能把 6/7 洗成 7/7。它同时承担 key 检查：删除后
         #        `rev-parse HEAD:<path>` 失败即 False（原 `landed - set(receipts)` 子集判据因此
         #        冗余，已删）。
-        #      · 路径历史：每张落过的收据路径在 `base..HEAD` 内未被 D/M/R 触碰
-        #        （`_receipt_path_was_touched`）。它挡的正是内容项挡不住的那一格：「改坏 / 删掉
-        #        之后再写回原字节」——blob 会比回相等，中间那几笔被动过的提交只有路径历史看得见。
+        #      · 路径历史：每张落过的收据路径在 `base..HEAD` 的第一父链上未被 D 或 M 触碰
+        #        （`_receipt_path_was_touched`；改名按 `--no-renames` 拆成 D+A，由 D 覆盖，`R`
+        #        在该口径下不产出）。它挡的正是内容项挡不住的那一格：「改坏 / 删掉之后再写回原
+        #        字节」——blob 会比回相等，中间那几笔被动过的提交只有路径历史看得见。
         #        r3 变异口径：路径项 load-bearing（只删它 ⇒ 两条恢复原字节钉转红，M10）；内容项
         #        当前无独立鉴别力（只删它 ⇒ 0 条行为失败，M9：删 / 藏 / 改坏都是 D/M 事件，已被
         #        路径项覆盖），保留为纵深防御。但内容项一旦在位，就必须带 `-m`：否则 merge 落地
