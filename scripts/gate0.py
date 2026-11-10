@@ -1224,12 +1224,21 @@ def transfer_diff_docs_only(repo_root, p: str, c: str) -> bool:
     return all(len(r) >= 2 and r[0] in ("A", "M") and _doc_pattern().match(r[1]) for r in rows)
 
 
-def _receipt_matches_first_landing(repo_root, tested_sha: str) -> bool:
-    """Reject edits to an attestation after its first committed landing."""
+def _receipt_matches_first_landing(
+    repo_root, tested_sha: str, *, include_merges: bool = False,
+) -> bool:
+    """Reject edits to an attestation after its first committed landing.
+
+    `include_merges`（默认关，既有调用点行为不变）给 `git log` 加 `-m`：默认 git 不对 merge
+    提交做 diff，收据首次落地在 merge 冲突解决里时看不到任何 A 提交 ⇒ 恒 False。gen-2 自举
+    与 `_in_range_receipt_landings` 同口径，必须能看见 merge 落地。
+    """
     path = f"docs/gate/{tested_sha}.json"
-    additions = _git_at(
-        repo_root, "log", "--diff-filter=A", "--format=%H", "HEAD", "--", path,
-    )
+    args = ["log"]
+    if include_merges:
+        args.append("-m")
+    args += ["--diff-filter=A", "--format=%H", "HEAD", "--", path]
+    additions = _git_at(repo_root, *args)
     if additions.returncode != 0:
         return False
     commits = [line for line in additions.stdout.splitlines() if line]
@@ -1243,6 +1252,21 @@ def _receipt_matches_first_landing(repo_root, tested_sha: str) -> bool:
         and current.returncode == 0
         and original.stdout.strip() == current.stdout.strip()
     )
+
+
+def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) -> bool:
+    """该收据路径在 `base..head` 内是否被删除 / 修改 / 改名过（只新增不算）。
+
+    内容合取项（blob == 首次落地 blob）挡不住「改坏 / 删掉之后再写回原字节」：抹掉中间那几笔
+    就等于把「收据曾被动过」从审计链上洗掉。这里独立看**路径历史**，任一笔 D/M/R 都算动过。
+    `-m` / `--no-renames` 与 `_in_range_receipt_landings` 同口径（merge 落地、改名都要看得见）。
+    读失败 ⇒ True（按"动过"处理，fail-closed）。
+    """
+    proc = _git_at(
+        repo_root, "log", "-m", "--no-renames", "--diff-filter=DMR", "--format=%H",
+        f"{base}..{head}", "--", f"docs/gate/{tested_sha}.json",
+    )
+    return proc.returncode != 0 or bool(proc.stdout.strip())
 
 
 def tail_is_docs_or_receipts(repo_root, t: str) -> bool:
@@ -1323,20 +1347,24 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
 
     第二代自举（#1692，同一 flag 门槛）：区间内**已有**扫描有效的收据、本次违反里**至少一笔
     是 stale-ledger**（候选收据存在，只是其绑定的台账指纹被其后新增的台账行改掉）、落地历史
-    可读、**且区间内落过的每一张收据在 HEAD 树里都还在** ⇒ 本次跑落盘的 HEAD 收据按形状④
-    刷新这些 stale 覆盖。这一条修的是「收据落地 → 台账漂移 → 又进无收据代码提交」的自锁。
+    可读、**且区间内落过的每一张收据都还在、且路径在区间内未被删除 / 修改 / 改名** ⇒ 本次跑
+    落盘的 HEAD 收据按形状④刷新这些 stale 覆盖。这一条修的是「收据落地 → 台账漂移 → 又进
+    无收据代码提交」的自锁。
 
     ⚠ 有效范围（如实披露）：`attested` 是**整跑级**结论，一次放行覆盖本次全部违规，所以
-    "落过就必须还在"是必需的合取项——否则只要另有一张在场收据制造 stale，删掉/藏掉自己落过的
-    收据就能把 6/7 洗成 7/7。反过来，只要例行台账归属行（每张票都做）落地，收据就会 stale，
-    此时本判据实际只要求「本次完整全绿全量跑」，并不再单独区分"收据新鲜、其后又进代码提交"
-    的完整性形状——stale 不是完整性形状的替身，这条放宽面由
+    "落过就必须没被动过"是必需的合取项——否则只要另有一张在场收据制造 stale，删掉/藏掉自己
+    落过的收据就能把 6/7 洗成 7/7。反过来，只要例行台账归属行（每张票都做）落地，收据就会
+    stale，此时本判据实际只要求「本次完整全绿全量跑」，并不再单独区分"收据新鲜、其后又进
+    代码提交"的完整性形状——stale 不是完整性形状的替身，这条放宽面由
     `test_second_receipt_bootstrap_attests_after_a_routine_ledger_row` 登记为语义。
-    删掉 / 改坏区间内收据的现场没有本地自举出口（保留的完整性角，见
+    删掉 / 藏掉 / 改坏区间内收据的现场没有本地自举出口，包括「改坏或删掉之后再写回原字节」
+    （路径历史合取项挡住它；保留的完整性角，见
     `test_second_receipt_bootstrap_requires_an_in_range_valid_receipt` /
     `..._requires_an_in_range_valid_receipt_on_tamper` /
     `..._stays_red_when_a_landed_receipt_was_deleted` /
-    `..._stays_red_when_a_landed_receipt_was_tampered`）；票面方向 1 的
+    `..._stays_red_when_a_landed_receipt_was_tampered` /
+    `..._stays_red_when_a_deleted_receipt_is_readded_verbatim` /
+    `..._stays_red_when_a_tampered_receipt_is_reverted_verbatim`）；票面方向 1 的
     「区间内至少有张在场收据」字面过宽，会把 7 条 `test_bootstrap_stays_red_*` 的 before 态
     一并翻绿。
     """
@@ -1505,14 +1533,21 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         #    （候选收据存在且扫描有效，只是它绑定的台账指纹被其后新增的台账行改掉）。票面方向 1
         #    的「区间内至少有张在场收据」字面过宽，会把 7 条 `test_bootstrap_stays_red_*` 的
         #    before 态一并翻绿。
-        #    另加合取项「落过的收据都还在、且仍是首次落地的内容」：`attested` 是整跑结论，一次
-        #    放行覆盖本次**全部**违规；没有这一条时，只要另有一张在场收据制造 stale，删掉/藏掉
-        #    自己落过的收据（乃至已提交的 FAIL 收据）就能把 6/7 洗成 7/7 并落 PASS 收据。
-        #    「还在」按 key 判（`set(receipts)`），但 key 判不出「原地改坏」——收据文件仍在、
-        #    只是 `passed != total`，所以再要求每张落过的收据仍与**首次落盘时的内容**一致
-        #    （复用 `_receipt_matches_first_landing`）。两处都只验「没被动过」，不验是否仍有效：
-        #    stale 收据本就不是有效收据，拿 `in_range_receipts` 作包含域会让第二代现场自己判红
-        #    （修复失效）。
+        #    另加两条合取项，都只验「落过的收据**没被动过**」、不验是否仍有效（stale 收据本就
+        #    不是有效收据，拿 `in_range_receipts` 作包含域会让第二代现场自己判红 = 修复失效）：
+        #      · 内容：每张落过的收据仍与**首次落盘时的内容**一致（`_receipt_matches_first_landing`，
+        #        带 `-m` 以看见 merge 落地）。`attested` 是整跑结论，一次放行覆盖本次**全部**
+        #        违规；没有这一条，另有一张在场收据制造 stale 时，删掉/藏掉自己落过的收据
+        #        （乃至已提交的 FAIL 收据）就能把 6/7 洗成 7/7。它同时承担 key 检查：删除后
+        #        `rev-parse HEAD:<path>` 失败即 False（原 `landed - set(receipts)` 子集判据因此
+        #        冗余，已删）。
+        #      · 路径历史：每张落过的收据路径在 `base..HEAD` 内未被 D/M/R 触碰
+        #        （`_receipt_path_was_touched`）。它挡的正是内容项挡不住的那一格：「改坏 / 删掉
+        #        之后再写回原字节」——blob 会比回相等，中间那几笔被动过的提交只有路径历史看得见。
+        #        r3 变异口径：路径项 load-bearing（只删它 ⇒ 两条恢复原字节钉转红，M10）；内容项
+        #        当前无独立鉴别力（只删它 ⇒ 0 条行为失败，M9：删 / 藏 / 改坏都是 D/M 事件，已被
+        #        路径项覆盖），保留为纵深防御。但内容项一旦在位，就必须带 `-m`：否则 merge 落地
+        #        的形状会被它误判成「落地后被动过」（M11 只改回默认 `False` ⇒ merge 钉转红）。
         first_receipt = False
         second_receipt = False
         if receipts_scanned:
@@ -1522,11 +1557,13 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
                 landed = None  # 落地历史读不出来 ⇒ 两支都判不了 ⇒ fail-closed
             if landed is not None:
                 first_receipt = not in_range_receipts and not landed
-                # `bool(landed)` 是防御性冗余：`in_range_receipts` 非空已蕴含区间内有落地提交。
+                # `bool(landed)` 已删（防御性冗余：`in_range_receipts` 非空已蕴含区间内有落地）。
                 second_receipt = (
                     bool(in_range_receipts) and bool(stale_ledger_violations)
-                    and bool(landed) and not (landed - set(receipts))
-                    and all(_receipt_matches_first_landing(repo_root, t) for t in landed)
+                    and all(_receipt_matches_first_landing(repo_root, t, include_merges=True)
+                            for t in landed)
+                    and not any(_receipt_path_was_touched(repo_root, base, head_sha, t)
+                                for t in landed)
                 )
         if head_tree_proc.returncode == 0 and head_tree and (
             per_commit_transfer or first_receipt or second_receipt

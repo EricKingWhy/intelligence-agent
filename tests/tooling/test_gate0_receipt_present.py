@@ -1085,10 +1085,12 @@ def _stale_from_out_of_range_receipt(tmp_path) -> tuple[Repo, str, str]:
 def test_second_receipt_bootstrap_requires_an_in_range_valid_receipt_on_tamper(tmp_path):
     """#1692：区间内收据**改坏但仍在 HEAD 树里**、区间外收据制造 stale 违规 ⇒ 仍不得自举。
 
-    收据先在有效状态下落地、再被原地改坏 ⇒ 「落过的收据仍是首次落地的内容」这一合取项
-    把它挡住（删掉该合取项 ⇒ 本用例转红）。
+    本条与 `..._on_birth_invalid` 各自钉 `in_range_receipts` 的一半：本条钉「收据在 HEAD 里
+    但无效」，那条钉「首次落地即无效」。两者都不依赖内容合取项（改坏后 `in_range_receipts`
+    已空，第二代自举本来就恒假）；内容合取项的真实钉子见
+    `..._stays_red_when_a_landed_receipt_was_tampered`。
     """
-    repo, base, c1 = _stale_from_out_of_range_receipt(tmp_path / "r")
+    repo, base, c1 = _stale_from_out_of_range_receipt(tmp_path)
     repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
     _tamper_receipt(repo, c1)
 
@@ -1104,11 +1106,11 @@ def test_second_receipt_bootstrap_requires_an_in_range_valid_receipt_on_birth_in
 ):
     """#1692：区间内那张收据**首次落地就是 FAIL**（从未被编辑）、区间外收据制造 stale ⇒ 判红。
 
-    这条钉的是 `in_range_receipts` 里「**有效**」那半边：内容合取项（从未被编辑）与 key
-    合取项都成立，挡住自举的只能是「区间内至少一张扫描**有效**的收据」。删掉
-    `in_range_receipts` ⇒ 本用例转红（`..._on_tamper` 挡的则是内容合取项）。
+    这条钉的是 `in_range_receipts` 里「**有效**」那半边：内容合取项（从未被编辑）成立，
+    挡住自举的只能是「区间内至少一张扫描**有效**的收据」。删掉 `in_range_receipts` ⇒
+    本用例转红（`..._on_tamper` 钉另一半）。
     """
-    repo, base, c1 = _stale_from_out_of_range_receipt(tmp_path / "r")
+    repo, base, c1 = _stale_from_out_of_range_receipt(tmp_path)
     fail = json.loads(next(iter(repo.receipt(c1).values())))
     fail["result"] = "FAIL"
     fail["passed"] = fail["total"] - 1
@@ -1243,6 +1245,124 @@ def test_second_receipt_bootstrap_stays_red_when_a_landed_receipt_was_tampered(t
     with _clean_env():
         assert c1 in gate0.head_tree_receipts(str(repo.root))
         assert not gate0.head_tree_receipts(str(repo.root))[c1]["valid"]
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_deleted_receipt_is_readded_verbatim(
+    tmp_path,
+):
+    """r3 P1-1(g)：删掉落过的收据、下一笔又用**原字节**加回、另一张仍在场制造 stale ⇒ 判红。
+
+    内容合取项（blob == 首次落地 blob）在恢复原字节后成立，key 合取项也只问在不在 ⇒ 修复轮 2
+    仍可整跑洗白（base `violations`、tip `attested`）。补「收据路径在区间内未被 D/M/R 触碰」
+    后 ⇒ `violations`：中间那笔删除仍在路径历史上。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    c2 = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit(repo.receipt(c2), "docs(gate): receipt for code 2")
+    repo.remove(f"docs/gate/{c1}.json", "docs(gate): drop the receipt for code 1")
+    repo.commit({f"docs/gate/{c1}.json": original},
+                "docs(gate): re-add the identical receipt")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    # 前提自证：收据内容确实回到首次落地的字节（内容合取项成立），stale 违规在场。
+    with _clean_env():
+        receipts = gate0.head_tree_receipts(str(repo.root))
+        assert receipts[c1]["valid"], receipts[c1]
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1)
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_tampered_receipt_is_reverted_verbatim(
+    tmp_path,
+):
+    """r3 P1-1(h)：改坏一张落过的收据、下一笔又写回**原字节**、另一张仍在场制造 stale ⇒ 判红。
+
+    与上一条同理：恢复原字节后内容合取项成立，只有路径历史（M 事件）能看见中间那笔改坏。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    c2 = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.commit(repo.receipt(c2), "docs(gate): receipt for code 2")
+    _tamper_receipt(repo, c1)
+    repo.commit({f"docs/gate/{c1}.json": original},
+                "docs(gate): restore the original receipt bytes")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    with _clean_env():
+        receipts = gate0.head_tree_receipts(str(repo.root))
+        assert receipts[c1]["valid"], receipts[c1]
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1)
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_sees_a_receipt_first_landed_in_a_merge(tmp_path):
+    """r3 P2-1：唯一区间内收据由 **merge 提交**带入的合法 gen-2 形状 ⇒ `attested`。
+
+    `_receipt_matches_first_landing` 不带 `-m` 时 `--diff-filter=A` 看不见 merge 落地 ⇒
+    恒 False ⇒ 这条形状被判红（r2 相对 r1 的假红，等于该形状重新自锁）。gen-2 调用点改传
+    `include_merges=True` 后恢复 `attested`；既有调用点仍走默认 `False`。
+    """
+    repo, base, c1 = _branch_with_a_receipt_landed_in_a_merge(tmp_path)
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+
+    with _clean_env():
+        # 前提自证：不带 `-m` 时看不见 merge 落地（这正是被修的盲区）。
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1) is False
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is True, check.detail
+    assert check.status == "attested", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_merge_landed_receipt_is_tampered(
+    tmp_path,
+):
+    """r3 P2-1 反向守卫：merge 落地后**又被改坏**仍是 `violations`（`-m` 不误伤 fail-closed）。
+
+    现场：c1 收据正常落地（后因例行台账行变 stale）+ c2 收据在 merge 里首次落地后再被改坏。
+    内容合取项开 `-m` 后能看见 merge 落地那笔 A，改坏 ⇒ blob 不等 ⇒ 不得自举。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    c2 = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    receipt_c2 = next(iter(repo.receipt(c2).values()))
+    repo.git("checkout", "-q", "-b", "side")
+    repo.commit({"src/s.py": "s = 1\n"}, "side work")
+    repo.git("checkout", "-q", "main")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit({f"docs/gate/{c2}.json": receipt_c2},
+                "merge side, landing the receipt in the merge commit")
+    _tamper_receipt(repo, c2)
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    # 前提自证：stale 违规在场（c1 收据仍在场但指纹过期）。
     assert "stale ledger fingerprint" in check.detail, check.detail
     assert check.ok is False, check.detail
     assert check.status == "violations", check.detail
