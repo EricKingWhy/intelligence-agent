@@ -563,10 +563,38 @@ printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
 """
 
 
-class SandboxHardeningError(RuntimeError):
-    """容器未满足基础降权档，且无法在不破坏数据的前提下自动处置。"""
+#: `SandboxHardeningError.reason` 的**唯一**定义处（产生侧）。web 层的响应白名单
+#: （`web/domain_errors.py::sandbox_hardening_http_error`）import 这一个集合，不再自己
+#: 抄一份字面量——抄两份时新增 reason 会静默降级成 `hardening_failed`，没有门禁会红。
+#: `tests/web/test_sandbox_hardening_error_api.py` 的钉子测试用 AST 扫本模块里
+#: 形如 `(hardening|migration)_*` 的字符串字面量，断言与本集合**双向相等**。
+_HARDENING_REASONS: frozenset[str] = frozenset(
+    {
+        "hardening_failed",
+        "migration_failed",
+        "migration_wait_failed",
+        "migration_helper_start_failed",
+        "migration_rollback_failed",
+        "migration_backup_restore_failed",
+    }
+)
 
-    def __init__(self, message: str, *, volume_name: str | None = None, reason: str = "hardening_failed") -> None:
+
+class SandboxHardeningError(RuntimeError):
+    """容器未满足基础降权档，且无法在不破坏数据的前提下自动处置。
+
+    `volume_name` 只作服务端诊断留痕，**不可经 HTTP 回显**：它的来源是 harness 自己
+    生成的卷名（或调用方传进来的任意值），没有任何可验证的可信出处，回显即等于把
+    未校验输入带到客户端（见 `web/domain_errors.py` 的 `"volume": None`）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        volume_name: str | None = None,
+        reason: str = "hardening_failed",
+    ) -> None:
         super().__init__(message)
         self.volume_name = volume_name
         self.reason = reason
