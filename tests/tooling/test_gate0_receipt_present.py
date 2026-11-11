@@ -1467,7 +1467,9 @@ def test_second_receipt_bootstrap_stays_red_when_the_merge_commit_tampers_the_re
 
     `--first-parent` 让 `git log` 对 merge 出「相对第一父」的 diff ⇒ 这笔 `M` 看得见；少了
     `--first-parent`（或不带 `-m` 的跨父查询）merge 提交根本不产出 diff ⇒ 该形状失守。
-    侧分支历史是干净的（`--no-merges` 也不看 merge），所以这一格只有第一父查询能判。
+    侧查询是 `--full-history --diff-merges=first-parent --no-patch --not origin/main`，它同样
+    看得见这笔 merge ⇒ 本格两路都会命中；第一父查询是语义上的第一道闸，侧查询是它的兜底
+    （Standards r9 P3-1：r5 时代那句「只有第一父能判」在 r6 换实现后已不成立）。
     """
     repo, base, c1 = _branch_tampered_inside_the_merge_commit(tmp_path)
 
@@ -1934,6 +1936,253 @@ def test_second_receipt_bootstrap_stays_red_when_a_sibling_adoption_chain_repeat
     _assert_sibling_adoption_stays_red(repo, base, c1, receipt, sync)
 
 
+def _branch_whose_side_plain_commit_rewrites_to_historical_main_bytes(
+    tmp_path, *, invalid_bytes: bool
+):
+    """侧分支用**普通提交**（非 merge）把收据写成 main **曾出版、现已替换掉**的字节，交付线解回原字节。
+
+    与 r8 那条兄弟分支钉的区别：这里的字节**确实**由 `origin/main` 出版过 ⇒ r8 的「main 出版过的
+    字节集合」会放行它（r9 Spec P1 的洗白格）。r7 的第二父候选从不覆盖它（侧提交没有第二父）。
+
+    `invalid_bytes=True` ⇒ main 先出版一张 FAIL 收据（`passed != total` / `result=FAIL`），再改成
+    合法 PASS 字节；侧分支写回那张 FAIL 字节 —— 即「曾被改成非法」被洗成合法。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    receipt = f"docs/gate/{c1}.json"
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit({receipt: original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+
+    historical = json.loads(original)
+    historical["wall_seconds"] = 7.0
+    if invalid_bytes:
+        historical["passed"] = historical["total"] - 1
+        historical["result"] = "FAIL"
+    historical_body = json.dumps(historical)
+
+    current = json.loads(original)
+    current["wall_seconds"] = 61.0
+    current_body = json.dumps(current)
+
+    repo.git("checkout", "-q", "main")
+    repo.commit({receipt: historical_body}, "main: publish bytes that will be replaced")
+    repo.commit({receipt: current_body}, "main: publish the current bytes")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    side = repo.commit({receipt: historical_body},
+                       "side: rewrite the receipt with a plain commit")
+
+    repo.git("checkout", "-q", "branch")
+    repo.commit({"src/c.py": "c = 3\n"}, "branch: more code")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit({receipt: original}, "merge side, resolving the receipt back to our bytes")
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+    return repo, base, c1, receipt, side
+
+
+def _assert_historical_bytes_rewrite_stays_red(repo, base, c1, receipt, side):
+    """前提自证 + 期望 `violations`。"""
+    with _clean_env():
+        # ① 侧查询确实命中那笔普通提交（它是 D/M 命中，且**没有第二父**）。
+        hits = gate0._git_at(str(repo.root), "log", "--full-history",
+                             "--diff-merges=first-parent", "--no-patch", "--no-renames",
+                             "--diff-filter=DMR", "--format=%H", f"{base}..HEAD",
+                             "--not", "origin/main", "--", receipt).stdout.split()
+        assert side in hits, "the side query must hit the side branch's plain rewrite"
+        parents = gate0._git_at(str(repo.root), "rev-list", "--parents", "-n", "1",
+                                side).stdout.split()[1:]
+        assert len(parents) == 1, "the rewriting commit must be a plain (non-merge) commit"
+        # ② 该字节**确实**由 origin/main 出版过（否则退化成本仓已钉住的「兄弟字节」形状）。
+        blob = gate0._git_at(str(repo.root), "rev-parse", f"{side}:{receipt}").stdout.strip()
+        published = set()
+        for main_commit in gate0._git_at(str(repo.root), "log", "--full-history",
+                                         "--format=%H", "origin/main", "--",
+                                         receipt).stdout.split():
+            got = gate0._git_at(str(repo.root), "rev-parse", f"{main_commit}:{receipt}")
+            if got.returncode == 0:
+                published.add(got.stdout.strip())
+        assert blob in published, "the rewritten bytes must have been published by main"
+        # ③ 它不是 main **当前**字节 ⇒ 那个显式例外覆盖不到它。
+        upstream = gate0._git_at(str(repo.root), "rev-parse",
+                                 f"origin/main:{receipt}").stdout.strip()
+        assert blob != upstream, "the rewritten bytes must be a replaced, not current, blob"
+        # ④ 交付树回到首次落地字节，内容项认为没动过。
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_plain_commit_rewrites_to_replaced_main_bytes(
+    tmp_path,
+):
+    """r9 Spec P1（洗白格）：侧分支普通提交写回 main **曾出版、现已替换**的字节 ⇒ 必须 `violations`。
+
+    r8 的跳过步只问「这串字节是否曾被 main 出版」，不问**来源**：分支自己用普通提交写出的历史
+    字节因而被当成 adoption 放行（交付线再解回原字节，其余各钉全满足）。r9 起加 donor 身份判定
+    ——该字节必须由一个 main 侧的父逐字交来，普通提交没有这样的父 ⇒ 判红。
+    """
+    repo, base, c1, receipt, side = (
+        _branch_whose_side_plain_commit_rewrites_to_historical_main_bytes(tmp_path, invalid_bytes=False)
+    )
+    _assert_historical_bytes_rewrite_stays_red(repo, base, c1, receipt, side)
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_plain_commit_restores_replaced_fail_bytes(
+    tmp_path,
+):
+    """r9 Spec P1（FAIL 变体）：main 曾出版一张 FAIL 收据、后改成 PASS；侧分支普通提交写回那张
+    FAIL 字节 ⇒ 必须 `violations`（「曾被改成非法」不得被洗成合法）。
+    """
+    repo, base, c1, receipt, side = (
+        _branch_whose_side_plain_commit_rewrites_to_historical_main_bytes(tmp_path, invalid_bytes=True)
+    )
+    _assert_historical_bytes_rewrite_stays_red(repo, base, c1, receipt, side)
+
+
+def test_second_receipt_bootstrap_survives_a_side_branch_plain_commit_copying_origin_mains_receipt(
+    tmp_path,
+):
+    """侧分支用**普通提交**拷走 `origin/main` **当前**字节、交付线保留本侧字节 ⇒ `attested`。
+
+    Standards r8 P2-1 / r9 P4-2 指出的形状：没有第二父，只能靠「main 当前 blob」这条身份例外放行
+    （donor 判定对它为 False —— 它的父不持有该字节）。r8 起没有钉覆盖；本钉把它机械钉住。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    receipt = f"docs/gate/{c1}.json"
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit({receipt: original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+
+    rerun = json.loads(original)
+    rerun["wall_seconds"] = 61.0
+    current_body = json.dumps(rerun)
+    repo.git("checkout", "-q", "main")
+    repo.commit({receipt: current_body}, "main: re-ran gate0 (current bytes)")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    copy_commit = repo.commit({receipt: current_body},
+                              "side: copy main's receipt bytes with a plain commit")
+    repo.git("checkout", "-q", "branch")
+    repo.commit({"src/c.py": "c = 3\n"}, "branch: more code")
+    repo.git("merge", "--no-ff", "--no-commit", "-s", "ours", "side")
+    repo.commit({}, "merge side, keeping our own bytes")
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+
+    with _clean_env():
+        blob = gate0._git_at(str(repo.root), "rev-parse",
+                            f"{copy_commit}:{receipt}").stdout.strip()
+        upstream = gate0._git_at(str(repo.root), "rev-parse",
+                                 f"origin/main:{receipt}").stdout.strip()
+        assert blob == upstream, "the copied bytes must be origin/main's current blob"
+        parents = gate0._git_at(str(repo.root), "rev-list", "--parents", "-n", "1",
+                                copy_commit).stdout.split()[1:]
+        assert len(parents) == 1, "the copying commit must be a plain (non-merge) commit"
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is True, check.detail
+    assert check.status == "attested", check.detail
+
+
+def test_second_receipt_bootstrap_stays_attested_as_origin_main_prunes_the_adopted_bytes(
+    tmp_path,
+):
+    """r9 Spec P2：main 用一笔「结果 == 第二父」的 merge 把旧收据字节剪掉后，合法 sync 仍 `attested`。
+
+    `git log <rev> -- <path>` 默认做路径历史简化：与某个父 TREESAME 的 merge 被剪掉、其祖先也可能
+    整段消失。r8 的候选集合没带 `--full-history` ⇒ main 把旧字节换成新字节后，分支**合法**收下的
+    那串旧字节不再是候选 ⇒ 判红。关键断言是**单调性**：同一 HEAD 在 main 前进前后都必须 `attested`
+    （r7 在同样形状上 attested→attested；r8 是 attested→violations）。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    receipt = f"docs/gate/{c1}.json"
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit({receipt: original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+
+    adopted = json.loads(original)
+    adopted["wall_seconds"] = 61.0
+    adopted_body = json.dumps(adopted)
+    repo.git("checkout", "-q", "main")
+    main_b = repo.commit({receipt: adopted_body},
+                         "main: publish B (the bytes the branch will adopt)")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    main_b_parent = repo.git("rev-parse", "HEAD^")
+
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    repo.git("merge", "--no-ff", "--no-commit", "-X", "theirs", "origin/main")
+    repo.commit({receipt: adopted_body}, "side: sync, adopting main's bytes")
+
+    repo.git("checkout", "-q", "branch")
+    repo.commit({"src/c.py": "c = 3\n"}, "branch: more code")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit({receipt: original}, "merge side, resolving the receipt back to our bytes")
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+    head = repo.git("rev-parse", "HEAD")
+
+    # stage 1: main 顶端正是分支收下的那串字节 ⇒ 合法 adoption。
+    first = _bootstrapping_check(repo, base)
+    assert first.warn_only is False, first.detail
+    assert first.status == "attested", first.detail
+
+    # main 用一笔「结果 == 第二父」的 merge 换成别的字节 ⇒ 旧字节被默认路径简化剪掉。
+    lane_bytes = json.loads(original)
+    lane_bytes["wall_seconds"] = 99.0
+    repo.git("checkout", "-q", "-b", "lane", main_b_parent)
+    repo.commit({receipt: json.dumps(lane_bytes)}, "lane: receipt with different bytes")
+    repo.git("checkout", "-q", "main")
+    repo.git("merge", "--no-ff", "--no-commit", "-X", "theirs", "lane")
+    repo.commit({}, "main: merge lane (result is the second parent's, dropping B)")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    repo.git("checkout", "-q", head)
+
+    with _clean_env():
+        # 前提自证：分支 HEAD 没动；被收下的那串字节被默认列表剪掉、但 `--full-history` 仍看得见。
+        assert repo.git("rev-parse", "HEAD") == head, "the branch HEAD must not move"
+        adopted_blob = gate0._git_at(str(repo.root), "rev-parse",
+                                     f"{main_b}:{receipt}").stdout.strip()
+
+        def _published(*extra) -> set[str]:
+            out = gate0._git_at(str(repo.root), "log", *extra, "--format=%H",
+                                "origin/main", "--", receipt).stdout.split()
+            blobs = set()
+            for commit in out:
+                got = gate0._git_at(str(repo.root), "rev-parse", f"{commit}:{receipt}")
+                if got.returncode == 0:
+                    blobs.add(got.stdout.strip())
+            return blobs
+
+        assert adopted_blob not in _published(), (
+            "fixture must make default path simplification prune the adopted bytes"
+        )
+        assert adopted_blob in _published("--full-history"), (
+            "fixture must keep the adopted bytes visible under --full-history"
+        )
+
+    second = _bootstrapping_check(repo, base)
+    assert second.warn_only is False, second.detail
+    assert second.status == "attested", second.detail
+
+
 def test_second_receipt_bootstrap_stays_red_when_a_side_branch_tamper_is_discarded(
     tmp_path,
 ):
@@ -1941,7 +2190,8 @@ def test_second_receipt_bootstrap_stays_red_when_a_side_branch_tamper_is_discard
 
     `--first-parent` 只看交付线 ⇒ 侧分支那笔 `M` 藏在第二父后面，交付树回到原字节，内容项也成立
     （HEAD blob == 首次落地 blob）⇒ r4 起整跑 `attested`（7/7 + PASS 收据）。侧分支是本分支自己的
-    提交，被 merge 丢弃不等于没发生过 ⇒ 路径项必须另看分支侧历史（`--full-history --no-merges`）。
+    提交，被 merge 丢弃不等于没发生过 ⇒ 路径项必须另看分支侧历史（`--full-history
+    --diff-merges=first-parent --no-patch --not origin/main`；r5 的 `--no-merges` 已不再使用）。
     """
     repo, base, c1 = _branch_whose_side_edit_is_discarded_by_the_merge(tmp_path, "tamper")
 
@@ -2008,7 +2258,8 @@ def test_second_receipt_bootstrap_stays_red_when_a_side_branch_receipt_is_discar
     """r5 P1-1（钉 3 的同族）：侧分支给**自己的代码提交**落了收据、merge 丢弃 ⇒ 仍 `violations`。
 
     与上一条同属「内容项承重」的一格：那张收据在区间内落过（进 `landed`），但交付树里没有
-    `HEAD:path` ⇒ 内容项为 False。路径项看不到它（从未进交付树，且 `--no-merges` 不看 merge）。
+    `HEAD:path` ⇒ 内容项为 False。路径项看得到它：侧查询带 `--diff-merges=first-parent`，
+    侧分支 merge 提交里的编辑会出 diff（r5 的 `--no-merges` 已不再使用）。
     两条一起把内容项的独立贡献钉住（M9 单删 ⇒ 两条都转红）。
     """
     repo = Repo(tmp_path / "r")
