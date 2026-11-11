@@ -1814,6 +1814,126 @@ def test_second_receipt_bootstrap_survives_a_side_merge_that_adopts_an_older_ori
     assert check.status == "attested", check.detail
 
 
+def _branch_whose_side_merge_adopts_another_branchs_receipt_bytes(tmp_path, hops: int):
+    """侧分支的 merge **逐字收下兄弟分支改坏的收据字节**，交付线再解回原字节。
+
+    `hops` = 坏字节转手级数：1 ⇒ rogue 直接写坏；2 ⇒ rogue2 写坏 → rogue1 收下 → side 再收下
+    rogue1（多级 adoption 链，链条底部的引入笔仍在区间内）。
+
+    形状要点（也是本夹具的鉴别力所在）：命中 merge 的 blob == 其**第二父**的 blob（r7 的跳过步
+    据此放行），但该字节**从未**由 `origin/main` 出版过（`main` 在该路径根本没有这个文件）。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    original = next(iter(repo.receipt(c1).values()))
+    receipt = f"docs/gate/{c1}.json"
+    repo.commit({receipt: original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+
+    bad = json.loads(original)
+    if hops == 1:
+        bad["passed"] = bad["total"] - 1
+        bad["result"] = "FAIL"
+    else:
+        bad["wall_seconds"] = 7.0
+    bad_body = json.dumps(bad)
+
+    repo.git("checkout", "-q", "-b", "rogue", base)
+    repo.commit({receipt: bad_body}, "rogue: land edited bytes for code 1")
+    if hops == 1:
+        adopter, src_branch = "rogue", "rogue"
+    else:
+        repo.git("checkout", "-q", "-b", "rogue1", "branch")
+        repo.git("merge", "--no-ff", "--no-commit", "-X", "theirs", "rogue")
+        repo.commit({receipt: bad_body}, "rogue1: adopt rogue's bytes")
+        adopter, src_branch = "rogue1", "rogue1"
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    repo.git("merge", "--no-ff", "--no-commit", "-X", "theirs", src_branch)
+    sync = repo.commit({receipt: bad_body}, f"side: merge {adopter}, adopting its bytes")
+
+    repo.git("checkout", "-q", "main")
+    repo.commit({"src/m.py": "m = 0\n"}, "main: unrelated code")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    repo.git("checkout", "-q", "branch")
+    repo.commit({"src/c.py": "c = 3\n"}, "branch: more code")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit({receipt: original}, "merge side, resolving the receipt back to our bytes")
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+    return repo, base, c1, receipt, sync
+
+
+def _assert_sibling_adoption_stays_red(repo, base, c1, receipt, sync):
+    """公共断言：夹具前提自证 + 期望 `violations`。"""
+    with _clean_env():
+        # ① 侧查询确实命中那笔 adoption merge（否则测不到跳过分支）。
+        side_hits = gate0._git_at(str(repo.root), "log", "--full-history",
+                                  "--diff-merges=first-parent", "--no-patch", "--no-renames",
+                                  "--diff-filter=DMR", "--format=%H", f"{base}..HEAD",
+                                  "--not", "origin/main", "--", receipt).stdout.split()
+        assert sync in side_hits, "fixture must make the side query hit the adopting merge"
+        # ② 该 merge 的 blob == 其第二父的 blob（r7 跳过步正是据此放行）。
+        blob = gate0._git_at(str(repo.root), "rev-parse", f"{sync}:{receipt}").stdout.strip()
+        parents = gate0._git_at(str(repo.root), "rev-list", "--parents", "-n", "1",
+                               sync).stdout.split()[1:]
+        assert len(parents) >= 2, "the adopting commit must be a merge"
+        second = gate0._git_at(str(repo.root), "rev-parse",
+                               f"{parents[1]}:{receipt}").stdout.strip()
+        assert blob == second, "the merge must adopt its second parent's bytes verbatim"
+        # ③ 该字节**从未**由 origin/main 出版过（跳过步不该被这一笔命中）。
+        published = set()
+        for main_commit in gate0._git_at(str(repo.root), "log", "--format=%H",
+                                         "origin/main", "--", receipt).stdout.split():
+            got = gate0._git_at(str(repo.root), "rev-parse", f"{main_commit}:{receipt}")
+            if got.returncode == 0:
+                published.add(got.stdout.strip())
+        assert blob not in published, "the adopted bytes must never have been published by main"
+        # ④ 交付树里是原字节，内容项认为没动过。
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_merge_adopts_a_sibling_branchs_bytes(
+    tmp_path,
+):
+    """r8 Spec P1-1（洗白格 A）：侧 merge 逐字收下**兄弟分支**改坏的字节 ⇒ 必须 `violations`。
+
+    rogue 从 base（收据落地之前）起分支，自己提交一张改坏的收据；side 在**自己的 merge 提交**里
+    逐字收下它（`-X theirs`，merge 的 blob == 第二父 blob）；main 只前进一笔代码（收据路径不动，
+    `origin/main` 在该路径**没有**该文件）；交付线 merge side 时又把收据解回原字节。其余各钉都
+    满足（交付树回到首次落地字节、第一父链干净），判红只能靠侧路跳过步**拒绝**这笔命中。
+
+    r7 把「== 该提交第二父的 blob」当成「收下 main 的字节」⇒ 放行（tip `attested`）；r6 只认
+    `origin/main` 当前字节 ⇒ 判红（本钉的 before 态）。r8 换成「main 在该路径出版过的全部字节」
+    后，第二父那笔不在集合里 ⇒ 恢复判红。
+    """
+    repo, base, c1, receipt, sync = _branch_whose_side_merge_adopts_another_branchs_receipt_bytes(
+        tmp_path, hops=1
+    )
+    _assert_sibling_adoption_stays_red(repo, base, c1, receipt, sync)
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_sibling_adoption_chain_repeats(
+    tmp_path,
+):
+    """r8 Spec P1-1（洗白格 B，两级链）：坏字节 `rogue → rogue1 → side` 逐级逐字转手 ⇒ `violations`。
+
+    比单级多一层「收下的也是兄弟分支的字节」的 merge；若跳过步按第二父放行，整条链会被洗白。
+    """
+    repo, base, c1, receipt, sync = _branch_whose_side_merge_adopts_another_branchs_receipt_bytes(
+        tmp_path, hops=2
+    )
+    _assert_sibling_adoption_stays_red(repo, base, c1, receipt, sync)
+
+
 def test_second_receipt_bootstrap_stays_red_when_a_side_branch_tamper_is_discarded(
     tmp_path,
 ):
