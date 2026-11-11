@@ -21,6 +21,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -2278,3 +2279,285 @@ def test_second_receipt_bootstrap_stays_red_when_a_side_branch_receipt_is_discar
     assert check.warn_only is False, check.detail
     assert check.ok is False, check.detail
     assert check.status == "violations", check.detail
+
+
+def _branch_whose_side_merge_adopts_a_discarded_topic_blob(tmp_path, *, conflict: bool):
+    """topic 写「坏收据字节」→ main 把那笔 merge 的**内容整段丢弃** → 侧分支逐字收下坏字节。
+
+    与其余钉的区别（r10 Spec P1）：这里的字节**曾经出现在 `origin/main` 的历史里**（topic 提交
+    被 merge 过、因而是 main 的祖先），但**从未进入 main 的第一父线**——`-s ours` 整棵丢弃，或
+    `-X ours` 把冲突解成 main 侧字节。
+
+    `--full-history` 枚举会把它算成「main 出版过」（默认路径简化恰好剪掉它），于是「topic 写在
+    main 之前、侧分支 merge 收下」这条形状在 r9 被判 `attested`。候选集合以 `--first-parent` 为界
+    后恢复 `violations`（r6 / r8 也是 `violations`，只有 r7 / r9 放行）。
+
+    `conflict=True` ⇒ 走 `-X ours` 变体（main 在分叉后又推进一次同一路径，制造 modify/modify 冲突）。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    receipt = f"docs/gate/{c1}.json"
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit({receipt: original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+
+    bad = json.loads(original)
+    bad["passed"] = bad["total"] - 1
+    bad["result"] = "FAIL"
+    bad_body = json.dumps(bad)
+
+    repo.git("checkout", "-q", "main")
+    if conflict:
+        # main 先在这个路径写自己的字节，分叉后再推进一次 ⇒ 与 topic 的改动形成真冲突。
+        other = json.loads(original)
+        other["wall_seconds"] = 71.0
+        repo.commit({receipt: json.dumps(other)}, "main: publish its own receipt")
+        fork = repo.git("rev-parse", "HEAD")
+    else:
+        fork = repo.git("rev-parse", "main")
+
+    repo.git("checkout", "-q", "-b", "topic", fork)
+    topic_commit = repo.commit({receipt: bad_body}, "topic: write FAIL bytes")
+
+    repo.git("checkout", "-q", "main")
+    if conflict:
+        later = json.loads(original)
+        later["wall_seconds"] = 83.0
+        repo.commit({receipt: json.dumps(later)},
+                    "main: advance its own bytes after the fork")
+        repo.git("merge", "--no-ff", "--no-commit", "-X", "ours", "topic")
+        repo.commit({}, "main: merge topic with -X ours (keep main's bytes)")
+    else:
+        repo.git("merge", "--no-ff", "--no-commit", "-s", "ours", "topic")
+        repo.commit({}, "main: merge topic with -s ours (discard its tree)")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    # 侧分支用 merge 从 topic 逐字收下坏字节（donor 身份 = topic 这个 main 侧祖先）。
+    # 用普通提交写同样字节是 r9 已钉住的另一种洗白格，不是本形状。
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    repo.git("merge", "--no-ff", "--no-commit", "-X", "theirs", "topic")
+    adoption = repo.commit({}, "side: merge topic, adopting the FAIL bytes verbatim")
+
+    repo.git("checkout", "-q", "branch")
+    repo.commit({"src/c.py": "c = 3\n"}, "branch: more code")
+    repo.git("merge", "--no-ff", "--no-commit", "-s", "ours", "side")
+    repo.commit({}, "merge side with -s ours, keeping our own bytes")
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+    return repo, base, c1, receipt, bad_body, topic_commit, adoption
+
+
+def _assert_discarded_topic_blob_stays_red(repo, base, c1, receipt, bad_body, topic_commit):
+    """前提自证（四条）+ 期望 `violations`。"""
+    with _clean_env():
+        # ① 侧查询确实命中那笔 adoption merge。
+        hits = gate0._git_at(str(repo.root), "log", "--full-history",
+                             "--diff-merges=first-parent", "--no-patch", "--no-renames",
+                             "--diff-filter=DMR", "--format=%H", f"{base}..HEAD",
+                             "--not", "origin/main", "--", receipt).stdout.split()
+        assert hits, "the side query must hit the side branch's adoption merge"
+        adoption = hits[0]
+        parents = gate0._git_at(str(repo.root), "rev-list", "--parents", "-n", "1",
+                                adoption).stdout.split()[1:]
+        assert len(parents) >= 2, "the adopting commit must be a merge"
+        blob = gate0._git_at(str(repo.root), "rev-parse",
+                             f"{adoption}:{receipt}").stdout.strip()
+
+        def listed(*extra):
+            blobs = set()
+            for c in gate0._git_at(str(repo.root), "log", *extra, "--format=%H",
+                                   "origin/main", "--", receipt).stdout.split():
+                got = gate0._git_at(str(repo.root), "rev-parse", f"{c}:{receipt}")
+                if got.returncode == 0:
+                    blobs.add(got.stdout.strip())
+            return blobs
+
+        # ② 该 blob 在 --full-history 候选集里，但**不在** origin/main 的第一父线上。
+        assert blob in listed("--full-history"), "the bytes must appear in --full-history"
+        assert blob not in listed("--first-parent", "--full-history"), (
+            "the bytes must NOT have been published on origin/main's first-parent line")
+        # ③ topic 提交确实是 origin/main 的祖先（否则退化成本仓已钉住的兄弟分支形状）。
+        assert gate0._git_at(str(repo.root), "merge-base", "--is-ancestor",
+                             topic_commit, "origin/main").returncode == 0, (
+            "the topic commit must be an ancestor of origin/main")
+        # ④ 交付树回到首次落地字节，内容项认为没动过。
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_main_discards_a_topics_fail_bytes(tmp_path):
+    """r10 Spec P1（k1）：topic 写 FAIL 字节 → main `-s ours` 整棵丢弃 → 侧分支 merge 收下 ⇒ `violations`。
+
+    r9 的候选集合枚举缺 `--first-parent`：topic 提交因「被 main merge 过」而进了 `--full-history`
+    列表，于是这段**从未在主线出版过**的坏字节被当成「main 出版过」⇒ 放行。r6 / r8 判 `violations`，
+    r7 / r9 放行（r7 的第二父候选也覆盖这条形状）。
+    """
+    repo, base, c1, receipt, bad_body, topic, _ = (
+        _branch_whose_side_merge_adopts_a_discarded_topic_blob(tmp_path, conflict=False)
+    )
+    _assert_discarded_topic_blob_stays_red(repo, base, c1, receipt, bad_body, topic)
+
+
+def test_second_receipt_bootstrap_stays_red_when_main_resolves_conflict_against_a_topics_fail_bytes(
+    tmp_path,
+):
+    """r10 Spec P1（k4）：main 已出版自己的字节 → topic 写 FAIL → main `-X ours` 解冲突丢弃 ⇒ `violations`。
+
+    与 k1 同机制，只是丢弃发生在**冲突解法**里而不是 `-s ours`。两条一起把「第一父线是出版的
+    唯一口径」钉住。
+    """
+    repo, base, c1, receipt, bad_body, topic, _ = (
+        _branch_whose_side_merge_adopts_a_discarded_topic_blob(tmp_path, conflict=True)
+    )
+    _assert_discarded_topic_blob_stays_red(repo, base, c1, receipt, bad_body, topic)
+
+
+def test_second_receipt_bootstrap_plain_copy_of_main_current_bytes_turns_red_after_origin_main_advances_known_boundary_5(
+    tmp_path,
+):
+    """已知边界⑤（**不是**回归钉）：侧分支普通提交拷走 `origin/main` 当前字节，main 原地改写同一张
+    收据后，同一 HEAD 由 `attested` 翻 `violations`。
+
+    这条钉把**已知的不单调**机械钉住（r10 P2/S-1，处置取 (a)）：`current_main_blob` 例外判的是
+    「main **当前** 的 blob」，main 一动它就失效；而普通提交没有持有该字节的父 ⇒ donor 判定恒为
+    False ⇒ 没有任何东西再接住这条路径。对照：同一形状改用 **merge** 收下（donor=True）则
+    `attested → attested`，不受影响（r9 的 `..._stays_attested_as_origin_main_prunes_the_adopted_bytes`
+    覆盖的正是那条）。
+
+    现状为 r6/r7 同病、r8 单调（集合无身份约束）、r9 起恢复翻转。**真修复需要时间维判定**（拷贝
+    时刻该字节是否仍是 main 当前 blob），超出 #1692 的最小改动范围 ⇒ 另开票。本钉只保证「它是
+    已知的」可判定，不声称现状正确。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    receipt = f"docs/gate/{c1}.json"
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit({receipt: original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+
+    b = json.loads(original)
+    b["wall_seconds"] = 61.0
+    b_body = json.dumps(b)
+    c = json.loads(original)
+    c["wall_seconds"] = 99.0
+    c_body = json.dumps(c)
+
+    repo.git("checkout", "-q", "main")
+    repo.commit({receipt: b_body}, "main: re-ran gate0 (bytes B)")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    copy_commit = repo.commit({receipt: b_body},
+                              "side: copy main's current bytes with a plain commit")
+    repo.git("checkout", "-q", "branch")
+    repo.commit({"src/c.py": "c = 3\n"}, "branch: more code")
+    repo.git("merge", "--no-ff", "--no-commit", "-s", "ours", "side")
+    repo.commit({}, "merge side, keeping our own bytes")
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+    head = repo.git("rev-parse", "HEAD")
+
+    with _clean_env():
+        parents = gate0._git_at(str(repo.root), "rev-list", "--parents", "-n", "1",
+                                copy_commit).stdout.split()[1:]
+        assert len(parents) == 1, "the copying commit must be a plain (non-merge) commit"
+        upstream = gate0._git_at(str(repo.root), "rev-parse",
+                                 f"origin/main:{receipt}").stdout.strip()
+        blob = gate0._git_at(str(repo.root), "rev-parse",
+                             f"{copy_commit}:{receipt}").stdout.strip()
+        assert blob == upstream, "stage 1 copies origin/main's *current* blob"
+
+    stage1 = _bootstrapping_check(repo, base)
+    assert stage1.warn_only is False, stage1.detail
+    assert stage1.ok is True, stage1.detail
+    assert stage1.status == "attested", stage1.detail
+
+    # main 原地重写同一张收据（B → C）；HEAD **不动**。
+    repo.git("checkout", "-q", "main")
+    repo.commit({receipt: c_body}, "main: rewrite the same receipt (B -> C)")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    repo.git("checkout", "-q", head)
+    assert repo.git("rev-parse", "HEAD") == head, "HEAD must not move between the stages"
+
+    stage2 = _bootstrapping_check(repo, base)
+    assert stage2.warn_only is False, stage2.detail
+    assert stage2.ok is False, stage2.detail
+    assert stage2.status == "violations", stage2.detail
+
+
+def test_donor_depth_cap_fails_closed_instead_of_raising_recursion_error(tmp_path):
+    """r10 必修 4：donor 转手链超过 `_DONOR_MAX_DEPTH` 跳 ⇒ **判动过**，不抛 `RecursionError`。
+
+    形状：main 第一父线出版 B（后原地改成 C ⇒ `current_main_blob != B`，短路例外兜不住）、
+    侧支一串 adoption merge 每跳都持 B、链根接在 main 侧持 B 的提交上 ⇒ donor 必须递归到
+    链底才能回答 True。链长 > 上限时报「不成立」（False）⇒ 调用方不跳过 ⇒ 顶层判 `violations`。
+
+    这条钉**反向锁死返回值的符号**：`_handed_over_by_main` 的 True 语义是「main 交来的 ⇒
+    放行」，深度超限必须是 False。r10 一度写成 True，1000 跳探针里 r9 抛 `RecursionError`、
+    写反的 fix10 直接判 `attested`，两个都不对。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    receipt = f"docs/gate/{c1}.json"
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit({receipt: original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+
+    historical = json.loads(original)
+    historical["wall_seconds"] = 7.0
+    historical_body = json.dumps(historical)
+    current = json.loads(original)
+    current["wall_seconds"] = 61.0
+    current_body = json.dumps(current)
+
+    repo.git("checkout", "-q", "main")
+    main_holds_b = repo.commit({receipt: historical_body}, "main: publish bytes B")
+    repo.commit({receipt: current_body}, "main: rewrite to C")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    # 先红口径：r9 树**没有**这个上限常量 ⇒ 本钉在 r9 上以显式断言失败（不是靠碰巧的
+    # AttributeError），在 tip 上才走到真正的行为验证。
+    cap = getattr(gate0, "_DONOR_MAX_DEPTH", None)
+    assert isinstance(cap, int) and cap > 0, "r10 必修 4：必须有显式的 donor 深度上限常量"
+    hops = cap + 5
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    # 每跳都持 main 出版过的 B（相对第一父 branch 的原始字节是 M ⇒ 侧查询命中）
+    b_tree = repo.git("rev-parse", f"{main_holds_b}^{{tree}}")
+    hop = main_holds_b
+    for i in range(hops):
+        hop = repo.git("commit-tree", b_tree, "-p", "branch", "-p", hop,
+                       "-m", f"side: adopt hop {i}")
+    repo.git("update-ref", "refs/heads/chain", hop)
+    repo.git("checkout", "-q", "branch")
+    repo.git("merge", "--no-ff", "--no-commit", "chain")
+    repo.commit({receipt: original}, "merge the chain, resolving back to our bytes")
+    # 尾部再落一笔**没有收据的代码提交**：否则违规提交与 HEAD 的差异只剩收据路径
+    # （纯 docs）⇒ 逐笔传递把红洗绿，测不到路径项。
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+
+    with _clean_env():
+        before = sys.getrecursionlimit()
+        # ① 超过上限（= 上限 + 5 跳）⇒ 判「动过」，且**不抛** `RecursionError`。
+        assert gate0._receipt_path_was_touched(str(repo.root), base, "HEAD", c1) is True, \
+            "超过深度上限必须判「动过」（fail-closed），而不是放行或抛异常"
+        assert sys.getrecursionlimit() == before
+        # ② 同一棵树、同一条链，只把上限抬高到链长之上 ⇒ 回到「没动过」。
+        #    这一步证明 ① 是**上限**在起作用，而不是别的路径碰巧判红。
+        with mock.patch.object(gate0, "_DONOR_MAX_DEPTH", hops + 10):
+            assert gate0._receipt_path_was_touched(
+                str(repo.root), base, "HEAD", c1) is False
+        # ③ 顶层判红（该函数是 `second_receipt` 的合取项之一）。
+        check = _bootstrapping_check(repo, base)
+        assert check.ok is False, check.detail
+        assert check.status == "violations", check.detail

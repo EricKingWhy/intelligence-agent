@@ -886,6 +886,9 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 _RECEIPT_BOOTSTRAP_SHA = "d97b00f26a43e36fc289c16cf89dbd66e02dda8e"
 # A receipt requires a ledger binding when its tested Gate-0 source contains this marker.
 _LEDGER_BINDING_MARKER = "review-ledger-binding-v1"
+# donor 身份判定的递归深度上限（侧转手链长度）。超限按「不成立」处理（fail-closed），
+# 不让 `RecursionError` 裸穿 `receipt_present_check`（r10 Standards P4-1）。
+_DONOR_MAX_DEPTH = 200
 
 
 def receipt_bootstrap_sha(repo_root=None) -> str | None:
@@ -1284,9 +1287,9 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
       （`--diff-merges=first-parent` 的引入版本），不是 `--full-history`。
       ⚠ 但 `--full-history` 在**跳过步的候选集合枚举**上是**承重**的（r9 Spec P2）：见下。
       命中提交还要过一道**收下 main 字节**的跳过步，两个条件缺一不可：
-        ① 该提交在该路径的 blob ∈ `origin/main` **自己的历史线上**出现过的字节
-           （`git log --full-history --format=%H origin/main -- path` 逐笔
-           `rev-parse <c>:<path>`；被 main 丢弃的侧分支提交**不算**出版）；
+        ① 该提交在该路径的 blob ∈ `origin/main` **第一父线上**出版过的字节
+           （`git log --first-parent --full-history --format=%H origin/main -- path`
+           逐笔 `rev-parse <c>:<path>`；被 main merge 进来却又丢弃的侧支提交**不算**出版）；
         ② 该字节是**由一个「main 侧的父」逐字交给它的**（donor 身份，链式、memo；
            见内层 `_handed_over_by_main`），或者它就是 `origin/main` **当前**的 blob。
       用「main 历史线上的字节」而不是「main 现在的字节」：长生命周期分支先 sync 收下 main
@@ -1337,14 +1340,20 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
     commits = [c for c in side.stdout.split() if c]
     if not commits:
         return False
-    # 收下 main 字节的候选集合 = `origin/main` **自己的历史线上**在该路径出现过的字节
-    # （`--full-history` 必带：默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge
-    # 换掉」的提交剪掉，集合会随 main 前进而缩小 ⇒ 合法格误红且不单调，r9 Spec P2）。
+    # 收下 main 字节的候选集合 = `origin/main` **第一父线上**出版过的字节。
+    # `--first-parent` 必带（r10 Spec P1）：不带它时 `git log origin/main -- <path>` 会把
+    # 「main merge 过某分支、但那笔 merge 把内容丢弃（`-s ours` / 冲突解成 main 侧）」的侧支
+    # 提交也算成「main 出版」⇒ topic 写坏的字节被 main 丢弃后，侧分支收下它就能洗白
+    # （r10 Spec 的 k1/k4 两格；r6/r8 判红、r7/r9 放行）。第一父线是「main 真的交付过什么」
+    # 的唯一口径；被带入又丢弃的侧支提交的收据责任不在 main。
+    # `--full-history` 也必带：默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge
+    # 换掉」的提交剪掉，集合会随 main 前进而缩小 ⇒ 合法格误红且不单调（r9 Spec P2）。
+    # 两者组合的语义 = 「第一父线上出现过、且没有被后续 TREESAME merge 吞掉的历史」。
     # 读失败（`log` rc≠0 / 单笔 `rev-parse` 失败）⇒ 该候选不进集合；集合为空 ⇒ 一律判动过
     # （fail-closed，绝不因为读不到就放行）。
     candidates = set()
-    main_paths = _git_at(repo_root, "log", "--full-history", "--format=%H",
-                         "origin/main", "--", path)
+    main_paths = _git_at(repo_root, "log", "--first-parent", "--full-history",
+                         "--format=%H", "origin/main", "--", path)
     if main_paths.returncode == 0:
         for main_commit in main_paths.stdout.split():
             got = _git_at(repo_root, "rev-parse", f"{main_commit}:{path}")
@@ -1359,16 +1368,34 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
     current_main_blob = (
         upstream_now.stdout.strip() if upstream_now.returncode == 0 else ""
     )
-    adopted: dict[str, bool] = {}
+    adopted: dict[tuple[str, str], bool] = {}
 
-    def _handed_over_by_main(commit: str, blob: str) -> bool:
+    def _handed_over_by_main(commit: str, blob: str, depth: int = 0) -> bool:
         """该提交的 blob 是否由「main 侧的父」逐字交给它（链式放宽，memo 防重）。
 
         只认「父持同样字节、且父是 origin/main 的祖先或本身也是被 main 交来的」：
         分支自己写出的字节（哪怕 main 曾出版过）没有这样的父，不跳过（r9 Spec P1）。
+
+        键含 `blob`：函数签名是 `(commit, blob)`，语义上同一 commit 用不同 blob 问会得到不同
+        答案。今天按 commit 记忆也安全（`adopted` 是每次调用的局部量，`path` 由 `tested_sha`
+        唯一决定 ⇒ `rev-parse <commit>:<path>` 是 commit 的函数），但那是**隐式**不变量；
+        键写全 `(commit, blob)` 后，将来把 memo 提到模块级做跨调用缓存也不会静默错。
+
+        深度上限 `_DONOR_MAX_DEPTH`：递归深度 = 侧转手链长度。真实仓里 donor 判定一次都不会
+        被调用（侧路命中集合为空），但**语义契约是 fail-closed**——超限按「不成立」处理
+        （返回 **False** ⇒ 调用方不跳过 ⇒ 判「动过」），绝不让 `RecursionError` 裸穿
+        `receipt_present_check`（r10 Standards P4-1：实测 1000 层链直接抛 `RecursionError`）。
+        ⚠ 返回值的语义是「main 交来的 ⇒ 放行」，所以 fail-closed 对应 **False** 而不是 True
+        （r10 实现时一度写反：1000 跳探针实测 r9 抛 `RecursionError`、写反的 fix10 判
+        `attested`——两个都不是契约要的「判红」）。
         """
-        if commit in adopted:
-            return adopted[commit]
+        if depth >= _DONOR_MAX_DEPTH:
+            print(f"donor 转手链超过 {_DONOR_MAX_DEPTH} 跳，按「动过」处理（fail-closed）",
+                  file=sys.stderr)
+            return False
+        key = (commit, blob)
+        if key in adopted:
+            return adopted[key]
         parents = _git_at(repo_root, "rev-list", "--parents", "-n", "1",
                           commit).stdout.split()[1:]
         answer = False
@@ -1380,10 +1407,10 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
                        parent, "origin/main").returncode == 0:
                 answer = True
                 break
-            if _handed_over_by_main(parent, blob):
+            if _handed_over_by_main(parent, blob, depth + 1):
                 answer = True
                 break
-        adopted[commit] = answer
+        adopted[key] = answer
         return answer
 
     for commit in commits:
@@ -1503,10 +1530,10 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         自己的 merge 提交里改坏 / 删掉收据」整段滤掉（r6 P1-1）。
       · 侧路的跳过条件放过「收下 **main 交来的**字节」，两个条件缺一不可：① 命中提交在该
         路径上的 blob ∈ `origin/main` **自己历史线上**出现过的字节（
-        `git log --full-history --format=%H origin/main -- <path>` 逐笔 `rev-parse`；
-        被 main 丢弃的侧分支提交**不算**出版）；② 该字节由**一个「main 侧的父」逐字交给它**
-        （donor 身份，链式）**或**它就是 `origin/main` 当前的 blob。读失败 ⇒ 该候选/donor
-        不成立；集合为空 ⇒ 不跳过（fail-closed）。
+        `git log --first-parent --full-history --format=%H origin/main -- <path>` 逐笔
+        `rev-parse`；被 main merge 进来又丢弃的侧支提交**不算**出版）；② 该字节由**一个
+        「main 侧的父」逐字交给它**（donor 身份，链式）**或**它就是 `origin/main` 当前的 blob。
+        读失败 ⇒ 该候选/donor 不成立；集合为空 ⇒ 不跳过（fail-closed）。
         用「main 历史线上的字节」而不是「main 现在的字节」：长生命周期分支先 sync 收下 main
         当时的字节、之后 main 又原地改写同一张收据、分支再 sync 时旧基准已不在 `origin/main`
         的 tip 上，只用后者会把合法形状误判成动过（r7 P2-1）。枚举**必须带 `--full-history`**：
@@ -1517,9 +1544,11 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         **也不能**取「该提交第二父的 blob」：第二父同样没有身份约束，scratch 分支改坏后由侧
         分支 merge 逐字收下、多级转手链都会被放行（r8 Spec P1-1 的两条洗白格，
         `..._stays_red_when_a_side_merge_adopts_a_sibling_branchs_bytes` 钉住）。**已知边界**：
-        ① 若 main **出版过**坏字节而交付线保留了自己的原字节，这条会被跳过 ⇒ 仍 `attested`
-        （r6 只在「main 的坏字节仍在 tip」变体上实测过；r8 起「main 后来把坏字节改好」的变体
-        同样跳过）。按上面已登记的口径「main 侧提交的收据责任在 main」处理，不当作本分支的编辑。
+        ① 若 main **在第一父线上出版过**坏字节、而交付线保留了自己的原字节，这条会被跳过 ⇒
+        仍 `attested`（r6 只在「main 的坏字节仍在 tip」变体上实测过；r8 起「main 后来把坏字节
+        改好」的变体同样跳过）。按上面已登记的口径「main 侧提交的收据责任在 main」处理，不
+        当作本分支的编辑。**注意范围**：这里的「出版」= 出现在 `origin/main` 的**第一父线**上；
+        「main merge 过某分支但把内容丢弃」的侧支提交**不在**此列（r10 Spec P1 已把它判红）。
         ② 该口径只落在侧路；交付线（第一父链）上直接 sync 收下 main 改写过的字节仍没有跳过步
         ⇒ 合法形状误红 / 死锁（Standards r8 P3-1，r4 起既存，三单实测第一父 DMR 命中
         `docs/gate/` 为 0/0/0；本轮**不修**，另开票）。
@@ -1527,6 +1556,15 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         既存，与跳过步无关：删掉整个跳过步也改不动它）。
         ④ 第一父交付线的**命中**分支在现实现下被侧路完全覆盖（Standards r9 P4-1 实测
         M28 = 0 failed）：保留它是语义上的第一道闸与侧路将来放宽时的后备，别当成死代码删。
+        ⑤ **侧分支用普通提交拷走 `origin/main` 当前字节**的合法形状**不单调**：main 原地重写
+        同一张收据后，同一 HEAD 由 `attested` 翻 `violations`（r10 P2 / Standards S-1，四树
+        实测：r6 翻、r7 翻、r8 不翻、r9 起翻）。直接原因：`current_main_blob` 例外判的是 main
+        **当前**的 blob，main 一动就失效；而普通提交没有持有该字节的父 ⇒ donor 判定恒为 False
+        ⇒ 没有东西接住它。对照：同一形状改用 merge 收下（donor=True）则单调。**本轮按处置 (a)
+        登记不修**：真修复需要时间维判定（拷贝时刻该字节是否仍是 main 当前 blob），超出 #1692
+        的最小改动范围 ⇒ 合入后另开一票。机械钉：
+        `..._plain_copy_of_main_current_bytes_turns_red_after_origin_main_advances_known_boundary_5`
+        （stage1 `attested` / stage2 `violations`，钉住**现状**而非正确性）。
     删掉 / 藏掉 / 改坏区间内收据的现场没有本地自举出口，包括「改坏或删掉之后再写回原字节」，
     也包括「把改坏 / 删除 / 恢复原字节放到侧分支上、甚至放进侧分支自己的 merge 提交里，再让
     交付线 merge 丢弃」——两路取并后都判红（`--diff-merges=first-parent` 让侧路的 merge 提交
@@ -1746,17 +1784,23 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         #        改回被丢弃 ×3、侧分支 **merge 提交**里改坏 / 删除 / 写 FAIL ×3、两路的读失败钉
         #        各一。r6 变异口径：把侧查询的 `--diff-merges=first-parent` 换回 `--no-merges`
         #        （M20）⇒ 3 条嵌套侧 merge 钉转红（r5 时代这一维 M20 = 0，完全裸奔）。
-        #        r8 起跳过步的候选集合 = **`origin/main` 在该路径出版过的全部字节**（r7 的
-        #        「第二父 + main 当前」两个候选已被这一条取代）。删掉整步（M22）⇒ 两条 adopt
-        #        钉转红（兄弟分支钉期望判红，不受影响）；把集合换回「该提交的第二父」
-        #        ⇒ 兄弟分支钉转红
-        #        （`..._stays_red_when_a_side_merge_adopts_a_sibling_branchs_bytes` 与
-        #        `..._stays_red_when_a_sibling_adoption_chain_repeats`）。集合同时覆盖「命中
-        #        提交是**普通提交**（没有第二父）却收下 main 字节」这层——Standards r8 P2-1 的
-        #        `side_nonmerge_copy_main` 形状据此 `attested`；删掉整个集合（M22）它转
-        #        `violations`，但现役钉不覆盖该形状，靠 r8 白洗矩阵读数为证。r7 时代这条由
-        #        「main 当前」候选承重（当时 M22b 在现役钉上为 0 是夹具窄，不是候选冗余）；
-        #        新集合天然包含 main 当前 blob，故该候选已删（M22b 轴随之消失）。
+        #        跳过步（r9 起）= 两个条件的**合取**，缺一不可：
+        #          ① 命中提交在该路径的 blob ∈ `origin/main` **第一父线上**出版过的字节
+        #             （`git log --first-parent --full-history --format=%H origin/main -- <path>`
+        #             逐笔 `rev-parse`；被 main merge 进来又丢弃的侧支提交**不算**出版——r10
+        #             Spec P1 的 k1/k4 两格）；
+        #          ② 该字节由**一个「main 侧的父」逐字交给它**（donor 身份，链式 + memo），
+        #             **或**它就是 `origin/main` **当前**的 blob（r6 起的显式例外，承重：侧分支
+        #             用普通提交拷走 main 当前字节时其父不持有该字节，donor 为 False）。
+        #        r8 时代只有 ① 而**没有** ② ⇒ 分支自己用普通提交写出 main 曾出版、现已替换的
+        #        字节会被放行（r9 Spec P1 的两条洗白格）。r9 补 ②、r10 给 ① 加 `--first-parent`。
+        #        删掉整步（M22）⇒ 4 条**期望 `attested`** 的钉转红（两条 adopt、P2 单调性钉、
+        #        plain-commit 拷贝钉）；期望 `violations` 的钉不会因删整步而变红。把集合换回
+        #        「该提交的第二父」（M27）⇒ 只打掉 plain-commit 拷贝钉（其余钉的字节从不由
+        #        第二父携带）。删掉 donor 判定（M29）⇒ 恰好两条 P1 钉。候选集合枚举去掉
+        #        `--full-history`（M30）⇒ P2 单调性钉；去掉 `--first-parent`（M32）⇒ k1/k4 两钉。
+        #        删掉 `current_main_blob` 例外（M31，r9 复活该轴、**不是** M22b）⇒ plain-commit
+        #        拷贝钉。两条读失败路径（`log` / 单笔 `rev-parse`）都 fail-closed。
         #        内容项一旦在位，就必须带 `-m`：否则 merge 落地的形状会被它误判成「落地后被动过」
         #        （M11 只改回默认 `False` ⇒ merge 钉转红）。
         first_receipt = False
