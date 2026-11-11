@@ -850,8 +850,8 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 #: a49a2b9c5 起的全部 19 笔机械豁免；三选一实测（同一脚本直接调
 #: `receipt_present_check(bootstrap_sha=…)`）：锚 69befba3d ⇒ 18 违规 / 转硬，锚
 #: a49a2b9c5（merge-base）⇒ 仍 18 违规 / 仅靠 warn-only（窗到 2026-11-03T16:52Z，两天后同样
-#: 转硬，等于把死锁推迟而非解除），锚 d97b00f26 ⇒ 0 违规。宽限窗重计到 d97b00f26 的提交时间
-#: 2026-11-08T12:00:04Z。**不**锚到 origin/main 2b04fa767：它不是本分支 HEAD 的祖先，与 scope
+#: 转硬，等于把死锁推迟而非解除），锚 d97b00f26 ⇒ 0 违规。宽限窗从锚点提交时间
+#: 2026-11-01T12:00:04Z 起算 7 天，右端 2026-11-08T12:00:04Z。**不**锚到 origin/main 2b04fa767：它不是本分支 HEAD 的祖先，与 scope
 #: 内提交无祖先关系会被 `merge-base --is-ancestor` 判成「早于锚点」而把全部提交机械豁免——
 #: 那是把判据挖空，不是重开采用窗；锚点日期也不得伪造。
 #:
@@ -1285,7 +1285,9 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
       东西。保留它是因为「无 `--diff-merges` 的 git 上本查询会 rc≠0 ⇒ 判『动过』
       （fail-closed，合法 gen-2 分支会死锁）」——也就是说**真正的版本下限是 git ≥ 2.31**
       （`--diff-merges=first-parent` 的引入版本），不是 `--full-history`。
-      ⚠ 但 `--full-history` 在**跳过步的候选集合枚举**上是**承重**的（r9 Spec P2）：见下。
+      ⚠ `--full-history` 在**跳过步的候选集合枚举**上**已被 `--first-parent` 完全覆盖**
+      （r10 实测 M30 = 0 failed：单删它一格不红）。保留它是跨 git 版本的 belt-and-braces
+      与 r9 语义连续性，**不是牙齿**：见下。
       命中提交还要过一道**收下 main 字节**的跳过步，两个条件缺一不可：
         ① 该提交在该路径的 blob ∈ `origin/main` **第一父线上**出版过的字节
            （`git log --first-parent --full-history --format=%H origin/main -- path`
@@ -1296,11 +1298,13 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
       当时写的字节、之后 main 又原地改写同一张收据两次、分支再 sync 一次，只用当前 blob 比会
       把这笔历史的旧基准判掉、把合法形状误判成动过（r7 P2-1；同一 HEAD 会随 main 前进由
       attested 翻成 violations）。
-      候选集合枚举**必须带 `--full-history`**：`git log <rev> -- <path>` 默认做路径历史简化，
-      与某个父 TREESAME 的 merge 会被剪掉、其祖先也可能整段消失 —— main 用一笔「结果 == 第二父」
-      的 merge 换掉旧收据后，那串旧字节就从列表里没了，分支**合法**收下的它被判红，且集合随
-      main 前进而缩小 ⇒ 同一 HEAD 由 attested 翻 violations（r9 Spec P2 的 `pruned_legal` /
-      `flip` 形状；r7 在同样形状上是 attested→attested）。
+      枚举**以 `--first-parent` 为界**（被 main merge 进来又丢弃的侧支提交**不算**出版），
+      `--full-history` 在此之上**不再改变集合**（r10 实测：`pruned_legal` 场景下 `--first-parent`
+      已命中 main 自己的两笔提交，`--full-history` 多出的只是一笔持同一 blob 的侧支提交）。
+      这一层承重的是 `--first-parent`：去掉它（M32）⇒ k1/k4 两钉；**同时**去掉两条 flag（M33）
+      ⇒ P2 单调性钉（`pruned_legal` 的 `flip` 形状回来）。单删 `--full-history`（M30）⇒ **0 格**。
+      r9 Spec P2 的 `pruned_legal` / `flip` 形状在 r9 里由 `--full-history` 兜住，r10 起由
+      `--first-parent` 兜住——**承重发生了迁移**，不是承重消失。
       **不能**只问「字节是否曾被 main 出版」：那没有身份约束，分支自己用**普通提交**写出
       main 曾出版、现已替换掉的字节（含 main 曾出版过的 FAIL 字节）会被当成 adoption 放行
       （r9 Spec P1 的两条洗白格）。也**不能**用「该提交的第二父的 blob」：第二父同样没有身份
@@ -1311,7 +1315,8 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
       翻 violations（r9 探针 `p1:current`）；它是 r6 起的既存边界，保留为显式例外。
       本跳过步是承重的：删掉整步 ⇒ 两条 adopt 钉转红（兄弟分支钉本就期望判红，不受影响）；
       把集合换回「第二父」⇒ 兄弟分支钉（与两级链钉）转红；删掉 donor 判定 ⇒ 两条 P1 钉转红；
-      候选集合枚举去掉 `--full-history` ⇒ P2 钉转红。
+      候选集合枚举去掉 `--full-history` ⇒ **0 格**（M30 = 0）；去掉 `--first-parent` ⇒ k1/k4
+      两钉；两条 flag 都去掉 ⇒ P2 单调性钉（M33 = 1，承重由 `--first-parent` 承担的证据）。
       **读失败 fail-closed**：`git log` / 逐笔 `rev-parse` / `merge-base --is-ancestor` 读不到
       ⇒ 该候选（或该 donor）不成立；集合为空 ⇒ 一律按「动过」处理。
       `--not origin/main` 排除「已被 main 收下的提交」；实测它不是本判据的承重点（起点本身就是
@@ -1346,7 +1351,8 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
     # 提交也算成「main 出版」⇒ topic 写坏的字节被 main 丢弃后，侧分支收下它就能洗白
     # （r10 Spec 的 k1/k4 两格；r6/r8 判红、r7/r9 放行）。第一父线是「main 真的交付过什么」
     # 的唯一口径；被带入又丢弃的侧支提交的收据责任不在 main。
-    # `--full-history` 也必带：默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge
+    # `--full-history` 在本组合下已不改变集合（r10 M30 = 0，承重是 `--first-parent`）：
+    # 保留它是跨 git 版本的 belt-and-braces 与 r9 语义连续性。默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge
     # 换掉」的提交剪掉，集合会随 main 前进而缩小 ⇒ 合法格误红且不单调（r9 Spec P2）。
     # 两者组合的语义 = 「第一父线上出现过、且没有被后续 TREESAME merge 吞掉的历史」。
     # 读失败（`log` rc≠0 / 单笔 `rev-parse` 失败）⇒ 该候选不进集合；集合为空 ⇒ 一律判动过
@@ -1390,6 +1396,8 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
         `attested`——两个都不是契约要的「判红」）。
         """
         if depth >= _DONOR_MAX_DEPTH:
+            # 保留 `file=sys.stderr`（r11 Standards P4-2 已评估）：诊断类信息走 stderr 更合适，
+            # donor 转手链超限在真实仓不可达；不进 `lanes[].output_tail`、不进收据 JSON。
             print(f"donor 转手链超过 {_DONOR_MAX_DEPTH} 跳，按「动过」处理（fail-closed）",
                   file=sys.stderr)
             return False
@@ -1536,10 +1544,11 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         读失败 ⇒ 该候选/donor 不成立；集合为空 ⇒ 不跳过（fail-closed）。
         用「main 历史线上的字节」而不是「main 现在的字节」：长生命周期分支先 sync 收下 main
         当时的字节、之后 main 又原地改写同一张收据、分支再 sync 时旧基准已不在 `origin/main`
-        的 tip 上，只用后者会把合法形状误判成动过（r7 P2-1）。枚举**必须带 `--full-history`**：
+        的 tip 上，只用后者会把合法形状误判成动过（r7 P2-1）。枚举**以 `--first-parent` 为界**：
         默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge 换掉」的提交剪掉 ⇒ 合法
         分支收下的旧字节被判红，且集合随 main 前进而缩小 ⇒ 同一 HEAD 由 attested 翻 violations
-        （r9 Spec P2）。**也不能只问「字节是否曾被 main 出版」**：它没有身份约束，分支自己用
+        （r9 Spec P2）；r10 起挡住这一层的正是 `--first-parent`（M32 ⇒ k1/k4、M33 ⇒ P2 钉；
+        `--full-history` 单删 M30 = 0，已不承重）。**也不能只问「字节是否曾被 main 出版」**：它没有身份约束，分支自己用
         普通提交写出 main 曾出版、现已替换掉的字节（含 FAIL 字节）会被放行（r9 Spec P1）。
         **也不能**取「该提交第二父的 blob」：第二父同样没有身份约束，scratch 分支改坏后由侧
         分支 merge 逐字收下、多级转手链都会被放行（r8 Spec P1-1 的两条洗白格，
@@ -1798,7 +1807,9 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         #        plain-commit 拷贝钉）；期望 `violations` 的钉不会因删整步而变红。把集合换回
         #        「该提交的第二父」（M27）⇒ 只打掉 plain-commit 拷贝钉（其余钉的字节从不由
         #        第二父携带）。删掉 donor 判定（M29）⇒ 恰好两条 P1 钉。候选集合枚举去掉
-        #        `--full-history`（M30）⇒ P2 单调性钉；去掉 `--first-parent`（M32）⇒ k1/k4 两钉。
+        #        `--first-parent`（M32）⇒ k1/k4 两钉；**同时**去掉两条 flag（M33）⇒ P2 单调性钉。
+        #        单删 `--full-history`（M30）⇒ **0 failed**：`--first-parent` 之下它已不承重
+        #        （r10 实测，如实登记；承重由 `--first-parent` 承担）。
         #        删掉 `current_main_blob` 例外（M31，r9 复活该轴、**不是** M22b）⇒ plain-commit
         #        拷贝钉。两条读失败路径（`log` / 单笔 `rev-parse`）都 fail-closed。
         #        内容项一旦在位，就必须带 `-m`：否则 merge 落地的形状会被它误判成「落地后被动过」
