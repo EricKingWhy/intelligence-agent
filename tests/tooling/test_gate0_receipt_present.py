@@ -1227,8 +1227,9 @@ def test_second_receipt_bootstrap_stays_red_when_a_landed_receipt_was_tampered(t
 
     修复轮 1 的 `landed ⊆ set(receipts)` 按 key 判「在不在」：改坏的收据 key 仍在 ⇒ 该合取项
     成立，整跑 `attested`（6/7 洗成 7/7 + PASS 收据）。r2 时代本条是内容合取项的钉子（当时
-    M9 单删即红）；r3 加路径项后改由 `_receipt_path_was_touched` 捕获（M10 单删才红），内容项
-    退为纵深防御。保留本条以钉住「改坏 ⇒ `violations`」这一行为。
+    M9 单删即红）；r3 加路径项后本条要「内容项 + 路径项」**都删**才转红（M9 / M10 单删皆绿，
+    M9+M10 红）——这一格是双重覆盖，本条保留以钉住「改坏 ⇒ `violations`」这一行为。
+    内容项的独立鉴别力由侧分支两条钉承担（见本文件 `..._side_branch_*`，M9 单删即红）。
     """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
@@ -1259,7 +1260,8 @@ def test_second_receipt_bootstrap_stays_red_when_a_deleted_receipt_is_readded_ve
     内容合取项（blob == 首次落地 blob）在恢复原字节后成立，key 合取项也只问在不在 ⇒ 修复轮 2
     仍可整跑洗白（base `violations`、tip `attested`）。补「收据路径在第一父链上未被 D 或 M
     触碰」后 ⇒ `violations`：中间那笔删除仍在路径历史上。（改名按 `--no-renames` 拆成 D+A，
-    由 D 覆盖；`R` 在该口径下不产出，本判据不依赖它。）
+    由 D 覆盖；`R` 在该口径下不产出，本判据不依赖它。`_in_range_receipt_landings` 走
+    `--diff-filter=A`，改名的新路径作为 `A` 收下，不受影响。）
     """
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
@@ -1436,12 +1438,8 @@ def test_second_receipt_bootstrap_survives_a_sync_merge_keeping_its_own_receipt(
     assert check.status == "attested", check.detail
 
 
-def test_second_receipt_bootstrap_stays_red_when_the_path_history_read_fails(tmp_path):
-    """r4 P2-1：路径历史（`--diff-filter=DMR` 那次 `git log`）读不出来 ⇒ 不得自举（fail-closed）。
-
-    现场同 `..._readded_verbatim`（删掉再加回原字节 ⇒ 只有路径项看得见），再把那次 `git log`
-    打成 rc=128。没有这条用例时把 `returncode != 0` 改成忽略（fail-open）不会有任何测试变红。
-    """
+def _branch_tampered_inside_the_merge_commit(tmp_path) -> tuple[Repo, str, str]:
+    """merge 提交**自身**把落过的收据写成坏字节（第一父 diff 就是 `M`，侧分支历史干净）。"""
     repo = Repo(tmp_path / "r")
     base = _base_with_origin(repo)
     c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
@@ -1449,23 +1447,212 @@ def test_second_receipt_bootstrap_stays_red_when_the_path_history_read_fails(tmp
     repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
     c2 = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
     repo.commit(repo.receipt(c2), "docs(gate): receipt for code 2")
-    repo.remove(f"docs/gate/{c1}.json", "docs(gate): drop the receipt for code 1")
-    repo.commit({f"docs/gate/{c1}.json": original},
-                "docs(gate): re-add the identical receipt")
+    repo.git("checkout", "-q", "-b", "side")
+    repo.commit({"src/s.py": "s = 1\n"}, "side work")
+    repo.git("checkout", "-q", "main")
+    doc = json.loads(original)
+    doc["passed"] = doc["total"] - 1
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit({f"docs/gate/{c1}.json": json.dumps(doc)},
+                "merge side, resolving the receipt to tampered bytes")
     repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
     repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+    return repo, base, c1
 
+
+def test_second_receipt_bootstrap_stays_red_when_the_merge_commit_tampers_the_receipt(
+    tmp_path,
+):
+    """r5 P1-1 反向守卫：merge 提交自身把落过的收据改坏 ⇒ 仍 `violations`（第一父查询承重）。
+
+    `--first-parent` 让 `git log` 对 merge 出「相对第一父」的 diff ⇒ 这笔 `M` 看得见；少了
+    `--first-parent`（或不带 `-m` 的跨父查询）merge 提交根本不产出 diff ⇒ 该形状失守。
+    侧分支历史是干净的（`--no-merges` 也不看 merge），所以这一格只有第一父查询能判。
+    """
+    repo, base, c1 = _branch_tampered_inside_the_merge_commit(tmp_path)
+
+    with _clean_env():
+        # 前提自证：内容项也认为被改过（blob 与首次落地不等），与路径项方向一致。
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True) is False
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_the_path_history_read_fails(tmp_path):
+    """r4 P2-1 / r5 P2-2：路径历史的第一父查询读不出来 ⇒ 不得自举（fail-closed）。
+
+    现场用 sync-merge 那一格（本应 `attested`），把第一父那次 `git log` 打成 rc=128 ⇒ 必须转红。
+    把 `returncode != 0` 丢掉（fail-open）后它会落回侧分支查询的空结果 ⇒ `attested` ⇒ 本钉转红，
+    所以它不是真空断言。定位条件按路径参数 + `--first-parent`，不按 `DMR` 字面串（`DMR`→`DM` 不漏）。
+    """
+    # 用 sync-merge 那一格：第一父链干净、侧分支历史也干净、内容项为真 ⇒ 正常情况下 `attested`。
+    # 于是这条钉子只可能在「第一父查询读失败却没按 fail-closed 处理」时转红，不是真空断言。
+    repo, base, _c1 = _branch_with_a_sync_merge_keeping_its_own_receipt_bytes(tmp_path)
+    _assert_path_history_read_failure_is_closed(repo, base, "--first-parent")
+
+
+def test_second_receipt_bootstrap_stays_red_when_the_side_history_read_fails(tmp_path):
+    """r5 P1-1 / P2-2 同族：**分支侧历史**那一路读不出来 ⇒ 同样不得自举（fail-closed）。
+
+    现场同 `..._a_side_branch_tamper_is_discarded`（第一父链干净、只有侧分支历史有 `M`）⇒
+    这一格只有 `--full-history` 那一路能判，把它的 rc 打成 128 后必须判红，而不是当成「没动过」。
+    """
+    repo, base, _c1 = _branch_whose_side_edit_is_discarded_by_the_merge(tmp_path, "tamper")
+    _assert_path_history_read_failure_is_closed(repo, base, "--full-history")
+
+
+def _assert_path_history_read_failure_is_closed(repo: Repo, base: str, marker: str) -> None:
+    """把 `_receipt_path_was_touched` 的查询打成 rc=128 ⇒ 不得自举。
+
+    定位条件按**本函数的路径参数**（`docs/gate/*.json`）＋可选的行为标记（`--first-parent` /
+    `--full-history`），**不按会变的过滤字母**——`DMR` 改 `DM` 是等价改法，按字面串定位会让钉子
+    真空（r5 Standards P2-2）。要求带路径参数同时避免打中 `_in_range_receipt_landings` 的
+    `git log`（它走同一个 `_git_at`，但不按单张收据路径过滤）。
+
+    `marker=None` ⇒ 打本函数的两路查询（任一查询的 read-failure 分支被改成 fail-open 都会转红）。
+    """
     real = gate0._git_at
 
     def failing(repo_root, *args, **kwargs):
-        # 只打路径历史那一路；`_in_range_receipt_landings` 的 `git log` 必须放行，否则测的
-        # 就不是这个分支（它走同一个 `_git_at`）。
-        if args[:1] == ("log",) and "--diff-filter=DMR" in args:
+        hits_this_path = any(
+            str(a).startswith("docs/gate/") and str(a).endswith(".json") for a in args
+        )
+        if args[:1] == ("log",) and (marker is None or marker in args) and hits_this_path:
             return subprocess.CompletedProcess(args, 128, "", "fatal: simulated log failure")
         return real(repo_root, *args, **kwargs)
 
     with mock.patch.object(gate0, "_git_at", failing):
         check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def _branch_whose_side_edit_is_discarded_by_the_merge(tmp_path, how: str) -> tuple[Repo, str, str]:
+    """侧分支碰过落地收据（`how` = tamper / delete / edit_back），merge 冲突解决回**原字节**。
+
+    交付树里那张收据是首次落地的字节、第一父链上零 D/M ⇒ 内容项与「跨父」的直觉都认为没动过；
+    被丢弃的是「有人动过这张收据」这个事实，只有侧分支历史看得见。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    repo.git("checkout", "-q", "-b", "side")
+    if how == "tamper":
+        _tamper_receipt(repo, c1)
+    elif how == "delete":
+        repo.remove(f"docs/gate/{c1}.json", "side: delete the landed receipt")
+    else:  # edit_back
+        doc = json.loads(original)
+        doc["wall_seconds"] = 9.0
+        repo.commit({f"docs/gate/{c1}.json": json.dumps(doc)}, "side: edit the receipt")
+        repo.commit({f"docs/gate/{c1}.json": original},
+                    "side: edit it back to the original bytes")
+    repo.git("checkout", "-q", "main")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit({f"docs/gate/{c1}.json": original},
+                "merge side, discarding its receipt edit")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+    return repo, base, c1
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_branch_tamper_is_discarded(
+    tmp_path,
+):
+    """r5 P1-1（钉 1）：侧分支改坏落过的收据、merge 写回原字节 ⇒ 仍 `violations`。
+
+    `--first-parent` 只看交付线 ⇒ 侧分支那笔 `M` 藏在第二父后面，交付树回到原字节，内容项也成立
+    （HEAD blob == 首次落地 blob）⇒ r4 起整跑 `attested`（7/7 + PASS 收据）。侧分支是本分支自己的
+    提交，被 merge 丢弃不等于没发生过 ⇒ 路径项必须另看分支侧历史（`--full-history --no-merges`）。
+    """
+    repo, base, c1 = _branch_whose_side_edit_is_discarded_by_the_merge(tmp_path, "tamper")
+
+    with _clean_env():
+        # 前提自证：交付树里是原字节，内容项认为没动过；第一父链也干净。
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_branch_delete_is_discarded(
+    tmp_path,
+):
+    """r5 P1-1（钉 2）：侧分支删掉落过的收据、merge 写回原字节 ⇒ 仍 `violations`（同上）。"""
+    repo, base, c1 = _branch_whose_side_edit_is_discarded_by_the_merge(tmp_path, "delete")
+
+    with _clean_env():
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_branch_fail_receipt_is_discarded(
+    tmp_path,
+):
+    """r5 P1-1（钉 3）：侧分支提交某代码提交的 **FAIL 收据**、merge 丢弃 ⇒ 仍 `violations`。
+
+    挡住它的是**内容项**（`HEAD:path` 缺失 ⇒ False），不是路径项——路径项看不到从未进交付树的
+    收据。所以这条钉是内容项的独立鉴别力钉子：M9（单删内容项）下它必须转红。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    c2 = repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    fail = json.loads(next(iter(repo.receipt(c2).values())))
+    fail["result"] = "FAIL"
+    fail["passed"] = fail["total"] - 1
+    repo.git("checkout", "-q", "-b", "side")
+    repo.commit({f"docs/gate/{c2}.json": json.dumps(fail)},
+                "side: land a FAIL receipt for code 2")
+    repo.git("checkout", "-q", "main")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+    repo.git("merge", "--no-ff", "-s", "ours", "side")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_branch_receipt_is_discarded(
+    tmp_path,
+):
+    """r5 P1-1（钉 3 的同族）：侧分支给**自己的代码提交**落了收据、merge 丢弃 ⇒ 仍 `violations`。
+
+    与上一条同属「内容项承重」的一格：那张收据在区间内落过（进 `landed`），但交付树里没有
+    `HEAD:path` ⇒ 内容项为 False。路径项看不到它（从未进交付树，且 `--no-merges` 不看 merge）。
+    两条一起把内容项的独立贡献钉住（M9 单删 ⇒ 两条都转红）。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    repo.git("checkout", "-q", "-b", "side")
+    c2 = repo.commit({"src/b.py": "b = 2\n"}, "side: code 2")
+    repo.commit(repo.receipt(c2), "side: land the receipt for code 2")
+    repo.git("checkout", "-q", "main")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+    repo.git("merge", "--no-ff", "-s", "ours", "side")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+
+    check = _bootstrapping_check(repo, base)
     assert check.warn_only is False, check.detail
     assert check.ok is False, check.detail
     assert check.status == "violations", check.detail
