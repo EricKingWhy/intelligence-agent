@@ -1277,14 +1277,22 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
       `--no-merges` 会把「在侧分支自己的 merge 提交里改坏 / 删掉收据」整段滤掉（r6 P1-1 的
       洗白通道；r5 时代这一维 M20 = 0，无用例）。`--no-patch` 必需：`--diff-merges` 默认会往
       stdout 追加 patch 正文，`--format=%H` 只管提交头，正文会污染 `bool(stdout.strip())`。
-      `--full-history` 在 r5 的组合（`--no-merges`）下是必需的（默认路径简化会把只在被放弃侧
-      分支上的提交整段删掉）；但本轮换成 `--diff-merges=first-parent` 后，merge 一旦产出 diff
-      就不再 TREESAME，路径简化对这些形状不再删提交 —— r6 实测 M21（去掉 `--full-history`）
-      = **0 failed**。所以它在**当前 flag 组合下不承重**，保留为纵深防御与跨 git 版本的语义
-      显式；别把「它必需」当成现行事实（也不要在不加 `--diff-merges` 时删掉它）。
-      命中提交还要过一道「该提交在该路径的 blob == `origin/main` 的 blob ⇒ 跳过」：侧分支
-      sync main 后只是**收下了 main 写的字节**，那不是本分支的编辑（不加这一步会误伤这条合法
-      形状，`..._survives_a_side_branch_merge_that_adopts_origin_mains_receipt` 钉住）。
+      `--full-history` **只影响路径历史简化，不改变 merge 是否出 diff**。r5 的组合
+      （`--no-merges`）下它是必需的（默认路径简化会把只在被放弃侧分支上的提交整段删掉）；
+      r6 起换成 `--diff-merges=first-parent` 后 merge 会出 diff、提交不再 TREESAME，于是
+      r6 实测 M21（去掉 `--full-history`）= **0 failed**。保留它是因为「无 `--diff-merges`
+      的 git 上本查询会 rc≠0 ⇒ 判『动过』（fail-closed，合法 gen-2 分支会死锁）」——也就是说
+      **真正的版本下限是 git ≥ 2.31**（`--diff-merges=first-parent` 的引入版本），不是
+      `--full-history`。别把「它必需」当成现行事实，也不要在不加 `--diff-merges` 时删掉它。
+      命中提交还要过一道**收下 main 字节**的跳过步：该提交在该路径的 blob == 该提交第二父
+      （若它是 merge）在同一路径的 blob，**或** == `origin/main` 当前在该路径的 blob ⇒ 跳过。
+      基准是「merge 当时 main 交给它的字节」而不是「main 现在的字节」：长生命周期分支先 sync
+      收下 main 写的字节、之后 main 又原地改写同一张收据两次、分支再 sync 一次，只用当前
+      `origin/main` 比会把这笔历史的旧基准判掉、把合法形状误判成动过（r7 P2-1；同一 HEAD 会
+      随 main 前进由 attested 翻成 violations）。第二父候选项因此承重：删掉它
+      `..._survives_a_side_merge_that_adopts_an_older_origin_mains_receipt` 转红。
+      两个控制钉：`..._survives_a_side_merge_that_adopts_origin_mains_receipt`（收下
+      main 当前字节）与上一条（收下 main 旧字节）。
       `--not origin/main` 排除「已被 main 收下的提交」；实测它不是本判据的承重点（起点本身就是
       `merge-base(origin/main, HEAD)`，main 侧提交通常不在区间内），保留它是为了语义自洽与
       跨 git 版本一致，别把它当牙齿。
@@ -1313,10 +1321,23 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
         return False
     upstream = _git_at(repo_root, "rev-parse", f"origin/main:{path}")
     for commit in commits:
+        theirs = _git_at(repo_root, "rev-parse", f"{commit}:{path}")
+        if theirs.returncode != 0:
+            return True
+        blob = theirs.stdout.strip()
+        # 收下 main 字节的基准是「merge 当时那侧交来的字节」：第二父（若 merge）+ main 当前。
+        parents = _git_at(
+            repo_root, "rev-list", "--parents", "-n", "1", commit
+        ).stdout.split()[1:]
+        candidates = []
+        if len(parents) >= 2:
+            second = _git_at(repo_root, "rev-parse", f"{parents[1]}:{path}")
+            if second.returncode == 0:
+                candidates.append(second.stdout.strip())
         if upstream.returncode == 0:
-            theirs = _git_at(repo_root, "rev-parse", f"{commit}:{path}")
-            if theirs.returncode == 0 and theirs.stdout.strip() == upstream.stdout.strip():
-                continue
+            candidates.append(upstream.stdout.strip())
+        if blob in candidates:
+            continue
         return True
     return False
 
@@ -1420,10 +1441,14 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         前者避免把 sync merge 保留本侧字节误判成动过，后者盯住「把改坏 / 删除放到侧分支、再让
         merge 丢弃」这条洗白路线。侧路**必须能看见 merge 提交**：`--no-merges` 会把「在侧分支
         自己的 merge 提交里改坏 / 删掉收据」整段滤掉（r6 P1-1）。
-      · 侧路的跳过条件只放过一种：命中提交在该路径上的 blob == `origin/main` 的 blob ⇒ 侧分支
-        只是**收下了 main 写的字节**，不是本分支的编辑。**已知边界**：若 main 写的是坏字节而交付
-        线保留了自己的原字节，这条会被跳过 ⇒ 仍 `attested`（r6 Standards P3-2 实测）。这按上面
-        已登记的口径「main 侧提交的收据责任在 main」处理，不当作本分支的编辑。
+      · 侧路的跳过条件放过「收下 main 写的字节」：命中提交在该路径上的 blob 等于**其第二父
+        （若该提交是 merge）**在同一路径上的 blob，**或**等于 `origin/main` 当前在该路径上的
+        blob。基准取「merge 当时那侧交来的字节」而不是「main 现在的字节」：长生命周期分支先
+        sync 收下 main 的字节、之后 main 又原地改写同一张收据、分支再 sync 时旧基准已经不在
+        `origin/main` 的 tip 上，只用后者会把合法形状误判成动过（r7 P2-1）。**已知边界**：若
+        main 写的是坏字节而交付线保留了自己的原字节，这条会被跳过 ⇒ 仍 `attested`
+        （r6 Standards P3-2 实测）。这按上面已登记的口径「main 侧提交的收据责任在 main」处理，
+        不当作本分支的编辑。
     删掉 / 藏掉 / 改坏区间内收据的现场没有本地自举出口，包括「改坏或删掉之后再写回原字节」，
     也包括「把改坏 / 删除 / 恢复原字节放到侧分支上、甚至放进侧分支自己的 merge 提交里，再让
     交付线 merge 丢弃」——两路取并后都判红（`--diff-merges=first-parent` 让侧路的 merge 提交
@@ -1443,7 +1468,8 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
     `..._stays_red_when_a_side_merge_deletes_the_receipt` /
     `..._stays_red_when_a_side_merge_writes_fail_receipt` /
     `..._stays_red_when_a_side_branch_edit_back_is_discarded` /
-    `..._survives_a_side_merge_that_adopts_origin_mains_receipt`）；票面方向 1 的
+    `..._survives_a_side_merge_that_adopts_origin_mains_receipt` /
+    `..._survives_a_side_merge_that_adopts_an_older_origin_mains_receipt`）；票面方向 1 的
     「区间内至少有张在场收据」字面过宽，会把 7 条 `test_bootstrap_stays_red_*` 的 before 态
     一并翻绿。
     """
@@ -1631,12 +1657,16 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         #        （M9）恰命中这两条钉（`..._side_branch_fail_receipt_is_discarded` /
         #        `..._side_branch_receipt_is_discarded`）。r4 记的「M9 = 0」只说明当时没有测试
         #        覆盖它的贡献，不说明它不承重。
-        #        路径项承重面最宽（r6 M10 ⇒ 10 条）：恢复原字节 ×2、侧分支普通提交改坏 / 删除 /
+        #        路径项承重面最宽（r7 M10 ⇒ 10 条）：恢复原字节 ×2、侧分支普通提交改坏 / 删除 /
         #        改回被丢弃 ×3、侧分支 **merge 提交**里改坏 / 删除 / 写 FAIL ×3、两路的读失败钉
         #        各一。r6 变异口径：把侧查询的 `--diff-merges=first-parent` 换回 `--no-merges`
-        #        （M20）⇒ 3 条嵌套侧 merge 钉转红（r5 时代这一维 M20 = 0，完全裸奔）；删掉
-        #        「命中提交的 blob == origin/main 的 blob ⇒ 跳过」这一步（M22）⇒ 合法形状
-        #        `..._survives_a_side_merge_that_adopts_origin_mains_receipt` 转红。
+        #        （M20）⇒ 3 条嵌套侧 merge 钉转红（r5 时代这一维 M20 = 0，完全裸奔）。
+        #        r7 起跳过步有两个候选（第二父 / main 当前）：删掉整步（M22）⇒ 两条 adopt 钉
+        #        都转红；只删**第二父**候选（M26）⇒ 只剩
+        #        `..._survives_a_side_merge_that_adopts_an_older_origin_mains_receipt` 转红；
+        #        只删 main 当前候选（M22b）⇒ 0 条（现役夹具里 main 当前字节与第二父总有一边
+        #        覆盖；这条保留是因为它是 r5/r6 的原始基准、覆盖「第二父已不在 main 历史里」的
+        #        形状，别把它当牙齿）。
         #        内容项一旦在位，就必须带 `-m`：否则 merge 落地的形状会被它误判成「落地后被动过」
         #        （M11 只改回默认 `False` ⇒ merge 钉转红）。
         first_receipt = False

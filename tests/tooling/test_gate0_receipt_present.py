@@ -1626,7 +1626,7 @@ def test_second_receipt_bootstrap_stays_red_when_a_side_merge_tampers_the_receip
     repo, base, c1 = _branch_whose_side_merge_edits_the_receipt(tmp_path, "tamper", "conflict")
 
     with _clean_env():
-        # 前提自证：交付树里是原字节、内容项认��没动过 ⇒ 挡住它的只能是路径项。
+        # 前提自证：交付树里是原字节、内容项认为没动过 ⇒ 挡住它的只能是路径项。
         assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
 
     check = _bootstrapping_check(repo, base)
@@ -1733,6 +1733,83 @@ def test_second_receipt_bootstrap_survives_a_side_merge_that_adopts_origin_mains
 
     check = _bootstrapping_check(repo, base)
     assert check.warn_only is False, check.detail
+    assert check.ok is True, check.detail
+    assert check.status == "attested", check.detail
+
+
+def test_second_receipt_bootstrap_survives_a_side_merge_that_adopts_an_older_origin_mains_receipt(
+    tmp_path,
+):
+    """r7 P2-1（长生命周期分支）：侧 merge 收下的是 main **当时**的字节 ⇒ 仍 `attested`。
+
+    main 对同一张收据原地重跑两次（bytes B、C），分支每次 sync 都收下；此后 main 再跑一次
+    （bytes D，分支未 sync）⇒ `origin/main` 当前字节已经不等于任何一笔旧 adoption 的字节。
+    跳过步若只问「== 当前 `origin/main` 的 blob」，那两笔纯 adoption 会被判成动过 ⇒ 合法分支
+    翻红，且**不单调**（HEAD 不动，main 前进一次结论就变）。基准必须是「merge 时那侧交给它的
+    字节」：命中提交的 blob == 其第二父的 blob 也算收下。
+    本钉同时覆盖 Spec P3-2 的多轮形状（同一 fixture 反复 sync），不另补钉。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit({f"docs/gate/{c1}.json": original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+
+    def rerun_on_main(wall: float, msg: str) -> str:
+        doc = json.loads(original)
+        doc["wall_seconds"] = wall
+        body = json.dumps(doc)
+        repo.git("checkout", "-q", "main")
+        repo.commit({f"docs/gate/{c1}.json": body}, msg)
+        repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        return body
+
+    def sync_side(wall: float, body: str) -> str:
+        repo.git("merge", "--no-ff", "--no-commit", "-X", "theirs", "origin/main")
+        return repo.commit({f"docs/gate/{c1}.json": body},
+                           f"side: sync, adopting main bytes {wall}")
+
+    b = rerun_on_main(61.0, "docs(gate): origin/main re-ran gate0 (bytes B)")
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    sync1 = sync_side(61.0, b)
+    c = rerun_on_main(99.0, "docs(gate): origin/main re-ran gate0 again (bytes C)")
+    repo.git("checkout", "-q", "side")
+    sync2 = sync_side(99.0, c)
+    rerun_on_main(123.0, "docs(gate): origin/main re-ran gate0 once more (bytes D)")
+
+    repo.git("checkout", "-q", "branch")
+    repo.commit({"src/c.py": "c = 3\n"}, "branch: more code")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit({f"docs/gate/{c1}.json": original},
+                "merge side, keeping our own receipt bytes")
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+
+    path = f"docs/gate/{c1}.json"
+    with _clean_env():
+        side = gate0._git_at(str(repo.root), "log", "--full-history",
+                             "--diff-merges=first-parent", "--no-patch", "--no-renames",
+                             "--diff-filter=DMR", "--format=%H", f"{base}..HEAD",
+                             "--not", "origin/main", "--", path)
+        hits = [h for h in side.stdout.split() if h]
+        assert {sync1, sync2} <= set(hits), "fixture must make the side query hit both sync merges"
+        # 前提自证：主基准（当前 origin/main 的字节）已不覆盖这两笔 adoption，只有第二父覆盖。
+        upstream = gate0._git_at(str(repo.root), "rev-parse", f"origin/main:{path}").stdout.strip()
+        for hit in (sync1, sync2):
+            blob = gate0._git_at(str(repo.root), "rev-parse", f"{hit}:{path}").stdout.strip()
+            assert blob != upstream, "fixture must make the live origin/main blob stale"
+            parents = gate0._git_at(str(repo.root), "rev-list", "--parents", "-n", "1",
+                                    hit).stdout.split()[1:]
+            assert len(parents) >= 2, "sync merge must have two parents"
+            second = gate0._git_at(str(repo.root), "rev-parse",
+                                   f"{parents[1]}:{path}").stdout.strip()
+            assert blob == second, "the second parent must hold the adopted bytes"
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
     assert check.ok is True, check.detail
     assert check.status == "attested", check.detail
 
