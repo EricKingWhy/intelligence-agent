@@ -851,8 +851,9 @@ def _review_ledger_receipt(repo_root, tested_sha: str,
 #: `receipt_present_check(bootstrap_sha=…)`）：锚 69befba3d ⇒ 18 违规 / 转硬，锚
 #: a49a2b9c5（merge-base）⇒ 仍 18 违规 / 仅靠 warn-only（窗到 2026-11-03T16:52Z，两天后同样
 #: 转硬，等于把死锁推迟而非解除），锚 d97b00f26 ⇒ 0 违规。宽限窗从锚点提交时间
-#: 2026-11-01T12:00:04Z 起算 7 天，右端 2026-11-08T12:00:04Z。**不**锚到 origin/main 2b04fa767：它不是本分支 HEAD 的祖先，与 scope
-#: 内提交无祖先关系会被 `merge-base --is-ancestor` 判成「早于锚点」而把全部提交机械豁免——
+#: 2026-11-01T12:00:04Z 起算 7 天，右端 2026-11-08T12:00:04Z。**不**锚到 origin/main
+#: 2b04fa767：它不是本分支 HEAD 的祖先，与 scope 内提交无祖先关系会被
+#: `merge-base --is-ancestor` 判成「早于锚点」而把全部提交机械豁免——
 #: 那是把判据挖空，不是重开采用窗；锚点日期也不得伪造。
 #:
 #: ⚠ **全局影响（AC5）**：d97b00f26 是**分支私有**提交（`merge-base --is-ancestor d97b00f26
@@ -1282,9 +1283,9 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
       stdout 追加 patch 正文，`--format=%H` 只管提交头，正文会污染 `bool(stdout.strip())`。
       `--full-history` 在本函数的**侧查询**上不承重（r6 实测 M21 = 0）：r6 起换成
       `--diff-merges=first-parent` 后 merge 会出 diff、提交不再 TREESAME，默认路径简化剪不掉
-      东西。保留它是因为「无 `--diff-merges` 的 git 上本查询会 rc≠0 ⇒ 判『动过』
-      （fail-closed，合法 gen-2 分支会死锁）」——也就是说**真正的版本下限是 git ≥ 2.31**
-      （`--diff-merges=first-parent` 的引入版本），不是 `--full-history`。
+      东西。本查询在无 `--diff-merges` 的 git 上会 rc≠0 ⇒ 判『动过』（fail-closed，合法 gen-2
+      分支会死锁）；**真正的版本下限是 git ≥ 2.31**（`--diff-merges=first-parent` 的引入版本），
+      不是 `--full-history`。
       ⚠ `--full-history` 在**跳过步的候选集合枚举**上**已被 `--first-parent` 完全覆盖**
       （r10 实测 M30 = 0 failed：单删它一格不红）。保留它是跨 git 版本的 belt-and-braces
       与 r9 语义连续性，**不是牙齿**：见下。
@@ -1301,10 +1302,10 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
       枚举**以 `--first-parent` 为界**（被 main merge 进来又丢弃的侧支提交**不算**出版），
       `--full-history` 在此之上**不再改变集合**（r10 实测：`pruned_legal` 场景下 `--first-parent`
       已命中 main 自己的两笔提交，`--full-history` 多出的只是一笔持同一 blob 的侧支提交）。
-      这一层承重的是 `--first-parent`：去掉它（M32）⇒ k1/k4 两钉；**同时**去掉两条 flag（M33）
-      ⇒ P2 单调性钉（`pruned_legal` 的 `flip` 形状回来）。单删 `--full-history`（M30）⇒ **0 格**。
-      r9 Spec P2 的 `pruned_legal` / `flip` 形状在 r9 里由 `--full-history` 兜住，r10 起由
-      `--first-parent` 兜住——**承重发生了迁移**，不是承重消失。
+      `--first-parent` 是 **k1/k4 的唯一承重点**：去掉它（M32）⇒ k1/k4 两钉。P2 单调性钉
+      （`pruned_legal` 的 `flip` 形状）则由两条 flag 的**析取**保护——单删 `--full-history`
+      （M30）⇒ **0 格**，单删 `--first-parent`（M32）⇒ **不含** P2 钉，**两条同时去掉**
+      （M33）⇒ P2 钉。任一条在位即可，所以不能说「承重迁移到了 `--first-parent`」。
       **不能**只问「字节是否曾被 main 出版」：那没有身份约束，分支自己用**普通提交**写出
       main 曾出版、现已替换掉的字节（含 main 曾出版过的 FAIL 字节）会被当成 adoption 放行
       （r9 Spec P1 的两条洗白格）。也**不能**用「该提交的第二父的 blob」：第二父同样没有身份
@@ -1316,7 +1317,7 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
       本跳过步是承重的：删掉整步 ⇒ 两条 adopt 钉转红（兄弟分支钉本就期望判红，不受影响）；
       把集合换回「第二父」⇒ 兄弟分支钉（与两级链钉）转红；删掉 donor 判定 ⇒ 两条 P1 钉转红；
       候选集合枚举去掉 `--full-history` ⇒ **0 格**（M30 = 0）；去掉 `--first-parent` ⇒ k1/k4
-      两钉；两条 flag 都去掉 ⇒ P2 单调性钉（M33 = 1，承重由 `--first-parent` 承担的证据）。
+      两钉；两条 flag **都**去掉 ⇒ P2 单调性钉（M33 = 1）⇒ 该钉由两条 flag 的析取保护。
       **读失败 fail-closed**：`git log` / 逐笔 `rev-parse` / `merge-base --is-ancestor` 读不到
       ⇒ 该候选（或该 donor）不成立；集合为空 ⇒ 一律按「动过」处理。
       `--not origin/main` 排除「已被 main 收下的提交」；实测它不是本判据的承重点（起点本身就是
@@ -1351,9 +1352,13 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
     # 提交也算成「main 出版」⇒ topic 写坏的字节被 main 丢弃后，侧分支收下它就能洗白
     # （r10 Spec 的 k1/k4 两格；r6/r8 判红、r7/r9 放行）。第一父线是「main 真的交付过什么」
     # 的唯一口径；被带入又丢弃的侧支提交的收据责任不在 main。
-    # `--full-history` 在本组合下已不改变集合（r10 M30 = 0，承重是 `--first-parent`）：
-    # 保留它是跨 git 版本的 belt-and-braces 与 r9 语义连续性。默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge
-    # 换掉」的提交剪掉，集合会随 main 前进而缩小 ⇒ 合法格误红且不单调（r9 Spec P2）。
+    # `--full-history` 在本组合下已不改变集合（r10 M30 = 0）；P2 单调性钉由它与
+    # `--first-parent` 的**析取**保护（M32 只打掉 k1/k4、M33 才打掉 P2 钉），k1/k4 的
+    # 唯一承重点是 `--first-parent`。保留 `--full-history` 是跨 git 版本的 belt-and-braces
+    # 与 r9 语义连续性。默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge 换掉」
+    # 的提交剪掉，集合会随 main 前进而缩小 ⇒ 合法格误红且不单调（r9 Spec P2）——这是 r8/r9
+    # 时代的口径；`--first-parent` 之下第一父线上的提交不参与 TREESAME 化简，该剪枝不会
+    # 发生，M30 = 0 即此。
     # 两者组合的语义 = 「第一父线上出现过、且没有被后续 TREESAME merge 吞掉的历史」。
     # 读失败（`log` rc≠0 / 单笔 `rev-parse` 失败）⇒ 该候选不进集合；集合为空 ⇒ 一律判动过
     # （fail-closed，绝不因为读不到就放行）。
