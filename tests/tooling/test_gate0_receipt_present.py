@@ -1505,14 +1505,16 @@ def test_second_receipt_bootstrap_stays_red_when_the_side_history_read_fails(tmp
 
 
 def _assert_path_history_read_failure_is_closed(repo: Repo, base: str, marker: str) -> None:
-    """把 `_receipt_path_was_touched` 的查询打成 rc=128 ⇒ 不得自举。
+    """把 `_receipt_path_was_touched` 的**某一路**查询打成 rc=128 ⇒ 不得自举。
 
-    定位条件按**本函数的路径参数**（`docs/gate/*.json`）＋可选的行为标记（`--first-parent` /
+    定位条件按**本函数的路径参数**（`docs/gate/*.json`）＋行为标记（`--first-parent` /
     `--full-history`），**不按会变的过滤字母**——`DMR` 改 `DM` 是等价改法，按字面串定位会让钉子
     真空（r5 Standards P2-2）。要求带路径参数同时避免打中 `_in_range_receipt_landings` 的
     `git log`（它走同一个 `_git_at`，但不按单张收据路径过滤）。
 
-    `marker=None` ⇒ 打本函数的两路查询（任一查询的 read-failure 分支被改成 fail-open 都会转红）。
+    `marker` 是**必填**的：两个调用点各打一路，合起来才覆盖两路。r6 之前它曾是可选参数并宣称
+    「`marker=None` ⇒ 两路都打」——实测为假（`_receipt_matches_first_landing` 的 `--diff-filter=A`
+    查询排在前面，一打就短路，两路路径查询根本执行不到），该说法已删（r6 Spec 条件性 P4）。
     """
     real = gate0._git_at
 
@@ -1520,7 +1522,7 @@ def _assert_path_history_read_failure_is_closed(repo: Repo, base: str, marker: s
         hits_this_path = any(
             str(a).startswith("docs/gate/") and str(a).endswith(".json") for a in args
         )
-        if args[:1] == ("log",) and (marker is None or marker in args) and hits_this_path:
+        if args[:1] == ("log",) and marker in args and hits_this_path:
             return subprocess.CompletedProcess(args, 128, "", "fatal: simulated log failure")
         return real(repo_root, *args, **kwargs)
 
@@ -1561,6 +1563,178 @@ def _branch_whose_side_edit_is_discarded_by_the_merge(tmp_path, how: str) -> tup
     repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
     repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
     return repo, base, c1
+
+
+def _branch_whose_side_merge_edits_the_receipt(tmp_path, how: str, outer: str):
+    """侧分支**在自己的 merge 提交里**碰落地收据（`how` = tamper / delete / fail），交付线丢弃。
+
+    与 `..._side_edit_is_discarded_by_the_merge` 的区别只在编辑发生的**位置**：那里是侧分支的
+    普通提交，这里是侧分支 `git merge --no-ff --no-commit` 一个兄弟分支后，在冲突解决里把收据
+    写成坏字节 / 删掉 / 写成 FAIL。合法作业里这比普通提交更容易撞上（侧分支 sync 后解冲突）。
+
+    `outer` = conflict ⇒ 交付线 merge 时把收据解回**原字节**；ours ⇒ `git merge -s ours`。
+    两种都让交付树回到首次落地的字节，于是内容项与第一父查询都认为没动过。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit(repo.receipt(c1), "docs(gate): receipt for code 1")
+    repo.git("checkout", "-q", "-b", "side")
+    repo.git("checkout", "-q", "-b", "sub")
+    repo.commit({"src/s.py": "s = 1\n"}, "sub: unrelated work")
+    repo.git("checkout", "-q", "side")
+    repo.git("merge", "--no-ff", "--no-commit", "sub")
+    if how == "tamper":
+        doc = json.loads(original)
+        doc["passed"] = doc["total"] - 1
+        repo.commit({f"docs/gate/{c1}.json": json.dumps(doc)},
+                    "side merge: resolve the receipt to tampered bytes")
+    elif how == "delete":
+        (repo.root / "docs" / "gate" / f"{c1}.json").unlink()
+        repo.git("add", "-A")
+        repo.git("commit", "-q", "-m", "side merge: resolve the receipt away")
+    else:  # fail
+        doc = json.loads(original)
+        doc["result"] = "FAIL"
+        doc["passed"] = doc["total"] - 1
+        repo.commit({f"docs/gate/{c1}.json": json.dumps(doc)},
+                    "side merge: resolve the receipt to FAIL bytes")
+    repo.git("checkout", "-q", "main")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2")
+    if outer == "ours":
+        repo.git("merge", "--no-ff", "-s", "ours", "side")
+    else:
+        repo.git("merge", "--no-ff", "--no-commit", "side")
+        repo.commit({f"docs/gate/{c1}.json": original},
+                    "merge side, resolving the receipt back to the original bytes")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/c.py": "c = 3\n"}, "code 3 without a receipt")
+    return repo, base, c1
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_merge_tampers_the_receipt(
+    tmp_path,
+):
+    """r6 P1-1（钉 1）：侧分支**在 merge 提交里**改坏落过的收据、交付线解回原字节 ⇒ `violations`。
+
+    r5 的侧查询带 `--no-merges`，于是「编辑发生在侧分支的 merge 提交里」两路同时看不见：
+    第一父链干净、侧历史被 `--no-merges` 整段滤掉、内容项因交付树回到原字节而成立 ⇒ tip
+    `attested`（7/7 + 一张 PASS 收据）。修法：侧查询改 `--diff-merges=first-parent --no-patch`。
+    本钉在 r6 修法前**红**（`attested`），修后绿。
+    """
+    repo, base, c1 = _branch_whose_side_merge_edits_the_receipt(tmp_path, "tamper", "conflict")
+
+    with _clean_env():
+        # 前提自证：交付树里是原字节、内容项认��没动过 ⇒ 挡住它的只能是路径项。
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert "stale ledger fingerprint" in check.detail, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_merge_deletes_the_receipt(
+    tmp_path,
+):
+    """r6 P1-1（钉 2）：侧分支 merge 提交里删掉落过的收据、交付线 `-s ours` 丢弃 ⇒ `violations`。"""
+    repo, base, c1 = _branch_whose_side_merge_edits_the_receipt(tmp_path, "delete", "ours")
+
+    with _clean_env():
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_merge_writes_fail_receipt(
+    tmp_path,
+):
+    """r6 P1-1（钉 3）：侧分支 merge 提交里把落过的收据写成 FAIL、交付线丢弃 ⇒ `violations`。
+
+    这一格同时覆盖「侧分支自己写坏字节」与「交付树回到 PASS 原字节」两个面：内容项成立
+    （HEAD blob == 首次落地 blob），判红只能靠侧历史看得见 merge 提交。
+    """
+    repo, base, c1 = _branch_whose_side_merge_edits_the_receipt(tmp_path, "fail", "conflict")
+
+    with _clean_env():
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_stays_red_when_a_side_branch_edit_back_is_discarded(
+    tmp_path,
+):
+    """r5 P3-1 / r6 Spec P3-1：侧分支「改成别的字节再改回」后交付线丢弃 ⇒ `violations`。
+
+    这条钉消费 `_branch_whose_side_edit_is_discarded_by_the_merge` 的 `edit_back` 分支——r5 加了
+    该分支却没有任何调用者（死代码），且 (p3) 形状当时没有专属钉。
+    """
+    repo, base, c1 = _branch_whose_side_edit_is_discarded_by_the_merge(tmp_path, "edit_back")
+
+    with _clean_env():
+        assert gate0._receipt_matches_first_landing(str(repo.root), c1, include_merges=True)
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is False, check.detail
+    assert check.status == "violations", check.detail
+
+
+def test_second_receipt_bootstrap_survives_a_side_merge_that_adopts_origin_mains_receipt(
+    tmp_path,
+):
+    """r6 P1-1 误伤控制：侧分支 sync main 只是**收下 main 写的字节** ⇒ 仍 `attested`。
+
+    侧历史会把侧分支的 merge 提交报成 `M`（它相对第一父把该路径改成了 main 的字节）。那不是
+    本分支的编辑 ⇒ 命中提交若在该路径上的 blob 等于 `origin/main` 的 blob 就跳过。删掉这一步
+    会让这条合法形状回退成 `violations`（本钉就是它的牙齿）。
+    """
+    repo = Repo(tmp_path / "r")
+    base = _base_with_origin(repo)
+    repo.git("checkout", "-q", "-b", "branch")
+    c1 = repo.commit({"src/a.py": "a = 1\n"}, "code 1")
+    original = next(iter(repo.receipt(c1).values()))
+    repo.commit({f"docs/gate/{c1}.json": original}, "docs(gate): land the receipt on branch")
+    repo.commit(_LEDGER_ROW, "docs(ledger): append a review-ledger row")
+    repo.commit({"src/b.py": "b = 2\n"}, "code 2 without a receipt")
+    repo.git("checkout", "-q", "main")
+    rerun = json.loads(original)
+    rerun["wall_seconds"] = 61.0
+    repo.commit({f"docs/gate/{c1}.json": json.dumps(rerun)},
+                "docs(gate): origin/main re-ran gate0 on the same tree")
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    repo.git("checkout", "-q", "-b", "side", "branch")
+    repo.git("merge", "--no-ff", "--no-commit", "-X", "theirs", "origin/main")
+    repo.commit({f"docs/gate/{c1}.json": json.dumps(rerun)},
+                "side: merge origin/main, adopting its receipt bytes")
+    repo.git("checkout", "-q", "branch")
+    repo.commit({"src/c.py": "c = 3\n"}, "branch: more code")
+    repo.git("merge", "--no-ff", "--no-commit", "side")
+    repo.commit({f"docs/gate/{c1}.json": original},
+                "merge side, keeping our own receipt bytes")
+    repo.commit({"src/d.py": "d = 4\n"}, "code 4 without a receipt")
+
+    with _clean_env():
+        # 前提自证：侧历史确实看见了那笔 merge（否则本钉测不到跳过分支）。
+        side = gate0._git_at(str(repo.root), "log", "--full-history",
+                             "--diff-merges=first-parent", "--no-patch", "--no-renames",
+                             "--diff-filter=DMR", "--format=%H", f"{base}..HEAD",
+                             "--not", "origin/main", "--", f"docs/gate/{c1}.json")
+        assert side.stdout.strip(), "fixture must make the side query hit the merge commit"
+
+    check = _bootstrapping_check(repo, base)
+    assert check.warn_only is False, check.detail
+    assert check.ok is True, check.detail
+    assert check.status == "attested", check.detail
 
 
 def test_second_receipt_bootstrap_stays_red_when_a_side_branch_tamper_is_discarded(
