@@ -1357,8 +1357,8 @@ def _receipt_path_was_touched(repo_root, base: str, head: str, tested_sha: str) 
     # 唯一承重点是 `--first-parent`。保留 `--full-history` 是跨 git 版本的 belt-and-braces
     # 与 r9 语义连续性。默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge 换掉」
     # 的提交剪掉，集合会随 main 前进而缩小 ⇒ 合法格误红且不单调（r9 Spec P2）——这是 r8/r9
-    # 时代的口径；`--first-parent` 之下第一父线上的提交不参与 TREESAME 化简，该剪枝不会
-    # 发生，M30 = 0 即此。
+    # 时代的口径；`--first-parent` 关掉的正是「merge 对哪一父 TREESAME 就沿那一父化简」这条
+    # 重写规则，第一父线上的提交因此保持逐笔可见，M30 = 0 即此。
     # 两者组合的语义 = 「第一父线上出现过、且没有被后续 TREESAME merge 吞掉的历史」。
     # 读失败（`log` rc≠0 / 单笔 `rev-parse` 失败）⇒ 该候选不进集合；集合为空 ⇒ 一律判动过
     # （fail-closed，绝不因为读不到就放行）。
@@ -1552,8 +1552,9 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         的 tip 上，只用后者会把合法形状误判成动过（r7 P2-1）。枚举**以 `--first-parent` 为界**：
         默认路径简化会把「main 真的出版过、后来被一笔 TREESAME merge 换掉」的提交剪掉 ⇒ 合法
         分支收下的旧字节被判红，且集合随 main 前进而缩小 ⇒ 同一 HEAD 由 attested 翻 violations
-        （r9 Spec P2）；r10 起挡住这一层的正是 `--first-parent`（M32 ⇒ k1/k4、M33 ⇒ P2 钉；
-        `--full-history` 单删 M30 = 0，已不承重）。**也不能只问「字节是否曾被 main 出版」**：它没有身份约束，分支自己用
+        （r9 Spec P2）。r10 起 `--first-parent` 是 k1/k4 的唯一承重点（M32 ⇒ k1/k4 两钉）；
+        P2 单调性钉由两条 flag 的**析取**保护（M30 = 0、M32 不含它、M33 = 1 才是它）；
+        `--full-history` 单删不改变集合。**也不能只问「字节是否曾被 main 出版」**：它没有身份约束，分支自己用
         普通提交写出 main 曾出版、现已替换掉的字节（含 FAIL 字节）会被放行（r9 Spec P1）。
         **也不能**取「该提交第二父的 blob」：第二父同样没有身份约束，scratch 分支改坏后由侧
         分支 merge 逐字收下、多级转手链都会被放行（r8 Spec P1-1 的两条洗白格，
@@ -1813,8 +1814,8 @@ def receipt_present_check(repo_root=None, bootstrap_sha=None,
         #        「该提交的第二父」（M27）⇒ 只打掉 plain-commit 拷贝钉（其余钉的字节从不由
         #        第二父携带）。删掉 donor 判定（M29）⇒ 恰好两条 P1 钉。候选集合枚举去掉
         #        `--first-parent`（M32）⇒ k1/k4 两钉；**同时**去掉两条 flag（M33）⇒ P2 单调性钉。
-        #        单删 `--full-history`（M30）⇒ **0 failed**：`--first-parent` 之下它已不承重
-        #        （r10 实测，如实登记；承重由 `--first-parent` 承担）。
+        #        单删 `--full-history`（M30）⇒ **0 failed**（r10 实测，如实登记）。
+        #        k1/k4 由 `--first-parent` 独承；P2 单调性钉由两条 flag 的析取保护。
         #        删掉 `current_main_blob` 例外（M31，r9 复活该轴、**不是** M22b）⇒ plain-commit
         #        拷贝钉。两条读失败路径（`log` / 单笔 `rev-parse`）都 fail-closed。
         #        内容项一旦在位，就必须带 `-m`：否则 merge 落地的形状会被它误判成「落地后被动过」
