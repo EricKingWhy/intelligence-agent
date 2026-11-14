@@ -751,25 +751,100 @@ def test_first_receipt_bootstrap_requires_full_successful_recording_run(
 
 
 def test_full_gate_cannot_attest_missing_receipts_across_code_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    repo, base_sha, _first_code_sha, ledger = _receipt_repo(tmp_path, monkeypatch)
+    """AC3① 改范围（#1692）：旧收据**不能单独**覆盖其后代码提交，覆盖凭证只能是新落盘的 HEAD 收据。
+
+    同一构造（旧收据 + 台账漂移 + 其后 2 笔无收据代码提交），但旧断言（全绿完整跑 guards
+    rc=1）已随 #1692 的第二代自举失效：那正是本票要修的死锁。改范围后的断言分两半：
+
+    · **非完整跑仍判红**：CI / 局部跑（`will_record_receipt=False`）、一条车道失败的完整跑、
+      以及 `--only guards` 的局部跑，guards 都必须是 rc=1（这次跑的 HEAD 收据落不下来 /
+      本来就不落盘 ⇒ 没有任何新凭证）；
+    · **完整跑放行时，凭证是本次新落盘的 HEAD 收据**：落盘前 CI 硬口径仍 violations（旧
+      收据 stale、两笔代码提交无候选）；把本次跑的真实收据落盘并提交后，CI 硬口径才转 clear，
+      且新收据 `head_tree_receipts()` 判 valid、旧收据仍是 stale 的那一张。
+    """
+    repo, base_sha, old_receipt_sha, ledger = _receipt_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(gate0, "_RECEIPT_BOOTSTRAP_SHA", base_sha)
     _commit(repo, "change ledger after existing receipt", {
         LEDGER_SHARD: ledger[LEDGER_SHARD].replace(b"original evidence", b"updated evidence"),
     })
     _commit(repo, "first code change without a receipt", {"src/first.py": b"value = 2\n"})
-    _commit(repo, "second code change without a receipt", {"src/second.py": b"value = 3\n"})
+    head = _commit(repo, "second code change without a receipt", {"src/second.py": b"value = 3\n"})
 
+    # 旧收据不能单独覆盖：CI 硬口径（不落盘、不看旧收据以外的东西）判红。
+    before_ok, before_detail, _warn, before_status = gate0.receipt_present_check(
+        repo_root=repo, bootstrap_sha=base_sha,
+    )
+    assert before_ok is False, before_detail
+    assert before_status == "violations", before_detail
+    assert "missing receipt" in before_detail, before_detail
+
+    coverage_output = (
+        f"覆盖区间: {base_sha[:12]}..HEAD\n"
+        "提交总数 3 / 已审查 3 / 待判定 0\n"
+    )
     results = [
-        (lane, 0, 0.1, "")
+        (lane, 0, 0.1, coverage_output if lane.name == "coverage" else "")
         for lane in gate0.build_lanes("")
     ]
     gate0._apply_receipt_check(results, will_record_receipt=True)
+    attested_out = capsys.readouterr().out
 
+    # 一车道不绿的完整跑：不会落 PASS 收据 ⇒ guards 仍必须红。
+    failed_results = [
+        (lane, 1 if lane.name == "ruff" else rc, secs, out)
+        for lane, rc, secs, out in results
+    ]
+    gate0._apply_receipt_check(failed_results, will_record_receipt=True)
+    failed_guard = next(result for result in failed_results if result[0].name == "guards")
+    assert failed_guard[1] == 1
+    assert "missing receipt" in failed_guard[3]
+
+    # CI / 不落盘的跑：拿不到本次跑的 HEAD 收据 ⇒ guards 仍必须红。
+    no_record_results = [
+        (lane, 0, 0.1, coverage_output if lane.name == "coverage" else "")
+        for lane in gate0.build_lanes("")
+    ]
+    gate0._apply_receipt_check(no_record_results, will_record_receipt=False)
+    no_record_guard = next(result for result in no_record_results if result[0].name == "guards")
+    assert no_record_guard[1] == 1
+    assert "missing receipt" in no_record_guard[3]
+
+    # 完整全绿跑：guards 放行，但覆盖凭证只能是**本次跑即将落盘的 HEAD 收据**。
     guard = next(result for result in results if result[0].name == "guards")
-    assert guard[1] == 1
-    assert "missing receipt" in guard[3]
+    assert guard[1] == 0, guard[3]
+    assert "绑定当前台账指纹的 PASS 收据" in attested_out, attested_out
+
+    # 落盘前：HEAD 还不在收据表里 ⇒ CI 硬口径仍是 violations（旧收据没有被当成凭证）。
+    with_path = gate0.write_reading(
+        head=head, tree=_git(repo, "rev-parse", f"{head}^{{tree}}").strip(), argv=[],
+        wall=0.7, results=results, affected=None, changed=[], worktree={"untracked": []},
+    )
+    receipt_doc = json.loads(Path(with_path).read_text(encoding="utf-8"))
+    assert receipt_doc["result"] == "PASS"
+    assert receipt_doc["passed"] == receipt_doc["total"] == len(gate0.GATE0_LANE_IDS)
+    receipts = gate0.head_tree_receipts(repo)
+    assert old_receipt_sha in receipts and receipts[old_receipt_sha]["valid"], receipts
+    assert head not in receipts, "收据还没提交，HEAD 不应已在 HEAD 树的收据表里"
+    still_ok, still_detail, _warn, _status = gate0.receipt_present_check(
+        repo_root=repo, bootstrap_sha=base_sha,
+    )
+    assert still_ok is False, still_detail
+
+    # 新收据提交后：CI 硬口径转 clear；旧收据仍是 stale 的那一张，新收据才是覆盖凭证。
+    _commit(repo, "record the refreshed HEAD receipt", {
+        f"docs/gate/{head}.json": Path(with_path).read_bytes(),
+    })
+    receipts = gate0.head_tree_receipts(repo)
+    assert receipts[head]["valid"], receipts[head]["reason"]
+    assert old_receipt_sha in receipts and receipts[old_receipt_sha]["valid"], receipts
+    after_ok, after_detail, _warn, after_status = gate0.receipt_present_check(
+        repo_root=repo, bootstrap_sha=base_sha,
+    )
+    assert after_ok is True, after_detail
+    assert after_status == "clear", after_detail
 
 
 def test_written_receipt_records_ledger_fingerprint_and_coverage_summary(
