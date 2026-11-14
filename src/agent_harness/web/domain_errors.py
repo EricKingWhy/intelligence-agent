@@ -15,10 +15,10 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加）, SandboxHardeningError（#1647，全局 handler） |
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/approve` | InvalidSessionId, SessionNotFound, ApprovalQueueMissing, ApprovalRequestMissing, InvalidDecision, ApprovalAlreadyResolved |
-| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
+| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加）, SandboxHardeningError（#1647，全局 handler，经 `RecoveryCoordinator._session_from_events`） |
 | `GET /api/sessions/{id}/recovery`（#1049 追加，只读） | InvalidSessionId, SessionNotFound, EventLogCorruptError |
 | `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict |
-| `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict, EventLogCorruptError（#565 追加） |
+| `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict, EventLogCorruptError（#565 追加）, SandboxHardeningError（#1647，全局 handler，idle 分支经 `build_runtime` → `_build_tooling`） |
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
 | `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary, SandboxUnavailableError（`#1278`）, SandboxHardeningError（#1647，全局 handler） |
 | `GET /api/sessions`（WS-3 / #153 追加） | WorkspaceNotFound |
@@ -98,11 +98,18 @@ Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上�
   禁止「引入该端点本来不产生的状态码」——因此其余异常仍由每个端点用**自己的 except
   元组**声明「本端点翻译哪些」，子集语义不变。
   **本条的例外只有 `SandboxHardeningError` 一个**（`#1647`）：它会被 `WorkspaceRegistry.get`
-  / `create` 等**同步、散落在会话与工作区多个端点**的路径抛出（`POST /api/sessions`、
-  `POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/forks`、四条
-  `.../workspace/*` 只读路由、`POST /api/sessions/{id}/workspace/export`、
-  `POST /api/sessions/{id}/project-instructions/reload`），逐端点重述会把这个映射抄
-  七遍。它适合全局注册的理由是**反向的**：它的响应体是固定四字段的合成体，**不携带
+  / `create` 等**同步、散落在会话与工作区多个端点**的路径抛出。已知会经下列 **11 条**
+  端点抛出（**非穷尽**：任何经 `build_runtime` / `session_sandbox` / `_session_from_events`
+  触达 registry 的路径都算，逐端点重述要抄十一遍）：
+  `POST /api/sessions`、`POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/forks`、
+  `POST /api/sessions/{id}/messages`（idle 分支 `resume_and_launch` →
+  `build_runtime` → `_build_tooling`）、`POST /api/sessions/{id}/recover`
+  （`RecoveryCoordinator._session_from_events`）、四条 `.../workspace/*` 只读路由
+  （`files` / `file` / `git/status` / `git/diff`，经 `session_sandbox`）、
+  `POST /api/sessions/{id}/workspace/export`、`POST /api/sessions/{id}/project-instructions/reload`。
+  重跑核查：`grep -rn 'workspace_registry[.](get|create)' src/agent_harness`
+  取调用面，再顺着 `build_runtime` / `session_sandbox` / `_session_from_events` 往上找
+  HTTP 入口。它适合全局注册的理由是**反向的**：它的响应体是固定四字段的合成体，**不携带
   任何可回显的原文**（`message` 是常量、`volume` 恒为 `None`），所以「全局把意外异常
   洗成别的状态码」的风险在这里不成立——它本来就不把异常原文交给客户端。
 - **不用装饰器**：app.py 与 lineage.py 都启用了 `from __future__ import annotations`，

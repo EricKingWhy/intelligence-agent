@@ -2,8 +2,6 @@
 
 import ast
 import logging
-import re
-import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -292,16 +290,18 @@ def test_hardening_failure_is_logged_server_side(tmp_path, monkeypatch):
     assert response.status_code == 409
     records = [r for r in collector.records if r.levelno >= logging.ERROR]
     assert records, "409 路径必须在 agent_harness.web 留 ERROR 级日志"
-    # 按落盘形态取文本：`.exception(...)` 把原文放在 traceback 里，
-    # `getMessage()` 看不到它，`format()` 才是 agent.jsonl 里真正写下去的东西。
+    # 断言按 .jsonl 里真正落盘的形态取：`formatter.format(r)` 对带 `exc_info` 的记录
+    # **已经**包含 traceback（`Formatter.format` 内部调 `formatException`），也就是
+    # `getMessage()` 看不到、但落到 agent.jsonl 里的那部分。它才是"原文有没有留下"
+    # 的判据；单看 `getMessage()` 会漏掉 traceback 里那段。
     formatter = logging.Formatter("%(levelname)s %(name)s %(message)s")
     logged = "\n".join(formatter.format(r) for r in records)
-    logged += "\n".join(
-        "".join(traceback.format_exception(*r.exc_info)) if r.exc_info else ""
-        for r in records
-    )
     assert "migration_rollback_failed" in logged
+    # 原文在 traceback 里，落盘形态（`format()`）看得见。
     assert "MIGRATE_FATAL rollback failed" in logged  # 原文进日志（r.getMessage 已含 exc）
+    # 与上一条分开：原文能被看见的前提是记录带了 exc_info。丢了它，上面的断言也会红，
+    # 但红了以后读的人分不清是「换了 logger 名」还是「丢了 traceback」。
+    assert all(r.exc_info for r in records), "ERROR 日志必须带 exc_info（否则原文不在落盘内容里）"
     # 定位到「哪个请求」，否则一行 reason 帮不上排查。
     assert "POST" in logged and "/api/sessions" in logged, logged
     # 日志有原文 ≠ 响应有原文。
@@ -309,23 +309,97 @@ def test_hardening_failure_is_logged_server_side(tmp_path, monkeypatch):
     assert "agent-harness-log" not in response.text
 
 
-def test_hardening_reason_whitelist_matches_producer_literals():
-    """#1647 P3-3：reason 白名单只有一处定义，且与产生侧的字符串字面量**双向相等**。
+def _enclosing_function(module: ast.Module, node: ast.AST) -> ast.AST | None:
+    """`node` 最内层的所属函数（动态站点的名字解析范围就到这里）。"""
+    parents = {
+        child: parent for parent in ast.walk(module) for child in ast.iter_child_nodes(parent)
+    }
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef):
+            return current
+        current = parents.get(current)
+    return None
+
+
+def test_hardening_reason_whitelist_matches_producer_call_sites():
+    """#1647 P3-3 / #1678 R2-F1：reason 白名单只有一处定义，且与**产生侧调用点**双向相等。
 
     白名单此前抄在 `docker.py`（产生侧）与 `web/domain_errors.py`（消费侧）两处。
     抄两份的失效形态是静默的：`docker.py` 新增一个 reason，响应端不认识它，就降级成
     `hardening_failed`——没有任何门禁会红，客户端只是少了一档分类。
 
-    这里的钉子走 AST 而不是 `grep`：扫 `docker.py` 里所有形如 `(hardening|migration)_*`
-    的字符串字面量（raise 点、exit-code 映射、`__init__` 默认值全在内），断言它与
-    `_HARDENING_REASONS` 逐值相等。消费侧已 import 同一常量，所以一处改不动两处。
+    扫描面取**产生侧本身**，不是名字形状：早先的版本用 `(hardening|migration)_[a-z_]+`
+    正则界定扫描面，于是「新增一个不以此开头的 reason」既不进扫描面、也不引发差集
+    非空（加法变异 `95: "oom_killed"` 存活 15 passed）。reason 的取值域是
+    `SandboxHardeningError.reason`，与名字怎么拼无关，所以这里改从 AST 取
+    `raise SandboxHardeningError(...)` 的 `reason=` 实参，加上 `__init__` 的 kwonly
+    默认值（不传 reason 的 raise 站点取的就是它）。
+
+    动态站点（`reason=reason` 变量传参）**解析而不是豁免**：它的可能值由所属函数里给
+    这个变量赋的值决定（现状是那张 exit-code 字典），所以扫的是赋值右值里的字符串
+    常量。解不出任何字符串就直接红——"扫不到就算了"正是旧版失效的形态。这里做的是
+    等式闭合，不是控制流分析：如果哪天有人把 reason 改成从别处算出来的，这条断言会
+    先红，逼着重写契约，而不是让新值静悄悄地从扫描面漏过去。
     """
-    shape = re.compile(r"(?:hardening|migration)_[a-z_]+")
     module = ast.parse(Path(sandbox_docker.__file__).read_text(encoding="utf-8"))
 
-    # 常量自身那一笔要**排除**在扫描面之外：把它算进去，扫描就变成
-    # 「常量等于常量」的恒真命题（变异「往常量里多塞一个没人产生的值」会存活，
-    # 实测正是如此）。扫描面 = 产生侧的所有**其它**字面量。
+    # 不传 reason 的 raise 站点取 `__init__` 的默认值。
+    default_kwonly = next(
+        kw_default
+        for cls in module.body
+        if isinstance(cls, ast.ClassDef) and cls.name == "SandboxHardeningError"
+        for func in cls.body
+        if isinstance(func, ast.FunctionDef) and func.name == "__init__"
+        for arg, kw_default in zip(func.args.kwonlyargs, func.args.kw_defaults)
+        if arg.arg == "reason"
+    )
+    assert isinstance(default_kwonly, ast.Constant), default_kwonly
+    default = default_kwonly.value
+
+    literals: set[str] = set()
+    dynamic: list[int] = []
+    for node in ast.walk(module):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "SandboxHardeningError"
+        ):
+            continue
+        passed = next((k.value for k in node.keywords if k.arg == "reason"), None)
+        if passed is None:
+            literals.add(default)
+            continue
+        if isinstance(passed, ast.Constant) and isinstance(passed.value, str):
+            literals.add(passed.value)
+            continue
+        # 动态站点：`reason=<变量>`。它的可能值由**同一函数作用域里**给该名字赋的值
+        # 决定（现状是那张 exit-code 字典）；解析不出任何字符串就红，不当作"扫不到"。
+        dynamic.append(node.lineno)
+        scope = _enclosing_function(module, node)
+        assert scope is not None and isinstance(passed, ast.Name), (
+            f"{node.lineno}: `reason=` 既不是字符串字面量也不是作用域内变量，扫描面无法闭合"
+        )
+        assignments = [
+            stmt.value
+            for stmt in ast.walk(scope)
+            if isinstance(stmt, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == passed.id for t in stmt.targets)
+        ]
+        names = {
+            sub.value
+            for value in assignments
+            for sub in ast.walk(value)
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+        }
+        assert names, (
+            f"{node.lineno}: 动态站点的 `reason={passed.id}` 在作用域内没有字符串赋值，"
+            "无法闭合扫描面"
+        )
+        literals.update(names)
+
+    # 常量自身那一笔要**排除**在扫描面之外：把它算进去，扫描就变成「常量等于常量」
+    # 的恒真命题（变异「往常量里多塞一个没人产生的值」会存活，实测正是如此）。
     declaration = next(
         node
         for node in module.body
@@ -340,20 +414,16 @@ def test_hardening_reason_whitelist_matches_producer_literals():
         for node in ast.walk(declaration.value)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    produced = {
-        node.value
-        for node in ast.walk(module)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and shape.fullmatch(node.value)
-        and node not in set(ast.walk(declaration))
-    }
     assert declared == set(_HARDENING_REASONS), (
         "_HARDENING_REASONS 的字面量与导入的常量不一致（模块内有第二份定义？）"
     )
-    literals = produced
+    assert dynamic, (
+        "预期 `_migrate_volume_ownership` 里有一处 reason 由 exit-code 字典推导"
+        "（`reason=reason`）——扫描面为零说明这处推导消失了，请复核 expectation"
+    )
     assert literals == set(_HARDENING_REASONS), (
-        "docker.py 的 reason 字面量与 _HARDENING_REASONS 不一致："
+        "产生侧的 reason 取值与 _HARDENING_REASONS 不一致："
         f"只在产生侧 {sorted(literals - set(_HARDENING_REASONS))} / "
         f"只在常量 {sorted(set(_HARDENING_REASONS) - literals)}"
+        f"（动态站点行号：{dynamic}）"
     )

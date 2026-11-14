@@ -567,7 +567,9 @@ printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
 #: （`web/domain_errors.py::sandbox_hardening_http_error`）import 这一个集合，不再自己
 #: 抄一份字面量——抄两份时新增 reason 会静默降级成 `hardening_failed`，没有门禁会红。
 #: `tests/web/test_sandbox_hardening_error_api.py` 的钉子测试用 AST 扫本模块里
-#: 形如 `(hardening|migration)_*` 的字符串字面量，断言与本集合**双向相等**。
+#: **所有 `raise SandboxHardeningError(...)` 的 `reason=` 实参**（含作用域内的
+#: exit-code 字典与 `__init__` 的 kwonly 默认值），断言与本集合**双向相等**。
+#: 别按名字形状（如 `hardening_*` 前缀）定契约：reason 是取值域，不是命名约定。
 _HARDENING_REASONS: frozenset[str] = frozenset(
     {
         "hardening_failed",
