@@ -1127,7 +1127,8 @@ class TestHeaderReader:
     @pytest.mark.test_timeout(
         600,
         reason=(
-            "10k JSONL fsync: 426.93s local Linux slow disk (2026-11-09, --durations=1); "
+            "10k JSONL fsync: 427-556s local Linux slow disk (3 logged runs, "
+            "2026-11-09/11-14, --durations=1) => 600s is only ~1.08x headroom; "
             "91.12s Gate-1 Linux; 295.12s Windows (manual, no log)"
         ),
     )

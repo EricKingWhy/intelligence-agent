@@ -370,8 +370,9 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
             assert result == f"{operation.removesuffix('_send')}_timed_out"
             assert isinstance(elapsed, float)
             # drain_send：settle=1.5 吃掉大部分预算 ⇒ send 必须按**剩余时间**（0.5s）封顶，
-            # 用整轮 timeout（2.0s）会拖到 ~3.5s。上界取 1.2× 预算，给调度留余量。
-            limit = 1.5 if operation == "receive" else 2.4
+            # 用整轮 timeout（2.0s）会拖到 ~3.5s。上界写成「预算 + 固定宽限」：本断言
+            # 区分 2.0s 与 3.5s 两族，不用于卡精确时序（余量留给调度/覆盖率作业的抖动）。
+            limit = 0.5 + 1.0 if operation == "receive" else 2.0 + 0.75
             assert elapsed < limit, (
                 f"{operation} overran its budget: {elapsed:.2f}s (limit {limit}s)"
             )
@@ -381,12 +382,12 @@ def test_permanent_portal_stall_is_confined_to_a_supervised_child(
             assert process.is_alive(), "probe escaped before parent cleanup"
         elif parent.poll(1):
             # 子进程在 portal 卡死期间死掉时，pipe 先 EOF ⇒ 必须与"意外返回"分开报。
+            # 此时还没 join，`process.exitcode` 读不到值，所以文案里不带它。
             try:
                 outcome = parent.recv()
             except EOFError:
                 raise AssertionError(
-                    f"{operation} child crashed while the portal was blocked "
-                    f"(exitcode={process.exitcode}); it did not return"
+                    f"{operation} child crashed while the portal was blocked; it did not return"
                 ) from None
             raise AssertionError(
                 f"{operation} unexpectedly returned with a blocked portal: {outcome!r}"

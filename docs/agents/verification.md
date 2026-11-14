@@ -569,7 +569,7 @@ teardown 可能不跑，后续用例不继续**；换来的是“退出码可靠
 
 Windows 可复跑命令（PowerShell，仓库根；`.venv\Scripts\python.exe`）：
 `$env:PYTHONUTF8=1; .venv\Scripts\python.exe -m pytest tests\test_per_test_timeout.py tests\test_pytest_deadline.py -q -p no:randomly --basetemp=$env:TEMP\pptt`
-期望 **14 passed**（`tests/test_per_test_timeout.py` 13 + `tests/test_pytest_deadline.py` 1，2026-11-09 修复轮实测）；超时归因探针在输出里给出 `[test-timeout] <nodeid> 超过 Ns 未返回（reason）`。
+期望 **14 passed**（`tests/test_per_test_timeout.py` 13 + `tests/test_pytest_deadline.py` 1；Linux 实测，Windows 未取证）；超时归因探针在输出里给出 `[test-timeout] <nodeid> 超过 Ns 未返回（reason）`。
 **读数状态：无 Windows 落盘读数**——本仓 Windows 作业（`mm08-windows-verify.yml`
 等）不跑后端 pytest，该命令只有在 Windows 机上手工执行才能取证。
 
@@ -584,9 +584,11 @@ Windows 可复跑命令（PowerShell，仓库根；`.venv\Scripts\python.exe`）
 **默认值**：`pyproject.toml` `[tool.pytest.ini_options]` 里 `test_timeout = "300"`。
 实测依据（2026-11-07，Gate-1 与 Windows venv；2026-11-09 补本机 Linux 读数）：
 - Gate-1 run `42253777049` 的 JUnit 报告覆盖 10,018 个测试；最长单条 91.12s，次长 26.16s。
-- **本机 Linux 慢盘实测 426.93s**（2026-11-09，`--durations=1`，同一用例；此前两次为
-  409.31s / 418.11s）⇒ 默认 300s 在慢盘上**会误杀**该用例，600s 例外确有必要，
-  但对慢盘只是约 1.4 倍余量——**该用例在慢盘上贴近 600s**。
+- **本机 Linux 慢盘同一用例实测 427–556s（3 次有落盘日志，2026-11-09/11-14，
+  `--durations=1`）：426.93s / 468.36s / 555.78s** ⇒ 默认 300s 在慢盘上**会误杀**该用例，
+  600s 例外确有必要；但按最慢的 555.78s 算余量只有约 **1.08×**（按 426.93s 算约 1.4×）——
+  **600s 在慢盘上只是勉强够用**，没有安全余量，再慢就会触发看门狗整场终止。
+  只引用有日志的读数：此前的 409.31s / 418.11s 无落盘日志，已删。
 - Windows 上 295.12s 为**单机手测读数、无落盘日志**（`grep -rn 295.12` 只命中散文），
   600s 相对它是约 2 倍余量。
 - 默认 300s 约为 Gate-1 最长单条的 3.3 倍（CI 机器口径；不要把它当成所有机器都成立）。
