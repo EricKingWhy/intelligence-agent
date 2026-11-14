@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import fnmatch
 import importlib
 import io
 import logging
@@ -35,6 +34,7 @@ from agent_harness.sandbox.base import (
 )
 from agent_harness.sandbox.decoding import StreamDecoder
 from agent_harness.sandbox.local import DEFAULT_EXEC_TIMEOUT, _CappedCapture
+from agent_harness.sandbox.paths import glob_match
 
 logger = logging.getLogger("agent_harness.sandbox.docker")
 
@@ -52,17 +52,12 @@ class _ContainerExecState:
 
 
 def _glob_match_posix(rel_path: str, pattern: str) -> bool:
-    """对容器内相对路径做 glob 匹配，支持 ** 递归（与 LocalSubprocessSandbox._glob_match 同语义）。"""
-    if pattern in ("", "*"):
-        return True
-    if "**" in pattern:
-        normalized = pattern.replace("**/", "").replace("**", "*")
-        return fnmatch.fnmatch(rel_path, normalized) or fnmatch.fnmatch(
-            PurePosixPath(rel_path).name, normalized
-        )
-    return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
-        PurePosixPath(rel_path).name, pattern
-    )
+    """对容器内相对路径做 glob 匹配，支持 ** 递归（纯策略见 `sandbox.paths.glob_match`）。
+
+    basename 用 `PurePosixPath`：容器内文件名可以含反斜杠（POSIX 的合法文件名字符），
+    不能被宿主的 `ntpath` 语义切成两段。
+    """
+    return glob_match(rel_path, pattern, basename=lambda path: PurePosixPath(path).name)
 
 
 def _export_data_filter(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
@@ -1678,7 +1673,7 @@ class DockerSandbox(Sandbox):
     def list_files(self, pattern: str) -> list[str]:
         """枚举容器 workspace 内匹配 glob 模式的文件，返回相对 /workspace 路径（排序）。
 
-        用 exec("find . -type f -printf '%P\n'") 拿文件列表后 Python 侧 fnmatch 过滤。
+        用 exec("find . -type f -printf '%P\n'") 拿文件列表后 Python 侧经 `_glob_match_posix` 过滤。
         """
         effective = pattern if pattern else "*"
         result = self.exec("find . -type f -printf '%P\n'")

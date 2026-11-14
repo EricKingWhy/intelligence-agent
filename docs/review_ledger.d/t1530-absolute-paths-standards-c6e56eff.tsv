@@ -1,0 +1,1 @@
+2026-11-08	#1530 Standards 修复轮复审（fresh，未读 Spec 输出）：单行 pattern 样本增补，范围与命名符合测试风格；无新 finding，P0–P4=0；Docker/Linux 实跑证据待 PR CI。明细见月档 #1530。	33877e1e15d6bc1cd7e3d4a5864a2293bf4521b9..c6e56eff072ea6f740fc3c455d315dba7bdeee43

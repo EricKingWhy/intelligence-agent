@@ -1,0 +1,1 @@
+2026-11-08	机械归属（非内容审查主张）：#1663 PR 分支与 origin/main 同步 merge 518e87e09（父一 9e15a4fb8=PR tip，父二 2680bb888=origin/main，merge-base b39f44ba9）。ort 自动合并零冲突；git show --cc --name-only 为空表，未发生手工冲突取舍。来侧 main 提交由其既有台账行覆盖，PR 侧提交由本票原审查行覆盖；本行仅机械归属该 sync merge。	9e15a4fb8c7ada1573bee7d8c28af674dfb30f1a..518e87e09d96240f3e9caa61e119afd1d4dacb76

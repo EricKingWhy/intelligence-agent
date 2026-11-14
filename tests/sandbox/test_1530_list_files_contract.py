@@ -59,7 +59,7 @@ def test_list_files_preserves_patterns_and_platform_validation(sandbox):
     assert sandbox.list_files('pkg/*.py') == pkg_files
     assert sandbox.list_files(r'pkg\*.py') == (pkg_files if os.name == 'nt' else [])
     assert sandbox.list_files('*.PY') == (lower if os.name == 'nt' else ['pkg/deep/up.PY'])
-    for pattern in ('C:/outside/*.py', '../*.py'):
+    for pattern in ('/outside/*.py', 'C:/outside/*.py', r'C:\outside\*.py', '../*.py'):
         if backend == 'psec':
             with pytest.raises(PermissionError):
                 sandbox.list_files(pattern)
