@@ -558,8 +558,48 @@ printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
 """
 
 
+#: `SandboxHardeningError.reason` 的**唯一**定义处（产生侧）与**公开合同**。
+#: 公开名（无下划线）是刻意的：它是 reason 取值域的单一来源，web 层响应白名单
+#: （`web/domain_errors.py::sandbox_hardening_http_error`）经包级公开面
+#: `agent_harness.sandbox.HARDENING_REASONS` import 这一个集合，不再自己抄一份字面量
+#: ——抄两份时新增 reason 会静默降级成 `hardening_failed`，没有门禁会红。
+#: `tests/web/test_sandbox_hardening_error_api.py` 的钉子测试用 AST 扫本模块里
+#: **所有 `raise SandboxHardeningError(...)` 的 `reason=` 实参**（含作用域内的
+#: exit-code 字典与 `__init__` 的 kwonly 默认值），断言与本集合**双向相等**。
+#: 扫描面的三条边界与测试 docstring 一致：只扫**本模块**（别的模块新增 raise 站点不在此列）、
+#: 只认裸名与模块级别名（子类名 / 属性写法不算）、只认**显式** `reason=`（`**{...}` 展开
+#: 闭合不了扫描面，钉子直接红而不是漏扫）。
+#: 别按名字形状（如 `hardening_*` 前缀）定契约：reason 是取值域，不是命名约定。
+HARDENING_REASONS: frozenset[str] = frozenset(
+    {
+        "hardening_failed",
+        "migration_failed",
+        "migration_wait_failed",
+        "migration_helper_start_failed",
+        "migration_rollback_failed",
+        "migration_backup_restore_failed",
+    }
+)
+
+
 class SandboxHardeningError(RuntimeError):
-    """容器未满足基础降权档，且无法在不破坏数据的前提下自动处置。"""
+    """容器未满足基础降权档，且无法在不破坏数据的前提下自动处置。
+
+    `volume_name` 只作服务端诊断留痕，**不可经 HTTP 回显**：它的来源是 harness 自己
+    生成的卷名（或调用方传进来的任意值），没有任何可验证的可信出处，回显即等于把
+    未校验输入带到客户端（见 `web/domain_errors.py` 的 `"volume": None`）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        volume_name: str | None = None,
+        reason: str = "hardening_failed",
+    ) -> None:
+        super().__init__(message)
+        self.volume_name = volume_name
+        self.reason = reason
 
 
 class DockerSandbox(Sandbox):
@@ -935,7 +975,8 @@ class DockerSandbox(Sandbox):
         except Exception as error:
             self._remove_helper_containers()
             raise SandboxHardeningError(
-                f"无法启动卷属主迁移容器（{self._volume_name}）：{error}"
+                f"无法启动卷属主迁移容器（{self._volume_name}）：{error}",
+                volume_name=self._volume_name, reason="migration_helper_start_failed",
             ) from error
         try:
             # 无上界等待会让会话启动在 daemon 卡住 / 超大卷时永久挂住（复核
@@ -958,7 +999,8 @@ class DockerSandbox(Sandbox):
             raise SandboxHardeningError(
                 f"卷 {self._volume_name} 属主迁移等待失败"
                 f"（>{_MIGRATION_WAIT_SECONDS}s 或 daemon 异常）：{error}"
-                + (f" | helper 日志：{detail}" if detail else "")
+                + (f" | helper 日志：{detail}" if detail else ""),
+                volume_name=self._volume_name, reason="migration_wait_failed",
             ) from error
         finally:
             with suppress(Exception):
@@ -968,9 +1010,14 @@ class DockerSandbox(Sandbox):
             detail = " | ".join(
                 line for line in logs.splitlines() if line.startswith("MIGRATE")
             )
+            reason = {
+                89: "migration_backup_restore_failed",
+                96: "migration_rollback_failed",
+            }.get(exit_code, "migration_failed")
             raise SandboxHardeningError(
                 f"卷 {self._volume_name} 属主迁移失败（exit={exit_code}）："
-                f"{detail or logs.strip()[-500:]}"
+                f"{detail or logs.strip()[-500:]}",
+                volume_name=self._volume_name, reason=reason,
             )
         # 迁移成功：备份卷整个删掉（里面只剩备份 tar，没有别的用途）。
         try:

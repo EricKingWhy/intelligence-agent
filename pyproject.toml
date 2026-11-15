@@ -72,8 +72,8 @@ dev = [
 # #1514（并入 #1515）：单测级可归因超时。pytest-timeout 未安装且本票不加依赖，
 # 机制在 tests/conftest.py::pytest_runtest_protocol（stdlib 看门狗 + faulthandler）。
 # 语义 = pytest-timeout 的 thread 方法：超时终止整个进程，不承诺后续用例继续跑。
-# 逐用例放宽/关闭：`@pytest.mark.test_timeout(N)`（0 = 不设上限）。
-# 取值依据见 docs/agents/verification.md「单测超时」一节与 #1514 回报的实测读数。
+# Per-test overrides require finite positive seconds and an evidence-based reason.
+# See docs/agents/verification.md for the default and measured exceptions.
 test_timeout = "300"
 # 让项目根进入 sys.path，使 tests/ 下的测试辅助模块（如 scripted_model）
 # 能以 tests.xxx 形式被跨文件导入；否则只有 src 在路径上。
