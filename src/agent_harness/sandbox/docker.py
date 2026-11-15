@@ -558,9 +558,11 @@ printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
 """
 
 
-#: `SandboxHardeningError.reason` 的**唯一**定义处（产生侧）。web 层的响应白名单
-#: （`web/domain_errors.py::sandbox_hardening_http_error`）import 这一个集合，不再自己
-#: 抄一份字面量——抄两份时新增 reason 会静默降级成 `hardening_failed`，没有门禁会红。
+#: `SandboxHardeningError.reason` 的**唯一**定义处（产生侧）与**公开合同**。
+#: 公开名（无下划线）是刻意的：它是 reason 取值域的单一来源，web 层响应白名单
+#: （`web/domain_errors.py::sandbox_hardening_http_error`）经包级公开面
+#: `agent_harness.sandbox.HARDENING_REASONS` import 这一个集合，不再自己抄一份字面量
+#: ——抄两份时新增 reason 会静默降级成 `hardening_failed`，没有门禁会红。
 #: `tests/web/test_sandbox_hardening_error_api.py` 的钉子测试用 AST 扫本模块里
 #: **所有 `raise SandboxHardeningError(...)` 的 `reason=` 实参**（含作用域内的
 #: exit-code 字典与 `__init__` 的 kwonly 默认值），断言与本集合**双向相等**。
@@ -568,7 +570,7 @@ printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
 #: 只认裸名与模块级别名（子类名 / 属性写法不算）、只认**显式** `reason=`（`**{...}` 展开
 #: 闭合不了扫描面，钉子直接红而不是漏扫）。
 #: 别按名字形状（如 `hardening_*` 前缀）定契约：reason 是取值域，不是命名约定。
-_HARDENING_REASONS: frozenset[str] = frozenset(
+HARDENING_REASONS: frozenset[str] = frozenset(
     {
         "hardening_failed",
         "migration_failed",

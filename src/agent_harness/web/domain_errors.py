@@ -152,14 +152,12 @@ from agent_harness.model.config import (
     ModelClientConstructionError,
     UnsupportedReasoningEffort,
 )
+from agent_harness.sandbox import HARDENING_REASONS
 from agent_harness.sandbox.capabilities import (
     SandboxUnavailableError,
     probe_all_capabilities,
 )
-from agent_harness.sandbox.docker import (
-    _HARDENING_REASONS,
-    SandboxHardeningError,
-)
+from agent_harness.sandbox.docker import SandboxHardeningError
 from agent_harness.session.errors import (
     ActiveRunConflict,
     ApprovalAlreadyResolved,
@@ -576,8 +574,9 @@ def sandbox_hardening_http_error(exc: SandboxHardeningError) -> HTTPException:
         status_code=status,
         detail={
             "message": "Sandbox hardening failed",
-            # 白名单来自产生侧（`sandbox/docker.py::_HARDENING_REASONS`），本层不再抄一份。
-            "reason": exc.reason if exc.reason in _HARDENING_REASONS else "hardening_failed",
+            # 白名单来自产生侧（`sandbox/docker.py::HARDENING_REASONS` 经包级公开面导出），
+            # 本层不再抄一份。
+            "reason": exc.reason if exc.reason in HARDENING_REASONS else "hardening_failed",
             "volume": None,  # 刻意恒为 None，理由见 docstring；不要把 exc.volume_name 接上。
             "remediation": "Preserve the volume and backup; verify recovery state before retrying.",
         },

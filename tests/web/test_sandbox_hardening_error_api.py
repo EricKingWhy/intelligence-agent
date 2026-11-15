@@ -12,7 +12,7 @@ import agent_harness.sandbox.docker as sandbox_docker
 from agent_harness.config import Settings
 from agent_harness.sandbox.capabilities import SandboxUnavailableError
 from agent_harness.sandbox.docker import (
-    _HARDENING_REASONS,
+    HARDENING_REASONS,
     DockerSandbox,
     SandboxHardeningError,
 )
@@ -434,7 +434,7 @@ def test_hardening_reason_whitelist_matches_producer_call_sites():
         for node in module.body
         if isinstance(node, ast.AnnAssign | ast.Assign)
         and any(
-            isinstance(t, ast.Name) and t.id == "_HARDENING_REASONS"
+            isinstance(t, ast.Name) and t.id == "HARDENING_REASONS"
             for t in ([node.target] if isinstance(node, ast.AnnAssign) else node.targets)
         )
     )
@@ -443,16 +443,16 @@ def test_hardening_reason_whitelist_matches_producer_call_sites():
         for node in ast.walk(declaration.value)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    assert declared == set(_HARDENING_REASONS), (
-        "_HARDENING_REASONS 的字面量与导入的常量不一致（模块内有第二份定义？）"
+    assert declared == set(HARDENING_REASONS), (
+        "HARDENING_REASONS 的字面量与导入的常量不一致（模块内有第二份定义？）"
     )
     assert dynamic, (
         "预期 `_migrate_volume_ownership` 里有一处 reason 由 exit-code 字典推导"
         "（`reason=reason`）——扫描面为零说明这处推导消失了，请复核 expectation"
     )
-    assert literals == set(_HARDENING_REASONS), (
-        "产生侧的 reason 取值与 _HARDENING_REASONS 不一致："
-        f"只在产生侧 {sorted(literals - set(_HARDENING_REASONS))} / "
-        f"只在常量 {sorted(set(_HARDENING_REASONS) - literals)}"
+    assert literals == set(HARDENING_REASONS), (
+        "产生侧的 reason 取值与 HARDENING_REASONS 不一致："
+        f"只在产生侧 {sorted(literals - set(HARDENING_REASONS))} / "
+        f"只在常量 {sorted(set(HARDENING_REASONS) - literals)}"
         f"（动态站点行号：{dynamic}）"
     )
