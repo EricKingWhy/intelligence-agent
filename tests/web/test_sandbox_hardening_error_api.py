@@ -298,7 +298,7 @@ def test_hardening_failure_is_logged_server_side(tmp_path, monkeypatch):
     logged = "\n".join(formatter.format(r) for r in records)
     assert "migration_rollback_failed" in logged
     # 原文在 traceback 里，落盘形态（`format()`）看得见。
-    assert "MIGRATE_FATAL rollback failed" in logged  # 原文进日志（r.getMessage 已含 exc）
+    assert "MIGRATE_FATAL rollback failed" in logged
     # 与上一条分开：原文能被看见的前提是记录带了 exc_info。丢了它，上面的断言也会红，
     # 但红了以后读的人分不清是「换了 logger 名」还是「丢了 traceback」。
     assert all(r.exc_info for r in records), "ERROR 日志必须带 exc_info（否则原文不在落盘内容里）"
@@ -329,12 +329,20 @@ def test_hardening_reason_whitelist_matches_producer_call_sites():
     抄两份的失效形态是静默的：`docker.py` 新增一个 reason，响应端不认识它，就降级成
     `hardening_failed`——没有任何门禁会红，客户端只是少了一档分类。
 
-    扫描面取**产生侧本身**，不是名字形状：早先的版本用 `(hardening|migration)_[a-z_]+`
+    扫描面取**本模块的产生点**，不是名字形状：早先的版本用 `(hardening|migration)_[a-z_]+`
     正则界定扫描面，于是「新增一个不以此开头的 reason」既不进扫描面、也不引发差集
     非空（加法变异 `95: "oom_killed"` 存活 15 passed）。reason 的取值域是
     `SandboxHardeningError.reason`，与名字怎么拼无关，所以这里改从 AST 取
     `raise SandboxHardeningError(...)` 的 `reason=` 实参，加上 `__init__` 的 kwonly
     默认值（不传 reason 的 raise 站点取的就是它）。
+
+    扫描面有**三条明示边界**，越界的产生点不会被这条钉子看见：
+    ① 只扫 `sandbox/docker.py` 一个文件——别的模块新增 `raise` 站点不在此列（本类目前
+    只在该文件被抛出；扩到全仓会连测试文件里那些故意非法的 reason 一起要求登记）；
+    ② 被调用者只认裸名 `SandboxHardeningError` 与**模块级别名**（`_Err = SandboxHardeningError`）；
+    子类名与属性写法（`docker.SandboxHardeningError`）不在此列；
+    ③ 只认**显式** `reason=` 关键字：`**{...}` 展开无法闭合扫描面，所以它不是"漏扫"而是
+    直接红（见下方 `assert not any(k.arg is None ...)`）。
 
     动态站点（`reason=reason` 变量传参）**解析而不是豁免**：它的可能值由所属函数里给
     这个变量赋的值决定（现状是那张 exit-code 字典），所以扫的是赋值右值里的字符串
@@ -357,15 +365,36 @@ def test_hardening_reason_whitelist_matches_producer_call_sites():
     assert isinstance(default_kwonly, ast.Constant), default_kwonly
     default = default_kwonly.value
 
+    # 产生点也可能经模块级别名抛出（`_Err = SandboxHardeningError` 后 `raise _Err(...)`）：
+    # 认得出的别名一律进扫描面。只认模块级的直接赋值（右值是 `ast.Name`），不做流敏感
+    # 分析——链式别名按文件顺序收敛。
+    producers = {"SandboxHardeningError"}
+    for stmt in module.body:
+        if isinstance(stmt, ast.Assign):
+            targets, value = stmt.targets, stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            targets, value = [stmt.target], stmt.value
+        else:
+            continue
+        if isinstance(value, ast.Name) and value.id in producers:
+            producers |= {t.id for t in targets if isinstance(t, ast.Name)}
+
     literals: set[str] = set()
     dynamic: list[int] = []
     for node in ast.walk(module):
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "SandboxHardeningError"
+            and node.func.id in producers
         ):
             continue
+        # `**{...}` 展开闭合不了扫描面：`reason` 可能就藏在被展开的字典里，而 `k.arg`
+        # 为 `None` 会让下面取不到实参、被当成"没传 reason"而落到默认值上（那是**漏报**，
+        # 与"解不出就红"相反）。所以这里直接红，要求写成显式关键字。
+        assert not any(k.arg is None for k in node.keywords), (
+            f"{node.lineno}: `**` 展开的实参闭合不了扫描面（reason 可能藏在里面），"
+            "请写成显式 `reason=` 关键字"
+        )
         passed = next((k.value for k in node.keywords if k.arg == "reason"), None)
         if passed is None:
             literals.add(default)

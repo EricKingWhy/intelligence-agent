@@ -569,6 +569,9 @@ printf 'MIGRATE_OK records=%s target=%s:%s\n' "$records" "$U" "$G"
 #: `tests/web/test_sandbox_hardening_error_api.py` 的钉子测试用 AST 扫本模块里
 #: **所有 `raise SandboxHardeningError(...)` 的 `reason=` 实参**（含作用域内的
 #: exit-code 字典与 `__init__` 的 kwonly 默认值），断言与本集合**双向相等**。
+#: 扫描面的三条边界与测试 docstring 一致：只扫**本模块**（别的模块新增 raise 站点不在此列）、
+#: 只认裸名与模块级别名（子类名 / 属性写法不算）、只认**显式** `reason=`（`**{...}` 展开
+#: 闭合不了扫描面，钉子直接红而不是漏扫）。
 #: 别按名字形状（如 `hardening_*` 前缀）定契约：reason 是取值域，不是命名约定。
 _HARDENING_REASONS: frozenset[str] = frozenset(
     {
