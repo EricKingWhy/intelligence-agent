@@ -29,6 +29,9 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | `GET /api/sessions/{id}/workspace/files`、`GET .../workspace/file`、`GET .../workspace/git/status`、`GET .../workspace/git/diff`（#1647 追加） | 走 `session_sandbox` → `WorkspaceRegistry.get`；SandboxHardeningError（全局 handler） |
 | `POST /api/sessions/{id}/workspace/export`（#1647 追加） | 同上，SandboxHardeningError（全局 handler） |
 | `POST /api/sessions/{id}/project-instructions/reload`（#1647 追加） | 走 `WorkspaceRegistry.get`；SandboxHardeningError（全局 handler） |
+| `POST /api/sessions/{id}/workflow-mode`（#1647 追加） | 走 `Session.load(workspace_registry=...)` → `WorkspaceRegistry.get`；SandboxHardeningError（全局 handler） |
+| `POST /api/sessions/{id}/approvals/revoke`（#1647 追加） | 同上，经 `Session.load`；SandboxHardeningError（全局 handler） |
+| `PATCH /api/sessions/{id}/context-settings`（#1647 追加） | 同上，经 `Session.load`；SandboxHardeningError（全局 handler） |
 
 审计发现：**每个异常在所有 handler 里状态码一致**（这正是可单源化的前提）。
 两个特例写进契约、不得「顺手统一」：
@@ -98,18 +101,32 @@ Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上�
   禁止「引入该端点本来不产生的状态码」——因此其余异常仍由每个端点用**自己的 except
   元组**声明「本端点翻译哪些」，子集语义不变。
   **本条的例外只有 `SandboxHardeningError` 一个**（`#1647`）：它会被 `WorkspaceRegistry.get`
-  / `create` 等**同步、散落在会话与工作区多个端点**的路径抛出。已知会经下列 **11 条**
+  / `create` 等**同步、散落在会话与工作区多个端点**的路径抛出。已知会经下列 **14 条**
   端点抛出（**非穷尽**：任何经 `build_runtime` / `session_sandbox` / `_session_from_events`
-  触达 registry 的路径都算，逐端点重述要抄十一遍）：
+  / `Session.load` 触达 registry 的路径都算，逐端点重述要抄十四遍）：
   `POST /api/sessions`、`POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/forks`、
   `POST /api/sessions/{id}/messages`（idle 分支 `resume_and_launch` →
   `build_runtime` → `_build_tooling`）、`POST /api/sessions/{id}/recover`
   （`RecoveryCoordinator._session_from_events`）、四条 `.../workspace/*` 只读路由
   （`files` / `file` / `git/status` / `git/diff`，经 `session_sandbox`）、
-  `POST /api/sessions/{id}/workspace/export`、`POST /api/sessions/{id}/project-instructions/reload`。
-  重跑核查：`grep -rn 'workspace_registry[.](get|create)' src/agent_harness`
-  取调用面，再顺着 `build_runtime` / `session_sandbox` / `_session_from_events` 往上找
-  HTTP 入口。它适合全局注册的理由是**反向的**：它的响应体是固定四字段的合成体，**不携带
+  `POST /api/sessions/{id}/workspace/export`、`POST /api/sessions/{id}/project-instructions/reload`、
+  `POST /api/sessions/{id}/workflow-mode`（`app.py:4062` → `service.set_workflow_mode` →
+  `Session.load`）、`POST /api/sessions/{id}/approvals/revoke`（`app.py:3985` →
+  `service.revoke_approval_grant` → `Session.load`）、`PATCH /api/sessions/{id}/context-settings`
+  （`app.py:4189` → `service.set_context_window` → `Session.load`）。
+  末尾三条经第四条上溯入口 `Session.load(workspace_registry=...)`
+  （`session/session.py:428`）：`load` 对 `KeyError` 降级为 `sandbox=None`（#1235），但
+  `SandboxHardeningError` 不是 `KeyError`，因此照常上抛并由全局 handler 接住——这三条
+  已用注入实测 409 + 固定四字段响应体。
+  重跑核查：`grep -rnE '(workspace_)?registry[.](get|create)[(,]' src/agent_harness`
+  ——当前 **19 命中**；再排除工具注册表（`self._registry` / `self._tool_registry`，与
+  workspace 无关，共 6 行）剩 **13 行**，其中 **11 行是 workspace registry 的真实调用点**、
+  2 行是注释/docstring。两点别踩：不带 `-E` 时 `|` 与 `()` 在 BRE 下都是字面量，命中 **0 行、
+  exit 1**（比没有更糟——下一个人会据此认定 registry 无调用面）；右边界只要求紧跟左括号会漏掉
+  `web/workspace_files.py:220` 把方法对象当值 `run_sync(...)` 传给 worker 线程的形态，
+  故用 `[(,]`。
+  拿到调用面后再顺着 `build_runtime` / `session_sandbox` / `_session_from_events` /
+  `Session.load` 往上找 HTTP 入口。它适合全局注册的理由是**反向的**：它的响应体是固定四字段的合成体，**不携带
   任何可回显的原文**（`message` 是常量、`volume` 恒为 `None`），所以「全局把意外异常
   洗成别的状态码」的风险在这里不成立——它本来就不把异常原文交给客户端。
 - **不用装饰器**：app.py 与 lineage.py 都启用了 `from __future__ import annotations`，
