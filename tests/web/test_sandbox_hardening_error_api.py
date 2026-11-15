@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import agent_harness.sandbox.docker as sandbox_docker
+import agent_harness.web.domain_errors as web_errors
 from agent_harness.config import Settings
 from agent_harness.sandbox import HARDENING_REASONS
 from agent_harness.sandbox.capabilities import SandboxUnavailableError
@@ -462,3 +463,8 @@ def test_hardening_reason_whitelist_matches_producer_call_sites():
     # 用它）。产生侧一致改名后上面的双向相等仍绿，而 HTTP 会吐出域外值，所以兜底值本身
     # 必须留在域内。
     assert "hardening_failed" in HARDENING_REASONS
+    # 上面两条只钉住「包级 ↔ 模块级」这一跳；web 层消费的是它自己模块里的
+    # `HARDENING_REASONS` 名字。若 `web/domain_errors.py` 自抄一份副本，两跳各自
+    # 成立而消费侧悄悄脱钩：产生侧新增 reason 后 HTTP 会把它降级成 hardening_failed，
+    # 本文件与守卫都不会红。所以消费侧那一跳也必须是同一个对象。
+    assert web_errors.HARDENING_REASONS is HARDENING_REASONS
