@@ -29,8 +29,19 @@ def main() -> int:
 
     if not shas:
         raise ValueError("No verifiable gate receipts found")
-    reachable = set(git("rev-list", "--all").stdout.splitlines())
-    dangling = sorted(shas - reachable)
+    # `git clone` from a bundle keeps only refs/heads/* and refs/tags/*; every other ref
+    # (remote-tracking, audit, notes, …) is dropped on the receiving side. The handoff documented in
+    # docs/agents/verification.md re-fetches refs/gate-evidence/* explicitly afterwards, so only
+    # those three namespaces survive the round trip — that set is what "already preserved" means.
+    # `refs/gate-receipts/*` is not imported by a bundle clone, so it is not counted (it appears
+    # in some maintainer worktrees only).
+    # Add a namespace here only if that document starts importing it.
+    survives_bundle_round_trip = set(
+        git("rev-list", "--branches", "--tags", "--glob=refs/gate-evidence/*").stdout.splitlines()
+    )
+    # Mixed state: the object is still missing locally, or it is present but only behind a ref the
+    # clone drops. The `missing` probe below splits the two.
+    dangling = sorted(shas - survives_bundle_round_trip)
     if not dangling:
         return 0
 

@@ -49,6 +49,8 @@ CJK_VENDOR = REPO_ROOT / "native" / "fts5_cjk" / "vendor"
 
 # 全量长跑（数十分钟、数百失败用例）时 5s 会让 worker 就绪等待假红；这里判的是
 # handle 曲线而不是时延，给足等待时间不放松断言。
+# 取值与 tests/tooling/test_approve_policy.py 的同名常量一致（#1514）：
+# 两文件同为线程并发用例，改动时同步。
 _WORKER_WAIT_SECONDS = 60
 
 
@@ -630,7 +632,13 @@ class TestConcurrencyAndCrash:
         for t in workers:
             t.start()
         for t in workers:
-            t.join()
+            # #1514：裸 join 会让挂死的 worker 把整套拖到 job 总超时才收场。
+            # 有界 join + 存活断言：线程未退出即有界失败并点名线程（实测本用例 <0.2s，
+            # 60s 是本文件既有的 _WORKER_WAIT_SECONDS 约定，约 300 倍余量）。
+            t.join(timeout=_WORKER_WAIT_SECONDS)
+            assert not t.is_alive(), (
+                f"worker 线程 {t.name} 在 {_WORKER_WAIT_SECONDS}s 内未退出（挂死？）"
+            )
         assert not errors
         rows = archive.get_messages("c")
         assert len(rows) == threads * per_thread
@@ -920,7 +928,11 @@ class TestStoreObserverWiring:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            # #1514：同上，裸 join 改有界 join + 存活断言（_WORKER_WAIT_SECONDS=60s）。
+            thread.join(timeout=_WORKER_WAIT_SECONDS)
+            assert not thread.is_alive(), (
+                f"线程 {thread.name} 在 {_WORKER_WAIT_SECONDS}s 内未退出（挂死？）"
+            )
 
         assert errors == []
         assert len(results) == 8
