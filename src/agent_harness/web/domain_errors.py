@@ -10,22 +10,28 @@ lineage.py 1，共 **37 个 except 臂**）——同一个异常在不同 handle
 | 端点 | 翻译的领域异常 |
 | --- | --- |
 | `GET /api/sessions/{id}/events` | InvalidSessionId, SessionNotFound |
-| `POST /api/sessions` | WorkspaceNameInvalid（含子类 WorkspacePathInvalid）, InvalidDecision, SandboxUnavailableError（#363，`#1278` 起与本模块共用） |
+| `POST /api/sessions` | WorkspaceNameInvalid（含子类 WorkspacePathInvalid）, InvalidDecision, SandboxUnavailableError（#363，`#1278` 起与本模块共用）, SandboxHardeningError（#1647，全局 handler） |
 | `GET /api/sessions/{id}/stream` | InvalidSessionId, SessionNotFound |
-| `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
+| `POST /api/sessions/{id}/resume` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加）, SandboxHardeningError（#1647，全局 handler） |
 | `POST /api/sessions/{id}/cancel` | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/approve` | InvalidSessionId, SessionNotFound, ApprovalQueueMissing, ApprovalRequestMissing, InvalidDecision, ApprovalAlreadyResolved |
-| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加） |
+| `POST /api/sessions/{id}/recover` | InvalidSessionId, SessionNotFound, InvalidDecision（#547 追加）, RecoveryConflict, SeqConflict, EventLogCorruptError（#565 追加）, SandboxHardeningError（#1647，全局 handler，经 `RecoveryCoordinator._session_from_events`） |
 | `GET /api/sessions/{id}/recovery`（#1049 追加，只读） | InvalidSessionId, SessionNotFound, EventLogCorruptError |
 | `POST /api/sessions/{id}/model` | InvalidSessionId, SessionNotFound, UnknownModel, SeqConflict |
-| `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict, EventLogCorruptError（#565 追加） |
+| `POST /api/sessions/{id}/messages` | InvalidSessionId, SessionNotFound, ActiveRunConflict, RecoveryConflict, QueueItemNotFound, SteerTargetNotFound, SeqConflict, EventLogCorruptError（#565 追加）, SandboxHardeningError（#1647，全局 handler，idle 分支经 `build_runtime` → `_build_tooling`） |
 | `POST /api/sessions/{id}/queue/{qid}/cancel` | InvalidSessionId, SessionNotFound, QueueItemNotFound, SeqConflict |
-| `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary, SandboxUnavailableError（`#1278`） |
+| `POST /api/sessions/{id}/forks`（lineage.py） | InvalidSessionId, SessionNotFound, ActiveRunConflict, InvalidForkBoundary, SandboxUnavailableError（`#1278`）, SandboxHardeningError（#1647，全局 handler） |
 | `GET /api/sessions`（WS-3 / #153 追加） | WorkspaceNotFound |
 | `DELETE /api/sessions/{id}`（会话硬删 / #172 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict, SessionHasChildren |
 | `POST /api/sessions/{id}/archive`（会话归档 / #171 追加） | InvalidSessionId, SessionNotFound, ActiveRunConflict |
 | `DELETE /api/sessions/{id}/archive`（取消归档 / #171 追加） | InvalidSessionId, SessionNotFound |
 | `POST /api/sessions/{id}/permission`（F18-A / #282 追加） | InvalidSessionId, SessionNotFound, InvalidDecision, PendingApprovalConflict, SeqConflict |
+| `GET /api/sessions/{id}/workspace/files`、`GET .../workspace/file`、`GET .../workspace/git/status`、`GET .../workspace/git/diff`（#1647 追加） | 走 `session_sandbox` → `WorkspaceRegistry.get`；SandboxHardeningError（全局 handler） |
+| `POST /api/sessions/{id}/workspace/export`（#1647 追加） | 同上，SandboxHardeningError（全局 handler） |
+| `POST /api/sessions/{id}/project-instructions/reload`（#1647 追加） | 走 `WorkspaceRegistry.get`；SandboxHardeningError（全局 handler） |
+| `POST /api/sessions/{id}/workflow-mode`（#1647 追加） | 走 `Session.load(workspace_registry=...)` → `WorkspaceRegistry.get`；SandboxHardeningError（全局 handler） |
+| `POST /api/sessions/{id}/approvals/revoke`（#1647 追加） | 同上，经 `Session.load`；SandboxHardeningError（全局 handler） |
+| `PATCH /api/sessions/{id}/context-settings`（#1647 追加） | 同上，经 `Session.load`；SandboxHardeningError（全局 handler） |
 
 审计发现：**每个异常在所有 handler 里状态码一致**（这正是可单源化的前提）。
 两个特例写进契约、不得「顺手统一」：
@@ -90,9 +96,39 @@ Deployment 解析（`Settings` 的 `ge=1` 保证不可能越权），结构上�
 
 ## 设计取舍（为什么不再往前一步）
 
-- **不用 FastAPI 全局 `exception_handler`**：那会把整张表应用到每个端点，使一个本来
-  只会 500 的意外异常突然变成 404/422。issue 边界明确禁止「引入该端点本来不产生的
-  状态码」——每个端点仍用**自己的 except 元组**声明「本端点翻译哪些」，子集语义不变。
+- **除 `SandboxHardeningError` 外不用 FastAPI 全局 `exception_handler`**：全局注册会把
+  整张表应用到每个端点，使一个本来只会 500 的意外异常突然变成 404/422。issue 边界明确
+  禁止「引入该端点本来不产生的状态码」——因此其余异常仍由每个端点用**自己的 except
+  元组**声明「本端点翻译哪些」，子集语义不变。
+  **本条的例外只有 `SandboxHardeningError` 一个**（`#1647`）：它会被 `WorkspaceRegistry.get`
+  / `create` 等**同步、散落在会话与工作区多个端点**的路径抛出。已知会经下列 **14 条**
+  端点抛出（**非穷尽**：任何经 `build_runtime` / `session_sandbox` / `_session_from_events`
+  / `Session.load` 触达 registry 的路径都算，逐端点重述要抄十四遍）：
+  `POST /api/sessions`、`POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/forks`、
+  `POST /api/sessions/{id}/messages`（idle 分支 `resume_and_launch` →
+  `build_runtime` → `_build_tooling`）、`POST /api/sessions/{id}/recover`
+  （`RecoveryCoordinator._session_from_events`）、四条 `.../workspace/*` 只读路由
+  （`files` / `file` / `git/status` / `git/diff`，经 `session_sandbox`）、
+  `POST /api/sessions/{id}/workspace/export`、`POST /api/sessions/{id}/project-instructions/reload`、
+  `POST /api/sessions/{id}/workflow-mode`（`app.py:4062` → `service.set_workflow_mode` →
+  `Session.load`）、`POST /api/sessions/{id}/approvals/revoke`（`app.py:3985` →
+  `service.revoke_approval_grant` → `Session.load`）、`PATCH /api/sessions/{id}/context-settings`
+  （`app.py:4189` → `service.set_context_window` → `Session.load`）。
+  末尾三条经第四条上溯入口 `Session.load(workspace_registry=...)`
+  （`session/session.py:428`）：`load` 对 `KeyError` 降级为 `sandbox=None`（#1235），但
+  `SandboxHardeningError` 不是 `KeyError`，因此照常上抛并由全局 handler 接住——这三条
+  已用注入实测 409 + 固定四字段响应体。
+  重跑核查：`grep -rnE '(workspace_)?registry[.](get|create)[(,]' src/agent_harness`
+  ——当前 **19 命中**；再排除工具注册表（`self._registry` / `self._tool_registry`，与
+  workspace 无关，共 6 行）剩 **13 行**，其中 **11 行是 workspace registry 的真实调用点**、
+  2 行是注释/docstring。两点别踩：不带 `-E` 时 `|` 与 `()` 在 BRE 下都是字面量，命中 **0 行、
+  exit 1**（比没有更糟——下一个人会据此认定 registry 无调用面）；右边界只要求紧跟左括号会漏掉
+  `web/workspace_files.py:220` 把方法对象当值 `run_sync(...)` 传给 worker 线程的形态，
+  故用 `[(,]`。
+  拿到调用面后再顺着 `build_runtime` / `session_sandbox` / `_session_from_events` /
+  `Session.load` 往上找 HTTP 入口。它适合全局注册的理由是**反向的**：它的响应体是固定四字段的合成体，**不携带
+  任何可回显的原文**（`message` 是常量、`volume` 恒为 `None`），所以「全局把意外异常
+  洗成别的状态码」的风险在这里不成立——它本来就不把异常原文交给客户端。
 - **不用装饰器**：app.py 与 lineage.py 都启用了 `from __future__ import annotations`，
   注解是字符串；包装函数定义在别的模块会改变 `__globals__`，FastAPI 的
   `get_type_hints` 解析 `ForkRequest` / `ResumeRequest` 这类本模块名会 NameError。
@@ -116,10 +152,12 @@ from agent_harness.model.config import (
     ModelClientConstructionError,
     UnsupportedReasoningEffort,
 )
+from agent_harness.sandbox import HARDENING_REASONS
 from agent_harness.sandbox.capabilities import (
     SandboxUnavailableError,
     probe_all_capabilities,
 )
+from agent_harness.sandbox.docker import SandboxHardeningError
 from agent_harness.session.errors import (
     ActiveRunConflict,
     ApprovalAlreadyResolved,
@@ -504,7 +542,45 @@ def model_http_error(exc: Exception) -> HTTPException:
 #: 结构化诊断同形；`detail` 由下面的函数统一构造）。
 _SANDBOX_ERROR_STATUS: dict[type[Exception], int] = {
     SandboxUnavailableError: 409,
+    SandboxHardeningError: 409,
 }
+
+
+def sandbox_hardening_http_error(exc: SandboxHardeningError) -> HTTPException:
+    """Report a failed sandbox hardening without falling back to another backend.
+
+    **沿 MRO 查状态码**（#1647 P2-1），与 `memory_http_error` 同一写法：Starlette 的
+    `exception_handler` 按 MRO 派发，子类一定会进到 handler，而精确类型索引会让子类
+    在查表时 KeyError → 被通用 500 兜底。降级方向安全（不泄露），但结构化诊断会静默
+    消失，正是本票要消灭的那种 500。
+
+    `volume` **恒为 `None`，是有意不接、不是忘了接**：`SandboxHardeningError.volume_name`
+    只用于服务端诊断，它的来源（卷名 / 调用方传入值）没有任何可验证的可信出处，回显
+    即等于把未校验输入带进客户端（`tests/web/test_sandbox_hardening_error_api.py` 用
+    路径、token 形状、超长值三种输入锁住这一点）。接上它只需一行，但那正是本票修掉
+    的缺陷形态。
+    """
+    status = next(
+        (
+            _SANDBOX_ERROR_STATUS[cls]
+            for cls in type(exc).__mro__
+            if cls in _SANDBOX_ERROR_STATUS
+        ),
+        None,
+    )
+    if status is None:
+        raise KeyError(type(exc))
+    return HTTPException(
+        status_code=status,
+        detail={
+            "message": "Sandbox hardening failed",
+            # 白名单来自产生侧（`sandbox/docker.py::HARDENING_REASONS` 经包级公开面导出），
+            # 本层不再抄一份。
+            "reason": exc.reason if exc.reason in HARDENING_REASONS else "hardening_failed",
+            "volume": None,  # 刻意恒为 None，理由见 docstring；不要把 exc.volume_name 接上。
+            "remediation": "Preserve the volume and backup; verify recovery state before retrying.",
+        },
+    )
 
 
 def sandbox_unavailable_http_error(
