@@ -10,12 +10,9 @@ from fastapi.testclient import TestClient
 
 import agent_harness.sandbox.docker as sandbox_docker
 from agent_harness.config import Settings
+from agent_harness.sandbox import HARDENING_REASONS
 from agent_harness.sandbox.capabilities import SandboxUnavailableError
-from agent_harness.sandbox.docker import (
-    HARDENING_REASONS,
-    DockerSandbox,
-    SandboxHardeningError,
-)
+from agent_harness.sandbox.docker import DockerSandbox, SandboxHardeningError
 from agent_harness.sandbox.registry import WorkspaceRegistry
 from agent_harness.web.app import create_app
 
@@ -352,6 +349,11 @@ def test_hardening_reason_whitelist_matches_producer_call_sites():
     """
     module = ast.parse(Path(sandbox_docker.__file__).read_text(encoding="utf-8"))
 
+    # 包级接缝不能是第二份副本：web 层消费的是 `agent_harness.sandbox.HARDENING_REASONS`，
+    # 本钉子钉的是 `sandbox.docker` 里那个定义。两者若不是同一个对象，`__init__.py` 退回
+    # 成字面量副本时，新增 reason 会在这里的差集里看不见——静默降级成 hardening_failed。
+    assert HARDENING_REASONS is sandbox_docker.HARDENING_REASONS
+
     # 不传 reason 的 raise 站点取 `__init__` 的默认值。
     default_kwonly = next(
         kw_default
@@ -456,3 +458,7 @@ def test_hardening_reason_whitelist_matches_producer_call_sites():
         f"只在常量 {sorted(set(HARDENING_REASONS) - literals)}"
         f"（动态站点行号：{dynamic}）"
     )
+    # 消费侧兜底值是 `web/domain_errors.py` 里的一份字面量副本（`reason` 不在白名单时
+    # 用它）。产生侧一致改名后上面的双向相等仍绿，而 HTTP 会吐出域外值，所以兜底值本身
+    # 必须留在域内。
+    assert "hardening_failed" in HARDENING_REASONS
