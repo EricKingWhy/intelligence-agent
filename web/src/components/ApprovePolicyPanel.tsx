@@ -95,11 +95,13 @@ function ApprovePolicyPanelBody({
     <Dialog.Content
       className="project-dialog approve-policy-dialog"
       onOpenAutoFocus={(e) => {
+        /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
+        const root = e.currentTarget as HTMLElement;
         const requestedTarget = focusReturnTargetRef?.current ?? null;
         if (focusReturnTargetRef) focusReturnTargetRef.current = null;
         openerRef.current = resolveFocusReturnTarget(requestedTarget ?? document.activeElement);
         // #1694：由「持久审批规则」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
-        deferMenuInitialFocus(e, () => focusFirstIn(e.currentTarget as HTMLElement));
+        deferMenuInitialFocus(e, () => focusFirstIn(root));
       }}
       onCloseAutoFocus={(event) => {
         if (openerRef.current) {

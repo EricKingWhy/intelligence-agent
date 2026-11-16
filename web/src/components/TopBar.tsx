@@ -416,7 +416,10 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                 </DropdownMenu.Item>
               )}
               {onOpenRecoveryList && (
-                <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenRecoveryList}>
+                <DropdownMenu.Item
+                  className="rail-menu-item"
+                  onSelect={() => openMenuDialog(onOpenRecoveryList)}
+                >
                   <History size={14} aria-hidden="true" /> 恢复列表
                 </DropdownMenu.Item>
               )}

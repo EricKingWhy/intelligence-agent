@@ -19,6 +19,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { RefreshCw, RotateCcw, X } from 'lucide-react';
 import { listInterruptedRecoveries, type InterruptedRecoveries } from '../lib/api';
 import { formatProgressVersion, progressTone } from '../lib/recovery';
+import { deferMenuInitialFocus, focusFirstIn } from './menuDialogTiming';
 import '../styles/recovery.css';
 
 interface Props {
@@ -115,8 +116,12 @@ function RecoveryListBody({
   return (
     <Dialog.Content
       className="recovery-list-panel"
-      onOpenAutoFocus={() => {
+      onOpenAutoFocus={(e) => {
+        /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
+        const root = e.currentTarget as HTMLElement;
         openerRef.current = focusReturnTarget(document.activeElement);
+        // #1694：由「恢复列表」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        deferMenuInitialFocus(e, () => focusFirstIn(root));
       }}
       onCloseAutoFocus={(event) => {
         if (openerRef.current?.isConnected) {
