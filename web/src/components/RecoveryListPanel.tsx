@@ -19,6 +19,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { RefreshCw, RotateCcw, X } from 'lucide-react';
 import { listInterruptedRecoveries, type InterruptedRecoveries } from '../lib/api';
 import { formatProgressVersion, progressTone } from '../lib/recovery';
+import { resolveFocusReturnTarget } from './focusReturn';
 import { deferMenuInitialFocus, focusFirstIn } from './menuDialogTiming';
 import '../styles/recovery.css';
 
@@ -54,16 +55,10 @@ const GATE_REASON = '加载完成前不能继续——先核对完上次任务�
  *  按 Radix 的菜单契约在**记录时**上溯到常驻触发器：菜单内容挂
  *  `aria-labelledby=<触发器 id>`（DropdownMenu 的 Content 固定注入），触发器本身
  *  常驻。不是菜单项就原样返回——从常驻按钮打开的旧行为不变。
- *  （与 `focusReturn.ts` 的 `resolveFocusReturnTarget` 同义但私有：那边只管
- *  `isConnected`，这里还多了「菜单项 → 常驻触发器」的上溯语义，故未迁移。） */
-function focusReturnTarget(active: Element | null): HTMLElement | null {
-  if (!(active instanceof HTMLElement)) return null;
-  const menu = active.closest('[role="menu"]');
-  if (!menu) return active;
-  const triggerId = menu.getAttribute('aria-labelledby')?.split(' ')[0];
-  const trigger = triggerId ? document.getElementById(triggerId) : null;
-  return trigger instanceof HTMLElement ? trigger : null;
-}
+ *
+ *  #1694：本文件原有一份与 `focusReturn.ts` 的 `resolveFocusReturnTarget` **逐字相同**
+ *  的私有实现，现已改为共用。`isConnected` 的判断不在该函数里——它在调用方
+ *  （`onCloseAutoFocus` 的 `openerRef.current?.isConnected`）与 `restoreFocusTarget`。 */
 
 function ResumeButton({
   sessionId,
@@ -120,7 +115,7 @@ function RecoveryListBody({
       onOpenAutoFocus={(e) => {
         /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
         const root = e.currentTarget as HTMLElement;
-        openerRef.current = focusReturnTarget(document.activeElement);
+        openerRef.current = resolveFocusReturnTarget(document.activeElement);
         // #1694：由「恢复列表」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
         deferMenuInitialFocus(e, () => focusFirstIn(root));
       }}

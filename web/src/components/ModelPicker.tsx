@@ -39,6 +39,7 @@ import type { ModelCatalogEntry } from '../lib/api';
 import { capabilityBadges, isUnavailable, providerAvailability, reasonLabel } from '../lib/modelAvailability';
 import { selectableModels } from '../lib/modelSelection';
 import { DEFAULT_VALUE, OptionRowContent } from './OptionPicker';
+import { openMenuDialog, takeMenuCloseAutoFocus } from './menuDialogTiming';
 import { ProviderManagerDialog } from './ProviderManagerDialog';
 import { Tip } from './Tooltip';
 
@@ -143,6 +144,8 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
           align="end"
           sideOffset={6}
           onCloseAutoFocus={(event) => {
+            // #1694：由「管理模型」打开弹层的那次关闭，初焦已交给弹层（见 menuDialogTiming）。
+            if (takeMenuCloseAutoFocus(event)) return;
             const content = event.currentTarget;
             const focused = document.activeElement;
             if (
@@ -255,13 +258,17 @@ export function ModelPicker({ models, selectedModel, onModelChange, disabled = f
           })}
           <Menu.Separator className="picker-sep" />
           {/* #203：「管理模型」入口（两栏弹层）。onSelect 里先关菜单再开弹层：
-              两层浮层叠放会互相抢 Esc 与焦点；先关菜单让弹层独占浮层栈。 */}
+              两层浮层叠放会互相抢 Esc 与焦点；先关菜单让弹层独占浮层栈。
+              #1694：与其他同形入口一样走 `openMenuDialog`——它摘掉菜单留在 body 上的
+              指针锁并接管初焦时序。 */}
           <Menu.Item
             className="picker-item picker-manage-item"
-            onSelect={() => {
-              setOpen(false);
-              setManageOpen(true);
-            }}
+            onSelect={() =>
+              openMenuDialog(() => {
+                setOpen(false);
+                setManageOpen(true);
+              })
+            }
           >
             <OptionRowContent
               title="管理模型"

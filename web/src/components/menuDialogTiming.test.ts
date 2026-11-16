@@ -3,8 +3,9 @@
  *  除状态机四步外，另有两类**能真正失败**的守卫：
  *  - 真实 `Event` + `dispatchEvent`：延后闭包执行时 `currentTarget` 已为 null，
  *    所以闭包只能引用同步期捕获的节点（契约写在 `deferMenuInitialFocus` 的 JSDoc）；
- *  - 生产调用点静态扫描：这些文件里 `currentTarget` 只允许出现在同步取容器那一种
- *    形状（`const x = e.currentTarget as HTMLElement;`）——写成多行闭包也绕不过去。
+ *  - 生产调用点静态扫描：`onOpenAutoFocus` 回调体的顶层只允许「同步取容器」那一句，
+ *    `deferMenuInitialFocus(` / `setTimeout(` 等的实参区一律不许出现 `currentTarget`。
+ *    扫描前剥掉注释与字符串（否则注释里一个 `)` 就能截断括号配平）。
  */
 import { afterEach, describe, expect, it } from 'vitest';
 // node 内置模块没有声明（web 的 tsconfig 只带 vite/client），同其他源码扫描用例。
@@ -117,15 +118,16 @@ describe('menuDialogTiming', () => {
     root.remove();
   });
 
-  it('focusFirstIn 跳过 tabindex=-1 / disabled / hidden，落到首个真正可聚焦的元素', () => {
+  it('focusFirstIn 跳过 tabindex=-1 / disabled / hidden / display:none，落到首个真正可聚焦的元素', () => {
     const root = document.createElement('div');
-    /* 三个"拦不住但聚焦不了"的形态都排在期望落点**之前**——否则 find 命中 #a 后
-     * 这几条过滤删掉也不会红（恒真断言）。 */
+    /* 四个「属性拦不住但聚焦不了」的形态都排在期望落点**之前**——若实现退回
+     * 「只取首个候选」，本用例会立刻红（恒真断言的防线就靠这个顺序）。 */
     root.innerHTML =
       '<button tabindex="-1">关闭</button>' +
       '<button id="hidden" hidden>藏起来</button>' +
       '<button id="disabled" disabled>不可用</button>' +
       '<input id="hiddentype" type="hidden" />' +
+      '<button id="dn" style="display:none">不可见</button>' +
       '<input id="a" />' +
       '<button id="b">取消</button>';
     document.body.append(root);
@@ -146,10 +148,75 @@ describe('menuDialogTiming', () => {
     root.remove();
   });
 
+  it('focusFirstIn 候选全被拒时退回容器（前提：容器可聚焦，如 FocusScope 的 tabindex=-1）', () => {
+    const root = document.createElement('div');
+    /* 裸 `div` 的 `focus()` 在浏览器与 jsdom 里都不改 activeElement，所以生产里这个兜底
+       只在 `root` 是 Radix FocusScope 容器时有效——它固定注入 `tabIndex: -1`。
+       这里显式给它 tabindex，验证「可聚焦容器才会成为兜底落点」这条前提。 */
+    root.tabIndex = -1;
+    root.innerHTML = '<fieldset disabled><button>关不掉</button></fieldset>';
+    document.body.append(root);
+    focusFirstIn(root);
+    expect(document.activeElement).toBe(root);
+    root.remove();
+  });
+
   it('生产调用点不得在延后闭包里读 event.currentTarget', () => {
     /* jsdom 里 `import.meta.url` 不是 file: URL，vitest 的 cwd 是 `web/`。 */
     const base = cwd() as string;
-    const allowed = /^\s*const \w+ = e\.currentTarget as HTMLElement;\s*$/;
+    /* 允许的形状：同步期把容器取进局部 const（参数名不限——`evt` 与 `e` 等价）。 */
+    const capture = /^\s*const \w+ = \w+\.currentTarget as HTMLElement;\s*$/;
+
+    /* 扫描前先把注释与字符串字面量的内容抹成空格（保留换行与长度，下标仍可映射回原文）。
+       否则注释里一个 `)` 就能截断括号配平，让守卫整体失效——这正是上一轮的可达盲区。 */
+    const blank = (source: string): string => {
+      const out = source.split('');
+      const n = source.length;
+      for (let i = 0; i < n; i += 1) {
+        const ch = source[i];
+        if (ch === '/' && source[i + 1] === '*') {
+          const close = source.indexOf('*/', i + 2);
+          const stop = close < 0 ? n : close + 2;
+          for (let j = i; j < stop; j += 1) if (out[j] !== '\n') out[j] = ' ';
+          i = stop - 1;
+        } else if (ch === '/' && source[i + 1] === '/') {
+          let j = i;
+          while (j < n && source[j] !== '\n') {
+            out[j] = ' ';
+            j += 1;
+          }
+          i = j - 1;
+        } else if (ch === "'" || ch === '"' || ch === '`') {
+          let j = i + 1;
+          while (j < n && source[j] !== ch) {
+            if (source[j] === '\\') {
+              out[j] = ' ';
+              j += 1;
+            }
+            if (j < n && source[j] !== '\n') out[j] = ' ';
+            j += 1;
+          }
+          i = j;
+        }
+      }
+      return out.join('');
+    };
+
+    /* 从开括号起配平到收尾，返回闭区间下标。 */
+    const balanced = (source: string, from: number, open: string, close: string): number => {
+      let depth = 0;
+      for (let i = from; i < source.length; i += 1) {
+        if (source[i] === open) depth += 1;
+        else if (source[i] === close) {
+          depth -= 1;
+          if (depth === 0) return i;
+        }
+      }
+      return source.length - 1;
+    };
+
+    const lineOf = (source: string, at: number): number => source.slice(0, at).split('\n').length;
+
     for (const name of [
       'MemoryPanel.tsx',
       'ApprovePolicyPanel.tsx',
@@ -159,41 +226,55 @@ describe('menuDialogTiming', () => {
       'SessionReplayDialog.tsx',
       'TaskCreationDialog.tsx',
       'ProjectDialogs.tsx',
+      'ModelPicker.tsx',
+      'ProviderManagerDialog.tsx',
     ]) {
-      const source = readFileSync(`${base}/src/components/${name}`, 'utf8');
-      const lines = source.split('\n') as string[];
+      const raw = readFileSync(`${base}/src/components/${name}`, 'utf8');
+      const source = blank(raw);
 
-      /* ① 全文件：`currentTarget` 只允许「同步取容器」这一种形状（注释不算）。 */
-      lines.forEach((line: string, index: number) => {
-        if (!line.includes('currentTarget')) return;
-        const trimmed = line.trim();
-        /* 注释里的说明文字不算调用点。 */
-        if (trimmed.startsWith('*') || trimmed.startsWith('/*') || trimmed.startsWith('//')) return;
-        expect(line, `${name}:${index + 1}`).toMatch(allowed);
-      });
-
-      /* ② 实参区：从 `deferMenuInitialFocus(` 起按括号配平扫到收尾，整段都不许出现
-       * `currentTarget`——闭包写成多行也逃不掉（行局部扫描的盲区）。 */
-      /* ② 实参区（含**) 全部**调用点**）：从 `deferMenuInitialFocus(` 起按括号配平扫到
-       * 收尾，整段都不许出现 `currentTarget`——闭包写成多行也逃不掉（行局部扫描的盲区）。 */
-      let from = 0;
-      for (;;) {
-        const at = source.indexOf('deferMenuInitialFocus(', from);
-        if (at < 0) break;
-        let depth = 0;
-        let end = at;
-        for (; end < source.length; end += 1) {
-          const ch = source[end];
-          if (ch === '(') depth += 1;
-          else if (ch === ')') {
-            depth -= 1;
-            if (depth === 0) break;
-          }
+      /* ① `onOpenAutoFocus` 回调体：`currentTarget` 只允许出现在**同步期取容器**那一句
+         （体的顶层、形状固定）。写在嵌套块 / 嵌套闭包里的一律红——那些地方才是跨拍读。
+         约定：本次全部调用点都是 `onOpenAutoFocus={(e) => { … }}`，故以箭头体为扫描区。 */
+      let at = source.indexOf('onOpenAutoFocus=');
+      while (at >= 0) {
+        const arrow = source.indexOf('=>', at);
+        const bodyStart = arrow < 0 ? -1 : source.indexOf('{', arrow);
+        if (bodyStart < 0) {
+          at = source.indexOf('onOpenAutoFocus=', at + 'onOpenAutoFocus='.length);
+          continue;
         }
-        const call = source.slice(at, end + 1);
-        const lineOfCall = source.slice(0, at).split('\n').length;
-        expect(call, `${name}:${lineOfCall} 的实参区`).not.toContain('currentTarget');
-        from = end + 1;
+        const end = balanced(source, bodyStart, '{', '}');
+        const body = source.slice(bodyStart, end + 1);
+        let depth = 0;
+        for (let i = 0; i < body.length; i += 1) {
+          if (body[i] === '{') depth += 1;
+          else if (body[i] === '}') depth -= 1;
+          if (body[i] !== 'c' || !body.startsWith('currentTarget', i)) continue;
+          const startOfLine = body.lastIndexOf('\n', i) + 1;
+          const endOfLine = body.indexOf('\n', i);
+          const line = body.slice(startOfLine, endOfLine < 0 ? body.length : endOfLine);
+          const where = `${name}:${lineOf(raw, bodyStart + startOfLine)}`;
+          expect(depth, `${where} 的 currentTarget 必须写在回调体顶层（不得在嵌套闭包里）`).toBe(1);
+          expect(line.trim(), where).toMatch(capture);
+        }
+        at = source.indexOf('onOpenAutoFocus=', end);
+      }
+
+      /* ② 延后执行的实参区：`deferMenuInitialFocus(` 与其它把回调推迟到下一拍的调用，
+         整个实参区都不许出现 `currentTarget`——闭包写成多行、无花括号也逃不掉。 */
+      for (const call of ['deferMenuInitialFocus(', 'setTimeout(', 'queueMicrotask(', 'requestAnimationFrame(']) {
+        let from = 0;
+        for (;;) {
+          const start = source.indexOf(call, from);
+          if (start < 0) break;
+          const open = start + call.length - 1;
+          const end = balanced(source, open, '(', ')');
+          const args = source.slice(open, end + 1);
+          expect(args, `${name}:${lineOf(raw, start)} 的 ${call.trim()} 实参区`).not.toContain(
+            'currentTarget',
+          );
+          from = end + 1;
+        }
       }
     }
   });
