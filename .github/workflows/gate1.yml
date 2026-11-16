@@ -57,7 +57,7 @@ jobs:
       - name: Fetch historical gate receipt commits
         run: python scripts/fetch_gate_receipts.py
       - name: 装 uv 0.10.9（缓存 ~/.cache/uv，锁文件变更时失效）
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: '0.10.9'
           cache-dependency-glob: uv.lock

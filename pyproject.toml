@@ -27,13 +27,13 @@ dependencies = [
     # 归一化是 MM-02」，故本票引入。
     "pillow>=10",
     "pydantic>=2.13.4",
-    "pydantic-settings>=2.15.0",
+    "pydantic-settings>=2.16.2",
     "pyjwt>=2.10,<3",
     "python-dotenv>=1.2.2",
-    "sse-starlette>=2.1.0",
+    "sse-starlette>=3.7.0",
     "tiktoken>=0.7.0",
     # Windows has no system IANA database for zoneinfo.
-    "tzdata>=2024.1",
+    "tzdata>=2026.6",
     "uvicorn[standard]>=0.54.0",
 ]
 
