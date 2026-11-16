@@ -123,7 +123,7 @@ jobs:
           python-version: '3.13'
 
       - name: 装 uv 0.10.9（缓存 ~/.cache/uv，锁文件变更时失效）
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: '0.10.9'
           cache-dependency-glob: uv.lock
@@ -132,7 +132,7 @@ jobs:
         run: uv sync --locked --all-extras
 
       - name: 装 pnpm 10.32.1
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 10.32.1
 
