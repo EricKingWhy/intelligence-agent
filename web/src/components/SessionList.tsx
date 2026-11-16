@@ -663,8 +663,8 @@ export const SessionList = memo(function SessionList({
                             // 移到别处，别再让关闭时默认的"归还 trigger 焦点"偷回来（见
                             // `suppressMenuAutoFocus` 注释）。其余情况保持 Radix 默认。
                             onCloseAutoFocus={(event) => {
-                              // #1694：由「删除会话…」打开弹窗的那次关闭，初焦已交给
-                              // 弹窗（菜单的 FocusScope 此时还 trapped 着一拍）。
+                              // #1694：「新建任务…」/「删除项目…」打开弹窗的那次关闭，
+                              // 初焦已交给弹窗（菜单的 FocusScope 此时还 trapped 着一拍）。
                               if (takeMenuCloseAutoFocus(event)) return;
                               if (suppressMenuAutoFocus.current) {
                                 suppressMenuAutoFocus.current = false;
@@ -698,7 +698,7 @@ export const SessionList = memo(function SessionList({
                             </DropdownMenu.Item>
                             <DropdownMenu.Item
                               className="rail-menu-item"
-                              onSelect={() => setStartTaskFor(project)}
+                              onSelect={() => openMenuDialog(() => setStartTaskFor(project))}
                             >
                               新建任务…
                             </DropdownMenu.Item>
@@ -714,7 +714,7 @@ export const SessionList = memo(function SessionList({
                             </DropdownMenu.Item>
                             <DropdownMenu.Item
                               className="rail-menu-item rail-menu-item-danger"
-                              onSelect={() => setDeleting(project)}
+                              onSelect={() => openMenuDialog(() => setDeleting(project))}
                             >
                               删除项目…
                             </DropdownMenu.Item>
@@ -1173,11 +1173,14 @@ function SessionRow({
               <>
                 <DropdownMenu.Item
                   className="rail-menu-item"
-                  onSelect={() => onAttachPick(s.session_id)}
+                  onSelect={() => openMenuDialog(() => onAttachPick(s.session_id))}
                 >
                   加入项目…
                 </DropdownMenu.Item>
-                <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenCreate}>
+                <DropdownMenu.Item
+                  className="rail-menu-item"
+                  onSelect={() => openMenuDialog(onOpenCreate)}
+                >
                   新建项目…
                 </DropdownMenu.Item>
               </>
@@ -1201,14 +1204,16 @@ function SessionRow({
             <DropdownMenu.Item
               className="rail-menu-item"
               onSelect={() =>
-                onReplay({
-                  id: s.session_id,
-                  title,
-                  // #1372 改动 3：菜单项在菜单关闭时被卸载，Radix 的默认焦点归还
-                  // 会落到 body。把「稳定的那个触发按钮」（行内 ⋯）记下来，
-                  // 由重放浮层关闭时显式归还。
-                  restoreFocus: menuTriggerRef.current,
-                })
+                openMenuDialog(() =>
+                  onReplay({
+                    id: s.session_id,
+                    title,
+                    // #1372 改动 3：菜单项在菜单关闭时被卸载，Radix 的默认焦点归还
+                    // 会落到 body。把「稳定的那个触发按钮」（行内 ⋯）记下来，
+                    // 由重放浮层关闭时显式归还。
+                    restoreFocus: menuTriggerRef.current,
+                  }),
+                )
               }
             >
               重放会话…

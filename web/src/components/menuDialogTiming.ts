@@ -70,16 +70,26 @@ export function takeMenuCloseAutoFocus(event: Event): boolean {
   return true;
 }
 
-/** 弹窗内第一个可聚焦元素，按文档序取（跳过 tabindex=-1、`disabled`、`hidden`）。
- *  与 Radix 的 `getTabbableCandidates` 同类但不等价：后者还按 tabindex 排序、并做
- *  `display:none` 过滤。当前三个调用点（记忆管理 / 持久审批规则 / 恢复列表）的首个可聚焦元素都可见，够用。 */
+/** 弹窗内首个**真正能拿到焦点**的元素：按文档序逐个试焦，以焦点落定与否为判据。
+ *
+ *  与 Radix 的 `getTabbableCandidates` 同类但不等价：后者同样按文档序收集，但额外
+ *  过滤 `display`/`visibility`、`disabled`、`INPUT[type=hidden]` 与 `<a>`。
+ *  属性层面拦不住「可被选中但不可被聚焦」的元素——`fieldset[disabled]` 内的按钮、
+ *  `display:none` 的按钮、`input[type=hidden]` 的 `tabIndex` 都是 0——所以只能试一次
+ *  再看焦点是否真的挪过去（Radix 的 `focusFirst` 也是这个做法）。也正因如此，这里
+ *  不另做 `disabled`/`hidden` 属性过滤：试焦已经覆盖，加了也只是重复一层。
+ *  `tabIndex < 0` 仍要显式跳过——`tabindex="-1"` 的元素**能**被 `focus()` 拿到焦点。 */
 const FOCUSABLE =
   'a[href], button, input, select, textarea, summary, [tabindex],' +
   ' [contenteditable]:not([contenteditable="false"])';
 
 export function focusFirstIn(root: HTMLElement): void {
-  const first = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).find(
-    (element) => element.tabIndex >= 0 && !element.hasAttribute('disabled') && !element.hidden,
-  );
-  (first ?? root).focus();
+  for (const candidate of root.querySelectorAll<HTMLElement>(FOCUSABLE)) {
+    if (candidate.tabIndex < 0) continue;
+    candidate.focus();
+    /* 焦点真的落到它身上才算成功；被拒（不可见 / 祖先 fieldset 禁用）就试下一个。 */
+    if (document.activeElement === candidate) return;
+  }
+  /* 候选全被拒：退回容器，至少不把焦点留在菜单项上。 */
+  root.focus();
 }

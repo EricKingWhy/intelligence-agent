@@ -54,7 +54,8 @@ const GATE_REASON = '加载完成前不能继续——先核对完上次任务�
  *  按 Radix 的菜单契约在**记录时**上溯到常驻触发器：菜单内容挂
  *  `aria-labelledby=<触发器 id>`（DropdownMenu 的 Content 固定注入），触发器本身
  *  常驻。不是菜单项就原样返回——从常驻按钮打开的旧行为不变。
- *  （与 `MemoryPanel.tsx` 的同名函数同形；两处各自私有，免得为一处六行引入共享模块。） */
+ *  （与 `focusReturn.ts` 的 `resolveFocusReturnTarget` 同义但私有：那边只管
+ *  `isConnected`，这里还多了「菜单项 → 常驻触发器」的上溯语义，故未迁移。） */
 function focusReturnTarget(active: Element | null): HTMLElement | null {
   if (!(active instanceof HTMLElement)) return null;
   const menu = active.closest('[role="menu"]');

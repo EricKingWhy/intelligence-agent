@@ -15,6 +15,7 @@ import { FolderPlus, TriangleAlert, X } from 'lucide-react';
 import { describeProjectError } from '../lib/api';
 import { useDirectoryListing } from '../hooks/useDirectoryListing';
 import { DirectoryBrowser } from './DirectoryBrowser';
+import { deferMenuInitialFocus, focusFirstIn } from './menuDialogTiming';
 import type { Project, ProjectDeleted } from '../types';
 
 interface CreateProps {
@@ -84,7 +85,16 @@ function CreateProjectForm({ onOpenChange, onCreate, existing }: CreateProps) {
   };
 
   return (
-    <Dialog.Content className="project-dialog" aria-label="新建项目">
+    <Dialog.Content
+      className="project-dialog"
+      aria-label="新建项目"
+      onOpenAutoFocus={(e) => {
+        /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
+        const root = e.currentTarget as HTMLElement;
+        // #1694：由「新建项目…」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        deferMenuInitialFocus(e, () => focusFirstIn(root));
+      }}
+    >
       <div className="project-dialog-head">
         <Dialog.Title className="project-dialog-title">
           <FolderPlus size={14} aria-hidden="true" /> 新建项目
@@ -234,7 +244,16 @@ function DeleteProjectForm({
   const count = project.session_ids.length;
 
   return (
-    <Dialog.Content className="project-dialog" aria-label="删除项目">
+    <Dialog.Content
+      className="project-dialog"
+      aria-label="删除项目"
+      onOpenAutoFocus={(e) => {
+        /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
+        const root = e.currentTarget as HTMLElement;
+        // #1694：由「删除项目…」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        deferMenuInitialFocus(e, () => focusFirstIn(root));
+      }}
+    >
       <div className="project-dialog-head">
         <Dialog.Title className="project-dialog-title project-dialog-title-danger">
           <TriangleAlert size={14} aria-hidden="true" /> 删除项目「{project.title}」
@@ -355,7 +374,16 @@ function AttachForm({
   };
 
   return (
-    <Dialog.Content className="project-dialog" aria-label="加入项目">
+    <Dialog.Content
+      className="project-dialog"
+      aria-label="加入项目"
+      onOpenAutoFocus={(e) => {
+        /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
+        const root = e.currentTarget as HTMLElement;
+        // #1694：由「加入项目…」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        deferMenuInitialFocus(e, () => focusFirstIn(root));
+      }}
+    >
       <div className="project-dialog-head">
         <Dialog.Title className="project-dialog-title">把会话加入项目</Dialog.Title>
         <Dialog.Close asChild>
