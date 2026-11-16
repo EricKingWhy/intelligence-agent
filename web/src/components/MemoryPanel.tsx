@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { deferMenuInitialFocus, focusFirstIn } from './menuDialogTiming';
 import { Brain, ChevronDown, ChevronUp, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { describeMemoryError, listProjects, MemoryError } from '../lib/api';
 import { resolveFocusReturnTarget, restoreFocusTarget } from './focusReturn';
@@ -193,10 +194,12 @@ function MemoryPanelBody({
   return (
     <Dialog.Content
       className="memory-panel memory-v2-panel"
-      onOpenAutoFocus={() => {
+      onOpenAutoFocus={(e) => {
         const requestedTarget = focusReturnTargetRef?.current ?? null;
         if (focusReturnTargetRef) focusReturnTargetRef.current = null;
         openerRef.current = resolveFocusReturnTarget(requestedTarget ?? document.activeElement);
+        // #1694：由「记忆管理」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        deferMenuInitialFocus(e, () => focusFirstIn(e.currentTarget as HTMLElement));
       }}
       onCloseAutoFocus={(event) => {
         if (openerRef.current) {

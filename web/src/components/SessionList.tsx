@@ -58,6 +58,7 @@ import {
   InlineRename,
 } from './ProjectDialogs';
 import { DeleteSessionDialog, type DeleteSessionTarget } from './DeleteSessionDialog';
+import { openMenuDialog, takeMenuCloseAutoFocus } from './menuDialogTiming';
 import { SessionReplayDialog, type ReplaySessionTarget } from './SessionReplayDialog';
 import { TaskCreationDialog } from './TaskCreationDialog';
 import { SessionListSkeleton } from './SessionListSkeleton';
@@ -662,6 +663,9 @@ export const SessionList = memo(function SessionList({
                             // 移到别处，别再让关闭时默认的"归还 trigger 焦点"偷回来（见
                             // `suppressMenuAutoFocus` 注释）。其余情况保持 Radix 默认。
                             onCloseAutoFocus={(event) => {
+                              // #1694：由「删除会话…」打开弹窗的那次关闭，初焦已交给
+                              // 弹窗（菜单的 FocusScope 此时还 trapped 着一拍）。
+                              if (takeMenuCloseAutoFocus(event)) return;
                               if (suppressMenuAutoFocus.current) {
                                 suppressMenuAutoFocus.current = false;
                                 event.preventDefault();
@@ -1134,7 +1138,16 @@ function SessionRow({
           </DropdownMenu.Trigger>
         </Tip>
         <DropdownMenu.Portal>
-          <DropdownMenu.Content className="rail-menu rail-menu-sheet" align="end" sideOffset={4}>
+          <DropdownMenu.Content
+            className="rail-menu rail-menu-sheet"
+            align="end"
+            sideOffset={4}
+            /* #1694：由「删除会话…」打开弹窗时挡掉归还触发器，初焦交给弹窗
+               （见 menuDialogTiming）。 */
+            onCloseAutoFocus={(event) => {
+              takeMenuCloseAutoFocus(event);
+            }}
+          >
             {inProject ? (
               <>
                 <DropdownMenu.Item
@@ -1209,7 +1222,9 @@ function SessionRow({
                 detail（409 的三种原因，见 DeleteSessionDialog）。 */}
             <DropdownMenu.Item
               className="rail-menu-item rail-menu-item-danger"
-              onSelect={() => onDelete({ id: s.session_id, title })}
+              onSelect={() =>
+                openMenuDialog(() => onDelete({ id: s.session_id, title }))
+              }
             >
               删除会话…
             </DropdownMenu.Item>
