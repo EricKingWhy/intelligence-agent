@@ -157,7 +157,25 @@ def test_real_sdk_serializes_redacted_trace_without_secrets():
         tracer.run_started()
         span = tracer.tool_span_started(
             tool_name="read", tool_call_id="call-1",
-            args={"access_token": "fake_access_123", "client_secret": "fake_client_456"},
+            args={
+                "access_token": "fake_access_123",
+                "client_secret": "fake_client_456",
+                "oauth": {
+                    "clientSecret": "fake_client_secret_camel_1511",
+                    "accessToken": "fake_access_token_camel_1511",
+                },
+                "json": (
+                    '{"oauth":{"clientSecret":"fake_json_client_secret_1511",'
+                    '"accessToken":"fake_json_access_token_1511"}}'
+                ),
+                "message": "Authorization=Basic fake_basic_equals_1511",
+                "bare_key": "sk-tracebarekey1511abcdef",
+                "pem": (
+                    "-----BEGIN PRIVATE KEY-----\n"
+                    "FAKE_TRACE_PEM_MATERIAL_1511\n"
+                    "-----END PRIVATE KEY-----"
+                ),
+            },
             is_delegate=False,
         )
         tracer.tool_span_completed(span, outcome="success", message="ordinary output")
@@ -170,6 +188,10 @@ def test_real_sdk_serializes_redacted_trace_without_secrets():
         assert "ordinary output" in serialized
         assert all(secret not in serialized for secret in (
             "fake_basic_789", "fake_access_123", "fake_client_456",
+            "fake_client_secret_camel_1511", "fake_access_token_camel_1511",
+            "fake_json_client_secret_1511", "fake_json_access_token_1511",
+            "fake_basic_equals_1511",
+            "sk-tracebarekey1511abcdef", "FAKE_TRACE_PEM_MATERIAL_1511",
         ))
     finally:
         client.shutdown()
