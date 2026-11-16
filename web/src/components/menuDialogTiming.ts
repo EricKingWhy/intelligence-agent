@@ -72,7 +72,7 @@ export function takeMenuCloseAutoFocus(event: Event): boolean {
 
 /** 弹窗内第一个可聚焦元素，按文档序取（跳过 tabindex=-1、`disabled`、`hidden`）。
  *  与 Radix 的 `getTabbableCandidates` 同类但不等价：后者还按 tabindex 排序、并做
- *  `display:none` 过滤。当前两个调用点的首个可聚焦元素都可见，够用。 */
+ *  `display:none` 过滤。当前三个调用点（记忆管理 / 持久审批规则 / 恢复列表）的首个可聚焦元素都可见，够用。 */
 const FOCUSABLE =
   'a[href], button, input, select, textarea, summary, [tabindex],' +
   ' [contenteditable]:not([contenteditable="false"])';
