@@ -1,0 +1,1 @@
+2026-11-16	#1694 同上（tsc 车道修复笔）：范围 e9a259f71..5ead28f9e，覆盖 81afe7bc8 实现笔与该笔对自检文件的事件桩类型修复；gate0 首轮 tsc 红（cancelable() 返回类型被擦成 {}），已修并 tsc -b 干净。读数见 ~/workspace/ticket-takeover-drafts/progress-1694.md。	e9a259f71601d5bc20353ee7a28ca4d05f032d12..5ead28f9ee820be03971dccb392edf29a025187c
