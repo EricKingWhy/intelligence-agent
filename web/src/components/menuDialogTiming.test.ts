@@ -8,7 +8,15 @@ import {
   takeMenuCloseAutoFocus,
 } from './menuDialogTiming';
 
-const cancelable = () => ({ defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } }) as unknown as Event & { defaultPrevented: boolean };
+const cancelable = () => {
+  const event = {
+    defaultPrevented: false,
+    preventDefault() {
+      event.defaultPrevented = true;
+    },
+  };
+  return event as unknown as Event & { defaultPrevented: boolean };
+};
 
 afterEach(() => {
   document.body.style.pointerEvents = '';
