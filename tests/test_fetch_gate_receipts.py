@@ -6,12 +6,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "fetch_gate_receipts.py"
 
 
 def git(repo: Path, *args: str) -> str:
     result = subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, encoding="utf-8", errors="replace")
     return result.stdout.strip()
+
+
+def run_script(repo: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT)], cwd=repo, encoding="utf-8", errors="replace", capture_output=True, check=False
+    )
 
 
 def test_fetches_unreferenced_receipt_commit_and_keeps_archived_exception(tmp_path: Path) -> None:
@@ -49,14 +57,24 @@ def test_fetches_unreferenced_receipt_commit_and_keeps_archived_exception(tmp_pa
         encoding="utf-8",
     )
     assert subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=target, check=False).returncode != 0
-    run = subprocess.run([sys.executable, str(SCRIPT)], cwd=target, encoding="utf-8", errors="replace", capture_output=True, check=False)
+    run = run_script(target)
     assert run.returncode == 0, run.stderr
     assert git(target, "rev-parse", f"{sha}^{{tree}}") == tree
     assert git(target, "rev-parse", f"refs/gate-evidence/{sha}") == sha
+    # Turn "unreferenced" into "reachable only through a ref a bundle clone drops": this line
+    # stands for *every* non-branch/tag namespace (remote-tracking, notes, stash, …) — a
+    # bundle clone imports none of them, so the script must treat the receipt as dangling and
+    # rebuild `refs/gate-evidence/<sha>` from the local object.
     git(target, "update-ref", "-d", f"refs/gate-evidence/{sha}")
-    run = subprocess.run([sys.executable, str(SCRIPT)], cwd=target, encoding="utf-8", errors="replace", capture_output=True, check=False)
+    git(target, "update-ref", "refs/remotes/audit/receipt", sha)
+    run = run_script(target)
     assert run.returncode == 0, run.stderr
     assert git(target, "rev-parse", f"refs/gate-evidence/{sha}") == sha
+    # Re-running is a no-op: a receipt reachable through `refs/gate-evidence/*` is already
+    # preserved — the other half of the predicate (`--glob=refs/gate-evidence/*`). Without
+    # it the existing ref would be rebuilt and `update-ref` would fail on it.
+    run = run_script(target)
+    assert run.returncode == 0, run.stderr
     bundle = tmp_path / "evidence.bundle"
     clone = tmp_path / "bundle-clone"
     git(target, "bundle", "create", str(bundle), "--all")
@@ -67,12 +85,48 @@ def test_fetches_unreferenced_receipt_commit_and_keeps_archived_exception(tmp_pa
     assert git(clone, "rev-parse", f"refs/gate-evidence/{sha}^{{tree}}") == tree
 
 
+@pytest.mark.parametrize("holder", ["branch", "tag"])
+def test_ref_reachable_receipt_gets_no_new_evidence_ref(tmp_path: Path, holder: str) -> None:
+    """A receipt already reachable from a branch or a tag survives without a synthetic evidence ref.
+
+    `--branches --tags` is what tells the script "this one is already safe". Dropping `--branches`
+    rebuilds `refs/gate-evidence/*` for the branch-reachable receipts: 243 dangling in a real
+    clone, or 299 (9 -> 308 evidence refs) when `--tags` is gone too. Dropping only `--tags` is
+    not observable in that clone today; the tag variant here pins it.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.name", "Tester")
+    git(repo, "config", "user.email", "test@example.com")
+    (repo / "payload").write_text("base", encoding="utf-8")
+    git(repo, "add", "payload")
+    git(repo, "commit", "-m", "base")
+    (repo / "payload").write_text("receipt source", encoding="utf-8")
+    git(repo, "add", "payload")
+    git(repo, "commit", "-m", "receipt")
+    sha = git(repo, "rev-parse", "HEAD")
+    tree = git(repo, "rev-parse", "HEAD^{tree}")
+    # Park the receipt commit on a branch/tag, then move the checked-out branch past it.
+    git(repo, "branch" if holder == "branch" else "tag", "evidence-holder", sha)
+    git(repo, "reset", "--hard", "HEAD~1")
+    receipts = repo / "docs" / "gate"
+    receipts.mkdir(parents=True)
+    (receipts / f"{sha}.json").write_text(json.dumps({"sha": sha, "tree": tree}), encoding="utf-8")
+
+    run = run_script(repo)
+    assert run.returncode == 0, run.stderr
+    assert subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/gate-evidence/{sha}"], cwd=repo, check=False
+    ).returncode != 0
+
+
 def test_unfetchable_receipt_stays_failure(tmp_path: Path) -> None:
     git(tmp_path, "init")
     receipts = tmp_path / "docs" / "gate"
     receipts.mkdir(parents=True)
     sha = "a" * 40
     (receipts / f"{sha}.json").write_text(json.dumps({"sha": sha, "tree": "b" * 40}), encoding="utf-8")
-    run = subprocess.run([sys.executable, str(SCRIPT)], cwd=tmp_path, encoding="utf-8", errors="replace", capture_output=True, check=False)
+    run = run_script(tmp_path)
     assert run.returncode != 0
     assert sha in run.stderr

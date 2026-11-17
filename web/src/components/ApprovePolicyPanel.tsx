@@ -16,6 +16,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { deferMenuInitialFocus, focusFirstIn } from './menuDialogTiming';
 import { RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react';
 import {
   listApprovePolicyRules,
@@ -93,10 +94,14 @@ function ApprovePolicyPanelBody({
   return (
     <Dialog.Content
       className="project-dialog approve-policy-dialog"
-      onOpenAutoFocus={() => {
+      onOpenAutoFocus={(e) => {
+        /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
+        const root = e.currentTarget as HTMLElement;
         const requestedTarget = focusReturnTargetRef?.current ?? null;
         if (focusReturnTargetRef) focusReturnTargetRef.current = null;
         openerRef.current = resolveFocusReturnTarget(requestedTarget ?? document.activeElement);
+        // #1694：由「持久审批规则」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        deferMenuInitialFocus(e, () => focusFirstIn(root));
       }}
       onCloseAutoFocus={(event) => {
         if (openerRef.current) {

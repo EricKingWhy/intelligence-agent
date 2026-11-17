@@ -107,6 +107,7 @@ from agent_harness.sandbox import (
     default_backend_for_platform,
     probe_all_capabilities,
 )
+from agent_harness.sandbox.docker import SandboxHardeningError
 from agent_harness.session import JsonlSessionStore, SessionEvent
 from agent_harness.session.board_projection import get_board_projection_store
 from agent_harness.session.cwd import session_cwd
@@ -184,6 +185,7 @@ from agent_harness.web.domain_errors import (
     MEMORY_REASON_CODE_HEADER,
     http_error,
     model_http_error,
+    sandbox_hardening_http_error,
     sandbox_unavailable_http_error,
     storage_http_error,
     storage_http_status,
@@ -2746,6 +2748,20 @@ def create_app(
     # 此处将其接入全局异常处理，使所有写磁盘的 API 路径（会话创建、事件落盘、
     # artifact 写入等）都能返回明确的 503 而非泛化的 500。未识别的 OSError /
     # sqlite3.Error 交还通用 500 处理（不洗成 4xx/5xx 的误报）。
+    # #1647：沙箱降权失败的全局出口。注意这里**必须**留服务端日志：它替换掉的是
+    # `_unhandled_exception_to_json` 那条 ERROR + 完整 traceback 的通道，而 `str(exc)`
+    # 里装着运维最需要的那串东西（`卷 agent-harness-X 属主迁移失败（exit=96）：
+    # MIGRATE_FATAL rollback failed`）。`model/failure.py` 对用户承诺「完整原始信息见
+    # 后端日志」，handler 不记日志就等于这条承诺对这一类异常失效。
+    # 日志面与响应面严格分开：原文只进日志，响应体仍是下面这四字段合成体。
+    @app.exception_handler(SandboxHardeningError)
+    async def _sandbox_hardening_error(request: Any, exc: SandboxHardeningError):
+        logging.getLogger("agent_harness.web").exception(
+            "沙箱降权失败（reason=%s）：%s %s", exc.reason, request.method, request.url.path
+        )
+        error = sandbox_hardening_http_error(exc)
+        return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+
     @app.exception_handler(OSError)
     async def _oserror_to_storage_status(request: Any, exc: OSError):
         status = storage_http_status(exc)
