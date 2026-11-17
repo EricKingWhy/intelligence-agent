@@ -32,6 +32,7 @@ import {
   type ProviderUpsert,
 } from '../lib/api';
 import { normalizeProviderModels, type ProviderModelRow } from '../lib/providerModels';
+import { deferMenuInitialFocus, focusFirstIn } from './menuDialogTiming';
 
 interface Props {
   open: boolean;
@@ -97,7 +98,17 @@ function ProviderManagerBody() {
   };
 
   return (
-    <Dialog.Content className="provider-dialog" aria-describedby={undefined}>
+    <Dialog.Content
+      className="provider-dialog"
+      aria-describedby={undefined}
+      /* #1694：由模型菜单的「管理模型」打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+         默认初焦会落在右上角「关闭(X)」——与本仓其它弹窗同一理由，改落首个可聚焦控件。 */
+      onOpenAutoFocus={(e) => {
+        /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
+        const root = e.currentTarget as HTMLElement;
+        deferMenuInitialFocus(e, () => focusFirstIn(root));
+      }}
+    >
       <div className="provider-dialog-head">
         <Dialog.Title className="provider-dialog-title">管理模型供应商</Dialog.Title>
         <Dialog.Close asChild>

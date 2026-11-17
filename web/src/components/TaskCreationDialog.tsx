@@ -31,6 +31,7 @@ import type { ModelCatalogEntry, SandboxBackendEntry } from '../lib/api';
 import type { Project } from '../types';
 import type { StartSessionPayload } from '../lib/api';
 import { OptionPicker } from './OptionPicker';
+import { deferMenuInitialFocus, focusFirstIn } from './menuDialogTiming';
 
 /** 三档自主度（抄 Copilot Interactive / Plan / Autopilot 的命名与语义）。 */
 const AUTONOMY_OPTIONS = [
@@ -182,7 +183,16 @@ function TaskCreationForm({
   const unavailableBackends = projectBackends.filter((b) => !b.available);
 
   return (
-    <Dialog.Content className="project-dialog" aria-label="新建任务">
+    <Dialog.Content
+      className="project-dialog"
+      aria-label="新建任务"
+      onOpenAutoFocus={(e) => {
+        /* 事件同步期先取容器：闭包在宏任务里才执行，届时 currentTarget 已是 null。 */
+        const root = e.currentTarget as HTMLElement;
+        // #1694：由「新建任务…」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        deferMenuInitialFocus(e, () => focusFirstIn(root));
+      }}
+    >
       <div className="project-dialog-head">
         <Dialog.Title className="project-dialog-title">
           新建任务

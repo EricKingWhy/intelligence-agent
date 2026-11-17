@@ -28,8 +28,8 @@ _GIT_CONFIG_SECRET = re.compile(
 _GIT_URL_USERINFO = re.compile(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@")
 
 _DIAGNOSTIC_FIELD = (
-    r"(?:api[-_]?key|(?:access|refresh|id)[-_]token|token|password|passwd|"
-    r"(?:client[-_])?secret|secret[-_]key|authorization)"
+    r"(?:api[-_]?key|(?:access|refresh|id)[-_]?token|token|password|passwd|"
+    r"(?:client[-_]?)?secret|secret[-_]?key|authorization)"
 )
 _DIAGNOSTIC_JSON_SECRET = re.compile(
     rf'''(?i)(["']{_DIAGNOSTIC_FIELD}["']\s*:\s*)'''
@@ -39,7 +39,9 @@ _DIAGNOSTIC_QUOTED_SECRET = re.compile(
     rf'''(?i)((?:--?)?{_DIAGNOSTIC_FIELD}\s*(?:=|:)\s*)'''
     r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')'''
 )
-_DIAGNOSTIC_AUTH = re.compile(r"(?i)(authorization\s*:\s*(?:basic|bearer)\s+)[^\s;,]+")
+_DIAGNOSTIC_AUTH = re.compile(
+    r"(?i)(authorization\s*[:=]\s*)(?:basic|bearer)\s+[^\s;,]+"
+)
 _DIAGNOSTIC_CLI = re.compile(
     rf'''(?i)(--?{_DIAGNOSTIC_FIELD}\s+)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;,]+)'''
 )

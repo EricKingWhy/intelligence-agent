@@ -1,0 +1,1 @@
+2026-11-16	#1694 台账措辞更正（append-only 增行，不改旧行）：1694-menu-dialog-focus-timing-tscfix.tsv 描述里的函数调用写法触发闸门 lint 规则 empty_parens 的 warn 误报（该括号不是丢内容，是函数调用）。现按 std P3-3 的措辞改为不带括号的表述；旧行按 §8.5「不回改已有行」保留，其 warn 为误报、不阻断。本行只做措辞归属，不主张代码审查。	6d66e149f70c1d0fc4cb386b73e143cd4a4cb388..6d66e149f70c1d0fc4cb386b73e143cd4a4cb388

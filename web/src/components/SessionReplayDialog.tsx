@@ -24,6 +24,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Play, X } from 'lucide-react';
 import { describeSessionError, replaySession, type SessionReplayStep } from '../lib/api';
+import { deferMenuInitialFocus } from './menuDialogTiming';
 
 /** 确认面要显示的会话标识（与 `DeleteSessionTarget` 同形：只够"认出点的是哪一条"）。 */
 export interface ReplaySessionTarget {
@@ -164,6 +165,9 @@ function SessionReplayForm({
          把初焦给右上角「关闭(X)」，键盘用户落地第一眼看到的是最不该先碰的控件。 */
       onOpenAutoFocus={(e) => {
         if (!cancelRef.current) return;
+        // #1694：由「重放会话…」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        // 实测该入口在 2.2.1 下同样被菜单归还压过（焦点停在行内 ⋯），故与另几处同形处理。
+        if (deferMenuInitialFocus(e, () => cancelRef.current?.focus())) return;
         e.preventDefault();
         cancelRef.current.focus();
       }}

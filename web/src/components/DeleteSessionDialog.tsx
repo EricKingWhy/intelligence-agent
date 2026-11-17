@@ -16,6 +16,7 @@ import { useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { TriangleAlert, X } from 'lucide-react';
 import { describeSessionError } from '../lib/api';
+import { deferMenuInitialFocus } from './menuDialogTiming';
 import { sessionDeletedMessage } from '../lib/sessionDelete';
 import type { SessionDeleted } from '../types';
 
@@ -98,9 +99,13 @@ function DeleteSessionForm({
          落在安全的出口上：「取消」（回车 = 安全取消）。回执态没有「取消」按钮，
          交回 Radix 默认处理。 */
       onOpenAutoFocus={(e) => {
-        if (!cancelRef.current) return;
+        const cancel = cancelRef.current;
+        // 回执态（无「取消」）交回 Radix 默认处理，不接管初焦。
+        if (!cancel) return;
+        // #1694：由「删除会话…」菜单项打开时，初焦等菜单卸载后再落（见 menuDialogTiming）。
+        if (deferMenuInitialFocus(e, () => cancel.focus())) return;
         e.preventDefault();
-        cancelRef.current.focus();
+        cancel.focus();
       }}
     >
       <div className="project-dialog-head">
