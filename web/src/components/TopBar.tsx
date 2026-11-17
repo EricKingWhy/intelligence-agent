@@ -22,6 +22,7 @@ import { deriveRunPulse, shouldShowWaitHint, waitingHintText } from '../lib/runS
 import { BUDGET_BADGE_UNITS, budgetBadgeFacts } from '../lib/runBudget';
 import { decodeJwtClaims, getToken, onTokenChange, setToken } from '../lib/auth';
 import { awaitingApproval as hasLiveApproval, displayedSessionUsage } from '../lib/projection';
+import { openMenuDialog, takeMenuCloseAutoFocus } from './menuDialogTiming';
 import type { ConversationState } from '../types';
 
 interface Props {
@@ -384,6 +385,9 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
               /* 选中「API 身份令牌」/「上下文洞察」后菜单关闭：默认会把焦点还给触发器，
                  面板 / 页面里的控件就接不到 Esc。阻止这次归还，由目标界面 effect 接管。 */
               onCloseAutoFocus={(event) => {
+                // #1694：由「记忆管理」/「持久审批规则」打开弹窗的那次关闭，
+                // 初焦已交给弹窗（菜单的 FocusScope 此时还 trapped 着一拍）。
+                if (takeMenuCloseAutoFocus(event)) return;
                 if (insightsFocusPendingRef.current) {
                   insightsFocusPendingRef.current = false;
                   event.preventDefault();
@@ -403,7 +407,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                 <DensityRadioGroup density={density} onDensityChange={onDensityChange} />
                 <DropdownMenu.Separator className="rail-menu-sep" />
               </div>
-              <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenMemories}>
+              <DropdownMenu.Item className="rail-menu-item" onSelect={() => openMenuDialog(onOpenMemories)}>
                 <Brain size={14} aria-hidden="true" /> 记忆管理
               </DropdownMenu.Item>
               {onOpenKanban && (
@@ -412,7 +416,10 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                 </DropdownMenu.Item>
               )}
               {onOpenRecoveryList && (
-                <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenRecoveryList}>
+                <DropdownMenu.Item
+                  className="rail-menu-item"
+                  onSelect={() => openMenuDialog(onOpenRecoveryList)}
+                >
                   <History size={14} aria-hidden="true" /> 恢复列表
                 </DropdownMenu.Item>
               )}
@@ -457,7 +464,7 @@ export function TopBar({ conversation, streaming, inspectorOpen, onToggleInspect
                   <ChartNoAxesColumn size={14} aria-hidden="true" /> 上下文洞察
                 </DropdownMenu.Item>
               )}
-              <DropdownMenu.Item className="rail-menu-item" onSelect={onOpenApprovePolicy}>
+              <DropdownMenu.Item className="rail-menu-item" onSelect={() => openMenuDialog(onOpenApprovePolicy)}>
                 <ShieldCheck size={14} aria-hidden="true" /> 持久审批规则
               </DropdownMenu.Item>
               {onOpenWatchtower && (

@@ -1,0 +1,1 @@
+2026-11-16	#1694 修复轮注释收尾笔 526206b7a（纯注释，零行为改动）：`focusFirstIn` 的 docstring 原写「当前两个调用点的首个可聚焦元素都可见」，恢复列表接入后实际是三处（记忆管理 / 持久审批规则 / 恢复列表），按实改正并点名三处。`tsc -b` EXIT=0、`menuDialogTiming.test.ts` 6 passed 复跑于同树。	6d66e149f70c1d0fc4cb386b73e143cd4a4cb388..526206b7a
