@@ -73,9 +73,10 @@ export function takeMenuCloseAutoFocus(event: Event): boolean {
 /** 弹窗内首个**真正能拿到焦点**的元素：按文档序逐个试焦，以焦点落定与否为判据。
  *
  *  与 Radix 的 `getTabbableCandidates` 同类但不等价：后者同样按文档序收集并跳过
- *  `disabled`/`hidden`/`INPUT[type=hidden]`/`tabIndex<0`，挂载时（`AUTOFOCUS_ON_MOUNT`）
- *  还用 `findVisible` 做 `display`/`visibility` 预过滤、用 `removeLinks` 跳过 `<a>`；
- *  Tab 键走的 `getTabbableEdges` **不**剔除链接。
+ *  `disabled`/`hidden`/`INPUT[type=hidden]`/`tabIndex<0`。挂载路径（`AUTOFOCUS_ON_MOUNT`）
+ *  是 `focusFirst(removeLinks(getTabbableCandidates(container)))`——**只有** `removeLinks`
+ *  跳过 `<a>`，没有可见性预过滤；`findVisible`（`display`/`visibility`）只出现在 Tab 键走的
+ *  `getTabbableEdges`，而那条路径**不**剔除链接。
  *  属性层面拦不住「可被选中但不可被聚焦」的元素——`fieldset[disabled]` 内的按钮、
  *  `display:none` 的按钮、`input[type=hidden]` 的 `tabIndex` 都是 0——所以只能试一次
  *  再看焦点是否真的挪过去（Radix 的 `focusFirst` 也是这个做法）。也正因如此，这里
