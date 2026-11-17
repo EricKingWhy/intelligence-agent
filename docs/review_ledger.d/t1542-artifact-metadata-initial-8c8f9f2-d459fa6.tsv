@@ -1,0 +1,1 @@
+2026-11-08	#1542 首轮双轴审查（范围 8c8f9f2..d459fa6）：Spec APPROVE（P0–P4=0）；Standards REQUEST_CHANGES（唯一 P3：S3 region_name 声称已核实但缺测试断言）。由 8d1bc8e5d 修复并复审。	8c8f9f2eb5ac896c5ab19c912e7873064ef8c28e..d459fa632466a8c13346c7e0e48dfdc0100b0f6c
