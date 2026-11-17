@@ -5,8 +5,8 @@
     "arch": "x64"
   },
   "generated": {
-    "at": "2026-10-30T14:31:13Z",
-    "by": "Targeted certifi and Pillow wheel refresh from uv.lock; remaining closure unchanged",
+    "at": "2026-11-17T10:13:44Z",
+    "by": "Targeted opentelemetry-api 1.45.1 -> 1.45.2 wheel refresh from uv.lock; remaining closure unchanged",
     "from": "pyproject.toml [project] dependencies; original closure 2026-10-07 + tzdata from uv.lock"
   },
   "python": {
@@ -275,10 +275,10 @@
     },
     {
       "name": "opentelemetry-api",
-      "version": "1.45.1",
-      "filename": "opentelemetry_api-1.45.1-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/1e/41/f7dcf80b81ee8e71c1a2b59f14208bc723edbd89ed027a73b175abf6348e/opentelemetry_api-1.45.1-py3-none-any.whl",
-      "sha256": "b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb"
+      "version": "1.45.2",
+      "filename": "opentelemetry_api-1.45.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a9/2d/610db864d7513158cebb8f36cc88e67e73bd6c7aa1905ef18d89e1281c81/opentelemetry_api-1.45.2-py3-none-any.whl",
+      "sha256": "2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34"
     },
     {
       "name": "orjson",
