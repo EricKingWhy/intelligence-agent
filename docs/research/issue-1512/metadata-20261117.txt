@@ -4,7 +4,7 @@
 observation_utc      2026-11-17T10:01:05Z        (baseline scan)
 observation_utc      2026-11-17T10:15:59Z        (post-upgrade rescan)
 commit                b1eaf9be2934b8e4e54fd1f5300a196a73925e5d   (baseline)
-commit                a3baf0c41952dde6e50982adc44713d437659627   (post-upgrade)
+commit                e97a3d5c3f7ba3eaa1e70cb9c22c4f00062478c5   (post-upgrade; scans ran on tree 8ee6ff8c, the same tree the pre-author-rewrite commit a3baf0c41952dde6e50982adc44713d437659627 had)
 
 # git show <commit>:<path> | sha256sum  (LF bytes, no text-mode conversion)
 uv.lock                                       e87c8d1847add05da252a9d325e105969c1a5a5f65ee251fd1da7512ae906426   (baseline)
