@@ -1,0 +1,47 @@
+# Issue 1512 2026-11-17 dependency scan metadata
+# Shape follows .github/workflows/dependency-audit.yml -> audit-results/metadata.txt
+
+observation_utc      2026-11-17T10:01:05Z        (baseline scan)
+observation_utc      2026-11-17T10:15:59Z        (post-upgrade rescan)
+commit                b1eaf9be2934b8e4e54fd1f5300a196a73925e5d   (baseline)
+commit                a3baf0c41952dde6e50982adc44713d437659627   (post-upgrade)
+
+# git show <commit>:<path> | sha256sum  (LF bytes, no text-mode conversion)
+uv.lock                                       e87c8d1847add05da252a9d325e105969c1a5a5f65ee251fd1da7512ae906426   (baseline)
+uv.lock                                       ae8857f470220731ea303cca7fab0f67d703c6065ad658692f71c10da99f19d4   (post-upgrade)
+web/pnpm-lock.yaml                            17b312eef3f435b93f6b0a8c30c9e34e932c8947d8f0e8948bfdc26f809d293f   (unchanged by this ticket)
+desktop/installer/python-runtime.lock.json    9b4e4627f5c3adf9fc8a73fe13510e11dc6ab7492c9bcc27012595442ae6da4d   (baseline)
+desktop/installer/python-runtime.lock.json    f6659a410cac617fe9b473bc22c165a374cdbabff19691fbe23ef6517275b623   (post-upgrade, at scan time)
+desktop/installer/python-runtime.lock.json    fdf0123cc408f5e972ec4847537c9d3c95538a1c88817aec9ec5105068a2bbda   (same wheel set; only generated.at corrected to the real write time 2026-11-17T10:13:44Z)
+
+# tool versions, as printed by the scanning host
+pip-audit          2.10.1                         (uv tool run pip-audit==2.10.1; ephemeral env, interpreter not separately recorded)
+pip-audit service  PyPI (default) and OSV          (OSV runs: development view only, baseline and post-upgrade)
+uv                 0.13.4 (x86_64-unknown-linux-musl)
+pnpm               10.32.1                         (audits ran as npx -y pnpm@10.32.1)
+pnpm (ambient)     12.18.0                         (host `pnpm --version`; NOT used for the audits - the pinned 10.32.1 above is what ran)
+python3 (helper)   3.14.4                         (system interpreter for the tomllib/PY helper only)
+audit target       CPython 3.13.16                 (uv-managed; `uv export --python 3.13` and pip-audit marker evaluation)
+
+# commands (identical for baseline and post-upgrade)
+uv export --locked --no-dev --no-hashes --no-emit-project --python 3.13 -o python-production.txt
+uv export --locked --all-extras --no-hashes --no-emit-project --python 3.13 -o python-development.txt
+python3 helper: enumerate uv.lock registry packages -> python-lock-superset.txt (asserts no non-registry source, no duplicate names)
+python3 helper: read desktop/installer/python-runtime.lock.json -> installer.txt
+uv tool run pip-audit==2.10.1 --disable-pip --no-deps -r <file> --format json -o <report>
+uv tool run pip-audit==2.10.1 --disable-pip --no-deps -r python-development.txt --vulnerability-service osv --format json -o development-osv.json
+npx -y pnpm@10.32.1 audit [--prod|--dev] --json   (cwd web/)
+
+# scanned sizes (exported pins / audited dependencies after marker evaluation)
+python production   exported 80 / audited 73   (7 marker-excluded: pywin32, pywin32-ctypes, colorama, zipp, importlib-metadata, backports-tarfile, httpx2-jsfetch)
+python development  exported 135 / audited 127 (8 marker-excluded: the same set plus tomli)
+python superset     135 registry packages     (marker-free; covers every marker-excluded pin)
+installer closure   71 wheels                 (win_amd64 CPython 3.12)
+pnpm web/prod/dev   365 / 112 / 191           (pnpm resolved sets, not node_modules file count)
+
+# exit codes: pip-audit exit 1 means "advisories reported"; 0 means none. pnpm 0 = no advisories.
+baseline      python-production 1, development 1, superset 1, installer 1, development-osv 1, pnpm 0/0/0
+post-upgrade  python-production 0, development 0, superset 0, installer 0, development-osv 0, pnpm 0/0/0
+
+# Read alongside *-20261117.json.gz (baseline) and *-20261117-after.json.gz (post-upgrade) in this directory.
+# The advisory services are live databases with no exposed snapshot id; the timestamps are observation times, not database versions.

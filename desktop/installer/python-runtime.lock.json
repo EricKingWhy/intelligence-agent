@@ -5,7 +5,7 @@
     "arch": "x64"
   },
   "generated": {
-    "at": "2026-11-17T10:20:00Z",
+    "at": "2026-11-17T10:13:44Z",
     "by": "Targeted opentelemetry-api 1.45.1 -> 1.45.2 wheel refresh from uv.lock; remaining closure unchanged",
     "from": "pyproject.toml [project] dependencies; original closure 2026-10-07 + tzdata from uv.lock"
   },
