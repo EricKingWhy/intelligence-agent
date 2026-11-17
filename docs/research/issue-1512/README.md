@@ -116,3 +116,41 @@ Pillow is used at `src/agent_harness/attachments/normalize.py` for decoding and 
 CI reports findings as warnings and retains raw results for 30 days; scanner errors, malformed reports and a failed known-vulnerable negative control fail the job. The job runs on push, PR, manual dispatch and weekly schedule. Weekly polling can delay discovery by up to a week when no push occurs, excluding service outages. Existing warnings are investigated and upgraded when compatible, rather than imposing an unapproved severity threshold or blocking every change.
 
 The frozen-lock and focused regression results, Docker-dependent cases, review, and CI run are tracked separately in the PR. A result is not a full release gate until those checks have actually completed.
+
+## 2026-11-17 fresh rescan, reachability assessment and targeted upgrade
+
+This section supersedes the numeric readings above for current `main`. The 2026-10-30 rows are left untouched: they were correct for that baseline and observation date, and the advisory services are live databases, so their contents are not comparable without rescanning.
+
+Baseline commit `b1eaf9be2934b8e4e54fd1f5300a196a73925e5d` (`main`). Rescan performed 2026-11-17T10:01:05Z UTC on Linux CPython 3.13.16, uv 0.13.4, pip-audit 2.10.1 (PyPI and OSV services), pnpm 10.32.1 against the configured registry. Markers in `uv export` were therefore evaluated against Linux CPython 3.13 here, unlike the Windows 3.13.5 evaluation on 2026-10-30; the platform caveat from that section still applies to whichever platform was used.
+
+Lock identity at the baseline, as Git blob SHA-1 and as SHA-256 over the exact `git show <commit>:<path>` bytes (no text-mode conversion): `uv.lock` `40655da53e58ce0c791ae000a8b74690d7954645` / `e87c8d1847add05da252a9d325e105969c1a5a5f65ee251fd1da7512ae906426`; `web/pnpm-lock.yaml` `ffea892e9085655d2ff2f172411445d8a041215c` / `17b312eef3f435b93f6b0a8c30c9e34e932c8947d8f0e8948bfdc26f809d293f`; `desktop/installer/python-runtime.lock.json` `5e1ff0dfd6c71396eb4c7245dd31fc048ab8fddd` / `9b4e4627f5c3adf9fc8a73fe13510e11dc6ab7492c9bcc27012595442ae6da4d`.
+
+Scanned sets and sizes: Python production 80 packages (`--no-dev`), Python development 135 (`--all-extras`), marker-free lock superset 135 registry packages, installer wheel closure 71, plus the three pnpm views (`web.json` 365 dependencies, `web-prod.json` 112, `web-dev.json` 191 — pnpm counts the resolved advisory-relevant set, not `node_modules` file count). Raw outputs are the `*-20261117.json.gz` files (baseline) and `*-20261117-after.json.gz` (post-upgrade); the negative control is `urllib3==1.26.5`.
+
+Baseline result: exactly one advisory record in each of the four Python views — `opentelemetry-api` 1.45.1, `CVE-2026-126360`, alias `GHSA-mf5v-w3w3-f6cg`, fixed in 1.45.2 — and zero in all three pnpm views. Alias grouping collapses those four records to one advisory; advisory record counts are not unique-vulnerability counts, and the four Python views are overlapping over-approximations rather than four independent findings. The negative control reported 18 records / 10 alias groups, so the fail-on-known-vulnerable path is still live at this baseline.
+
+### Trigger chain for the single retained finding
+
+| Step | Evidence |
+| --- | --- |
+| Package and role | `opentelemetry-api` 1.45.1, pulled in by `opentelemetry-sdk` 1.45.1, which `langfuse` 5.0.4 depends on. |
+| Defect | `TraceContextTextMapPropagator.extract()` backtracks quadratically over a `traceparent` value that has a valid trace-context prefix followed by a long whitespace run and an embedded newline. |
+| Only in-product call site | `fastapi/telemetry/_asgi.py:283` in the locked installer closure (`fastapi` 0.142.2), `:299` in the 0.159.1 used by the dev lock: `parent = propagate.extract(Headers(scope=scope), getter=_HEADERS_GETTER)`. `grep -rn "TraceContextTextMapPropagator\|propagate.extract\|set_global_textmap" src/` is empty, so no product code extracts trace context itself. |
+| Gate 1: tracer provider | FastAPI skips the whole block unless a real provider is installed: `tracing = not ((config["tracer_provider"] is None and _unconfigured(provider)) or isinstance(provider, trace.NoOpTracerProvider))`, then `if not tracing and not metering and not logging: await app(scope, receive, send); return`. `src/agent_harness/web/app.py:2737` builds `FastAPI(...)` without a `telemetry=` argument, and the process installs no provider of its own. |
+| Gate 2: Langfuse configuration | `langfuse/_client/resource_manager.py:653` calls `otel_trace_api.set_tracer_provider(provider)`, which makes `_unconfigured()` false and flips Gate 1 open. The sink only constructs a client when both keys are present: `src/agent_harness/observability/sink.py:132` returns before the factory if `not public_key or not secret_key`. So the vulnerable call runs only on deployments where Langfuse observability is actually configured. |
+| Gate 3: payload delivery | The malformed value must contain a newline. Measured with raw sockets against uvicorn 0.54.0: bare LF and bare CR inside a header value are rejected with `400 Bad Request` by both the h11 and httptools protocol implementations; h11 does accept obs-fold (`200 OK`) but unfolds the CRLF into spaces, so the value observed in the ASGI scope contains no newline. An HTTP request therefore cannot deliver the triggering value to `extract()`. |
+| Other extract() surface | `mcp` 2.3.0 ships `mcp/server/_otel.py`, which extracts from server-side message metadata. This repository only runs an MCP client (`src/agent_harness/mcp/client.py:238` `ClientSession(...)`, `:258` `stdio_client(...)`) and hosts no MCP server, so that path is not in-product. |
+| Measured cost on 1.45.1 | Advisory shape (`prefix + "-" + spaces + "\n" + "x"`): 0.0039 s at 1k, 0.062 s at 4k, 0.986 s at 16k whitespace characters; the CRLF variant 0.0041 / 0.061 / 1.043 s; a clean long value stays at 0.0001 s. Same inputs on 1.45.2 return in at most 0.0002 s because values longer than `_TRACEPARENT_MAXIMUM_LENGTH = 512` are rejected before matching. |
+| Verdict | Reachable code path, conditional on operator-configured Langfuse observability; the triggering value is not deliverable over HTTP and the MCP path is not exercised. Upgraded regardless, because the fix is patch-level inside 1.45.x and changes no API. |
+
+### Upgrade and post-upgrade readings
+
+`uv.lock`: `opentelemetry-api` 1.45.1 to 1.45.2, `opentelemetry-sdk` 1.45.1 to 1.45.2, `opentelemetry-semantic-conventions` 0.66b1 to 0.66b2 (the floor that sdk 1.45.2 declares). 9 insertions and 9 deletions; no other package in the lock changed. `desktop/installer/python-runtime.lock.json`: the `opentelemetry_api` wheel entry moves to 1.45.2 with its PyPI URL and `sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34`; the other 70 wheels are unchanged.
+
+Post-upgrade lock identity: `uv.lock` `42de4f7ed0c96d6f07f6558d4d2a0ababf723b68` / `ae8857f470220731ea303cca7fab0f67d703c6065ad658692f71c10da99f19d4`; `web/pnpm-lock.yaml` unchanged at `ffea892e9085655d2ff2f172411445d8a041215c` / `17b312eef3f435b93f6b0a8c30c9e34e932c8947d8f0e8948bfdc26f809d293f`; installer lock `f2c5b5310ad452a895bb978859ac0c8b7908c46a` / `f6659a410cac617fe9b473bc22c165a374cdbabff19691fbe23ef6517275b623`.
+
+Post-upgrade rescan at 2026-11-17T10:15:59Z with the same commands and tools: zero advisory records in all four Python views on both the PyPI and OSV services, and zero in all three pnpm views. As always, a zero report is specific to this date and these services.
+
+### CI policy cross-check
+
+Verified against `.github/workflows/dependency-audit.yml` at this baseline: findings are printed as `::warning::` and the raw `audit-results/` directory is uploaded with `retention-days: 30`; a scanner error, a malformed report, or a negative control that does not report a vulnerability step exits non-zero and fails the job (the step asserts `status == "1" and any(d["vulns"] ...)` for `urllib3==1.26.5`); the workflow triggers on `push`, `pull_request`, `workflow_dispatch` and the weekly `schedule: "0 3 * * 0"`. That matches the policy paragraph in the 2026-10-30 section; no threshold, no approval flow.
