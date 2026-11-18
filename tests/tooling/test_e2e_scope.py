@@ -106,12 +106,16 @@ def test_preflight_port_is_part_of_the_global_surface() -> None:
 
 
 def test_spec_file_change_selects_every_mapped_spec() -> None:
-    """改 spec 自己（`web/e2e/**`）⇒ 经全局面前缀选中表内全部 18 支（复审 P4-5a）。"""
+    """改 spec 自己（`web/e2e/**`）⇒ 经全局面前缀选中表内全部 18 支（复审 P4-5a）。
+
+    钉死 **18**：全局面扩容或映射表加行时会红，逼调用方重新确认「改一支 spec 真该跑哪些」。
+    """
     payload = _json("web/e2e/kanban.spec.ts")
     assert payload["unmapped_product"] == []
     assert {Path(s).name for s in payload["selected"]} >= RESIDENT_14 | {
         "kanban.spec.ts", "kanban-ws.spec.ts", "memory-management.spec.ts", "recovery-w13.spec.ts",
     }
+    assert len(payload["selected"]) == 18, payload["selected"]
 
 
 def test_duplicate_specs_are_deduped_and_resident_never_dropped() -> None:
