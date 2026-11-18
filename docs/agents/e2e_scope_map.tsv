@@ -1,0 +1,55 @@
+# docs/agents/e2e_scope_map.tsv —— 「前端路径 → e2e spec」的机械映射（issue #1500）
+#
+# 用途：`.github/workflows/e2e-smoke.yml` 用 `scripts/e2e_scope.py` 读本表，把「PR 改动面」
+#       翻译成「这次跑哪些 spec」= 常驻集 ∪ 命中行 ∪ 去重。表是唯一事实源：常驻 14 支不再
+#       写死在 workflow 的 run 行里。
+#
+# 列：
+#   `surface`     —— `|` 分隔的**精确路径**或**以 `/` 结尾的路径前缀**（禁通配、禁 catch-all，
+#                    与 `docs/agents/verification.map.tsv` 的 surface 同形）。保留字 `ALWAYS`
+#                    表示常驻集（不参与路径匹配，但永远被选中）。
+#   `specs`       —— `|` 分隔的 spec 文件名（相对 `web/e2e/`）。保留字 `ALL` = 本表里出现过的
+#                    每一支 spec（用于全局面：外壳 / 构建配置 / e2e 夹具，任何一支都可能受它影响）。
+#   `why`         —— 为什么这几支覆盖这个面（散文，人读）。
+#   `triage_ref`  —— 定性依据（票号 / 定性表章节）。**没有定性记录的 spec 不许进本表**（AC2）。
+#   `baseline_ref`—— 该在当前主线字节上的**逐支基线读数**（树 SHA + 用例数 + 逐用例耗时合计
+#                    + 红数）。数字来源：2026-11-18 沙箱全量 e2e（`--workers=2`，两视口，
+#                    `git ls-files` 树 `a5250089f` / `5c8ca801bb93407b1d07418b24e02dbbf5536831`），
+#                    原始 JSON 与逐支 TSV 见 pilot-1500-executor.md §2.2。「逐用例耗时合计」是
+#                    `--workers=2` 下单支的串行耗时之和，不是该支的墙钟。
+#
+# 三条硬口径：
+#   1. `ALWAYS` 行 = 常驻 14 支，**原样不动**（票面「常驻不因相关性算法消失」）。
+#   2. **未映射要红，但只对产品面**（复审第 1 轮 P2-1 收窄后的口径）：
+#      - `web/src/**` 下**非测试**的未映射文件 ⇒ `scripts/e2e_scope.py` 退出 2、工作流红。
+#        这是「用户能看到的行为变了却没跑对应 spec」的唯一可靠信号。
+#      - 其余未映射 `web/**`（`*.test.ts(x)` / `web/*.md` / `public/` / `e2e-live/` /
+#        `.oxlintrc.json` / `web/src/**/__fixtures__/` 等）只记 warning、跑常驻 14、退出 0。
+#      - 文档与许可证类文本（`*.md` / `*.txt` / `LICENSE` / `NOTICE*`）**不算产品面**：它们没有
+#        「对应 spec」可写，算进去只会造成**无解红**（复审第 2 轮 P3-1）。
+#      实测覆盖面（`git ls-files web/`，498 个跟踪文件）：**102 个**有映射行、**243 个**落到
+#      warning 面、**153 个**是未映射产品面（`web/src/**` 的 76 `.ts` + 73 `.tsx` + 4 `.css`）⇒
+#      改未映射组件的 PR 仍会红（可见、不挡合并），补一行 surface 即消红；改 vitest 用例 /
+#      前端文档 / 静态资源不会红。
+#   3. **没在本表里的 spec 一律不进 PR 车道**。当前被排除的清单（每类一句话 + 前置条件）：
+#      a. **44 支无任何逐支定性记录**的 spec（名单见 pilot-1500-precheck.md §2.5 末尾）：
+#         前提 = 补逐支定性（票号 + 定性章节 + 当前字节重核），否则不进（AC2）。
+#      b. `t-contrast.spec.ts`：有定性（#1476 §6），但 **160 用例 / 363.3s**（本次基线实测；
+#         预查引用的夜间旧数为 482s）⇒ 代价过高，刻意留夜间全量，需要时单列一批。
+#      c. `t-a11y-1372.spec.ts`：漂移 3 支之一（#1476 之后 **+16 行**），**未在当前字节上重核**
+#         定性 ⇒ 前提 = 重核后补 surface。
+#      d. **9 支已定性但无逐文件 surface**：`kanban-subagents`、`h-density`、`narrow-rail-drawer`、
+#         `pause-panels`、`session-row-layout`、`p-earlier-window`、`r-project-groups`、
+#         `v-dir-browser`、`z-artifact-content`。前提 = 逐支从定性表核出「哪些源文件影响它」，
+#         写不出可核 surface 就不进（写宽会让扩围退化成全量，写窄会静默漏测）。
+#      e. `s-memories.spec.ts`：**产品面缺陷**（命令面板被记忆面板盖住，spec 的 `force: true`
+#         掩盖了「用户点不到」）⇒ 见 `docs/flake-ledger.md` §7.2；前提 = 产品面处置落地。
+#      （算式：逐支有定性记录的共 **16 支** = #1476 的 7 + #1458 的 3 + #1457 的 1 + #1465 的 1
+#       + #1625 的 4；减去进表的 4 支 = 剩余 **12 支** = 三支另议（b `t-contrast` / c `t-a11y-1372`
+#       / e `s-memories`）+ 9 支待核 surface（d）—— 见 pilot §7 的后续项。）
+surface	specs	why	triage_ref	baseline_ref
+ALWAYS	task-review.spec.ts|u-project-task.spec.ts|control-row.spec.ts|context-usage.spec.ts|y-inspector-peek.spec.ts|w-session-delete.spec.ts|e-reconnect.spec.ts|d-recover.spec.ts|stream-fallback.spec.ts|n-approval-card.spec.ts|composer-stream-actions.spec.ts|queue-flush.spec.ts|multiturn-queue.spec.ts|keep-text-on-reject.spec.ts	常驻集（#1338 起的 PR 冒烟 14 支，本票不改内容、不改触发条件）	#1338	树 a5250089f（tree 5c8ca801）：14 支合计 **218 用例 / 716.5s / 0 红**
+web/src/components/KanbanPanel.tsx|web/src/components/KanbanCard.tsx|web/src/lib/kanban.ts|web/src/lib/kanbanUnread.ts|web/src/hooks/useBoardSnapshot.ts|web/src/styles/kanban.css	kanban.spec.ts|kanban-ws.spec.ts	看板是「会话行 → 四列投影」的纯投影面：面板 / 卡片 / 未读标记 / WS 快照 hook / 样式都在这里；两支持有 AC-1~AC-18 与 AC-14 的帧计数判据	#1476（b-triage-table.md §1–§2）	树 a5250089f（tree 5c8ca801）：`kanban` **36 用例 / 88.0s / 0 红**；`kanban-ws` **8 用例 / 18.3s / 0 红**
+web/src/components/MemoryPanel.tsx|web/src/components/MemoryActivity.tsx|web/src/lib/memory.ts|web/src/lib/memoryV2Api.ts|web/src/hooks/useMemories.ts|web/src/styles/memory-v2.css	memory-management.spec.ts	记忆管理面板：列表 / 分页 / 硬删二次确认 / 版本历史 / 降级态。#160 的 MEM-5 场景 `s-memories.spec.ts` **不进首版**：在当前字节上重核时发现「记忆面板打开时 Ctrl+K 命令面板渲染在其下层（两者同为 fixed/z-index 51，记忆面板在 DOM 中更晚）」⇒ 该 spec 的 `:309` 用例依赖 `force` 点击一个被遮住的 `.palette-item`，稳定性取决于 Radix 关闭路径的竞争（详见 pilot §4 U3 / `docs/flake-ledger.md` §7.2）	#1476（b-triage-table.md §3–§4）；`s-memories` 的排除依据见 `docs/flake-ledger.md` §7.2	树 a5250089f（tree 5c8ca801）：`memory-management` **34 用例 / 95.7s / 0 红**
+web/src/components/RecoveryListPanel.tsx|web/src/lib/recovery.ts|web/src/styles/recovery.css	recovery-w13.spec.ts	恢复列表面板（#357 W-13）：四要素展示 + 进度文件版本诚实标注 + 「先列后继续」的 loading 门	#1476（b-triage-table.md §5）	树 a5250089f（tree 5c8ca801）：`recovery-w13` **4 用例 / 11.3s / 0 红**
+web/src/App.tsx|web/src/index.css|web/src/styles/app.css|web/src/lib/api.ts|web/src/components/TopBar.tsx|web/src/components/menuDialogTiming.ts|web/src/components/focusReturn.ts|web/playwright.config.ts|web/package.json|web/pnpm-lock.yaml|web/index.html|web/e2e/|web/scripts/preflight-port.mjs	ALL	全局面：应用外壳 / 主题 token / HTTP 客户端 / 顶栏与菜单-弹窗焦点时序 / e2e 运行配置 —— 这些文件任何一处变化都可能改变**任一支** spec 的前提（外壳改动影响所有页，`playwright.config.ts` 与 `web/scripts/preflight-port.mjs` 是所有 spec 的运行前置），故选中本表内全部 spec（与常驻集去重后 18）。**`web/scripts/` 只收 `preflight-port.mjs`**：它是 `web/playwright.config.ts` 直接 import 的端口预检（每个 spec 起测前必跑）；同目录另三个 `perf-*.mjs` 是性能探针、无 e2e 引用 ⇒ 移出全局面，改动它们只记 warning	#1694 **仅覆盖** `menuDialogTiming.ts` / `focusReturn.ts` 的 menu→dialog 焦点时序；其余面是**设计决策**（外壳 / 构建配置 / e2e 运行前置可影响任一支 spec，故选中全部），**无逐支 #1476 条目**	树 a5250089f（tree 5c8ca801）：命中即选表内全部 18 支；全量基线 **940 用例 / 2666.0s / 1 红**（唯一红 = `design-tokens.spec.ts:127`，既有红见 `docs/flake-ledger.md` §7.1）

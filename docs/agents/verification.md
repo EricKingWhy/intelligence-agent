@@ -118,14 +118,14 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
 - 期望证据：退出 0、无输出。**验证规则本身有效**：往任一 CSS 塞 `#123456` 必须退出 2（否则
   规则可能被写成 no-op，全仓仍绿）。
 
-### ⑦ 机械守卫（生成物同步 + 验证映射 + 索引可执行位 + 收据锚点）
+### ⑦ 机械守卫（生成物同步 + 验证映射 + 索引可执行位 + 收据锚点 + e2e 选测）
 
 - 命令：`PYTHONUTF8=1 PYTHONPATH= .venv/Scripts/python.exe -m pytest
   tests/test_event_types_generated.py tests/test_event_vocabulary_generated.py
   tests/test_verification_map.py tests/test_exec_bit_matches_shebang.py
-  tests/tooling/test_gate0_bootstrap_anchor.py
+  tests/tooling/test_gate0_bootstrap_anchor.py tests/tooling/test_e2e_scope.py
   -q -p no:randomly -p no:cacheprovider`
-- 守卫对象（四类；**清单的唯一真值是 `scripts/gate0.py::GUARD_TESTS`**；「（N 文件）」这个计数
+- 守卫对象（五类；**清单的唯一真值是 `scripts/gate0.py::GUARD_TESTS`**；「（N 文件）」这个计数
   在车道描述与本文两侧都有，由 `tests/test_exec_bit_matches_shebang.py` 一处断言对账 ⇒ 改一处
   忘另一处会红）：
   1. **生成物同步**：`src/agent_harness/session/event.py`（词汇**唯一真值**）→ 生成物
@@ -134,7 +134,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
      tui 包内以满足 `rootDir: "."`）与 `docs/EVENT_VOCABULARY.md`
      （`scripts/gen_event_vocabulary.py`）。
   2. **验证映射**：见 §2 ⑭。
-  3. **索引可执行位 ⇔ shebang**（P0-2）—— **本条是这五文件里机制叙述的权威处**，判据
+  3. **索引可执行位 ⇔ shebang**（P0-2）—— **本条是这六文件里机制叙述的权威处**，判据
      `scripts/check_exec_bit.py`（判据脚本与用例只写操作约束 + 指回本处）：
      - **它补的是 `ruff` 的 `EXE001`**（`Shebang is present but file is not executable`）：那条
        规则只在 Unix 生效，而本仓 `core.filemode=false` ⇒ 本地 `ruff check .` **看不见**
@@ -180,6 +180,10 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
      ⇒ 第 1 条**且**第 3 条红（未提交时连带同一前置红；第 2 条在该用例里不会被求值）；唯一单条红
      是「另造一个带常量、无锚点的**非 HEAD** ref」⇒ 第 3 条单独红（offenders 指名该 ref，第 2 条
      仍绿）。实测明细见 `tests/tooling/test_gate0_bootstrap_anchor.py` 模块 docstring。
+  5. **PR e2e 选测**（#1500）：`scripts/e2e_scope.py` 的选测口径与 `e2e-smoke.yml` 的接线。守
+     「常驻 14 支不因相关性算法消失（`ALWAYS` 行）」「`web/src/**` 的未映射**非测试**文件
+     fail-closed（退出 2、不打印 `SPECS:`）；其余未映射 `web/**` 只 warning + 常驻 14」「表里
+     点名的 spec 都在盘上」「workflow 不写死 spec 且保留 `paths-ignore: ['docs/**']`」。
 - **同一车道另含 `receipt-present` 收据在场子检查**（issue #1338 改动 3）：guards 全绿后，对本 PR
   `merge-base(origin/main,HEAD)..HEAD` 的每笔非纯 docs / 非纯收据落盘提交，要求 HEAD 树里有可用 `docs/gate/<被测树 sha>.json`（§8.1 传递亦可）；首周 warn-only。
   读失败日志**别只 grep `missing receipt`**：warn-only（首周宽限）期该子检查的违规行带
@@ -195,8 +199,8 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   ⚠ fail-closed 边界：`t..HEAD` **逐笔**判，任一笔含代码（哪怕是"加了又删"）⇒ ④ 对该 `t` 不成立；
   空提交同样不成立（该 `t` 的 ④ 整体失效，不是"多跑一次全量"）。
 - 期望证据：`7 passed`（生成物 2 文件）+ `22 passed`（验证映射守卫，见 §2 ⑭）+
-  `12 passed`（索引可执行位守卫）+ `2 passed`（收据锚点守卫，2026-11-01 #1662 实测）
-  = **`43 passed`（5 文件）**。
+  `12 passed`（索引可执行位守卫）+ `2 passed`（收据锚点守卫，2026-11-01 #1662 实测）+
+  `15 passed`（e2e 选测守卫，#1500） = **`58 passed`（6 文件）**。
 - 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
   该文件的主要成本（`--durations` 实测：`test_cli_refuses_an_unmerged_index` 要真造一次
   三方冲突 ⇒ **9.98s**，是本车道最大单项；次之 `test_cli_flags_the_incident_shape_in_a_real_repo`
