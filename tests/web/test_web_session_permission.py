@@ -20,6 +20,7 @@ from agent_harness.config import Settings
 from agent_harness.session import service as service_module
 from agent_harness.session.event import SESSION_STARTED
 from agent_harness.web.app import create_app
+from tests.web import _harness as harness
 
 
 class _FakeRun:
@@ -58,12 +59,9 @@ def client(tmp_path, monkeypatch):
 
 
 def _create_session(client, app, *, permission_mode: str = "read-only") -> str:
-    resp = client.post(
-        "/api/sessions?launch=false",
-        json={"permission_mode": permission_mode},
+    session_id = harness.create_session_no_launch(
+        client, {"permission_mode": permission_mode},
     )
-    assert resp.status_code == 200, resp.text
-    session_id = resp.json()["session_id"]
     started = app.state.agent.store.read_events(session_id)[0]
     assert started.type == SESSION_STARTED
     assert started.data["permission_mode"] == permission_mode

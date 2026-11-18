@@ -46,8 +46,8 @@ from agent_harness.web.app import create_app
 from agent_harness.web.wire_safety import BODY_TOO_LARGE_DETAIL
 from tests.attachments.helpers import jpeg_bytes, large_png_bytes, png_bytes
 from tests.scripted_model import ScriptedModel
+from tests.web import _harness as harness
 
-_DATA_PREFIX = "data:"
 _OCTET = {"content-type": "application/octet-stream"}
 _JSON_HDR = {"content-type": "application/json"}
 
@@ -76,27 +76,8 @@ def _client(tmp_path: Path, **overrides: Any) -> TestClient:
 
 
 def _create_session(client: TestClient) -> str:
-    with patch(
-        "agent_harness.assembly.create_chat_model",
-        return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
-    ):
-        resp = client.post(
-            "/api/sessions",
-            json={
-                "task": "hi",
-                "model": "vision-probe",
-                "budget": {"local": {"max_agent_turns": 1}},
-            },
-        )
-    assert resp.status_code == 200, resp.text
-    frames = [
-        json.loads(line[len(_DATA_PREFIX) :].strip())
-        for line in resp.text.splitlines()
-        if line.startswith(_DATA_PREFIX)
-    ]
-    session_id = next((f["session_id"] for f in frames if f.get("session_id")), None)
-    assert session_id, f"SSE 流里没有 session_id：{frames[:3]}"
-    return str(session_id)
+    """薄 wrapper：建会话统一走 `tests/web/_harness.py`（#1534）。"""
+    return harness.create_session(client, model="vision-probe")
 
 
 def _upload(

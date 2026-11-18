@@ -22,9 +22,9 @@ from agent_harness.config import Settings
 from agent_harness.model.multimodal import DEFAULT_IMAGE_DETAIL
 from agent_harness.web.app import create_app
 from tests.scripted_model import ScriptedModel
+from tests.web import _harness as harness
 
 _OCTET = {"content-type": "application/octet-stream"}
-_DATA_PREFIX = "data:"
 
 _VISION_CATALOG = json.dumps(
     [
@@ -59,28 +59,9 @@ def _client(tmp_path: Path, **overrides: Any) -> TestClient:
     return TestClient(create_app(settings, enable_cors=False, allow_testserver=True))
 
 
-def _session_id_from_sse(resp: Any) -> str:
-    frames = [
-        json.loads(line[len(_DATA_PREFIX) :].strip())
-        for line in resp.text.splitlines()
-        if line.startswith(_DATA_PREFIX)
-    ]
-    session_id = next((f["session_id"] for f in frames if f.get("session_id")), None)
-    assert session_id, f"SSE 流里没有 session_id：{frames[:3]}"
-    return str(session_id)
-
-
 def _create_session(client: TestClient, *, model: str | None = "vision-probe") -> str:
-    body: dict[str, Any] = {"task": "hi", "budget": {"local": {"max_agent_turns": 1}}}
-    if model is not None:
-        body["model"] = model
-    with patch(
-        "agent_harness.assembly.create_chat_model",
-        return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
-    ):
-        resp = client.post("/api/sessions", json=body)
-    assert resp.status_code == 200, resp.text
-    return _session_id_from_sse(resp)
+    """薄 wrapper：建会话统一走 `tests/web/_harness.py`（#1534）。"""
+    return harness.create_session(client, model=model)
 
 
 def _upload(client: TestClient, session_id: str, data: bytes, *, name: str = "shot.png"):

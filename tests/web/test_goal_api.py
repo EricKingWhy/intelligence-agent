@@ -15,6 +15,7 @@ from agent_harness.session import service as service_module
 from agent_harness.session.event import GOAL_CHANGED
 from agent_harness.web.app import create_app
 from tests.conftest import register_workspace_from_build_kwargs
+from tests.web import _harness as harness
 
 _GOOD = "## Objective\n修好登录页\n\n## Success criteria\n跳转成功\n\n## Verification\npytest tests/auth\n"
 
@@ -71,9 +72,8 @@ def client(tmp_path, monkeypatch):
 
 
 def _create_session(client) -> str:
-    resp = client.post("/api/sessions?launch=false", json={})
-    assert resp.status_code == 200, resp.text
-    return resp.json()["session_id"]
+    """薄 wrapper：建会话统一走 `tests/web/_harness.py`（#1534）。"""
+    return harness.create_session_no_launch(client)
 
 
 def _post(client, session_id: str, **body):

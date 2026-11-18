@@ -30,19 +30,15 @@ import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage
 
 from agent_harness.config import Settings
 from agent_harness.sandbox import WorkspaceBindingError
 from agent_harness.session.runmanager import RunManager
 from agent_harness.web.app import create_app, session_service
-from tests.scripted_model import ScriptedModel
-
-_DATA_PREFIX = "data:"
+from tests.web import _harness as harness
 
 
 def _app(tmp_path: Path, **overrides):
@@ -60,23 +56,8 @@ def _client(tmp_path: Path, **overrides) -> TestClient:
 
 
 def _create_session(client: TestClient, **payload: object) -> str:
-    """建会话（真 runtime + 替身模型），返回 session_id。"""
-    base: dict[str, object] = {"task": "hi", "budget": {"local": {"max_agent_turns": 1}}}
-    base.update(payload)
-    with patch(
-        "agent_harness.assembly.create_chat_model",
-        return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
-    ):
-        resp = client.post("/api/sessions", json=base)
-    assert resp.status_code == 200, resp.text
-    frames = [
-        json.loads(line[len(_DATA_PREFIX) :].strip())
-        for line in resp.text.splitlines()
-        if line.startswith(_DATA_PREFIX)
-    ]
-    session_id = next((f["session_id"] for f in frames if f.get("session_id")), None)
-    assert session_id, f"SSE 流里没有 session_id：{frames[:3]}"
-    return str(session_id)
+    """薄 wrapper：建会话统一走 `tests/web/_harness.py`（#1534）。"""
+    return harness.create_session(client, extra=payload)
 
 
 def _db_path(client: TestClient) -> Path:

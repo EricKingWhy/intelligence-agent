@@ -21,15 +21,13 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage
 
 from agent_harness.config import Settings
 from agent_harness.web.app import create_app
-from tests.scripted_model import ScriptedModel
+from tests.web import _harness as harness
 
 #: 一个**真实注册**的工具名（装配层内置工具，见 CLI `--run-tool-limit glob=1` 用例）——
 #: 它是"非陈旧"的判据样本。
@@ -51,23 +49,8 @@ def _client(tmp_path: Path, **overrides) -> TestClient:
 
 
 def _create_session(client: TestClient, **payload: object) -> str:
-    """建会话（真 runtime + 替身模型），返回 session_id（同归档端点测试的建会话口径）。"""
-    base: dict[str, object] = {"task": "建立一个会话", "budget": {"local": {"max_agent_turns": 1}}}
-    base.update(payload)
-    with patch(
-        "agent_harness.assembly.create_chat_model",
-        return_value=ScriptedModel(responses=[AIMessage(content="ok")]),
-    ):
-        resp = client.post("/api/sessions", json=base)
-    assert resp.status_code == 200, resp.text
-    frames = [
-        json.loads(line[len("data:") :].strip())
-        for line in resp.text.splitlines()
-        if line.startswith("data:")
-    ]
-    session_id = next((f["session_id"] for f in frames if f.get("session_id")), None)
-    assert session_id, f"SSE 流里没有 session_id：{frames[:3]}"
-    return str(session_id)
+    """薄 wrapper：建会话统一走 `tests/web/_harness.py`（#1534）。"""
+    return harness.create_session(client, task="建立一个会话", extra=payload)
 
 
 def _db(client: TestClient) -> Path:

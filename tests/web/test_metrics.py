@@ -21,6 +21,7 @@ import time
 import pytest
 
 from agent_harness.web import metrics as metrics_mod
+from tests.web import _harness as harness
 
 # ────────────────────────────────────────────────────────────────────────────
 # 服务器接缝（与 test_context_usage.py 同型：真实 uvicorn + httpx）
@@ -33,70 +34,24 @@ EXPECTED_METRICS = {
     "agent_process_start_time_seconds",
     "agent_process_uptime_seconds",
 }
-_SERVER_START_TIMEOUT_SECONDS = 30.0
 
 
 async def _start_server(tmp_path, monkeypatch):
-    import uvicorn
+    """薄 wrapper：起服务统一走 `tests/web/_harness.py`（#1534）。
 
-    from agent_harness.config import Settings
-    from agent_harness.web.app import create_app
-
-    def _create_model(config, **kw):  # /metrics 与 /api/health 不触模型；占位防呆
+    `/metrics` 与 `/api/health` 都不触模型：注入"被调用即失败"的工厂防呆。
+    """
+    def _create_model(config, **kw):
         raise AssertionError("metrics tests must not create a chat model")
 
-    monkeypatch.setattr("agent_harness.assembly.create_chat_model", _create_model)
-    app = create_app(Settings(
-        _env_file=None, workspace_dir=str(tmp_path),
-        model_api_key="sk-test", enable_cors=False,
-    ),
-    allow_testserver=True,
+    server, serve_task, port, _app = await harness.start_test_server(
+        tmp_path, monkeypatch, model_factory=_create_model,
     )
-    lifespan_task = None
-
-    async def _track_lifespan_task(scope, receive, send):
-        nonlocal lifespan_task
-        if scope["type"] == "lifespan":
-            lifespan_task = asyncio.current_task()
-        await app(scope, receive, send)
-
-    config = uvicorn.Config(_track_lifespan_task, host="127.0.0.1", port=0,
-                            log_level="error", lifespan="on")
-    server = uvicorn.Server(config)
-    serve_task = asyncio.create_task(server.serve())
-    startup_timeout = asyncio.timeout(_SERVER_START_TIMEOUT_SECONDS)
-    try:
-        async with startup_timeout:
-            while not server.started:
-                if serve_task.done():
-                    await serve_task
-                    raise RuntimeError("Uvicorn exited before startup completed")
-                await asyncio.sleep(0.05)
-    except (Exception, asyncio.CancelledError) as exc:
-        server.should_exit = True
-        if not serve_task.done():
-            serve_task.cancel()
-        await asyncio.gather(serve_task, return_exceptions=True)
-        if lifespan_task is not None:
-            if not lifespan_task.done():
-                lifespan_task.cancel()
-            await asyncio.gather(lifespan_task, return_exceptions=True)
-        if startup_timeout.expired():
-            raise TimeoutError(
-                f"Uvicorn did not start within {_SERVER_START_TIMEOUT_SECONDS:g}s"
-            ) from exc
-        raise
-    port = server.servers[0].sockets[0].getsockname()[1]
     return server, serve_task, port
 
 
 async def _shutdown(server, serve_task) -> None:
-    server.should_exit = True
-    serve_task.cancel()
-    try:
-        await serve_task
-    except asyncio.CancelledError:
-        pass
+    await harness.shutdown_test_server(server, serve_task)
 
 
 @pytest.mark.asyncio
@@ -142,7 +97,7 @@ async def test_start_server_reaps_task_after_startup_timeout(tmp_path, monkeypat
 
     monkeypatch.setattr(uvicorn, "Server", _StalledServer)
     monkeypatch.setattr(
-        sys.modules[__name__], "_SERVER_START_TIMEOUT_SECONDS", 0.01, raising=False
+        harness, "SERVER_START_TIMEOUT_SECONDS", 0.01, raising=False
     )
 
     with pytest.raises(TimeoutError, match="Uvicorn did not start"):
@@ -177,7 +132,7 @@ async def test_start_server_reaps_uvicorn_lifespan_task_after_startup_timeout(
         lambda _settings, **_kwargs: _stalled_app,
     )
     monkeypatch.setattr(
-        sys.modules[__name__], "_SERVER_START_TIMEOUT_SECONDS", 2.0, raising=False
+        harness, "SERVER_START_TIMEOUT_SECONDS", 2.0, raising=False
     )
 
     with pytest.raises(TimeoutError, match="Uvicorn did not start"):

@@ -53,7 +53,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 from datetime import UTC, datetime, timedelta
@@ -70,6 +69,7 @@ from agent_harness.web.app import (
     WS_BUSINESS_SUBPROTOCOL,
     create_app,
 )
+from tests.web import _harness as harness
 
 _SECRET = "ws-auth-test-signing-secret-at-least-32-chars"
 
@@ -410,24 +410,14 @@ def test_unconfigured_local_shape_works_with_subprotocols(tmp_path: Path) -> Non
 async def _start_server(tmp_path: Path, *, jwt_secret: str | None = None):
     """启动真实 uvicorn，返回 `(server, serve_task, port)`。
 
-    与 `tests/web/test_web_ws_relay.py:86` 同款接缝（那一个的签名多了 `monkeypatch`
-    与模型工厂 `model_factory`，本文件只注入 JWT 设置、不需要造模型，**实现不复用**）；
-    **`_shutdown` 直接复用** `tests/web/test_web_ws_relay.py:118` 那一份，见两处
-    async 用例的 `from tests.web.test_web_ws_relay import _shutdown`。
-    """
-    import uvicorn
+    本文件只注入 JWT 设置、不造模型：app 由 `_app` 构造后交给共享起服务逻辑
+    （`tests/web/_harness.py`，#1534）；`_shutdown` 直接复用
+    `tests/web/test_web_ws_relay.py` 那一份，见两处 async 用例的导入。"""
+    server, serve_task, port, _ = await harness.start_test_server(
+        tmp_path, app=_app(tmp_path, jwt_secret=jwt_secret),
+    )
+    return server, serve_task, port
 
-    server = uvicorn.Server(uvicorn.Config(
-        _app(tmp_path, jwt_secret=jwt_secret),
-        host="127.0.0.1", port=0, log_level="error", lifespan="on",
-    ))
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn 未起来"
-    return server, serve_task, server.servers[0].sockets[0].getsockname()[1]
 
 
 @pytest.mark.asyncio

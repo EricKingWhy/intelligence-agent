@@ -21,6 +21,7 @@ from agent_harness.config import Settings
 from agent_harness.session import service as service_module
 from agent_harness.session.evidence import compute_evidence_manifest
 from agent_harness.web.app import create_app
+from tests.web import _harness as harness
 
 
 @pytest.fixture
@@ -60,9 +61,8 @@ def client(tmp_path, monkeypatch):
 
 
 def _create_session(client) -> str:
-    resp = client.post("/api/sessions?launch=false", json={})
-    assert resp.status_code == 200, resp.text
-    return resp.json()["session_id"]
+    """薄 wrapper：建会话统一走 `tests/web/_harness.py`（#1534）。"""
+    return harness.create_session_no_launch(client)
 
 
 def _define(client, session_id: str) -> list[str]:
