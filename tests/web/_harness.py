@@ -16,7 +16,8 @@ import asyncio
 import json
 from typing import Any
 
-#: SSE 帧前缀（`_progress_api` 等仍自带的 `_DATA_PREFIX = "data:"` 同值）。
+#: SSE 帧前缀（`test_progress_api` / `test_artifacts_api` /
+#: `test_session_list_workspace` 等仍自带的 `_DATA_PREFIX = "data:"` 同值）。
 DATA_PREFIX = "data:"
 
 #: 起服务的总 deadline。取代 15 份裸 `for _ in range(100): sleep(0.05)`：那些
@@ -45,15 +46,15 @@ async def start_test_server(
 ):
     """起真实 uvicorn（port=0），返回 `(server, serve_task, port, app)`。
 
-    启动失败 / 超时：在函数内 reap 已起的 serve_task 与 lifespan task，再抛原
-    异常（或带超时值的 `TimeoutError`）——不留孤儿任务，归因到调用用例。
+    启动失败 / 超时：在函数内 reap 已起的 serve_task 与 lifespan task、并关掉
+    可能已绑定的监听 socket，再把捕获到的异常抛给调用方——deadline 到期时是
+    `TimeoutError`；serve_task 自己失败时是它抛的那个异常（如 `RuntimeError`）；
+    取消路径是 `CancelledError`。
 
     已知边界（uvicorn 决定，非本模块可改）：lifespan 启动失败时 uvicorn 于
-    `Server.startup` 内 `sys.exit(3)`，`SystemExit` 从 `serve_task` 里逃出、
-    被 asyncio 的 `handle._run` 直接抛出事件循环，**任何调用方 `except` 都接不住**
-    （实测异常从 `runner.run()` 逃出，pytest 记在该用例上、进程继续）。所以这里
-    的 reap 只管 `Exception` / `CancelledError`（包括被测代码自己抛的
-    `RuntimeError`、以及超时后的取消）；`SystemExit` 走不到 reap 分支。
+    `Server.startup` 内 `sys.exit(3)`，这个 `SystemExit(3)` 由事件循环直接抛出
+    （不经本函数的 `except`），pytest 把它记在当前用例上、进程继续。所以这里的
+    reap 只管 `Exception` / `CancelledError`。
     """
     import uvicorn
 
@@ -100,6 +101,9 @@ async def start_test_server(
         if lifespan_task is not None and not lifespan_task.done():
             lifespan_task.cancel()
             await asyncio.gather(lifespan_task, return_exceptions=True)
+        # deadline 可能落在「已绑定、未 started」的窗口里：那时 serve_task 被 cancel
+        # 掉，uvicorn 的 `serve()` 来不及关 `asyncio.Server`，端口会一直占着。
+        _close_listening_sockets(server)
         if startup_timeout.expired():
             raise TimeoutError(
                 f"Uvicorn did not start within {SERVER_START_TIMEOUT_SECONDS:g}s"
@@ -130,9 +134,15 @@ async def shutdown_test_server(server, serve_task, *, grace: float = 1.0) -> Non
         await asyncio.wait_for(asyncio.shield(serve_task), grace)
         return
     except TimeoutError:
-        if serve_task.done():
-            # serve_task 自己抛的 TimeoutError（不是 grace 到期），原样上抛。
-            raise
+        # 只有 serve_task **自己**抛的 TimeoutError 才上抛；grace 到期（`wait_for`
+        # 抛的）走下面的 cancel 兜底。按异常种类判，不按 `done()` 判——上一版在
+        # serve_task 以超时完成时也会错误地上抛。
+        if serve_task.done() and not serve_task.cancelled():
+            exc = serve_task.exception()
+            if isinstance(exc, TimeoutError):
+                # 上抛前同样补关：serve_task 以超时结束不等于监听 socket 已关。
+                _close_listening_sockets(server)
+                raise
     except asyncio.CancelledError:
         # 调用方自己被取消：仍要收掉 serve_task，再把取消传出去。
         serve_task.cancel()

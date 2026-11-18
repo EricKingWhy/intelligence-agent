@@ -110,6 +110,59 @@ async def test_start_server_reaps_task_after_startup_timeout(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_start_server_closes_bound_socket_after_startup_timeout(
+    tmp_path, monkeypatch
+):
+    """超时落在「已绑定、还没 started」的窗口里 ⇒ reap 分支必须关监听 socket。
+
+    #1534 修复轮 1 / P1：`server.servers` 在 `startup()` 里绑定后即被填充，
+    而 `started` 要稍后才置 True。deadline 正好落在这一段时，旧的 reap 分支
+    只 cancel serve_task，**不关 socket** ⇒ 端口在用例结束后仍不可重绑
+    （Spec 实测 15/20 次、Standards 实测 EADDRINUSE(98)）。
+
+    桩必须让 `servers` 非空，这条路径才有判别力：既有两条超时用例的
+    `self.servers = []`，`_close_listening_sockets` 对空表是 no-op。
+    """
+    import uvicorn
+
+    class _FakeListener:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    servers = []
+
+    class _BoundButNeverStartedServer:
+        def __init__(self, _config):
+            self.started = False
+            self.should_exit = False
+            self.listeners = [_FakeListener()]
+            self.servers = self.listeners  # 已绑定、未 started
+            self.task = None
+            self.cleaned_up = False
+            servers.append(self)
+
+        async def serve(self):
+            self.task = asyncio.current_task()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cleaned_up = True
+
+    monkeypatch.setattr(uvicorn, "Server", _BoundButNeverStartedServer)
+    monkeypatch.setattr(harness, "SERVER_START_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    with pytest.raises(TimeoutError, match="Uvicorn did not start"):
+        await _start_server(tmp_path, monkeypatch)
+
+    server = servers[0]
+    assert server.cleaned_up, "serve_task 必须被 reap"
+    assert server.listeners[0].closed, "超时路径必须关掉已绑定的监听 socket"
+
+
+@pytest.mark.asyncio
 async def test_start_server_reaps_uvicorn_lifespan_task_after_startup_timeout(
     tmp_path, monkeypatch
 ):
