@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from agent_harness.config import Settings
 from agent_harness.session import service as service_module
 from agent_harness.web.app import create_app
+from tests.web import _harness as harness
 
 
 @pytest.fixture
@@ -51,9 +52,7 @@ def _create_session(client: TestClient, tmp_path, name: str) -> str:
     """造一个显式 cwd 的空会话（workspace 目录必须已存在，ADR-0025 口径）。"""
     cwd = tmp_path / "dirs" / name
     cwd.mkdir(parents=True, exist_ok=True)
-    resp = client.post("/api/sessions?launch=false", json={"cwd": str(cwd)})
-    assert resp.status_code == 200, resp.text
-    return resp.json()["session_id"]
+    return harness.create_session_no_launch(client, {"cwd": str(cwd)})
 
 
 def test_acquire_grants_then_queues_same_dir(client) -> None:

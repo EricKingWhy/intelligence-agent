@@ -24,6 +24,7 @@ from langchain_core.messages import AIMessage
 
 from tests.fake_clock import FakeClock
 from tests.scripted_model import ScriptedModel
+from tests.web import _harness as harness
 
 _QUESTIONS = [
     {
@@ -90,12 +91,7 @@ async def _start_server(
     tmp_path, monkeypatch, factory, *, ask_user_timeout: int = 300,
     tick_seconds: float = 3600.0,
 ):
-    import uvicorn
-
-    from agent_harness.config import Settings
-    from agent_harness.web.app import create_app
-
-    monkeypatch.setattr("agent_harness.assembly.create_chat_model", factory)
+    """薄 wrapper：起服务统一走 `tests/web/_harness.py`（#1534）。"""
     # 心跳只负责死对端检测；本文件自己驱动超时检查，调大以免与显式 tick 打架。
     monkeypatch.setattr("agent_harness.web.websocket.WS_PING_INTERVAL", 3600.0)
     # #1320：超时推进在组合根 ticker；默认调大，需要真实节拍的用例单独传小值。
@@ -104,33 +100,15 @@ async def _start_server(
     )
     # #1284：档位经 `ask_user` 工具进请求载荷快照，到期链路只认快照
     # （驱动 `timeout_seconds` 仅是旧载荷的兜底）——所以这里从 Settings 设档。
-    app = create_app(Settings(
-        _env_file=None, workspace_dir=str(tmp_path),
-        model_api_key="sk-test", enable_cors=False,
-        ask_user_question_timeout=ask_user_timeout,
-    ),
-    allow_testserver=True,
+    return await harness.start_test_server(
+        tmp_path, monkeypatch, model_factory=factory,
+        settings_kwargs={"ask_user_question_timeout": ask_user_timeout},
     )
-    uv_config = uvicorn.Config(app, host="127.0.0.1", port=0,
-                               log_level="error", lifespan="on")
-    server = uvicorn.Server(uv_config)
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started
-    port = server.servers[0].sockets[0].getsockname()[1]
-    return server, serve_task, port, app
 
 
 async def _shutdown(server, serve_task) -> None:
-    server.should_exit = True
-    serve_task.cancel()
-    try:
-        await serve_task
-    except asyncio.CancelledError:
-        pass
+    """薄 wrapper：拆服务统一走 `tests/web/_harness.py`（#1534）。"""
+    await harness.shutdown_test_server(server, serve_task)
 
 
 async def _start_run(port: int, task: str) -> str:

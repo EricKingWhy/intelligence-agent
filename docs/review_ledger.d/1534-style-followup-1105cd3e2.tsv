@@ -1,0 +1,1 @@
+2026-11-18	机械归属（仅说明来源，不构成对内容的独立审查）：1105cd3e2 只把 test_ask_user_timeout_online.py 的薄 wrapper 签名折行，逐字节 diff 4 增 2 删且全部落在该 def 的参数行内；ast.dump(parse(父)) == ast.dump(parse(子)) 实测为 True（无 AST 差异），故不携带任何新语义。其前的实现提交与双轴审查范围由 1534-two-axis-2b1c018af-f8609b71a.tsv 覆盖。	f8609b71af35a8ae1da486ba4cd54ddb29379188..1105cd3e2b56e85ba1520018e7c6b0632fb78fb7

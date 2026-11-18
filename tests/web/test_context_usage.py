@@ -19,6 +19,7 @@ from agent_harness.web.context_usage import (
     tool_schema_breakdown,
 )
 from tests.scripted_model import ScriptedModel
+from tests.web import _harness as harness
 
 
 class _OneTurnModel(ScriptedModel):
@@ -29,43 +30,20 @@ class _OneTurnModel(ScriptedModel):
 
 
 async def _start_server(tmp_path, monkeypatch, model_kwargs: dict | None = None):
-    import uvicorn
-
-    from agent_harness.config import Settings
-    from agent_harness.web.app import create_app
-
+    """薄 wrapper：起服务统一走 `tests/web/_harness.py`（#1534）。"""
     kwargs = model_kwargs or {}
 
     def _create_model(config, **kw):
         return _OneTurnModel(**kwargs)
 
-    monkeypatch.setattr("agent_harness.assembly.create_chat_model", _create_model)
-    app = create_app(Settings(
-        _env_file=None, workspace_dir=str(tmp_path),
-        model_api_key="sk-test", enable_cors=False,
-    ),
-    allow_testserver=True,
+    return await harness.start_test_server(
+        tmp_path, monkeypatch, model_factory=_create_model,
     )
-    uv_config = uvicorn.Config(app, host="127.0.0.1", port=0,
-                               log_level="error", lifespan="on")
-    server = uvicorn.Server(uv_config)
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started
-    port = server.servers[0].sockets[0].getsockname()[1]
-    return server, serve_task, port
 
 
 async def _shutdown(server, serve_task) -> None:
-    server.should_exit = True
-    serve_task.cancel()
-    try:
-        await serve_task
-    except asyncio.CancelledError:
-        pass
+    """薄 wrapper：拆服务统一走 `tests/web/_harness.py`（#1534）。"""
+    await harness.shutdown_test_server(server, serve_task)
 
 
 async def _get(port: int, path: str) -> tuple[int, dict]:
@@ -673,7 +651,7 @@ async def test_1095_compacted_session_summary_attributed_to_messages_not_other(t
 @pytest.mark.asyncio
 async def test_t5_endpoint_no_data_404(tmp_path, monkeypatch):
     """未知会话 → 404；端点形状回归锁。"""
-    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
     try:
         status, _payload = await _get(port, "/api/sessions/nonexistent/context-usage")
         assert status == 404
@@ -689,7 +667,7 @@ async def test_t5_endpoint_shape_with_run(tmp_path, monkeypatch):
     `#1249` 之后分母跟随会话生效窗口、默认只做回退，故此处仍是 200K。
     分母跟随挡位的那一面在 `test_1249_endpoint_window_tokens_follows_patched_tier`。
     """
-    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
     try:
         sid = await _completed_session(port)
         payload = await _wait_context_snapshot(port, sid)
@@ -723,7 +701,7 @@ async def test_t5_endpoint_shape_with_run(tmp_path, monkeypatch):
 async def test_t5_endpoint_cache_ok_with_cached_usage(tmp_path, monkeypatch):
     """provider 带缓存明细（langchain 归一化名 ``cache_read``）⇒ 事件流有
     cached_tokens ⇒ cache.state=ok。"""
-    server, serve_task, port = await _start_server(
+    server, serve_task, port, _app = await _start_server(
         tmp_path, monkeypatch,
         model_kwargs={"usage_metadata": {
             "input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
@@ -868,7 +846,7 @@ async def test_t6_endpoint_survives_snapshot_loss(tmp_path, monkeypatch):
     落到这条路径。旧实现在这里回 `used_tokens=0, state=no_data`，对 16 个 run
     的会话谎报"后端未上报"（`LIVE_BROWSER_TEST_20260916.md` F3）。
     """
-    server, serve_task, port = await _start_server(
+    server, serve_task, port, _app = await _start_server(
         tmp_path, monkeypatch,
         model_kwargs={"usage_metadata": {
             "input_tokens": 54841, "output_tokens": 6501, "total_tokens": 61342,
@@ -880,7 +858,7 @@ async def test_t6_endpoint_survives_snapshot_loss(tmp_path, monkeypatch):
         # 前提：先拿到 ok（证明这个会话本来有快照），再把它抹掉。
         ok_payload = await _wait_context_snapshot(port, sid)
         assert ok_payload["state"] == "ok"
-        app = server.config.app
+        app = _app
         assert app.state.agent.context_snapshots.pop(sid, None) is not None
 
         status, payload = await _get(port, f"/api/sessions/{sid}/context-usage")
@@ -950,7 +928,7 @@ async def test_1249_endpoint_window_tokens_follows_patched_tier(tmp_path, monkey
     """
     import httpx2
 
-    server, serve_task, port = await _start_server(tmp_path, monkeypatch)
+    server, serve_task, port, _app = await _start_server(tmp_path, monkeypatch)
     try:
         sid = await _completed_session(port)
         before = await _wait_context_snapshot(port, sid)

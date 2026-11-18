@@ -16,6 +16,7 @@ from agent_harness.session import JsonlSessionStore
 from agent_harness.tooling import Tool, ToolResult, ToolSideEffect
 from agent_harness.tooling.contract import ToolPermission
 from agent_harness.tooling.reconcile import ReconcileHint
+from tests.web import _harness as harness
 
 
 class SlowStreamModel:
@@ -74,29 +75,10 @@ class SlowBashTool(Tool):
 
 
 async def _start_server(tmp_path, monkeypatch, model):
-    import uvicorn
-
-    from agent_harness.config import Settings
-    from agent_harness.web.app import create_app
-
-    monkeypatch.setattr(
-        "agent_harness.assembly.create_chat_model", lambda config, **kw: model())
-    app = create_app(Settings(
-        _env_file=None, workspace_dir=str(tmp_path),
-        model_api_key="sk-test", enable_cors=False,
-    ),
-    allow_testserver=True,
+    """薄 wrapper：起服务统一走 `tests/web/_harness.py`（#1534）。"""
+    server, serve_task, port, _ = await harness.start_test_server(
+        tmp_path, monkeypatch, model_factory=lambda config, **kw: model(),
     )
-    uv_config = uvicorn.Config(app, host="127.0.0.1", port=0,
-                               log_level="error", lifespan="on")
-    server = uvicorn.Server(uv_config)
-    serve_task = asyncio.create_task(server.serve())
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    assert server.started, "uvicorn 未能在预期时间内启动"
-    port = server.servers[0].sockets[0].getsockname()[1]
     return server, serve_task, port
 
 
@@ -137,12 +119,8 @@ async def _wait_for_run_completed(store: JsonlSessionStore,
 
 
 async def _shutdown(server, serve_task) -> None:
-    server.should_exit = True
-    serve_task.cancel()
-    try:
-        await serve_task
-    except asyncio.CancelledError:
-        pass
+    """薄 wrapper：拆服务统一走 `tests/web/_harness.py`（#1534）。"""
+    await harness.shutdown_test_server(server, serve_task)
 
 
 @pytest.mark.asyncio
