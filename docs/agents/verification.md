@@ -200,7 +200,7 @@ python scripts/gate0.py          # 或让 .githooks/pre-push 自动跑
   空提交同样不成立（该 `t` 的 ④ 整体失效，不是"多跑一次全量"）。
 - 期望证据：`7 passed`（生成物 2 文件）+ `22 passed`（验证映射守卫，见 §2 ⑭）+
   `12 passed`（索引可执行位守卫）+ `2 passed`（收据锚点守卫，2026-11-01 #1662 实测）+
-  `13 passed`（e2e 选测守卫，#1500） = **`56 passed`（6 文件）**。
+  `15 passed`（e2e 选测守卫，#1500） = **`58 passed`（6 文件）**。
 - 实测（2026-09-27，本机）：4 文件 38 例；索引可执行位守卫自带的**两次真子进程**跑 CLI 是
   该文件的主要成本（`--durations` 实测：`test_cli_refuses_an_unmerged_index` 要真造一次
   三方冲突 ⇒ **9.98s**，是本车道最大单项；次之 `test_cli_flags_the_incident_shape_in_a_real_repo`

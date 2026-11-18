@@ -19,12 +19,12 @@ https://playwright.dev/docs/test-cli （2026-11-18 联网核对原文）。
 1. **常驻集合永不消失**：无论改动面是什么，表里 `surface=ALWAYS` 的那些 spec 一定被选中。
 2. **冷区要选中**：`web/src/**` 的路径落到某行 surface ⇒ 该行的 spec 进集合。
 3. **热区漏配要红，但只对产品面**（复审第 1 轮 P2-1 裁决）：`web/src/**` 下**未映射的非测试
-   文件** ⇒ 退出码 2 并点名（`unmapped_product`）。其余未映射的 `web/**`（`*.test.ts(x)`、
-   文档、`public/`、`e2e-live/` 等）只记 warning（`unmapped_other`）、跑常驻 14、退出码 0。
-   理由：实测 `git ls-files web/` 498 个跟踪文件里 396 个未映射（241 个非产品面 + 155 个
-   产品面），若一律 fail-closed，改一个 vitest 用例或 `web/README.md` 都会让 `e2e-smoke` 常态
-   变红 —— routine 的红会把真漏选的红一起淹掉。产品面（`web/src/**` 非测试）才代表
-   「用户能看到的行为变了却没跑对应 spec」。
+   代码文件** ⇒ 退出码 2 并点名（`unmapped_product`）。其余未映射的 `web/**`（`*.test.ts(x)`、
+   文档与 `LICENSE`/`NOTICE` 类文本、`public/`、`e2e-live/` 等）只记 warning（`unmapped_other`）、
+   跑常驻 14、退出码 0。理由：实测 `git ls-files web/` 498 个跟踪文件里 396 个未映射
+   （243 个非产品面 + 153 个产品面），若一律 fail-closed，改一个 vitest 用例或 `web/README.md`
+   都会让 `e2e-smoke` 常态变红 —— routine 的红会把真漏选的红一起淹掉。产品面
+   （`web/src/**` 非测试、非文档）才代表「用户能看到的行为变了却没跑对应 spec」。
 
 非 `web/**` 的改动（`src/**`、`tests/**`、`docs/**` …）不进 e2e 选测面：e2e 是前端浏览器车道，
 后端/文档改动不改变它的受测树。纯 `docs/**` 的 PR 连工作流都不会触发（`paths-ignore` 在原位）。
@@ -66,6 +66,11 @@ EXIT_UNMAPPED = 2
 
 #: `web/src/**` 下的测试/夹具不算产品面：改它们不改变用户可见行为（复审 P2-1）。
 _TEST_MARKERS = (".test.", ".spec.")
+#: 文档/纯文本同样不是产品面（复审第 2 轮 P3-1）：`web/src/**` 的 `*.md` / `*.txt` 与
+#: `LICENSE` / `NOTICE` 没有「对应 spec」可写，若算产品面就是**无解红**。
+#: 刻意**不**用「代码扩展名白名单」——那会漏掉未来新增的代码扩展名，把真产品面静默降级。
+_DOC_SUFFIXES = (".md", ".txt")
+_DOC_BASENAMES = ("license", "notice")
 
 
 class MapError(Exception):
@@ -116,15 +121,19 @@ def _matches(surface: str, path: str) -> bool:
 
 
 def _is_product_surface(path: str) -> bool:
-    """`web/src/**` 的非测试文件 = 用户能感知的行为面 ⇒ 未映射时 fail-closed。"""
+    """`web/src/**` 的非测试、非文本文档 = 用户能感知的行为面 ⇒ 未映射时 fail-closed。"""
     if not path.startswith("web/src/"):
         return False
     name = path.rsplit("/", 1)[-1]
-    return (
-        not any(marker in name for marker in _TEST_MARKERS)
-        and "/__tests__/" not in path
-        and "/__fixtures__/" not in path
-    )
+    lowered = name.lower()
+    if any(marker in name for marker in _TEST_MARKERS):
+        return False
+    if "/__tests__/" in path or "/__fixtures__/" in path:
+        return False
+    # 文档与许可证类文本没有「对应 spec」可写，算产品面只会造成无解红（复审第 2 轮 P3-1）。
+    # `LICENSE` / `NOTICE` 无扩展名时按 basename 认（大小写不敏感）；刻意**不**走代码扩展名
+    # 白名单 —— 白名单会漏掉未来新增的代码扩展名，把真产品面静默降级成 warning。
+    return not (lowered.endswith(_DOC_SUFFIXES) or lowered in _DOC_BASENAMES)
 
 
 def _uniq(items: list[str]) -> list[str]:

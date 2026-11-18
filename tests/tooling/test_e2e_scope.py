@@ -90,6 +90,33 @@ def test_unmapped_web_public_and_docs_only_warn() -> None:
         assert {Path(s).name for s in _specs(result)} == RESIDENT_14, path
 
 
+def test_unmapped_web_src_markdown_only_warns() -> None:
+    """`web/src/**` 的 `*.md` 文档**不是**产品面（复审第 2 轮 P3-1）。
+
+    它没有「对应 spec」可写 ⇒ 算产品面就是无解红。必须是「RC 0 + warning + 恰 14 支」。
+    """
+    path = "web/src/insights/NOTICE.md"
+    payload = _json(path)
+    assert payload["unmapped_product"] == []
+    assert payload["unmapped_other"] == [path]
+    assert {Path(s).name for s in payload["selected"]} == RESIDENT_14
+    result = _run(path)
+    assert result.returncode == 0, result.stderr
+    assert "[warning]" in result.stdout
+
+
+def test_unmapped_web_src_license_only_warns() -> None:
+    """`web/src/**` 的无扩展名 `LICENSE` 文本**不是**产品面（复审第 2 轮 P3-1）。"""
+    path = "web/src/insights/LICENSE"
+    payload = _json(path)
+    assert payload["unmapped_product"] == []
+    assert payload["unmapped_other"] == [path]
+    assert {Path(s).name for s in payload["selected"]} == RESIDENT_14
+    result = _run(path)
+    assert result.returncode == 0, result.stderr
+    assert "[warning]" in result.stdout
+
+
 def test_unmapped_perf_probe_script_only_warns() -> None:
     """`web/scripts/perf-*.mjs` 是性能探针、无 e2e 引用 ⇒ 未映射只 warning，不选全量。"""
     payload = _json("web/scripts/perf-pulse-cost.mjs")
