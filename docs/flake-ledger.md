@@ -160,16 +160,25 @@ Kubernetes SIG Testing 的 flaky-tests 政策：**零容忍 + 隔离（quarantin
   `@media (prefers-reduced-motion: reduce)` 给 `*` 加 `transition-duration: 0.01ms !important`，
   而 `transition-property` 初始值就是 `all` ⇒ `outline-width` / `outline-offset` / `outline-color`
   从聚焦前的值开始过渡。页内 rAF 时间线（`~/1500-evidence/1500-probe.log` Probe A，6 次重放）：
-  **6/6 次首帧（t=4~21ms）读到 `w:"3px", off:"0px"`** —— 其中 5 次同帧挂着 `outline-*:running`
-  过渡，第 3 次首帧过渡尚未注册、第二帧（t≈23ms）才出现；**第二帧起（t=33~44ms）恒为
-  `w:"2px", off:"2px"` 且无过渡**。spec 在**首帧**取 `getComputedStyle` ⇒ 读到过渡起点。
-  产品的稳态值确实是 2px（`:focus-visible { outline: 2px solid var(--focus-ring) }`）。
+  **5/6 次首帧（t=4~21ms）读到 `w:"3px", off:"0px"`**（第 5 次首帧 t=19ms 已是 `2px/2px`）；
+  其中 **4 次**（第 1、2、4、6 次）首帧同帧挂着 `outline-*:running` 过渡，第 3 次首帧（t=4ms）
+  过渡尚未注册、第二帧（t≈23ms）才出现。**各次最迟在 t≈44ms 收敛到 `w:"2px", off:"2px"` 且
+  无过渡**（收敛帧：第 1/2/4/6 次为第二帧 t=33~41ms，第 3 次为第三帧 t=44ms，第 5 次首帧
+  t=19ms 即已收敛 —— 不是「第二帧起恒为 2px」）。
+  spec 在**首帧**取 `getComputedStyle` ⇒ 读到过渡起点。产品的稳态值确实是 2px
+  （`:focus-visible { outline: 2px solid var(--focus-ring) }`）。
 - **F2 同树隔离重跑**：tree `5c8ca801` 上 6 次里 5 次全绿（每次 6 passed）⇒ 有 ≥2 次全绿读数，
   但**同签名在同树再现 2 次**（基线 + 第 3 次复跑）⇒ 按 §2 第 1 条**不得**登记为 flake。
-- **F3 零文件交集**：`git diff --name-status --no-renames a5250089f..<分支 tip>`（tip 每次追加
-  docs/收据会变，故不钉死 sha）当前为 **8 个文件**：workflow / 映射表 / 选测脚本 / 守卫测试 /
-  收据 ×2 / 台账行 / 本台账，与 `web/e2e/design-tokens.spec.ts` 及 `web/src/index.css`
-  交集为空（结论与文件数无关，逐行核对过）。
+- **F3 零文件交集**：`git diff --name-only a5250089f..cc4cee6aa`（**钉住实测时点的分支 tip
+  `cc4cee6aa`**；此前写作「8 个文件」是 `2ad973f32` 时点的数）实查 **13 个文件**，逐名：
+  `.github/workflows/e2e-smoke.yml`、`docs/agents/e2e_scope_map.tsv`、
+  `docs/agents/verification.md`、`docs/flake-ledger.md`、`docs/gate/35643a797….json`、
+  `docs/gate/dfc8f9ffe….json`、`docs/gate/f453bfd71….json`、
+  `docs/review_ledger.d/t1500-e2e-scope-expansion-mechanical.tsv`、
+  `docs/review_ledger.d/t1500-r1-fix-mechanical.tsv`、
+  `docs/review_ledger.d/t1500-r1-pin-mechanical.tsv`、`scripts/e2e_scope.py`、`scripts/gate0.py`、
+  `tests/tooling/test_e2e_scope.py`。与 `web/e2e/design-tokens.spec.ts` 及
+  `web/src/index.css` **交集为空**。其后的收据提交只加 `docs/gate/*.json`，不改变零交集结论。
 - **F4 基线对照**：**同签名红**（旧树 3/3、当前树 2/7）⇒ 这是**既有红**，不是本分支引入。
 - **F5 处置（待协调员）**：未开票（执行器无开票授权）；该 spec 未进 PR 车道，故不阻塞任何 PR。
   建议：修 spec 的采样时机（等 `transitionend` / `expect.poll` 到 2px），**不要**改断言值、
@@ -194,7 +203,8 @@ Kubernetes SIG Testing 的 flaky-tests 政策：**零容忍 + 隔离（quarantin
   spec 用 `page.locator('.palette-item').click({ force: true })` ⇒ 点击被派发给覆盖元素，
   命令面板的 `onClick` 不触发、面板不关 —— 卡住与否取决于命中测试的时序竞争。
 - **F2/F4**：同签名同树再现（2/3 整文件）⇒ §2 第 1 条排除 flake；且基线树即红 ⇒ 既有红。
-- **F3 零文件交集**：同上（本分支当前 8 个文件与该 spec、与 `App.tsx` / `CommandPalette.tsx` 零交集）。
+- **F3 零文件交集**：同上（`a5250089f..cc4cee6aa` 的 13 个文件均与该 spec、与 `App.tsx` /
+  `CommandPalette.tsx` 零交集；其后的收据提交只加 `docs/gate/*.json`，不改变该结论）。
 - **F5 处置**：**按 #1500 任务书第 3 步「隔离证据指向真产品缺陷 ⇒ 停下报协调员、不许自己开票」处理**：
   未开票、未登记为 flake；该 spec 已从 PR 车道映射表排除（见 §7.2 的 `e2e_scope_map.tsv` 说明）。
   建议方向（留给协调员/后续票）：命令面板与记忆面板同时打开时的层级/互斥（打开面板时关闭面板，
