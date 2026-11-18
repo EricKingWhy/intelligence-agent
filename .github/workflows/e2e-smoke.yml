@@ -27,8 +27,14 @@
 # 行为口径：
 #   - 常驻 14 永不消失（表里 `ALWAYS` 行）——相关性算法只做加法。
 #   - 冷区改动选中它那一行的 spec；全局面（外壳/配置/夹具）选中表内全部。
-#   - `web/**` 里有一条路径没有任何映射行 ⇒ `e2e_scope.py` 退出 2 ⇒ 本 job 红
+#   - **`web/src/**` 下未映射的产品文件**（非测试）⇒ `e2e_scope.py` 退出 2 ⇒ 本 job 红
 #     （漏配时报出来，而不是静默少跑）。回滚方式：把映射表那一行补上。
+#     其余未映射 `web/**`（`*.test.ts(x)` / `web/*.md` / `public/` / `e2e-live/` /
+#     `web/scripts/perf-*.mjs` 等）只打 warning、跑常驻 14、退出 0 —— 实测
+#     `git ls-files web/` 498 个跟踪文件里 241 个属这一类（另有 102 个有映射行、155 个是
+#     未映射产品面），若一律变红，改一支 vitest 用例就会红，routine 的红会把真漏选淹掉
+#     （复审第 1 轮 P2-1 的裁决）。
+#   - 有未映射产品面时**不打印 `SPECS:` 行**（「无 SPECS 行」本身即失败信号）。
 #   - 本工作流**仍是非必需检查**：可见、不卡合并（理由见上：paths 过滤 + 必需检查 =
 #     永久 pending）。改分支保护需要单独授权，不在本票范围。
 
@@ -95,11 +101,13 @@ jobs:
             > /tmp/changed.txt
           echo "── 改动文件（$(wc -l < /tmp/changed.txt) 个）──"
           cat /tmp/changed.txt
-          # 未映射的 web/** 路径 → 退出 2 → 本步（因而整个 job）变红。
+          # `web/src/**` 的非测试未映射文件 → 退出 2 → 本步（因而整个 job）变红。
           # 这是 AC3 的「热区漏配要红」；e2e-smoke 非必需，红了只提示、不卡合并。
+          # 其余未映射 web/** 只打 `[warning]`（脚本 stdout），不影响退出码。
           python3 scripts/e2e_scope.py --changed-list - < /tmp/changed.txt | tee /tmp/scope.txt
           specs=$(sed -n 's/^SPECS: //p' /tmp/scope.txt)
           # 空集合会让 playwright 跑**全量**（等于把 PR 车道变成夜间车道）⇒ 显式变红。
+          # 有未映射产品面时脚本刻意不打印 `SPECS:` ⇒ 也落到这一支（「无 SPECS 行」即失败信号）。
           test -n "$specs" || { echo "::error::选测集为空，拒绝退化成全量"; exit 1; }
           echo "── 选测（去重后 $(wc -w <<<"$specs") 支）──"
           tr ' ' '\n' <<<"$specs"

@@ -89,7 +89,7 @@ LANE_TIMEOUT = 300.0
 #: 原因：把「超预算」等于「失败」会把环境负载导致的慢误判成代码问题，与本项目「不做假绿灯」同理。
 GATE0_BUDGET = 60.0
 
-#: `guards` 车道的用例清单。四条机械守卫，各自守一个**跨面**的不变量。**本清单是唯一真值**；
+#: `guards` 车道的用例清单。五条机械守卫，各自守一个**跨面**的不变量。**本清单是唯一真值**；
 #: 逐条的判据 / 证据 / 实测读数见 `docs/agents/verification.md` §2 ⑦（此处只写「守什么」，
 #: 不复述机制 —— `AGENTS.md` §16.1）：
 #:   ① 生成物同步：`src/.../event.py`（词汇唯一真值）↔ `web/src/generated/event-types.ts`
@@ -102,6 +102,8 @@ GATE0_BUDGET = 60.0
 #:   ④ 收据锚点（#1662）：`_RECEIPT_BOOTSTRAP_SHA` 解析得出、是 HEAD 的祖先，且**每一棵带着
 #:      这个常量的树都拿得到该锚点**（常量与锚点一起传播）—— 否则那棵树的 receipt-present
 #:      整体归零（fail-open）。
+#:   ⑤ PR e2e 选测（#1500）：常驻 14 支不因相关性算法消失（`ALWAYS` 行）、`web/src/**` 的
+#:      未映射产品文件 fail-closed、workflow 不写死 spec 且保留 `paths-ignore: ['docs/**']`。
 #: 车道描述里的「（N 文件）」由 `tests/test_exec_bit_matches_shebang.py` 与
 #: `docs/agents/verification.md` §2 ⑦ 两侧对账（改一处忘另一处会红）。
 GUARD_TESTS = (
@@ -111,6 +113,9 @@ GUARD_TESTS = (
     "tests/test_exec_bit_matches_shebang.py",
     # #1662：锚点常量与锚点必须一起传播，否则 receipt-present 对整棵树静默 fail-open。
     "tests/tooling/test_gate0_bootstrap_anchor.py",
+    # #1500：PR e2e 选测的守卫（常驻集不消失 / 未映射产品面 fail-closed / workflow 不写死 spec）。
+    # 与 `tests/test_verification_map.py` 同类（映射类不变量），故同在必需门禁里跑。
+    "tests/tooling/test_e2e_scope.py",
 )
 
 #: 代码面 ↔ 必跑车道的机械映射（issue #292）。`--affected` 读它；`tests/test_verification_map.py` 守它。
@@ -447,7 +452,7 @@ def build_lanes(since: str) -> list[Lane]:
     py = venv_python()
     guard_env = dict(os.environ, PYTHONUTF8="1", PYTHONPATH="")
     lanes.append(Lane(
-        "guards", "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位 + 收据锚点（5 文件）",
+        "guards", "pytest 机械守卫：生成物同步 + 验证映射 + 索引可执行位 + 收据锚点 + e2e 选测（6 文件）",
         [py, "-m", "pytest", *GUARD_TESTS, "-q", "-p", "no:randomly", "-p", "no:cacheprovider"]
         if py else None,
         REPO_ROOT, env=guard_env,
