@@ -43,14 +43,21 @@ AST 指纹显示 16 份里 13 个不同实现，差异全在"起服务前注入�
   `assert server.started`。上界 5s（`test_ws_auth` 是 200 次 = 10s），失败类型
   `AssertionError`，**不 reap**。
 - 共享实现：`asyncio.timeout(30.0)`，失败类型 `TimeoutError("Uvicorn did not start
-  within 30s")`，抛出前 `should_exit` + cancel + gather serve_task 与 lifespan task。
+  within 30s")`，抛出前 `should_exit` + cancel + gather serve_task 与 lifespan task
+  + `_close_listening_sockets()`（deadline 可能落在「已绑定、未 started」的窗口里，
+  那时 serve_task 被 cancel 掉、uvicorn 的 `serve()` 来不及关 `asyncio.Server`）。
 - 任务书要求照 `test_metrics.py:39` 的 try/except + `serve_task.cancel()` 模式，
   本票即把它升为共享本体。`tests/web` 与 `tests/test_sse_disconnect.py` 内没有
   任何 `pytest.raises(AssertionError)` 包住 `_start_server`，故无用例依赖旧类型。
-- 已知边界：真实 uvicorn 的 lifespan 启动失败会 `sys.exit(3)`，`SystemExit` 从
-  `serve_task` 逃出事件循环，任何调用方都接不住（实测异常从 `runner.run()` 逃出，
-  pytest 记在该用例上、进程继续）。helper 的 reap 只管 `Exception` /
-  `CancelledError`；这条边界写在 `start_test_server` docstring 里。
+- reap 后抛什么（按实测）：deadline 到期 → `TimeoutError`；轮询发现 serve_task 先结束
+  → 原样上抛它自己的异常（`test_start_server_propagates_startup_failure` 钉的就是
+  `RuntimeError` 透传）；调用方自己被取消 → `CancelledError`。注意 uvicorn 的
+  `startup()` 内部失败时通常先把 serve_task 取消掉，那时调用方看到的是
+  `CancelledError`，原始异常只留在 uvicorn 的 traceback 里。
+- 已知边界：真实 uvicorn 的 lifespan 启动失败会 `sys.exit(3)`，这个
+  `SystemExit(3)` 由事件循环直接抛出（不经 helper 的 `except`），pytest 把它记在
+  该用例上、进程继续。helper 的 reap 只管 `Exception` / `CancelledError`；这条
+  边界写在 `start_test_server` docstring 里。
 
 ## `_shutdown`（15 份 → 1 份共享实现）
 
@@ -103,6 +110,17 @@ AST 指纹显示 16 份里 13 个不同实现，差异全在"起服务前注入�
 
 两处都不是票面枚举的 `_start_server` helper，且"不为建 conftest 搬全部测试"是本票
 明确的非目标。
+
+**按 helper 名枚举时不在范围内的同类块**（票面口径是"按 helper 名收容"，这些块
+不是独立 helper、或 helper 名不在枚举名单里，故本票不动；记下指针供后续清理票）：
+
+- `tests/web/test_session_list_workspace.py:43-57` 的 `_create`：内联
+  inline-SSE → `_DATA_PREFIX` 解析，与 `test_progress_api` / `test_artifacts_api`
+  同形；名字不叫 `_create_session`，未在枚举名单内。
+- `tests/web/test_artifacts_api.py:386-397`、`tests/web/test_progress_api.py:118-121`：
+  用例内的 inline `_DATA_PREFIX` 解析（各自仍带 `_DATA_PREFIX = "data:"` 常量）。
+- `DATA_PREFIX` 在 4 个测试文件里各自维护一份同值常量（上列三处 + `_harness.py`）；
+  统一为共享常量属后续清理票候选（本票已加注释标注同值，不改调用点）。
 
 ## SSE 红线
 
