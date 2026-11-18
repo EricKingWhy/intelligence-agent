@@ -131,3 +131,61 @@ Kubernetes SIG Testing 的 flaky-tests 政策：**零容忍 + 隔离（quarantin
   - 指派 owner / 跟踪票：
 - **状态**：<已准入 / 待补证据 / 已移出必需路径>
 ```
+
+---
+
+## 7. 既有红观测记录（**不是 flake 登记**）
+
+> 本节的条目**不构成准入**：它们是 F4 判为「基线同签名红」的观测，按 §2 第 1 条应走
+> 「既有红 waive + 开票」，而**开票不在执行器权限内**（#1500 任务书第 3 步：开票走双路票面审查）。
+> 放在这里只为把读数落盘、让协调员按 F1–F5 的形状接手；**不得**把本节读成「已登记 flake、
+> 可放上必需路径」。两条 spec 均**不在** PR 车道（`docs/agents/e2e_scope_map.tsv` 未收）。
+
+### 7.1 `web/e2e/design-tokens.spec.ts:127`（焦点环宽度量到 3px）
+
+- **F1 名称 / 签名 / 触发命令 / 树**
+  - 名称：`design-tokens.spec.ts` → `#1364 截图：会话列表 + 顶栏（dark/light）` 的焦点环断言（`:127`）。
+  - 签名：`expect(ring.width).toBe('2px')` 实得 `"3px"`，同一次失败里 `outline-color` 与
+    `--focus-ring` 都正确（`[dark] focus ring = 3px solid rgb(154, 139, 255)`）；**非确定性**。
+  - 触发命令（`web/`）：`node node_modules/@playwright/test/cli.js test design-tokens.spec.ts --workers=2`
+  - 树：`a5250089f`（tree `5c8ca801`）与旧绿 nightly 树 `e9a259f7`（tree `8843b789`）。
+  - 读数：基线全量 2026-11-18T02:25Z 红 1 次；同树隔离复跑 6 次红 1 次（`/home/agent/iso2.log`）；
+    旧树 `e9a259f7` 3 次复跑 **3 次全红**（`/home/agent/iso-1500.log` 段 C）。
+- **根因（机械，不是猜测）**：`web/src/index.css:592–598` 的
+  `@media (prefers-reduced-motion: reduce)` 给 `*` 加 `transition-duration: 0.01ms !important`，
+  而 `transition-property` 初始值就是 `all` ⇒ `outline-width` / `outline-offset` / `outline-color`
+  从聚焦前的值开始过渡。页内 rAF 时间线：`t=0 {"w":"3px","off":"0px","anims":[…]running}` →
+  `t≈15ms {"w":"2px","off":"2px","anims":[]}`。spec 在**首帧**取 `getComputedStyle` ⇒ 读到过渡起点。
+  产品的稳态值确实是 2px（`:focus-visible { outline: 2px solid var(--focus-ring) }`）。
+- **F2 同树隔离重跑**：tree `5c8ca801` 上 6 次里 5 次全绿（每次 6 passed）⇒ 有 ≥2 次全绿读数，
+  但**同签名在同树再现 2 次**（基线 + 第 3 次复跑）⇒ 按 §2 第 1 条**不得**登记为 flake。
+- **F3 零文件交集**：`git diff --name-status --no-renames a5250089f..2ad973f32` = 6 个文件
+  （workflow / 映射表 / 收据 / 台账行 / 选测脚本 / 守卫测试），与 `web/e2e/design-tokens.spec.ts`
+  及 `web/src/index.css` 交集为空。
+- **F4 基线对照**：**同签名红**（旧树 3/3、当前树 2/7）⇒ 这是**既有红**，不是本分支引入。
+- **F5 处置（待协调员）**：未开票（执行器无开票授权）；该 spec 未进 PR 车道，故不阻塞任何 PR。
+  建议：修 spec 的采样时机（等 `transitionend` / `expect.poll` 到 2px），**不要**改断言值、
+  也不要动 `prefers-reduced-motion` 块（那是无障碍必需项）。
+
+### 7.2 `web/e2e/s-memories.spec.ts:309`（关掉命令面板后 `.palette-input` 仍在）
+
+- **F1 名称 / 签名 / 触发命令 / 树**
+  - 名称：`s-memories.spec.ts` → `focus: selecting an already open panel does not leak its opener to the next panel`（`:309`，失败断言在 `:328`）。
+  - 签名：`expect(page.locator('.palette-input')).toHaveCount(0)` 实得 **1**（命令面板没关）。
+  - 触发命令（`web/`）：`node node_modules/@playwright/test/cli.js test s-memories.spec.ts --workers=1 --project=chromium-1920`
+  - 树：`a5250089f`（tree `5c8ca801`）。
+  - 读数：整文件 3 次里红 2 次（每次 `29 passed / 1 failed`，`/home/agent/iso-1500.log`）；
+    单用例 6 次里红 1 次；探针 12 次里卡住 4 次、另一探针 14 次里第 2 次即卡住。
+- **根因（机械，指向产品面）**：`.palette-content` 与 `.memory-panel` **同为 `position: fixed; z-index: 51`**，
+  且都是 Radix portal 追加到 `body`；记忆面板的 portal 更晚建立 ⇒ **记忆面板盖在命令面板上**。
+  页内实测：`document.elementFromPoint(命令项中心)` 恒为 `DIV.project-dialog-head`（记忆面板头部），
+  **6/6 次**；不加 `force` 的真实点击 **6/6 次被拦截**。
+  spec 用 `page.locator('.palette-item').click({ force: true })` ⇒ 点击被派发给覆盖元素，
+  命令面板的 `onClick` 不触发、面板不关 —— 卡住与否取决于命中测试的时序竞争。
+- **F2/F4**：同签名同树再现（2/3 整文件）⇒ §2 第 1 条排除 flake；且基线树即红 ⇒ 既有红。
+- **F3 零文件交集**：同上（本分支 6 个文件与该 spec、与 `App.tsx` / `CommandPalette.tsx` 零交集）。
+- **F5 处置**：**按 #1500 任务书第 3 步「隔离证据指向真产品缺陷 ⇒ 停下报协调员、不许自己开票」处理**：
+  未开票、未登记为 flake；该 spec 已从 PR 车道映射表排除（见 §7.2 的 `e2e_scope_map.tsv` 说明）。
+  建议方向（留给协调员/后续票）：命令面板与记忆面板同时打开时的层级/互斥（打开面板时关闭面板，
+  或给命令面板更高层级），并去掉 spec 里的 `force: true`（它掩盖了「用户点不到」这一事实）。
+
