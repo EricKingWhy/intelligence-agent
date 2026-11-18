@@ -87,8 +87,10 @@ def _gated_ask_then_finish_factory(gate: asyncio.Event):
     return factory
 
 
-async def _start_server(tmp_path, monkeypatch, factory, *, ask_user_timeout: int = 300,
-    tick_seconds: float = 3600.0,):
+async def _start_server(
+    tmp_path, monkeypatch, factory, *, ask_user_timeout: int = 300,
+    tick_seconds: float = 3600.0,
+):
     """薄 wrapper：起服务统一走 `tests/web/_harness.py`（#1534）。"""
     # 心跳只负责死对端检测；本文件自己驱动超时检查，调大以免与显式 tick 打架。
     monkeypatch.setattr("agent_harness.web.websocket.WS_PING_INTERVAL", 3600.0)
