@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  * {spec}")
         # `SPECS:` 是工作流唯一消费的一行；路径相对 `web/`（playwright 的 cwd），
         # 免得 workflow 里再做一轮字符串手术。
-        print("SPECS: " + " ".join(s[len("web/"):] if s.startswith("web/") else s
+        print("SPECS: " + " ".join(s.removeprefix("web/")
                                   for s in result["selected"]))
 
     if result["unmapped"]:
