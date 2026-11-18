@@ -106,8 +106,6 @@ async def _start_server(
     )
 
 
-
-
 async def _shutdown(server, serve_task) -> None:
     """薄 wrapper：拆服务统一走 `tests/web/_harness.py`（#1534）。"""
     await harness.shutdown_test_server(server, serve_task)

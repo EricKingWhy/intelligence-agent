@@ -419,7 +419,6 @@ async def _start_server(tmp_path: Path, *, jwt_secret: str | None = None):
     return server, serve_task, port
 
 
-
 @pytest.mark.asyncio
 async def test_unauthorized_handshake_starts_no_session_work(tmp_path: Path) -> None:
     """被拒的握手**没有**进入 `handle_websocket`：没有订阅、没有可驱动的连接。

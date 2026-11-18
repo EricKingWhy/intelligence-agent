@@ -96,8 +96,6 @@ async def _start_server(tmp_path, monkeypatch, model_factory=None):
     )
 
 
-
-
 async def _shutdown(server, serve_task) -> None:
     """薄 wrapper：拆服务统一走 `tests/web/_harness.py`（#1534）。"""
     await harness.shutdown_test_server(server, serve_task)

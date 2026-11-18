@@ -2,7 +2,8 @@
 
 按**等价生命周期**收容重复 helper：起服务（启动 deadline + 启动失败 reap）、
 拆服务、建会话。只收容证实等价的实现；带专属 monkeypatch / 请求载荷差异的
-文件保留一层薄 wrapper，调用点不动（差异逐组记在 PR 正文）。
+文件保留一层薄 wrapper，调用点不动（差异逐组记在
+`docs/1534-test-harness-cohesion.md`）。
 
 回收边界：本模块只负责**调用方 teardown 路径**（启动失败 / 断言失败 / 取消时
 经 try/finally + `shutdown_test_server` 真实回收 serve_task 与 lifespan task）。
@@ -15,7 +16,7 @@ import asyncio
 import json
 from typing import Any
 
-#: SSE 帧前缀（各测试文件里的 `_DATA_PREFIX = "data:"` 同值）。
+#: SSE 帧前缀（`_progress_api` 等仍自带的 `_DATA_PREFIX = "data:"` 同值）。
 DATA_PREFIX = "data:"
 
 #: 起服务的总 deadline。取代 15 份裸 `for _ in range(100): sleep(0.05)`：那些
@@ -24,7 +25,7 @@ SERVER_START_TIMEOUT_SECONDS = 30.0
 _POLL_SECONDS = 0.05
 
 
-def test_settings(tmp_path, **overrides: Any):
+def make_settings(tmp_path, **overrides: Any):
     """测试服务端统一 Settings：不读 .env、工作区进 tmp_path、假 API key。"""
     from agent_harness.config import Settings
 
@@ -46,6 +47,13 @@ async def start_test_server(
 
     启动失败 / 超时：在函数内 reap 已起的 serve_task 与 lifespan task，再抛原
     异常（或带超时值的 `TimeoutError`）——不留孤儿任务，归因到调用用例。
+
+    已知边界（uvicorn 决定，非本模块可改）：lifespan 启动失败时 uvicorn 于
+    `Server.startup` 内 `sys.exit(3)`，`SystemExit` 从 `serve_task` 里逃出、
+    被 asyncio 的 `handle._run` 直接抛出事件循环，**任何调用方 `except` 都接不住**
+    （实测异常从 `runner.run()` 逃出，pytest 记在该用例上、进程继续）。所以这里
+    的 reap 只管 `Exception` / `CancelledError`（包括被测代码自己抛的
+    `RuntimeError`、以及超时后的取消）；`SystemExit` 走不到 reap 分支。
     """
     import uvicorn
 
@@ -58,7 +66,7 @@ async def start_test_server(
                 "agent_harness.assembly.create_chat_model", model_factory
             )
         app = create_app(
-            test_settings(tmp_path, **(settings_kwargs or {})),
+            make_settings(tmp_path, **(settings_kwargs or {})),
             allow_testserver=allow_testserver,
         )
 
@@ -108,22 +116,47 @@ async def shutdown_test_server(server, serve_task, *, grace: float = 1.0) -> Non
     被取消时 uvicorn 来不及关监听 socket、也跑不到 lifespan shutdown，于是
     watchtower / ask-user ticker 这类后台任务留在事件循环里，端口在用例结束后
     仍不可重绑（#1534 AC2 的"回收"正是在这里不成立）。先给 `should_exit` 一次
-    机会（无在途连接时约 0.2s，顺带跑完 lifespan shutdown），有在途 SSE/WS
-    连接不退时在 `grace` 秒后取消，保持旧行为。
+    机会（无在途连接时约 0.2s，顺带跑完 lifespan shutdown）；有在途 SSE/WS
+    连接不退时在 `grace` 秒后 cancel——**取消来源与旧实现相同**（uvicorn
+    shutdown → `AppState.shutdown()` → `RunManager.aclose()`），只是时序推迟至多
+    `grace` 秒，可观察断言不变（代价：这类用例的 teardown 多约 1s）。
+
+    已知边界：有在途连接时走的是 cancel 分支，**只保证 serve_task 结束与监听
+    socket 关闭，不保证 lifespan shutdown 跑完**（uvicorn 侧 `LifespanOn.main`
+    可能仍是取消收尾）。需要精确 lifespan 收尾的用例应在调用前先关掉自己的流。
     """
     server.should_exit = True
     try:
         await asyncio.wait_for(asyncio.shield(serve_task), grace)
         return
     except TimeoutError:
-        pass
+        if serve_task.done():
+            # serve_task 自己抛的 TimeoutError（不是 grace 到期），原样上抛。
+            raise
     except asyncio.CancelledError:
         # 调用方自己被取消：仍要收掉 serve_task，再把取消传出去。
         serve_task.cancel()
         await asyncio.gather(serve_task, return_exceptions=True)
+        _close_listening_sockets(server)
         raise
     serve_task.cancel()
     await asyncio.gather(serve_task, return_exceptions=True)
+    _close_listening_sockets(server)
+
+
+def _close_listening_sockets(server) -> None:
+    """取消路径上补关监听 socket。
+
+    `uvicorn.Server.serve()` 的 `finally` 只在 `shutdown()` 跑过时关 socket；在
+    `main_loop()` 里被 cancel 时它来不及关，端口就一直占着（旧 15 份 `_shutdown`
+    的"端口不可重绑"正是这个）。这里同步关——不 await，所以在被取消的上下文里
+    也能执行。uvicorn 自己关的也是 `asyncio.Server.close()`（不是 socket 对象）。
+    """
+    for srv in getattr(server, "servers", None) or []:
+        try:
+            srv.close()
+        except (AttributeError, OSError):
+            pass
 
 
 def session_id_from_sse(resp) -> str:

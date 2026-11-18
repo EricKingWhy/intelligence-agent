@@ -82,7 +82,6 @@ async def _start_server(tmp_path, monkeypatch, model):
     return server, serve_task, port
 
 
-
 async def _read_until(line_marker: str, port: int) -> None:
     """读 SSE 流直到出现标记帧，然后立刻断开连接——不排空流。
 
@@ -117,7 +116,6 @@ async def _wait_for_run_completed(store: JsonlSessionStore,
                 if events and events[-1].type == "run/completed":
                     return
             await asyncio.sleep(0.1)
-
 
 
 async def _shutdown(server, serve_task) -> None:
