@@ -18,6 +18,19 @@
 #
 # 成熟产品的同类做法：Django 的 CI 用 paths-ignore 跳过 docs/**；VS Code 用 detect-changes
 # 决定要不要跑重车道 —— 都是按路径裁剪**可选**车道，而不是裁剪**必需**检查。
+#
+# #1500：跑哪些 spec 不再写死。`docs/agents/e2e_scope_map.tsv` 是「路径 → spec」的唯一
+# 事实源，`scripts/e2e_scope.py` 把本 PR 的改动面翻译成
+#   **常驻 14 ∪ 映射命中（去重）**。
+# 三条读法（本 job 的日志逐段打印出来，便于复核）：
+#   ① 改动文件清单；② 每行命中 `matched <path> -> <specs>`；③ `selected after dedup` + `SPECS:`。
+# 行为口径：
+#   - 常驻 14 永不消失（表里 `ALWAYS` 行）——相关性算法只做加法。
+#   - 冷区改动选中它那一行的 spec；全局面（外壳/配置/夹具）选中表内全部。
+#   - `web/**` 里有一条路径没有任何映射行 ⇒ `e2e_scope.py` 退出 2 ⇒ 本 job 红
+#     （漏配时报出来，而不是静默少跑）。回滚方式：把映射表那一行补上。
+#   - 本工作流**仍是非必需检查**：可见、不卡合并（理由见上：paths 过滤 + 必需检查 =
+#     永久 pending）。改分支保护需要单独授权，不在本票范围。
 
 name: e2e-smoke
 
@@ -45,7 +58,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
+          # #1500：选测要算 `base...head` 的改动面 ⇒ 必须拿到 base 提交。
+          # 全图克隆与 gate0.yml 同款（该仓已在必需检查里付过这份代价）。
+          fetch-depth: 0
       - name: 装 pnpm 10.32.1
         uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
@@ -67,6 +82,28 @@ jobs:
       - name: 装 Chromium（--with-deps 由 runner root 装系统库）
         working-directory: web
         run: node node_modules/@playwright/test/cli.js install --with-deps chromium
-      - name: 运行 e2e 冒烟集（2 worker；webServer 自动起 vite :5173）
+      - name: 算本次要跑的 spec（常驻 14 ∪ 改动面命中，去重）
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # 三点 diff：`base...head` 从 merge-base 起算，不受 base 分支后续提交影响
+          # （与 PR 的 "Files changed" 口径一致）。
+          git diff --name-only --no-renames "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" "$HEAD_SHA" \
+            > /tmp/changed.txt
+          echo "── 改动文件（$(wc -l < /tmp/changed.txt) 个）──"
+          cat /tmp/changed.txt
+          # 未映射的 web/** 路径 → 退出 2 → 本步（因而整个 job）变红。
+          # 这是 AC3 的「热区漏配要红」；e2e-smoke 非必需，红了只提示、不卡合并。
+          python3 scripts/e2e_scope.py --changed-list - < /tmp/changed.txt | tee /tmp/scope.txt
+          specs=$(sed -n 's/^SPECS: //p' /tmp/scope.txt)
+          # 空集合会让 playwright 跑**全量**（等于把 PR 车道变成夜间车道）⇒ 显式变红。
+          test -n "$specs" || { echo "::error::选测集为空，拒绝退化成全量"; exit 1; }
+          echo "── 选测（去重后 $(wc -w <<<"$specs") 支）──"
+          tr ' ' '\n' <<<"$specs"
+          echo "specs=$specs" >> "$GITHUB_OUTPUT"
+      - name: 运行 e2e（选测集；2 worker；webServer 自动起 vite :5173）
         working-directory: web
-        run: node node_modules/@playwright/test/cli.js test --workers=2 task-review.spec.ts u-project-task.spec.ts control-row.spec.ts context-usage.spec.ts y-inspector-peek.spec.ts w-session-delete.spec.ts e-reconnect.spec.ts d-recover.spec.ts stream-fallback.spec.ts n-approval-card.spec.ts composer-stream-actions.spec.ts queue-flush.spec.ts multiturn-queue.spec.ts keep-text-on-reject.spec.ts
+        run: node node_modules/@playwright/test/cli.js test --workers=2 ${{ steps.scope.outputs.specs }}
