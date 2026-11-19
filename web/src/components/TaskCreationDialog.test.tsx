@@ -11,10 +11,20 @@
  */
 import { act, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
-import type { ModelCatalogEntry, SandboxBackendEntry } from '../lib/api';
-import { TaskCreationDialog } from './TaskCreationDialog';
+import type {
+  ModelCatalogEntry,
+  SandboxBackendEntry,
+  StartSessionFailure,
+  StartSessionPayload,
+  SubmitTaskResult,
+} from '../lib/api';
+import {
+  LOCAL_BACKEND_NTFS_NOTICE,
+  LOCAL_BACKEND_NOTICE,
+  TaskCreationDialog,
+} from './TaskCreationDialog';
 import type { Project } from '../types';
 
 const project: Project = {
@@ -56,7 +66,7 @@ const advancedToggle = () =>
 
 function dialog(over: {
   project?: Project;
-  onCreateTask?: (p: unknown) => Promise<string | null>;
+  onCreateTask?: (p: StartSessionPayload) => Promise<SubmitTaskResult>;
   onOpenChange?: (o: boolean) => void;
 } = {}) {
   return (
@@ -293,5 +303,136 @@ describe('TaskCreationDialog 化简（#1177 §B）', () => {
       );
     });
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
+/** #1644：填 prompt 并点「创建并启动」（结构化回执用例的公共前半段）。 */
+async function submitPrompt(
+  onCreateTask: (p: StartSessionPayload) => Promise<SubmitTaskResult>,
+): Promise<{ onOpenChange: Mock<(open: boolean) => void> }> {
+  const onOpenChange = vi.fn();
+  await act(async () => {
+    render(dialog({ onCreateTask, onOpenChange }));
+    await Promise.resolve();
+  });
+  const prompt = document.body.querySelector<HTMLTextAreaElement>('#task-prompt')!;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      'value',
+    )!.set!;
+    setter.call(prompt, '给登录接口加上限流');
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const create = [...document.body.querySelectorAll('button')].find(
+    (b) => b.textContent === '创建并启动',
+  )!;
+  await act(async () => {
+    create.click();
+    await Promise.resolve();
+  });
+  return { onOpenChange };
+}
+
+const sandboxUnavailable = (
+  over: Partial<StartSessionFailure> = {},
+): StartSessionFailure => ({
+  message: '提交失败：Docker sandbox unavailable: docker SDK not installed',
+  status: 409,
+  backend: 'docker',
+  availableBackends: ['local'],
+  ...over,
+});
+
+describe('TaskCreationDialog 409 切换动作（#1644）', () => {
+  it('显式选 Docker 不可用：卡片给两条明示与「改用 local 重试」；点击以 sandbox_backend=local 重发原 payload', async () => {
+    const failure = sandboxUnavailable();
+    const onCreateTask = vi.fn(
+      async (_p: StartSessionPayload): Promise<SubmitTaskResult> => null,
+    );
+    onCreateTask.mockResolvedValueOnce(failure).mockResolvedValueOnce(null);
+
+    const onOpenChange = vi.fn();
+    await act(async () => {
+      render(dialog({ onCreateTask, onOpenChange }));
+      await Promise.resolve();
+    });
+
+    // 走到会触发 409 的请求形状：运行位置显式选 Docker。
+    const prompt = document.body.querySelector<HTMLTextAreaElement>('#task-prompt')!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(prompt, '给登录接口加上限流');
+      prompt.dispatchEvent(new Event('input', { bubbles: true }));
+      advancedToggle().click();
+    });
+    await act(async () => {
+      document.body.querySelector<HTMLButtonElement>('[aria-label="运行位置"]')!.click();
+    });
+    const docker = [...document.body.querySelectorAll<HTMLElement>('[cmdk-item]')].find(
+      (item) => item.querySelector('.picker-item-title')?.textContent?.trim() === 'Docker',
+    );
+    expect(docker).toBeTruthy();
+    await act(async () => {
+      docker!.click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll('button')]
+        .find((b) => b.textContent === '创建并启动')!
+        .click();
+      await Promise.resolve();
+    });
+
+    expect(onCreateTask).toHaveBeenCalledTimes(1);
+    const first = onCreateTask.mock.calls[0][0];
+    expect(first.sandbox_backend).toBe('docker');
+
+    const card = document.body.querySelector<HTMLElement>('.project-error')!;
+    expect(card.textContent).toContain(failure.message);
+    expect(card.textContent).toContain(LOCAL_BACKEND_NOTICE);
+    expect(card.textContent).toContain(LOCAL_BACKEND_NTFS_NOTICE);
+    const retry = [...card.querySelectorAll('button')].find(
+      (b) => b.textContent === '改用 local 重试',
+    );
+    expect(retry).toBeTruthy();
+
+    await act(async () => {
+      retry!.click();
+      await Promise.resolve();
+    });
+    expect(onCreateTask).toHaveBeenCalledTimes(2);
+    const second = onCreateTask.mock.calls[1][0];
+    // AC2：原 payload 重发，只强制运行位置 = local。
+    expect(second.sandbox_backend).toBe('local');
+    expect(second.task).toBe('给登录接口加上限流');
+    expect(second.cwd).toBe('D:\\Projects\\Demo');
+    // 第二次成功（resolve null）=> 请求关闭浮层。
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('普通字符串失败：只渲染原因，不给切换按钮', async () => {
+    await submitPrompt(async () => '提交失败：目录不存在：D:\\nope');
+
+    const card = document.body.querySelector<HTMLElement>('.project-error')!;
+    expect(card.textContent).toBe('提交失败：目录不存在：D:\\nope');
+    expect(card.textContent).not.toContain(LOCAL_BACKEND_NOTICE);
+    expect(
+      [...card.querySelectorAll('button')].some((b) => b.textContent === '改用 local 重试'),
+    ).toBe(false);
+  });
+
+  it('409 但 local 不在可用列表：不给切换按钮', async () => {
+    const failure = sandboxUnavailable({ availableBackends: [] });
+    await submitPrompt(async () => failure);
+
+    const card = document.body.querySelector<HTMLElement>('.project-error')!;
+    expect(card.textContent).toContain(failure.message);
+    expect(card.textContent).not.toContain(LOCAL_BACKEND_NOTICE);
+    expect(
+      [...card.querySelectorAll('button')].some((b) => b.textContent === '改用 local 重试'),
+    ).toBe(false);
   });
 });

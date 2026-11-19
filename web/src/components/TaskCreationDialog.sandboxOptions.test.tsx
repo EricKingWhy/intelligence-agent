@@ -4,7 +4,11 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { SandboxBackendEntry } from '../lib/api';
-import { TaskCreationDialog } from './TaskCreationDialog';
+import {
+  LOCAL_BACKEND_NOTICE,
+  LOCAL_BACKEND_NTFS_NOTICE,
+  TaskCreationDialog,
+} from './TaskCreationDialog';
 import type { Project } from '../types';
 
 const project: Project = {
@@ -117,12 +121,13 @@ describe('TaskCreationDialog sandbox options (#1071/#1048)', () => {
     expect(titles).toContain('Docker');
     expect(titles.some((title) => title.includes('Windows PSEC'))).toBe(false);
 
-    // #1486 AC3：local 无 OS 级隔离必须在选项里明说（与 CLI
-    // LOCAL_SANDBOX_NOTICE 同义）；docker 档的描述必须对得上实现的三项降权。
+    // #1644（本票为文案基准）：local 选项的描述必须是通用句原文（与 409 卡片
+    // 共用同一常量，单一来源）；三条分段断言一并收束到原文比对。
     const local = options.find((option) => option.title === '\u672c\u673a');
-    expect(local?.description).toContain('无 OS 级');
-    expect(local?.description).toContain('文件');
-    expect(local?.description).toContain('网络');
+    expect(local?.description).toContain(LOCAL_BACKEND_NOTICE);
+    expect(local?.description).toContain('无操作系统级文件/网络隔离。');
+    // Windows 追加句只属于 409 卡片，不塞进选项描述（前端不猜平台）。
+    expect(local?.description).not.toContain(LOCAL_BACKEND_NTFS_NOTICE);
 
     const dockerOption = options.find((option) => option.title === 'Docker');
     expect(dockerOption?.description).toContain('非 root');

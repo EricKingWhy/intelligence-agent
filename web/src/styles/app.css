@@ -1836,6 +1836,17 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   line-height: 1.5;
   color: var(--text-secondary);
 }
+/* #1644：409 卡片的明示文案与切换动作各自成行（纯字符串失败仍是单行卡片）。 */
+.project-error-message,
+.project-error-notice {
+  display: block;
+}
+.project-error-sandbox {
+  margin-top: var(--space-xs);
+}
+.project-error-retry {
+  margin-top: var(--space-xs);
+}
 .project-notice {
   padding: 6px var(--space-sm);
   background: var(--accent-soft);
