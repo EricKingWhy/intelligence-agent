@@ -37,7 +37,7 @@ vi.mock('../lib/wsStream', async (importOriginal) => {
   };
 });
 
-import { getSessionEvents, sendMessage as apiSendMessage, startSession } from '../lib/api';
+import { getSessionEvents, sendMessage as apiSendMessage, startSession, type SubmitTaskResult } from '../lib/api';
 import { SessionClaimTimeoutError, discoverNewSessionId, sessionIdBaselineDetailed } from '../lib/wsStream';
 import { EARLY_RESPONSE_WINDOW_MS, useSession, type SessionApi } from './useSession';
 
@@ -102,7 +102,7 @@ describe('#1367 P1-1 — 能证明未受理的失败才给重试动作', () => {
     const retry = vi.fn(async () => true);
     await mount();
 
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       result = await captured.hook!.submitTask({ task: '会撞 422 的任务' }, { onRetry: retry });
     });
@@ -130,7 +130,7 @@ describe('#1367 P1-1 — 能证明未受理的失败才给重试动作', () => {
     const retry = vi.fn(async () => true);
     await mount();
 
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       result = await captured.hook!.submitTask({ task: '降级态也要能重试' }, { onRetry: retry });
     });

@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EventType, type AgentEvent, type ConversationState, type FailedDraft, type SessionDeleted, type SessionMode, type SessionSummary } from '../types';
-import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionErrorDetail, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload } from '../lib/api';
+import { listSessions, getSessionEvents, getSessionRecovery, readErrorBody, readErrorDetail, startSession, startSessionFailure, StartSessionError, worktreePathFromResponse, cancelSession, recoverSession, resumeSession, resumeRunLimitsBody, sendMessage as apiSendMessage, changeSessionModel, changeSessionPermission, changeWorkflowMode, forkSession, deleteSession, archiveSession, unarchiveSession, listSessionQueue, flushSessionQueue, cancelQueueItem, NotFoundError, RecoverError, ResumeRejectionError, SessionError, type PendingDecision, type RecoverDecisionInput, type UserInputAnswerPayload, type ResumePausedRunTarget, type SendMessagePayload, type StartSessionPayload, type SubmitTaskResult } from '../lib/api';
 import { consumeSSE, type SSEHandle } from '../lib/sse';
 import {
   wsStreamResponse,
@@ -1538,7 +1538,11 @@ export function useSession() {
    *  「未知模型」并刷新模型目录）。传 `{ ownError: true }` 时**不**写横幅、只返回
    *  原因——「在此项目中新建任务」（#1177 §A.3 改名，现名「新建任务…」）确认面（#169 AC12）要把它留在浮层里，而且需要
    *  后端 detail 原文（如「目录不存在：…」），所以那条路径连 422 也不套用
-   *  「未知模型」的旧语义。 */
+   *  「未知模型」的旧语义。
+   *
+   *  #1644 AC2：`ownError` 路径遇 409 时返回**结构化回执**（`StartSessionFailure`），
+   *  而不是纯字符串——创建表单据此渲染「改用 local 重试」。其余调用方（Composer）
+   *  仍旧只拿字符串。 */
   const submitTask = useCallback(
     async (
       payload: StartSessionPayload,
@@ -1549,7 +1553,7 @@ export function useSession() {
          *  （见 `SendFailure.onRetry`）。不传 = 这条失败不给重试按钮。 */
         onRetry?: () => Promise<boolean> | void;
       },
-    ): Promise<string | null> => {
+    ): Promise<SubmitTaskResult> => {
       setError(null);
       setSendFailure(null);
       // #1521（审查 A-F2）：提交新任务 = 上一轮装载失败面与温和提示一并退场
@@ -1611,8 +1615,9 @@ export function useSession() {
           const res = await started;
           if (res.status === 422 && !opts?.ownError) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
           if (!res.ok || !res.body) {
-            const detail = await startSessionErrorDetail(res);
-            throw new Error(detail || `Start failed: ${res.status}`);
+            throw new StartSessionError(
+              await startSessionFailure(res, `Start failed: ${res.status}`),
+            );
           }
           // #367 P3：消费 X-Worktree-Path 头——目录冲突自动建 worktree 时告诉用户
           // 任务实际跑在哪个隔离目录（降级态响应立即可得）。
@@ -1628,8 +1633,9 @@ export function useSession() {
           // 失败，必须让后端 detail 说话（它才是可行动的那句）。
           if (res.status === 422 && !opts?.ownError) throw new Error(UNKNOWN_MODEL_ERROR_TEXT);
           if (!res.ok || !res.body) {
-            const detail = await startSessionErrorDetail(res);
-            throw new Error(detail || `Start failed: ${res.status}`);
+            throw new StartSessionError(
+              await startSessionFailure(res, `Start failed: ${res.status}`),
+            );
           }
           // #367 P3：同上，短窗内落定的响应（422/短 JSON 确认）也消费该头。
           const wtEarly = worktreePathFromResponse(res);
@@ -1727,6 +1733,12 @@ export function useSession() {
             retryable: !outcomeUnknown,
             ...(outcomeUnknown || opts?.onRetry === undefined ? {} : { onRetry: opts.onRetry }),
           });
+        }
+        // #1644 AC2：确认面（ownError）拿到结构化回执，卡片才能按
+        // status/backend/available_backends 渲染「改用 local 重试」。
+        // `message` 用上面包装过的整句——与旧字符串路径逐字一致。
+        if (opts?.ownError && !outcomeUnknown && e instanceof StartSessionError) {
+          return { ...e.failure, message };
         }
         return message;
       }
