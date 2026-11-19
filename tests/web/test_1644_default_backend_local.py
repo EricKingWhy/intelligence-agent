@@ -3,7 +3,7 @@
 判据句（票面「不做」后）：**显式选择**（`sandbox_backend` 出现在请求体里）=
 用户意志，不回落，仍 409；**部署默认**（未显式）= 没有选择，才落 local。
 
-本文件钉 HTTP 边界上的四件事（前端 409 卡片/e2e 由另派执行器做）：
+本文件钉 HTTP 边界上的三件事（前端 409 卡片/e2e 由另派执行器做）：
 
 1. 部署默认路径（含模拟 Windows 平台默认）建会话成功、映射 `backend == "local"`、
    **不调用** `probe_docker_capabilities`；`session/started` 不含 `sandbox_backend`
@@ -11,7 +11,10 @@
 2. 显式 `docker` + 不可用 ⇒ 409 + 结构化诊断（`backend` / `remediation` /
    `available_backends` 含 `"local"`）；显式 `local` 建得成且映射 local。
 3. fork 默认会话（父没显式选）走部署默认 → local。
-4. Watchtower 规则 `sandbox_backend=None` 走部署默认 → local。
+
+Watchtower 规则 `sandbox_backend=None` 的对应主张在
+`tests/watchtower/test_service.py::test_rule_without_backend_passes_none_to_deployment_default`
+（规则层只管「不替用户做选择」，落 local 由部署默认保证）。
 
 「模拟 Windows 部署默认」用 `WorkspaceRegistry(root, backend=default_backend_for_platform("nt"))`
 ——那正是 `AppState.__init__` 在 `os.name == "nt"` 时构造的东西（同一个函数、
