@@ -281,6 +281,9 @@ export interface ApiMock {
   sessionsListFailAfter?: number;
   /** GET /api/models（模型目录；缺省 = 空目录 → 选择器降级隐藏） */
   models?: unknown[];
+  /** GET /api/sandbox-backends（运行位置选择器数据源）。缺省 = 404 未建模 →
+   *  前端按端点缺席处理、隐藏运行位置（既有 spec 的默认行为）。 */
+  sandboxBackends?: unknown[];
   /** POST /api/sessions（live 流） */
   onSessionPost?: (route: Route) => Promise<void> | void;
   /** `GET /api/ws` 的接流剧本（每次 `subscribe` 调用一次；第 N 次 = 第 N 次接流）。
@@ -1077,6 +1080,10 @@ export async function routeApi(page: Page, mock: ApiMock): Promise<void> {
     }
     if (path === '/api/models') {
       return route.fulfill({ status: 200, body: JSON.stringify({ models: mock.models ?? [] }), contentType: 'application/json' });
+    }
+    if (path === '/api/sandbox-backends' && req.method() === 'GET') {
+      if (!mock.sandboxBackends) return json(route, { detail: 'not mocked in e2e' }, 404);
+      return json(route, { backends: mock.sandboxBackends });
     }
     // ── #825（MM-04）附件上传 / 受控读回（语义对齐 `web/attachments.py`）──
     // 上传：真后端从**字节**判定 media type 并要求与声明一致、按内容寻址返回 id，
