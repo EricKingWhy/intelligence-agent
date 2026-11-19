@@ -590,8 +590,9 @@ def sandbox_unavailable_http_error(
 
     `detail` 带 remediation 与可用后端列表，供客户端诊断。
     （#1325 S8：此前这里承诺"前端据此渲染切换动作"，但 `web/src/` 从未消费
-    `available_backends`——承诺已删；Web 侧只展示 message，其中已由
-    `SandboxUnavailableError` 拼入 remediation。）
+    `available_backends`——该承诺当时已删。**2026-11-19 #1644 起恢复消费**：
+    Web 409 错误卡片读 `available_backends` 渲染「改用 local 重试」动作，
+    点击以 `sandbox_backend: "local"` 重发创建请求——后端 detail 形状不变。）
     `POST /api/sessions` 与 `POST /api/sessions/{id}/forks` 共用这一份构造：
     两处都必须让"选定的 docker 跑不起来"是同一个可诊断的 409，而不是一条
     裸 500（`#1278` P2-2）。

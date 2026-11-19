@@ -648,8 +648,8 @@ class CreateSessionRequest(_AmendValueValidators):
     # 显式 auto_approve=true 仍走 auto-approve（向后兼容）。
     auto_approve: bool = False
     # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒ 部署默认
-    # （按平台：Windows ⇒ docker，否则 local，见 `create_app` 的
-    # `default_backend_for_platform()`）。未知值 → 422（字段校验器响亮拒绝）。
+    # （`AppState.__init__` 注入的 `default_backend_for_platform()`，自 #1644 起
+    # 恒为 local，含 Windows）。未知值 → 422（字段校验器响亮拒绝）。
     # docker 不可用 → 409 SandboxUnavailableError（结构化诊断，绝不静默降级）。
     sandbox_backend: str | None = None
     # amend contract fields（Phase 5 staged → RUNTIME 子批次全部消费：reasoning_effort
@@ -1390,10 +1390,11 @@ class AppState:
         self.delegation_tree_ledger = SqliteDelegationTreeLedger(self.harness_db)
         self.workspace_registry = WorkspaceRegistry(
             root=Path(settings.workspace_dir),
-            # #1048 AC1：部署默认按平台解析——受影响（Windows/NTFS）平台默认
-            # docker（不可用即 409 fail-closed，绝不回落 local/PSEC）；其余平台
-            # 默认 local（无 NTFS hard link 对象身份问题）。显式 `sandbox_backend`
-            # 仍优先于本默认（registry 的「显式 > 部署默认」）。
+            # #1644（2026-10-28 用户裁决）：部署默认恒 local（含 Windows）——
+            # 没有 docker 的安装（打包安装器不带 docker wheel）也能建会话。
+            # #1048 的 NTFS 硬链接边界事实不变，风险由用户明示接受（ADR-0054
+            # 2026-10-28 补注）。docker 为显式可选：显式 `sandbox_backend="docker"`
+            # 仍优先于本默认，不可用即 409 fail-closed（registry 的「显式 > 部署默认」）。
             backend=default_backend_for_platform(),
         )
         # WS-2 / ADR-0025：项目实体 + 有序会话账本（同 harness.db 的另 5 张表）。

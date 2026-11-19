@@ -139,6 +139,29 @@ class TestDockerRegistryDeterministicNaming:
 
 
 @docker_required
+class TestExplicitDockerStillWorksAfterDefaultFlip:
+    """#1644 AC4：默认翻转后，显式 docker 仍真走 docker（容器创建 + inspect）。
+
+    本类只断言「显式选择仍进 docker 后端」，不碰默认路径——默认路径的
+    「落 local、零探针」由 `tests/web/test_1644_default_backend_local.py`
+    与 `tests/session/test_1644_deployment_default.py` 在无 docker 环境也能跑。
+    无 docker daemon 的环境按 `docker_required` 跳过并记录。
+    """
+
+    def test_explicit_docker_creates_container_and_inspects(self, registry):
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        sandbox = registry.create(SESSION_ID, backend="docker")
+        try:
+            assert isinstance(sandbox, DockerSandbox)
+            sandbox.ensure_started()
+            sandbox.write_text("explicit-docker.txt", "ok")
+            assert sandbox.read_text("explicit-docker.txt") == "ok"
+        finally:
+            registry.stop(SESSION_ID)
+
+
+@docker_required
 class TestDockerWorkspaceRecovery:
     def test_workspace_files_persist_across_restart(self, registry):
         """workspace 恢复：create → write → 新 Registry get → 文件还在。
