@@ -113,10 +113,14 @@ def registry(tmp_path: Path):
     except Exception:  # noqa: BLE001, S110 — best-effort cleanup
         pass
     try:
+        reg.delete(EXPLICIT_DOCKER_SESSION_ID)
+    except Exception:  # noqa: BLE001, S110 — best-effort cleanup
+        pass
+    try:
         import docker
 
         client = docker.from_env(use_context=False)
-        for vol_suffix in [SESSION_ID]:
+        for vol_suffix in (SESSION_ID, EXPLICIT_DOCKER_SESSION_ID):
             try:
                 client.volumes.get(f"agent-harness-{vol_suffix}").remove(force=True)
             except Exception:  # noqa: BLE001, S110
@@ -157,6 +161,12 @@ class TestExplicitDockerStillWorksAfterDefaultFlip:
         try:
             assert isinstance(sandbox, DockerSandbox)
             sandbox.ensure_started()
+            assert sandbox._container is not None
+            sandbox._container.reload()
+            assert sandbox._container.status == "running"
+            assert sandbox._container.name == (
+                f"agent-harness-{EXPLICIT_DOCKER_SESSION_ID}"
+            )
             sandbox.write_text("explicit-docker.txt", "ok")
             assert sandbox.read_text("explicit-docker.txt") == "ok"
         finally:
