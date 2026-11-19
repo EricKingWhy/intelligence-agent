@@ -30,6 +30,8 @@ docker_required = pytest.mark.skipif(
 )
 
 SESSION_ID = "test-registry-docker-session"
+# #1644 AC4 用例独立容器名：避免 -n 并发下与既有类的确定性容器名互踩。
+EXPLICIT_DOCKER_SESSION_ID = "test-explicit-docker-after-flip"
 CHILD_SESSION_ID = "test-registry-docker-child"
 _WIN32_OPEN_EXISTING = 3
 _WIN32_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -151,14 +153,14 @@ class TestExplicitDockerStillWorksAfterDefaultFlip:
     def test_explicit_docker_creates_container_and_inspects(self, registry):
         from agent_harness.sandbox.docker import DockerSandbox
 
-        sandbox = registry.create(SESSION_ID, backend="docker")
+        sandbox = registry.create(EXPLICIT_DOCKER_SESSION_ID, backend="docker")
         try:
             assert isinstance(sandbox, DockerSandbox)
             sandbox.ensure_started()
             sandbox.write_text("explicit-docker.txt", "ok")
             assert sandbox.read_text("explicit-docker.txt") == "ok"
         finally:
-            registry.stop(SESSION_ID)
+            registry.stop(EXPLICIT_DOCKER_SESSION_ID)
 
 
 @docker_required

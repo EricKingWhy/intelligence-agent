@@ -33,6 +33,10 @@ def _fake_build_runtime(registry: WorkspaceRegistry):
     真实现（`assembly.build_runtime`）就是用同一组 kwargs 调 registry.create，
     映射文件由那一步写出；替身只省掉模型/工具装配，不改变 sandbox 语义——
     显式 docker 的 SandboxUnavailableError 仍由 registry 原样抛出。
+
+    边界：替身只透传 `session_id` / `workspace` / `sandbox_backend` 三个 kwarg，
+    其余装配参数（permission / approval / budget / tools …）一律丢弃——
+    本文件的用例**不得**断言这些参数被传递（要断言请改用真 build_runtime 或另造替身）。
     """
 
     async def build(**kwargs):
