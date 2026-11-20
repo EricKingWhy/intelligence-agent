@@ -29,7 +29,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { ChevronRight, Cpu, HardDrive, TriangleAlert, X } from 'lucide-react';
 import type { ModelCatalogEntry, SandboxBackendEntry } from '../lib/api';
 import type { Project } from '../types';
-import type { StartSessionPayload } from '../lib/api';
+import type { StartSessionFailure, StartSessionPayload, SubmitTaskResult } from '../lib/api';
 import { OptionPicker } from './OptionPicker';
 import { deferMenuInitialFocus, focusFirstIn } from './menuDialogTiming';
 
@@ -54,6 +54,34 @@ const AUTONOMY_OPTIONS = [
 
 type AutonomyId = (typeof AUTONOMY_OPTIONS)[number]['id'];
 
+/** #1644（票面定义的唯一来源，#1486 对齐本票而不是反向）：local 后端的两条明示
+ *  文案。前端没有平台探测能力，不猜 `navigator.platform`：通用句放在运行位置
+ *  local 选项的描述里，Windows 追加句与通用句一并展示在 409 错误卡片上
+ *  （用户自己核对平台）。
+ *
+ *  `LOCAL_BACKEND_NOTICE`：通用句，逐字出现在 local 选项与 409 卡片。
+ *  `LOCAL_BACKEND_NTFS_NOTICE`：Windows 追加句（硬链接逃逸风险，见 #1048），
+ *  只在 409 卡片出现。两处引用同一常量：grep 可查、单一来源。 */
+export const LOCAL_BACKEND_NOTICE =
+  'local 后端直接在本机文件系统运行，无操作系统级文件/网络隔离。';
+export const LOCAL_BACKEND_NTFS_NOTICE =
+  'Windows 上 local 另存在 NTFS 硬链接逃逸风险（工作区内恶意内容可逃逸到宿主），见 #1048。';
+
+/** #1644 AC2：创建失败是否属于「显式选 docker 但不可用、且 local 可用」的 409。
+ *  形状取自后端 `sandbox_unavailable_http_error` 的 detail（`backend` +
+ *  `available_backends`）；只按字段判，不解析文案。 */
+function isSandboxFallbackFailure(
+  failure: SubmitTaskResult,
+): failure is StartSessionFailure {
+  return (
+    failure !== null &&
+    typeof failure !== 'string' &&
+    failure.status === 409 &&
+    failure.backend === 'docker' &&
+    failure.availableBackends.includes('local')
+  );
+}
+
 interface Props {
   /** 待开任务的项目；null = 关闭。 */
   project: Project | null;
@@ -63,8 +91,10 @@ interface Props {
   sandboxBackends: SandboxBackendEntry[];
   onOpenChange: (open: boolean) => void;
   /** 创建并启动任务。resolve `null` = 已创建（调用方关闭浮层）；
-   *  否则 resolve 一句给用户看的原因（浮层就地显示）。 */
-  onCreateTask: (payload: StartSessionPayload) => Promise<string | null>;
+   *  否则 resolve 给用户看的原因（浮层就地显示）。字符串是旧契约；
+   *  #1644 起确认面路径还会拿到结构化失败回执（409 卡片据此渲染
+   *  「改用 local 重试」）。 */
+  onCreateTask: (payload: StartSessionPayload) => Promise<SubmitTaskResult>;
 }
 
 export function TaskCreationDialog({
@@ -113,7 +143,8 @@ function TaskCreationForm({
   const [model, setModel] = useState<string>('auto');
   // 运行位置：'auto' = 不发 sandbox_backend 键（部署默认）；其余为后端名
   const [sandbox, setSandbox] = useState<string>('auto');
-  const [error, setError] = useState<string | null>(null);
+  // 失败回执：字符串（旧契约）或 #1644 的结构化 409 回执。
+  const [failure, setFailure] = useState<SubmitTaskResult>(null);
   const [pending, setPending] = useState(false);
   // #1177 §B：高级设置默认折叠（任务描述是唯一主视觉）。
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -121,29 +152,38 @@ function TaskCreationForm({
 
   const promptValid = prompt.trim().length > 0;
 
-  const submit = async () => {
+  /** `overrides.sandbox_backend` = 「改用 local 重试」的强制档位：重发**原 payload**，
+   *  只把运行位置换成 local（#1644 AC2）。用参数而不是先 setSandbox 再 submit——
+   *  后者读到的仍是旧闭包值（React 状态尚未重渲染）。 */
+  const submit = async (overrides?: { sandbox_backend: string }) => {
     if (pending || !promptValid) return;
     setPending(true);
-    setError(null);
+    setFailure(null);
     // 完成目标走结构化字段（#1359 阶段 2）：不再拼进 prompt——验收项进
     // task/defined.criteria，`task` 保持 prompt 原文。
     const acceptanceText = acceptance.trim();
+    const sandboxBackend = overrides?.sandbox_backend ?? sandbox;
     const payload: StartSessionPayload = {
       task: prompt.trim(),
       ...(acceptanceText ? { criteria: [{ text: acceptanceText }] } : {}),
       cwd: project.path,
       autonomy,
       ...(model !== 'auto' ? { model } : {}),
-      ...(sandbox !== 'auto' ? { sandbox_backend: sandbox } : {}),
+      ...(sandboxBackend !== 'auto' ? { sandbox_backend: sandboxBackend } : {}),
       // on_conflict 不发 = 后端默认 worktree（选项 A：目录冲突默认自动 worktree）
     };
-    const failure = await onCreateTask(payload);
-    if (failure) {
-      setError(failure);
+    const result = await onCreateTask(payload);
+    if (result) {
+      setFailure(result);
       setPending(false);
       return;
     }
     onOpenChange(false);
+  };
+
+  const retryWithLocal = () => {
+    setSandbox('local');
+    void submit({ sandbox_backend: 'local' });
   };
 
   const modelOptions = [
@@ -171,9 +211,10 @@ function TaskCreationForm({
           : b.backend === 'docker'
             ? 'Docker'
             : b.backend,
-        // #1486 AC3：local 无 OS 级隔离必须在 UI 明示（语义与 CLI LOCAL_SANDBOX_NOTICE 一致）。
+        // #1644（本票为文案基准，#1486 对齐本票）：local 无 OS 级隔离必须在 UI
+        // 明示；通用句与 409 卡片共用同一常量。
         description: b.backend === 'local'
-          ? '无 OS 级文件/网络隔离：以当前用户身份直接读写宿主目录、可触达本机网络'
+          ? LOCAL_BACKEND_NOTICE
           : b.backend === 'docker'
             ? '容器内运行：非 root、cap_drop=ALL、no-new-privileges'
             : undefined,
@@ -370,9 +411,28 @@ function TaskCreationForm({
         </div>
       </div>
 
-      {error && (
+      {failure && (
         <div className="project-error" role="alert">
-          {error}
+          <span className="project-error-message">
+            {typeof failure === 'string' ? failure : failure.message}
+          </span>
+          {/* #1644 AC2：显式选 docker 而 docker 不可用、local 可用 -> 给切换动作。
+              两条明示文案与运行位置 local 选项同源；按钮以原 payload 重发，
+              只把 sandbox_backend 换成 local。其它失败形状不渲染这一块。 */}
+          {isSandboxFallbackFailure(failure) && (
+            <div className="project-error-sandbox">
+              <span className="project-error-notice">{LOCAL_BACKEND_NOTICE}</span>
+              <span className="project-error-notice">{LOCAL_BACKEND_NTFS_NOTICE}</span>
+              <button
+                type="button"
+                className="project-btn project-error-retry"
+                onClick={retryWithLocal}
+                disabled={pending}
+              >
+                改用 local 重试
+              </button>
+            </div>
+          )}
         </div>
       )}
 

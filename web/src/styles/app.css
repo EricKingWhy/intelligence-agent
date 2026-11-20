@@ -1836,6 +1836,19 @@ svg[width="20"][height="20"] { stroke-width: var(--icon-stroke-lg); }
   line-height: 1.5;
   color: var(--text-secondary);
 }
+/* #1644：409 卡片的明示文案与切换动作各自成行（纯字符串失败仍是单行卡片）。
+   间距统一由容器 gap 承担；`.project-error-retry` 只是 `.project-btn`，不再单独设 margin。 */
+.project-error-message,
+.project-error-notice {
+  display: block;
+}
+.project-error-sandbox {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  margin-top: var(--space-xs);
+}
 .project-notice {
   padding: 6px var(--space-sm);
   background: var(--accent-soft);

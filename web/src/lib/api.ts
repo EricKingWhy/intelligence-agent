@@ -154,12 +154,24 @@ export async function readErrorBody(
   reason: string | null;
   objectDetail: boolean;
   pendingDecisions?: PendingDecision[];
+  /** #1644：对象形 detail 的 sandbox 诊断字段（`sandbox_unavailable_http_error`
+   *  的 409 带 `backend` + `available_backends`）；其余形状一律 null / 空数组。
+   *  创建失败卡片据此渲染「改用 local 重试」，只按字段判、不解析文案。 */
+  backend: string | null;
+  availableBackends: string[];
 }> {
   try {
     const j = (await res.json()) as { detail?: unknown } | null;
     const detail = j?.detail;
     if (typeof detail === 'string')
-      return { message: detail, code: null, reason: null, objectDetail: false };
+      return {
+        message: detail,
+        code: null,
+        reason: null,
+        objectDetail: false,
+        backend: null,
+        availableBackends: [],
+      };
     if (Array.isArray(detail)) {
       const message = detail
         .flatMap((item) => {
@@ -167,14 +179,23 @@ export async function readErrorBody(
           return typeof msg === 'string' && msg ? [msg.replace(/^Value error,\s*/, '')] : [];
         })
         .join('；');
-      return { message, code: null, reason: null, objectDetail: false };
+      return {
+        message,
+        code: null,
+        reason: null,
+        objectDetail: false,
+        backend: null,
+        availableBackends: [],
+      };
     }
     if (typeof detail === 'object' && detail !== null) {
-      const { message, code, reason, pending_decisions } = detail as {
+      const { message, code, reason, pending_decisions, backend, available_backends } = detail as {
         message?: unknown;
         code?: unknown;
         reason?: unknown;
         pending_decisions?: unknown;
+        backend?: unknown;
+        available_backends?: unknown;
       };
       return {
         message: typeof message === 'string' ? message : '',
@@ -182,11 +203,29 @@ export async function readErrorBody(
         reason: typeof reason === 'string' && reason ? reason : null,
         objectDetail: true,
         pendingDecisions: parsePendingDecisions(pending_decisions),
+        backend: typeof backend === 'string' && backend ? backend : null,
+        availableBackends: Array.isArray(available_backends)
+          ? available_backends.filter((b): b is string => typeof b === 'string')
+          : [],
       };
     }
-    return { message: '', code: null, reason: null, objectDetail: false };
+    return {
+      message: '',
+      code: null,
+      reason: null,
+      objectDetail: false,
+      backend: null,
+      availableBackends: [],
+    };
   } catch {
-    return { message: '', code: null, reason: null, objectDetail: false };
+    return {
+      message: '',
+      code: null,
+      reason: null,
+      objectDetail: false,
+      backend: null,
+      availableBackends: [],
+    };
   }
 }
 
@@ -1024,14 +1063,49 @@ export function worktreePathFromResponse(res: Response): string | null {
   }
 }
 
-/** create 会话失败时后端给的可行动原因（`{detail}` 的两种合法形状，见 readErrorDetail）。
+/** #1644 AC2：`POST /api/sessions` 失败的完整回执。
  *
- *  单独开这个缝的原因：「在此项目中新建任务」（#1177 §A.3 改名，现名「新建任务…」）确认面（#169 AC12）要把后端 detail
- *  **原样**留在浮层里，而 useSession 的失败通道是给用户看的一句话——它还带着
- *  "422 = 未知模型"的旧语义（App 据那句话刷新模型目录）。两者混在一起会让
- *  「cwd 目录不存在」被显示成「模型不可用」。由调用方自己读，两条语义各自成立。 */
-export async function startSessionErrorDetail(res: Response): Promise<string> {
-  return readErrorDetail(res);
+ *  `message` 是给用户看的那句（与 `StartSessionError.message` 同源）；`status` /
+ *  `backend` / `availableBackends` 只在后端给出对象形 detail 时才有意义——
+ *  「选定 docker 跑不起来」的 409 就属于这一类
+ *  （`domain_errors.sandbox_unavailable_http_error`）。创建表单据此渲染
+ *  「改用 local 重试」（通用句 + NTFS 追加句），只按字段判、不新增端点。 */
+export interface StartSessionFailure {
+  message: string;
+  status: number;
+  backend: string | null;
+  availableBackends: string[];
+}
+
+/** `submitTask`（新任务创建入口）的失败回执：`null` = 已接管；字符串 = 旧契约
+ *  给用户看的原因；#1644 起确认面路径还可能拿到结构化 409 回执。命名出来是为了
+ *  让 useSession / App / SessionList / TaskCreationDialog 共用同一个契约。 */
+export type SubmitTaskResult = string | StartSessionFailure | null;
+
+/** 携带 `StartSessionFailure` 的错误：`submitTask` 的失败路径据此把结构化回执
+ *  交回创建表单。字符串契约仍在——只读 `.message` 的调用方行为不变。 */
+export class StartSessionError extends Error {
+  readonly failure: StartSessionFailure;
+  constructor(failure: StartSessionFailure) {
+    super(failure.message);
+    this.name = 'StartSessionError';
+    this.failure = failure;
+  }
+}
+
+/** 读一次响应体，组装 POST /api/sessions 的失败回执（`fallback` = 无 detail 时的
+ *  兜底文案）。与 `readErrorDetail` 同一份解析，只是把 sandbox 诊断字段一并带出。 */
+export async function startSessionFailure(
+  res: Response,
+  fallback: string,
+): Promise<StartSessionFailure> {
+  const body = await readErrorBody(res);
+  return {
+    message: body.message || fallback,
+    status: res.status,
+    backend: body.backend,
+    availableBackends: body.availableBackends,
+  };
 }
 
 /** POST /api/sessions/{id}/messages（PRD §5.3 续聊入口）。

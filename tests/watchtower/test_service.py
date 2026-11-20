@@ -197,6 +197,30 @@ async def test_fire_uses_existing_session_path_and_preserves_sandbox_and_consent
 
 
 @pytest.mark.asyncio
+async def test_rule_without_backend_passes_none_to_deployment_default(tmp_path):
+    """#1644：规则 `sandbox_backend=None` = 未显式选择 ⇒ 原样传 None（部署默认）。
+
+    Watchtower 不得把它补成 "docker" 或 "local"：本票之后部署默认在 Windows 上
+    也解析为 local（判据 `tests/session/test_1644_deployment_default.py`），
+    而显式填 "docker" 的规则在 docker 不可用时仍须 409 —— 两档的区别唯一靠
+    这里"不替用户做选择"来维持。
+    """
+    store, session_service, service = await _new_service(tmp_path)
+    rule = await _rule(service, sandbox_backend=None)
+    await store.transition(
+        rule.rule_id, expected_version=rule.version, state="active",
+        event_kind="test_due", patch={"trigger_at": datetime.now(UTC).isoformat()},
+    )
+
+    await service.tick()
+
+    assert session_service.created[0]["sandbox_backend"] is None
+    executions = await store.list_executions(rule.rule_id)
+    assert executions[0].state == "fired"
+    await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_overlapping_ticks_dispatch_a_fire_once(tmp_path):
     store, session_service, service = await _new_service(tmp_path)
     session_service.create_delay_seconds = 0.15

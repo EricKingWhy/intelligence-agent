@@ -82,6 +82,7 @@ import {
   type ConstraintScope,
   type ModelCatalogEntry,
   type SandboxBackendEntry,
+  type SubmitTaskResult,
   type StartSessionPayload,
 } from './lib/api';
 import { allTools, awaitingApproval, summarizeEvent } from './lib/projection';
@@ -1164,7 +1165,7 @@ export default function App() {
    *  不再 `createEmptySession` + 回输入框发第一条消息——prompt 已在弹窗里，
    *  创建即带任务启动。 */
   const handleStartTaskInProject = useCallback(
-    async (payload: StartSessionPayload): Promise<string | null> => {
+    async (payload: StartSessionPayload): Promise<SubmitTaskResult> => {
       // submitTask 自己处理 SSE 接线与错误文案；resolve null = 已接管。
       // 失败文案（string）交回弹窗就地显示。
       // #367 P3：worktree 自动创建时把隔离路径提示给用户（可关闭的一次性横幅）。

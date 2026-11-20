@@ -37,7 +37,7 @@ vi.mock('../lib/wsStream', async (importOriginal) => {
   };
 });
 
-import { getSessionEvents, sendMessage as apiSendMessage, startSession } from '../lib/api';
+import { getSessionEvents, sendMessage as apiSendMessage, startSession, type SubmitTaskResult } from '../lib/api';
 import { SessionClaimTimeoutError, discoverNewSessionId, sessionIdBaselineDetailed } from '../lib/wsStream';
 import { EARLY_RESPONSE_WINDOW_MS, useSession, type SessionApi } from './useSession';
 
@@ -53,6 +53,15 @@ const error422 = (): Response =>
   new Response(JSON.stringify({ detail: '模型不可用' }), {
     status: 422, headers: { 'content-type': 'application/json' },
   });
+
+const error409Sandbox = (): Response =>
+  new Response(JSON.stringify({
+    detail: {
+      message: 'Docker sandbox unavailable: docker SDK not installed',
+      backend: 'docker',
+      available_backends: ['local'],
+    },
+  }), { status: 409, headers: { 'content-type': 'application/json' } });
 
 const captured = { hook: null as SessionApi | null };
 let container: HTMLDivElement | null = null;
@@ -102,7 +111,7 @@ describe('#1367 P1-1 — 能证明未受理的失败才给重试动作', () => {
     const retry = vi.fn(async () => true);
     await mount();
 
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       result = await captured.hook!.submitTask({ task: '会撞 422 的任务' }, { onRetry: retry });
     });
@@ -130,7 +139,7 @@ describe('#1367 P1-1 — 能证明未受理的失败才给重试动作', () => {
     const retry = vi.fn(async () => true);
     await mount();
 
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       result = await captured.hook!.submitTask({ task: '降级态也要能重试' }, { onRetry: retry });
     });
@@ -138,6 +147,42 @@ describe('#1367 P1-1 — 能证明未受理的失败才给重试动作', () => {
     expect(result).toContain('网络中断');
     expect(captured.hook!.sendFailure?.retryable).toBe(true);
     expect(captured.hook!.sendFailure?.onRetry).toBe(retry);
+  });
+});
+
+describe('#1644 AC2 — ownError 路径的 409 结构化回执', () => {
+  it('短窗 409（对象形 detail）⇒ ownError 返回结构化回执，两诊断字段透传、不写横幅', async () => {
+    vi.mocked(startSession).mockResolvedValue(error409Sandbox() as never);
+    await mount();
+
+    let result: SubmitTaskResult = null;
+    await act(async () => {
+      result = await captured.hook!.submitTask({ task: '選了 docker 但不可用' }, { ownError: true });
+    });
+
+    expect(typeof result).toBe('object');
+    expect(result).not.toBeNull();
+    const failure = result as unknown as Exclude<SubmitTaskResult, string | null>;
+    expect(failure.status).toBe(409);
+    expect(failure.backend).toBe('docker');
+    expect(failure.availableBackends).toContain('local');
+    expect(failure.message).toMatch(/^提交失败：/);
+    // ownError 路径不写横幅：回执由调用方（创建浮层）自己渲染。
+    expect(captured.hook!.error).toBeNull();
+  });
+
+  it('对照：不传 ownError 的同一条 409 ⇒ 返回值仍是字符串，且横幅落「提交失败」', async () => {
+    vi.mocked(startSession).mockResolvedValue(error409Sandbox() as never);
+    await mount();
+
+    let result: SubmitTaskResult = null;
+    await act(async () => {
+      result = await captured.hook!.submitTask({ task: '選了 docker 但不可用' });
+    });
+
+    expect(typeof result).toBe('string');
+    expect(result).toContain('提交失败');
+    expect(captured.hook!.error).toContain('提交失败');
   });
 });
 

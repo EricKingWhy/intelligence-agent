@@ -43,7 +43,7 @@ vi.mock('../lib/wsStream', async (importOriginal) => {
   };
 });
 
-import { getSessionEvents, sendMessage as apiSendMessage, startSession, type PendingDecision } from '../lib/api';
+import { getSessionEvents, sendMessage as apiSendMessage, startSession, type PendingDecision, type SubmitTaskResult } from '../lib/api';
 import { SessionClaimAmbiguousError, SessionClaimTimeoutError, discoverNewSessionId, sessionIdBaselineDetailed } from '../lib/wsStream';
 import { EARLY_RESPONSE_WINDOW_MS, useSession } from './useSession';
 
@@ -271,7 +271,7 @@ describe('#1148 路径 B — submitTask 认领成功后 POST 才失败', () => {
     offset = 0,
     deferClaim = false,
     settlePost = true,
-  ): Promise<{ result: string | null; postUnsettled: boolean }> {
+  ): Promise<{ result: SubmitTaskResult; postUnsettled: boolean }> {
     let rejectPost!: (e: Error) => void;
     let postUnsettled = true;
     const post = new Promise<Response>((_resolve, reject) => {
@@ -286,7 +286,7 @@ describe('#1148 路径 B — submitTask 认领成功后 POST 才失败', () => {
       return 's-new';
     });
 
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       const p = captured.hook!.submitTask({ task });
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
@@ -374,7 +374,7 @@ describe('#1321 AC4 — 认领超时不得被渲染成「提交失败」', () =>
     vi.mocked(discoverNewSessionId).mockRejectedValue(new SessionClaimTimeoutError());
 
     await mount();
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       const p = captured.hook!.submitTask({ task: '慢负载下不能丢的原文' });
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
@@ -399,7 +399,7 @@ describe('#1321 AC4 — 认领超时不得被渲染成「提交失败」', () =>
     );
 
     await mount();
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       const p = captured.hook!.submitTask({ task: 'POST 真的失败了' }, { onRetry: () => {} });
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
@@ -432,7 +432,7 @@ describe('#1333 findings 修复——认领接线', () => {
     vi.mocked(discoverNewSessionId).mockRejectedValue(new SessionClaimTimeoutError());
 
     await mount();
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       const p = captured.hook!.submitTask({ task: '接线钉锚点' });
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);
@@ -458,7 +458,7 @@ describe('#1333 findings 修复——认领接线', () => {
     );
 
     await mount();
-    let result: string | null = null;
+    let result: SubmitTaskResult = null;
     await act(async () => {
       const p = captured.hook!.submitTask({ task: 'POST 失败盖住歧义' });
       await vi.advanceTimersByTimeAsync(EARLY_RESPONSE_WINDOW_MS + 200);

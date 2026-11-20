@@ -32,13 +32,17 @@ LEGACY_BACKENDS = ("windows_psec",)
 
 
 def default_backend_for_platform(name: str = os.name) -> str:
-    """平台默认后端（#1048）。
+    """平台默认后端：恒为 `local`，含 Windows（#1644，2026-10-28 用户裁决）。
 
-    受影响（Windows/NTFS）平台上工作区的对象身份边界只能靠换文件系统切断，
-    故平台默认落 `docker`（不可用即 fail-closed，绝不回落 local/PSEC）。
-    其余平台默认 `local`（无 NTFS hard link 对象身份问题）。
+    #1048 的事实不变——受影响（Windows/NTFS）平台上工作区的对象身份边界无法
+    靠 local 切断，硬链接可逃逸到宿主；该风险由用户明示接受（见 ADR-0054 的
+    2026-10-28 补注）。docker 改为**显式可选**后端：显式 `sandbox_backend=
+    "docker"` 不可用时仍 fail-closed（409），绝不静默回落 local；未显式选择
+    的部署默认永不因 docker 不可用而失败（没有 docker 的安装也能建会话）。
+
+    `name` 保留在签名里（平台名），当前不参与决策——调用方与测试按平台传值。
     """
-    return "docker" if name == "nt" else "local"
+    return "local"
 
 
 @dataclass(frozen=True)

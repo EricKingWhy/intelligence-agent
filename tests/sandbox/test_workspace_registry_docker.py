@@ -30,6 +30,8 @@ docker_required = pytest.mark.skipif(
 )
 
 SESSION_ID = "test-registry-docker-session"
+# #1644 AC4 用例独立容器名：避免 -n 并发下与既有类的确定性容器名互踩。
+EXPLICIT_DOCKER_SESSION_ID = "test-explicit-docker-after-flip"
 CHILD_SESSION_ID = "test-registry-docker-child"
 _WIN32_OPEN_EXISTING = 3
 _WIN32_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -111,10 +113,14 @@ def registry(tmp_path: Path):
     except Exception:  # noqa: BLE001, S110 — best-effort cleanup
         pass
     try:
+        reg.delete(EXPLICIT_DOCKER_SESSION_ID)
+    except Exception:  # noqa: BLE001, S110 — best-effort cleanup
+        pass
+    try:
         import docker
 
         client = docker.from_env(use_context=False)
-        for vol_suffix in [SESSION_ID]:
+        for vol_suffix in (SESSION_ID, EXPLICIT_DOCKER_SESSION_ID):
             try:
                 client.volumes.get(f"agent-harness-{vol_suffix}").remove(force=True)
             except Exception:  # noqa: BLE001, S110
@@ -136,6 +142,35 @@ class TestDockerRegistryDeterministicNaming:
         mapping = json.loads(mapping_file.read_text(encoding="utf-8"))
         assert mapping["container_name"] == f"agent-harness-{SESSION_ID}"
         assert mapping["volume_name"] == f"agent-harness-{SESSION_ID}"
+
+
+@docker_required
+class TestExplicitDockerStillWorksAfterDefaultFlip:
+    """#1644 AC4：默认翻转后，显式 docker 仍真走 docker（容器创建 + inspect）。
+
+    本类只断言「显式选择仍进 docker 后端」，不碰默认路径——默认路径的
+    「落 local、零探针」由 `tests/web/test_1644_default_backend_local.py`
+    与 `tests/session/test_1644_deployment_default.py` 在无 docker 环境也能跑。
+    无 docker daemon 的环境按 `docker_required` 跳过并记录。
+    """
+
+    def test_explicit_docker_creates_container_and_inspects(self, registry):
+        from agent_harness.sandbox.docker import DockerSandbox
+
+        sandbox = registry.create(EXPLICIT_DOCKER_SESSION_ID, backend="docker")
+        try:
+            assert isinstance(sandbox, DockerSandbox)
+            sandbox.ensure_started()
+            assert sandbox._container is not None
+            sandbox._container.reload()
+            assert sandbox._container.status == "running"
+            assert sandbox._container.name == (
+                f"agent-harness-{EXPLICIT_DOCKER_SESSION_ID}"
+            )
+            sandbox.write_text("explicit-docker.txt", "ok")
+            assert sandbox.read_text("explicit-docker.txt") == "ok"
+        finally:
+            registry.stop(EXPLICIT_DOCKER_SESSION_ID)
 
 
 @docker_required

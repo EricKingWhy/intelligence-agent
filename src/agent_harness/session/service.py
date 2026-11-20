@@ -1928,8 +1928,8 @@ class SessionService:
         session_tool_call_limits: Mapping[str, Any] | None = None,
         session_max_delegations: int | None = None,
         # #363 / W-19：显式选择的 sandbox 后端（"local" | "docker"）；None ⇒
-        # 部署默认（按平台解析：Windows ⇒ docker，否则 local，见 web 层
-        # `default_backend_for_platform`）。docker 不可用时 registry.create 抛
+        # 部署默认（`default_backend_for_platform`，自 #1644 起恒为 local，含
+        # Windows）。**显式**选 docker 且不可用时 registry.create 抛
         # SandboxUnavailableError（fail-fast，零副作用），绝不静默回落。
         sandbox_backend: str | None = None,
         # #1296：调度器在持久 dispatch intent 里预分配的 Session ID。只供内部

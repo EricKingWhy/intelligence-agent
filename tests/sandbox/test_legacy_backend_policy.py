@@ -48,8 +48,20 @@ class TestNewSessionBackendPolicy:
             registry.create("sess_psec_new", backend="windows_psec")
         assert not registry.exists("sess_psec_new")
 
-    def test_windows_platform_default_backend_is_docker(self) -> None:
-        """AC1：受影响（Windows）工作区新会话默认 docker，而非 local/PSEC。"""
+    def test_windows_platform_default_backend_is_local(self) -> None:
+        """#1644（翻转 #1048 的默认）：Windows 平台默认 local，不是 docker。
+
+        2026-10-28 用户裁决：Windows 默认改 local（#1048 硬链接口子重开，风险由
+        用户明示接受），docker 改为显式可选。本用例钉住该默认——它的前身
+        `test_windows_platform_default_backend_is_docker` 断言 `== "docker"`，
+        本票落地即红。
+        """
         from agent_harness.sandbox.capabilities import default_backend_for_platform
 
-        assert default_backend_for_platform("nt") == "docker"
+        assert default_backend_for_platform("nt") == "local"
+
+    def test_posix_platform_default_backend_stays_local(self) -> None:
+        """#1644 AC3：非 Windows 默认仍 local（不随本票改变）。"""
+        from agent_harness.sandbox.capabilities import default_backend_for_platform
+
+        assert default_backend_for_platform("posix") == "local"

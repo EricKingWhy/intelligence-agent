@@ -49,6 +49,7 @@ import type {
   ModelCatalogEntry,
   SandboxBackendEntry,
   StartSessionPayload,
+  SubmitTaskResult,
 } from '../lib/api';
 import type { ProjectActions } from '../hooks/useProjects';
 import {
@@ -98,7 +99,7 @@ interface Props {
   /** 「新建任务…」（#367 [W-23] 选项 A；#1177 §A.3 改名，原「在此项目中新建任务」）：
    *  统一创建入口，prompt 唯一必填 + 三档自主度 + 模型 + 运行位置，创建即启动。
    *  resolve `null` = 已创建；否则为**给用户看的原因**（留在确认面里）。 */
-  onStartTask: (payload: StartSessionPayload) => Promise<string | null>;
+  onStartTask: (payload: StartSessionPayload) => Promise<SubmitTaskResult>;
   /** 模型目录（GET /api/models）——创建表单模型选择器的数据源。 */
   models: ModelCatalogEntry[];
   /** sandbox 后端探针（GET /api/sandbox-backends）——运行位置选择器的数据源。 */

@@ -16,6 +16,12 @@ NTFS **hard link** 是同一卷上**同一文件对象的多个名称**（同一
 
 ## 决策
 
+> **2026-10-28 用户裁决（#1644）**：平台默认后端改为 `local`（含 Windows），
+> docker 改为**显式可选**。本 ADR 的事实认定（NTFS 硬链接的对象身份边界只能靠
+> 换文件系统切断）**不变**，改的只是默认策略：Windows 上 `local` 硬链接逃逸口子
+> 重开，风险由用户明示接受（明示文案 + docker 仍可选作缓解）。受影响会话仍应
+> 显式选 docker；显式选择不可用时仍 fail-closed（409），不静默回落。
+
 1. **受影响隔离会话使用每会话私有 Docker named volume** 挂到 Linux `/workspace`。
    容器不挂宿主项目目录、不挂 docker socket、不挂其它可写宿主路径（Docker 官方
    Volumes 语义：named volume 由 daemon 管理、独立于任一宿主路径；只有 bind mount
