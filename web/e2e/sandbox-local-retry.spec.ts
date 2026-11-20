@@ -16,7 +16,10 @@ import { fulfillSse, routeApi, RUN, SID, T, type ApiMock, type FrameSpec } from 
 
 const ALPHA = 'D:/repos/alpha';
 
-/** 票面定义的两条文案：逐字复制，不 import src（e2e 锁的是最终渲染，不是常量）。 */
+/** 票面定义的两条文案：逐字复制，不 import src（e2e 锁的是最终渲染，不是常量）。
+ *  若票面文案变更，**本文件两常量必须同步改**；`TaskCreationDialog.test.tsx` 的
+ *  `toContain(LOCAL_BACKEND_NOTICE)` 是唯一同源锚点（e2e 不 import src：不同 tsconfig
+ *  工程，且同源会让「两处同时改错」检不出来）。 */
 const LOCAL_NOTICE = 'local 后端直接在本机文件系统运行，无操作系统级文件/网络隔离。';
 const NTFS_NOTICE =
   'Windows 上 local 另存在 NTFS 硬链接逃逸风险（工作区内恶意内容可逃逸到宿主），见 #1048。';

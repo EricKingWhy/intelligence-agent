@@ -1540,9 +1540,11 @@ export function useSession() {
    *  后端 detail 原文（如「目录不存在：…」），所以那条路径连 422 也不套用
    *  「未知模型」的旧语义。
    *
-   *  #1644 AC2：`ownError` 路径遇 409 时返回**结构化回执**（`StartSessionFailure`），
-   *  而不是纯字符串——创建表单据此渲染「改用 local 重试」。其余调用方（Composer）
-   *  仍旧只拿字符串。 */
+   *  #1644 AC2：`ownError` 路径遇到**能确定未被受理**的失败（短窗 4xx 等，
+   *  `StartSessionError`）时返回**结构化回执**（`StartSessionFailure`），而不是纯字符串
+   *  ——创建表单据此渲染「改用 local 重试」（是否 409 + `backend === 'docker'` 由
+   *  `TaskCreationDialog` 的 `isSandboxFallbackFailure` 判，hook 层不判 status）。
+   *  其余调用方（Composer）仍旧只拿字符串。 */
   const submitTask = useCallback(
     async (
       payload: StartSessionPayload,

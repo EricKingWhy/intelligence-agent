@@ -435,4 +435,28 @@ describe('TaskCreationDialog 409 切换动作（#1644）', () => {
       [...card.querySelectorAll('button')].some((b) => b.textContent === '改用 local 重试'),
     ).toBe(false);
   });
+
+  it('500 且 backend=docker：不给切换按钮（状态码条件有牙）', async () => {
+    const failure = sandboxUnavailable({ status: 500 });
+    await submitPrompt(async () => failure);
+
+    const card = document.body.querySelector<HTMLElement>('.project-error')!;
+    expect(card.textContent).toContain(failure.message);
+    expect(card.textContent).not.toContain(LOCAL_BACKEND_NOTICE);
+    expect(
+      [...card.querySelectorAll('button')].some((b) => b.textContent === '改用 local 重试'),
+    ).toBe(false);
+  });
+
+  it('409 且 backend=local：不给切换按钮（backend 条件有牙）', async () => {
+    const failure = sandboxUnavailable({ backend: 'local' });
+    await submitPrompt(async () => failure);
+
+    const card = document.body.querySelector<HTMLElement>('.project-error')!;
+    expect(card.textContent).toContain(failure.message);
+    expect(card.textContent).not.toContain(LOCAL_BACKEND_NOTICE);
+    expect(
+      [...card.querySelectorAll('button')].some((b) => b.textContent === '改用 local 重试'),
+    ).toBe(false);
+  });
 });
