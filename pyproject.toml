@@ -26,7 +26,7 @@ dependencies = [
     # 本仓改用 Pillow。MM-01（#822）的 probe.py 注释已登记「本仓未依赖 Pillow，
     # 归一化是 MM-02」，故本票引入。
     "pillow>=10",
-    "pydantic>=2.13.4",
+    "pydantic>=2.14.3",
     "pydantic-settings>=2.16.2",
     "pyjwt>=2.10,<3",
     "python-dotenv>=1.2.2",
