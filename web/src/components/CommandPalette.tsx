@@ -75,6 +75,26 @@ export function CommandPalette({ open, onOpenChange, items, onAfterClose }: Prop
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  /* #1706：每个「打开周期」换一个 key，强制重新挂载 Radix 子树。
+   *
+   * 缺陷只在「关闭动画（`--dur-out` 150ms）没走完又打开」这一条路径上出现：Radix
+   * `Presence` 在退出期间复用原节点，于是
+   *   1. body 子节点顺序不变 —— 命令面板仍排在常驻管理面板（`.memory-panel` 等，
+   *      同为 `position: fixed; z-index: 51`）之前，命令项被面板头部盖住、点不到；
+   *   2. `DismissableLayer` 的图层栈也停在旧的注册位 —— 记忆面板仍被当成顶层模态，
+   *      把「点在命令面板里」判成 outside 而关掉自己（点击命令项后记忆面板消失）。
+   * 重新挂载 = 节点重新 append 到 body 末尾、图层重新入栈，两个症状一起消失；
+   * CSS 侧的 52/53 抬层只负责让新节点确实压在上面板层族之上。
+   *
+   * 用「渲染期调整 state」（React 官方派生状态写法：本次渲染被丢弃并立即重渲）而不是
+   * effect：effect 会在 open 的第一次提交之后才跑，那会先挂一个旧 key 的子树再换掉它，
+   * 多出一次挂载/卸载（`onCloseAutoFocus` 会被多触发一次）。 */
+  const [openCycle, setOpenCycle] = useState(0);
+  const [previousOpen, setPreviousOpen] = useState(open);
+  if (open !== previousOpen) {
+    setPreviousOpen(open);
+    if (open) setOpenCycle((n) => n + 1);
+  }
 
   const results = useMemo(() => filterCommands(items, query).slice(0, 50), [items, query]);
 
@@ -110,11 +130,17 @@ export function CommandPalette({ open, onOpenChange, items, onAfterClose }: Prop
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root key={openCycle} open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="palette-overlay" />
+        {/* #1706：命令面板是瞬时操作面，必须压过常驻管理面板（`.project-dialog` /
+            `.memory-panel` / … 都是 z-index 51）。裸 `.palette-overlay` / `.palette-content`
+            被全仓 13+ 处 Dialog 共用，直接改它们的数值会把所有弹窗的遮罩一起抬到自身内容
+            之上（#203：`inset:0` 遮罩接走指针事件）。所以在**本组件**上加修饰类，只抬这一份；
+            否则两者同为 51 时由 body 下的 DOM 顺序决定谁在上，命令项会被面板头部盖住
+            （#1706 根因）。遮罩与内容一起抬，保持 52/53 配对（内容仍高于遮罩）。 */}
+        <Dialog.Overlay className="palette-overlay palette-overlay-raised" />
         <Dialog.Content
-          className="palette-content"
+          className="palette-content palette-content-raised"
           aria-label="命令面板"
           onKeyDown={onKeyDown}
           onCloseAutoFocus={(e) => {

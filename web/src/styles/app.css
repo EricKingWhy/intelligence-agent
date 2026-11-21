@@ -10132,6 +10132,18 @@ button.json-row {
   overflow: hidden;
   animation: palette-in var(--dur-palette) var(--ease-apple);
 }
+/* #1706：命令面板要压过常驻管理面板层族（`.project-dialog` / `.memory-panel` / … = 51），
+ * 否则两者同为 51 时由 body 下的 portal 顺序决定谁在上（记忆面板晚建立 ⇒ 盖住命令项）。
+ * 只抬 `CommandPalette.tsx` 自己那一份：裸 `.palette-overlay`(50) 被全仓 13+ 处 Dialog 共用，
+ * 直接改它等于把所有弹窗的遮罩抬到内容之上（#203 的指针事件事故）。
+ * 52/53 仍按「内容 > 遮罩」配对；上方最近的高位层次是 `.arg-tip` 260 / `.skip-links` 1000，
+ * 有充足余量，也远低于诊断弹出的 1200。 */
+.palette-overlay.palette-overlay-raised {
+  z-index: 52;
+}
+.palette-content.palette-content-raised {
+  z-index: 53;
+}
 /* backdrop-filter 退化（code-review P0）：不支持毛玻璃的引擎改用近实心底，
  * 保证浮层与底层内容仍可分辨（surface-overlay 本身偏透，直接用会糊成一片）。 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
