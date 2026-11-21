@@ -321,9 +321,14 @@ test('focus: selecting an already open panel does not leak its opener to the nex
   await expect(panel(page)).toBeVisible();
 
   // Running the same command again does not reopen the mounted panel or start a new focus lifecycle.
+  // #1706：这里曾是 `click({ force: true })`——它把点击派发给盖在上面的记忆面板头部，
+  // 命令面板根本不关，`force` 掩盖了「用户点不到」。现在命令面板层级高于面板层族，
+  // 真实点击必须能命中并关掉它。层级修复的完整关闭路径见四条用例：
+  // `#1706 AC1：记忆面板打开时命令面板在上…`（真实点击）、`#1706 AC1②…`（Esc）、
+  // `#1706 AC1③…`（遮罩）、`#1706 AC1：键盘 Enter…`（Enter）。
   await page.keyboard.press('Control+k');
   await page.locator('.palette-input').fill('memory');
-  await page.locator('.palette-item').click({ force: true });
+  await page.locator('.palette-item').click();
   await expect(panel(page)).toBeVisible();
   await expect(page.locator('.palette-input')).toHaveCount(0);
 
@@ -341,6 +346,155 @@ test('focus: selecting an already open panel does not leak its opener to the nex
   await expect(dialog).toBeHidden();
   await expect(opener).toBeFocused();
 });
+
+/** **缺陷时序**：命令面板 → 选「管理记忆」（面板打开、命令面板进入 exit 动画）→
+ *  **不等**，立即 Ctrl+K 再开命令面板。
+ *
+ *  为什么必须这样开：#1706 的缺陷只在「命令面板已经挂载过、关闭动画 `--dur-out`
+ *  （150ms）没走完又打开」时出现——那时 Radix `Presence` 复用旧节点，命令面板的
+ *  portal 仍排在记忆面板**之前**（DOM 顺序），图层栈也停在旧位置。若改用顶栏菜单
+ *  开面板（`openMemories`），命令面板是**首次**挂载、必然 append 到 body 末尾，天然在
+ *  面板之上——那种写法在修复前也能通过，判别力为零。
+ *
+ *  同理**不许**在两次 Ctrl+K 之间加等待：等到 >150ms 旧节点已卸载，缺陷窗口就没了。 */
+async function openPaletteOverMemoriesFast(page: Page): Promise<void> {
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('memory');
+  await page.getByRole('option', { name: '管理记忆' }).click();
+  await expect(panel(page)).toBeVisible();
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('memory');
+  await expect(page.locator('.palette-item')).toHaveCount(1);
+}
+
+test('#1706 AC1：记忆面板打开时命令面板在上（真实点击命中命令项，不是被面板接走）', async ({
+  page,
+}) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.goto('/');
+  // 缺陷时序：下面的「层级 / 命中」断言只有在命令面板复用旧 portal 节点时才有判别力。
+  await openPaletteOverMemoriesFast(page);
+
+  // 机械判据：命令项中心的顶层元素必须属于命令面板（修复前是 `.project-dialog-head`，
+  // 即记忆面板头部）。层级自下而上为 面板 51 < 遮罩 52 < 内容 53，保持「内容 > 遮罩」。
+  const probe = await page.evaluate(() => {
+    const item = document.querySelector('.palette-item') as HTMLElement;
+    const r = item.getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) as HTMLElement | null;
+    // 用 null 而不是 `!` 取层级：修复前这些修饰类**不存在**，`!` 会让断言红在
+    // `getComputedStyle(null)` 的 TypeError 上，而不是红在「命中判定」这条真正的缺陷证据上。
+    const z = (sel: string) => {
+      const el = document.querySelector(sel);
+      return el ? getComputedStyle(el).zIndex : null;
+    };
+    return {
+      insidePalette: top?.closest('.palette-content') !== null && top?.closest('.palette-content') !== undefined,
+      topClass: top?.className ?? null,
+      // 记忆面板的遮罩也带裸 `.palette-overlay`（50）——必须取命令面板自己那份（修饰类），
+      // 否则断言的「内容 > 遮罩」可能比的是记忆面板的遮罩，测不到 52/53 配对。
+      contentZ: z('.palette-content-raised'),
+      overlayZ: z('.palette-overlay-raised'),
+      panelZ: z('.memory-panel'),
+    };
+  });
+  // 先断言缺陷证据（命中到记忆面板头部 = 用户点不到），再断言层级数值。
+  expect(probe.topClass).not.toContain('project-dialog');
+  expect(probe.insidePalette).toBe(true);
+  expect(probe.contentZ).not.toBeNull();
+  expect(probe.overlayZ).not.toBeNull();
+  expect(Number(probe.contentZ)).toBeGreaterThan(Number(probe.panelZ));
+  expect(Number(probe.contentZ)).toBeGreaterThan(Number(probe.overlayZ));
+  // 遮罩也确实压过面板层族（AC4② 的「抬遮罩」姿态）——否则面板区内的点会落到记忆面板上。
+  expect(Number(probe.overlayZ)).toBeGreaterThan(Number(probe.panelZ));
+
+  // 真实点击（不加 force）：命令面板关闭，记忆面板保持可见。
+  await page.locator('.palette-item').click();
+  await expect(page.locator('.palette-input')).toHaveCount(0);
+  await expect(panel(page)).toBeVisible();
+  await expect(row(page, '不要客套话')).toBeVisible();
+});
+
+test('#1706 AC1②：记忆面板打开时 Esc 关闭命令面板，记忆面板保持打开', async ({ page }) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.goto('/');
+  await openPaletteOverMemoriesFast(page);
+
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.palette-input')).toHaveCount(0);
+  await expect(panel(page)).toBeVisible();
+  await expect(row(page, '不要客套话')).toBeVisible();
+});
+
+test('#1706 AC1③：点击命令面板遮罩关闭它，记忆面板不受影响', async ({ page }) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.goto('/');
+  await openPaletteOverMemoriesFast(page);
+
+  // 姿态随 AC4② 的裁决：遮罩与内容一起抬到 52/53。左上角 (8,8) 在两个浮层之外、
+  // 只在 `.palette-overlay` 内 ⇒ 点它必须命中遮罩并关闭命令面板。
+  await page.mouse.click(8, 8);
+  await expect(page.locator('.palette-input')).toHaveCount(0);
+  await expect(panel(page)).toBeVisible();
+  // 命令面板的遮罩已卸载 ⇒ 记忆面板不再被压暗，其头部重新是顶层元素。
+  const hit = await page.evaluate(() => {
+    const head = document.querySelector('.memory-panel .project-dialog-head') as HTMLElement;
+    const r = head.getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) as HTMLElement | null;
+    return top !== null && (top === head || head.contains(top));
+  });
+  expect(hit).toBe(true);
+});
+
+test('#1706 AC1：键盘 Enter 选中命令项也会关闭命令面板', async ({ page }) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.goto('/');
+  await openPaletteOverMemoriesFast(page);
+
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.palette-input')).toHaveCount(0);
+  await expect(panel(page)).toBeVisible();
+});
+
+/* AC4③ 同层族回归（recovery-list-panel）。
+ *
+ * 恢复列表**没有**命令面板入口（`paletteItems` 里没有 recovery，App 也没传回调），所以这里
+ * 用同一层族里**有**入口的 `.approve-policy-dialog`（`ApprovePolicyPanel` 的 Content 同样是
+ * `project-dialog approve-policy-dialog`，走 `.project-dialog` 组的 fixed/z-index 51）走
+ * 完整的缺陷时序。`.recovery-list-panel` 与它共用同一组选择器（app.css 的 `.project-dialog`
+ * 组），层级行为由同一次抬升覆盖，故用不着再逐面板复验。 */
+test('#1706 AC4③ 同层族回归：project-dialog 层族面板打开时 Ctrl+K 可点可关', async ({
+  page,
+}) => {
+  await routeApi(page, { memories: [SHORT], sessions: [] });
+  await page.route('**/api/approve-policy/rules', (route) =>
+    route.fulfill({ status: 200, body: '[]', contentType: 'application/json' }),
+  );
+  await page.goto('/');
+
+  // 缺陷时序：命令面板 → 选「管理持久审批规则」（面板打开、命令面板进入 exit 动画）
+  // → 不等 → 立即 Ctrl+K 再开。与 `openPaletteOverMemoriesFast` 同形。
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('approval');
+  await page.getByRole('option', { name: '管理持久审批规则' }).click();
+  const dialog = page.locator('.approve-policy-dialog');
+  await expect(dialog).toBeVisible();
+
+  await page.keyboard.press('Control+k');
+  await page.locator('.palette-input').fill('切换主题');
+  const item = page.locator('.palette-item', { hasText: '切换主题' });
+  await expect(item).toHaveCount(1);
+  const topClass = await item.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) as HTMLElement | null;
+    return top?.className ?? null;
+  });
+  expect(topClass).toContain('palette-item');
+
+  await item.click();
+  await expect(page.locator('.palette-input')).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+});
+
 
 test('focus: body focus on a non-chat tab falls back to a visible app control', async ({ page }) => {
   await routeApi(page, { memories: [SHORT], sessions: [] });
