@@ -10137,7 +10137,7 @@ button.json-row {
  * 只抬 `CommandPalette.tsx` 自己那一份：裸 `.palette-overlay`(50) 被全仓 13+ 处 Dialog 共用，
  * 直接改它等于把所有弹窗的遮罩抬到内容之上（#203 的指针事件事故）。
  * 52/53 仍按「内容 > 遮罩」配对；更近的 60 档是既有的 `.rail-menu` / `.tl-tooltip` / `.drop-mask`
- * （本票未动；命令面板打开期间它们若出现仍会压在上面，属既有行为），再往上是
+ * （本票未动；命令面板打开期间它们若出现仍会压在上面，属既有行为），再往上还有
  * `.arg-tip` 260 / `.skip-links` 1000，有充足余量，也远低于 `.tip-content`（tooltip）的 1200。 */
 .palette-overlay.palette-overlay-raised {
   z-index: 52;
