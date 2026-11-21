@@ -205,7 +205,27 @@ Kubernetes SIG Testing 的 flaky-tests 政策：**零容忍 + 隔离（quarantin
 - **F2/F4**：同签名同树再现（2/3 整文件）⇒ §2 第 1 条排除 flake；且基线树即红 ⇒ 既有红。
 - **F3 零文件交集**：同上（`a5250089f..cc4cee6aa` 的 13 个文件均与该 spec、与 `App.tsx` /
   `CommandPalette.tsx` 零交集；其后的收据提交只加 `docs/gate/*.json`，不改变该结论）。
-- **F5 处置**：**按 #1500 任务书第 3 步「隔离证据指向真产品缺陷 ⇒ 停下报协调员、不许自己开票」处理**：
-  未开票、未登记为 flake；该 spec 已从 PR 车道映射表排除（见 §7.2 的 `e2e_scope_map.tsv` 说明）。
+- **F5 处置（以下为 #1706 修复前的历史记录）**：**按 #1500 任务书第 3 步「隔离证据指向真产品缺陷
+  ⇒ 停下报协调员、不许自己开票」处理**：未开票、未登记为 flake；该 spec 已从 PR 车道映射表排除
+  （见 §7.2 的 `e2e_scope_map.tsv` 说明）。
   建议方向（留给协调员/后续票）：命令面板与记忆面板同时打开时的层级/互斥（打开面板时关闭面板，
   或给命令面板更高层级），并去掉 spec 里的 `force: true`（它掩盖了「用户点不到」这一事实）。
+  > 上面这段记录了**当时的**处置与建议；其中「已从 PR 车道排除」「建议去掉 `force: true`」
+  > 两条在 #1706 之后都不成立，现状见下一条。
+- **2026-11-21 关闭（#1706）**
+  - **根因（两层）**：① DOM 顺序——`.palette-content` 与 `.memory-panel` 同为 fixed/51，Radix
+    portal 都 append 到 body，退出动画（`--dur-out` 150ms）未结束时重开使 `Presence` 复用旧节点
+    ⇒ 命令面板仍排在记忆面板之前；② Radix `DismissableLayer` 按**图层注册顺序**（插入序 Set）
+    判顶层 ⇒ 旧节点让记忆面板仍被视为顶层模态，把「点在命令面板里」判成 outside 而**关掉自己**。
+  - **修法**：`CommandPalette` 按打开周期重挂载（换 `Dialog.Root` key，节点重新 append、图层
+    重新入栈）；仅本组件的 Overlay/Content 加修饰类抬到 52/53（裸 `.palette-overlay` 被全仓
+    13+ 处 Dialog 共用，不动其数值——#203）。
+  - **`force: true` 已删除**（`s-memories.spec.ts` 的 `:309` 用例改为真实点击）。
+  - **`s-memories.spec.ts` 已进 PR 车道映射表**（`docs/agents/e2e_scope_map.tsv` 新增
+    `CommandPalette.tsx` 与 `s-memories.spec.ts` 两行，撤销排除项 e.）。
+  - **读数**：`:309` 单跑 **6/6** 通过；`s-memories.spec.ts` 两视口（chromium-1280 + 1920、
+    `--workers=2`）**40/40** 通过。
+  - **base 反向对照**（产品代码回退到 `d554cbf28`）：三条缺陷时序用例 **4/4 红**——
+    AC1① 命中 `DIV.project-dialog-head`、AC1② `.palette-input` 计数 1≠0、
+    AC1③ 与 AC4③ 面板被自关（`element(s) not found`）。
+    读数：`~/workspace/ticket-takeover-drafts/evidence-1706/spec-defect-timing-*.log`。
