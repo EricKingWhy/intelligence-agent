@@ -88,7 +88,7 @@ export function CommandPalette({ open, onOpenChange, items, onAfterClose }: Prop
    *
    * 用「渲染期调整 state」（React 官方派生状态写法：本次渲染被丢弃并立即重渲）而不是
    * effect：effect 会在 open 的第一次提交之后才跑，那会先挂一个旧 key 的子树再换掉它，
-   * 多出一次挂载/卸载（`onCloseAutoFocus` 会被多触发一次）。 */
+   * 多出一次挂载/卸载。 */
   const [openCycle, setOpenCycle] = useState(0);
   const [previousOpen, setPreviousOpen] = useState(open);
   if (open !== previousOpen) {
