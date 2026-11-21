@@ -323,8 +323,9 @@ test('focus: selecting an already open panel does not leak its opener to the nex
   // Running the same command again does not reopen the mounted panel or start a new focus lifecycle.
   // #1706：这里曾是 `click({ force: true })`——它把点击派发给盖在上面的记忆面板头部，
   // 命令面板根本不关，`force` 掩盖了「用户点不到」。现在命令面板层级高于面板层族，
-  // 真实点击必须能命中并关掉它。层级修复的完整关闭路径见用例
-  // `#1706：面板打开时 Ctrl+K 的三条关闭路径 + Enter`。
+  // 真实点击必须能命中并关掉它。层级修复的完整关闭路径见四条用例：
+  // `#1706 AC1：记忆面板打开时命令面板在上…`（真实点击）、`#1706 AC1②…`（Esc）、
+  // `#1706 AC1③…`（遮罩）、`#1706 AC1：键盘 Enter…`（Enter）。
   await page.keyboard.press('Control+k');
   await page.locator('.palette-input').fill('memory');
   await page.locator('.palette-item').click();
