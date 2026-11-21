@@ -430,9 +430,25 @@ test('#1706 AC1③：点击命令面板遮罩关闭它，记忆面板不受影�
   await page.goto('/');
   await openPaletteOverMemoriesFast(page);
 
-  // 姿态随 AC4② 的裁决：遮罩与内容一起抬到 52/53。左上角 (8,8) 在两个浮层之外、
-  // 只在 `.palette-overlay` 内 ⇒ 点它必须命中遮罩并关闭命令面板。
-  await page.mouse.click(8, 8);
+  // 姿态随 AC4② 的裁决：遮罩与内容一起抬到 52/53。判定点从遮罩矩形现算（左下角内侧），
+  // 不用固定 (8,8)：`.skip-links` 钉在 top:8px; left:8px 且 z-index 1000，那个像素命中谁
+  // 取决于它的排版状态，CI 里因此脆红过一次。点之前先断言这里确实是遮罩。
+  const { x, y, occupant } = await page.evaluate(() => {
+    const overlay = document.querySelector('.palette-overlay-raised');
+    if (overlay === null) return { x: -1, y: -1, occupant: 'null（找不到 .palette-overlay-raised）' };
+    const r = overlay.getBoundingClientRect();
+    const px = r.left + 16;
+    const py = r.bottom - 16;
+    const el = document.elementFromPoint(px, py);
+    return {
+      x: px,
+      y: py,
+      occupant:
+        el === null ? 'null' : `${el.tagName}.${String(el.className).split(' ').filter(Boolean).join('.')}`,
+    };
+  });
+  expect(occupant, `该点 (${x}, ${y}) 被 ${occupant} 占据，不是命令面板遮罩`).toContain('palette-overlay');
+  await page.mouse.click(x, y);
   await expect(page.locator('.palette-input')).toHaveCount(0);
   await expect(panel(page)).toBeVisible();
   // 命令面板的遮罩已卸载 ⇒ 记忆面板不再被压暗，其头部重新是顶层元素。
