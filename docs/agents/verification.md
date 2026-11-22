@@ -597,13 +597,19 @@ Windows 可复跑命令（PowerShell，仓库根；`.venv\Scripts\python.exe`）
 - **登记表生命周期**：`pytest_runtest_protocol` 进入时换新表，正常结束（含失败、
   skip）只清空不终止。跨用例不串扰：前一用例的登记项不会活到后一用例的 abort。
 - **终止语义**：POSIX 先 `killpg(pgid, SIGTERM)`，宽限 **2.0s**（轮询 `poll()`），
-  未退则 `killpg(pgid, SIGKILL)`，再等 **1.0s** 回收；按组收，所以**同一进程组内的
-  后代一并终止**。Windows 走 `taskkill /T /F /PID`（`subprocess.run`，`timeout=10`），
-  失败回退 `process.kill()`。
+  宽限后**不以 leader 是否存活为条件**——只要 `killpg(pgid, 0)` 探测到组内还有成员
+  （忽略 SIGTERM 的后代常见于此）就补 `killpg(pgid, SIGKILL)`，再等 **1.0s** 回收；
+  按组收，所以**同一进程组内的后代一并终止**。Windows 走 `taskkill /T /F /PID`
+  （`subprocess.run`，timeout 取 `min(10, 剩余预算)`），rc≠0 且进程仍存活、或抛
+  `OSError`/超时，都记 `[test-subprocess]` 日志并回退 `process.kill()`，随后同样等
+  `min(1.0s, 剩余预算)` 回收。
 - **有界与 best-effort**：整张表的总预算是 **5.0s**，到点放弃剩余条目并记日志；
-  任何 `ProcessLookupError` / `PermissionError` / 超时都只往真实 stderr fd 写一条
+  单条内的每次等待都按剩余预算截断，所以 Windows 分支也不会单条突破总预算。任何
+  `ProcessLookupError` / `PermissionError` / 超时都只往真实 stderr fd 写一条
   `[test-subprocess]` 日志（带 nodeid 与失败原因），继续处理下一个，绝不抛出，
   也绝不阻止 `finally` 里的 `os._exit(1)`。已退出 / 查无此进程视为成功。
+  登记侧同样可归因：pid 非法、进程已退出、读进程组失败、与 pytest 同组，四种拒绝
+  各写一条 `[test-subprocess] 拒绝登记 …`。
 - **顺序**（AC1）：写 nodeid + `faulthandler` 全线程栈 → 终止登记表内全部子进程 →
   `finally: os._exit(1)`。
 - **不承诺**：`setsid` 另起会话、脱离进程组的后代（#549 SB-02 的 killpg 盲区）不在
@@ -612,15 +618,17 @@ Windows 可复跑命令（PowerShell，仓库根；`.venv\Scripts\python.exe`）
 - **与 #1534 的分工**：#1534 只做 fixture 自身的 teardown 回收（正常返回 / 启动失败 /
   端口占用路径）；超时触发后 watchdog abort 路径的回收归 #1702，即本节。
 
-回归锁：`tests/test_per_test_timeout_subprocess.py`（孤儿终止、同组后代、注册/注销、
-重复终止幂等、未登记不受影响、跨用例不串扰、并发登记/注销、同组拒绝登记），全部
+回归锁：`tests/test_per_test_timeout_subprocess.py`（孤儿终止、同组后代、忽略 SIGTERM
+的后代、注册/注销、重复终止幂等、未登记不受影响、跨用例不串扰、正常结束只清表不杀、
+并发登记/注销、同组
+拒绝登记），全部
 走父进程 harness——触发超时的进程已被 `os._exit(1)` 打死，进程内断言没有意义。
 
 Windows 手工复跑（PowerShell，仓库根；`.venv\Scripts\python.exe`）：
 `$env:PYTHONUTF8=1; .venv\Scripts\python.exe -m pytest tests\test_per_test_timeout.py tests\test_pytest_deadline.py tests\test_per_test_timeout_subprocess.py -q -p no:randomly --basetemp=$env:TEMP\pptt`
-期望 `13 + 1 + 8 = 22 passed`。其中「同组后代」与「拒绝登记」两条用例带
-`sys.platform == "win32"` 早退（Windows 无 POSIX 进程组语义）；Windows 侧的终止
-主路径是 `taskkill /T /F`，需真机取证后才能把本节从「未取证」改成实测。
+期望 `13 + 1 + 10 = 24 passed`。其中「同组后代」「忽略 SIGTERM 的后代」「拒绝登记」
+三条用例带 `sys.platform == "win32"` 早退（Windows 无 POSIX 进程组语义）；Windows
+侧的终止主路径是 `taskkill /T /F`，需真机取证后才能把本节从「未取证」改成实测。
 **读数状态：无 Windows 落盘读数**。
 
 **默认值**：`pyproject.toml` `[tool.pytest.ini_options]` 里 `test_timeout = "300"`。

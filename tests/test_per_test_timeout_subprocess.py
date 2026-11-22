@@ -34,6 +34,23 @@ _GROUP_LEADER_CODE = (
     "time.sleep(3600)"
 )
 
+#: 孙进程：**忽略 SIGTERM**（先装处理器、落盘 ready 标记，再长睡）。组长自己对 TERM
+#: 是敏感的——组长先死、组内后代免疫 TERM 时，SIGKILL 升级若只看 leader 就会漏掉它。
+_TERM_IMMUNE_CHILD_CODE = (
+    "import os, pathlib, signal, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "pathlib.Path('grandchild.pid').write_text(str(os.getpid()))\n"
+    "pathlib.Path('grandchild.ready').write_text('ok')\n"
+    "time.sleep(3600)"
+)
+
+#: 探针里的「TERM 敏感组长 + TERM 免疫孙进程」，组长只负责 fork 与长睡。
+_TERM_IMMUNE_GROUP_CODE = (
+    "import subprocess, sys, time\n"
+    f"child = subprocess.Popen([sys.executable, '-c', {_TERM_IMMUNE_CHILD_CODE!r}])\n"
+    "time.sleep(3600)"
+)
+
 
 def _run_probe(
     tmp_path: Path, body: str, *args: str, timeout: float = 90.0,
@@ -58,10 +75,21 @@ def _pid_alive(pid: int) -> bool:
     """父进程侧核查：Linux/Windows 各自查进程表（AC2 要求，不是只看退出码）。"""
     if sys.platform == "win32":  # pragma: no cover - 本机 Linux，Windows 未取证
         result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            ["tasklist", "/FO", "CSV", "/NH", "/FI", f"PID eq {pid}"],
             capture_output=True, text=True, check=False,
         )
-        return str(pid) in result.stdout
+        # CSV 第一列是镜像名、第二列才是 PID；子串匹配会把 1234 认成 12345。
+        parsed = False
+        for line in result.stdout.splitlines():
+            columns = [part.strip().strip('"') for part in line.split(",")]
+            if len(columns) > 1 and columns[1].isdigit():
+                parsed = True
+                if int(columns[1]) == pid:
+                    return True
+        if parsed:
+            return False
+        # 输出形态认不出来（本地化 / 报错文案）时退化为子串判定，保持不脆。
+        return result.returncode == 0 and str(pid) in result.stdout
     result = subprocess.run(
         ["ps", "-o", "pid=,ppid=,pgid=", "-p", str(pid)],
         capture_output=True, text=True, check=False,
@@ -194,6 +222,61 @@ def test_registered_process_group_descendants_are_killed(
 
 
 # ---------------------------------------------------------------------------
+# 1c. SIGKILL 升级不以 leader 存活为准：忽略 TERM 的后代也必须被收掉
+# ---------------------------------------------------------------------------
+def test_term_immune_descendant_is_sigkilled_after_leader_exits(
+    tmp_path: Path,
+) -> None:
+    """组长对 TERM 敏感、孙进程忽略 TERM：宽限期后必须按组补 SIGKILL。
+
+    旧实现只在 leader `poll()` 仍存活时才发 SIGKILL ⇒ 这个孙进程逃逸。用例靠
+    `grandchild.ready` 确认孙进程已装好 SIG_IGN 再进 abort，断言不能靠时序碰运气。
+    """
+    if sys.platform == "win32":  # pragma: no cover - Windows 无进程组语义
+        return
+    result = _run_probe(
+        tmp_path,
+        f"""
+        import pathlib
+        import subprocess
+        import sys
+        import time
+
+        def test_registers_term_immune_group_then_hangs(track_subprocess):
+            proc = subprocess.Popen(
+                [sys.executable, "-c", {_TERM_IMMUNE_GROUP_CODE!r}],
+                start_new_session=True,
+            )
+            pathlib.Path("pids.txt").write_text(str(proc.pid))
+            track_subprocess.register(proc)
+            time.sleep(3600)
+        """,
+        "-o", "test_timeout=1",
+        timeout=60,
+    )
+
+    (leader,) = _read_pids(tmp_path)
+    pid_file = tmp_path / "grandchild.pid"
+    immune = int(pid_file.read_text(encoding="utf-8").strip()) if pid_file.exists() else None
+    try:
+        assert immune is not None, "前置失败：没拿到孙进程 pid（组长没来得及 fork）"
+        assert (tmp_path / "grandchild.ready").exists(), (
+            "前置失败：孙进程还没装好 SIGTERM 忽略处理器，用例会测不到升级路径"
+        )
+        assert result.returncode != 0
+        assert "[test-timeout]" in result.stdout + result.stderr
+        assert _wait_pid_gone(leader), f"组长 pid={leader} 未被终止"
+        assert _wait_pid_gone(immune), (
+            f"忽略 SIGTERM 的同组后代 pid={immune} 在 abort 后仍存活——"
+            "SIGKILL 升级以 leader 存活为条件，漏掉了 TERM-免疫的后代"
+        )
+    finally:
+        _kill_verified_process(leader)
+        if immune is not None:
+            _kill_verified_process(immune)
+
+
+# ---------------------------------------------------------------------------
 # 2. 注册/注销：正常结束只清表、不杀进程（登记制只管 abort 路径）
 # ---------------------------------------------------------------------------
 def test_unregistered_on_normal_exit_survives(tmp_path: Path) -> None:
@@ -305,6 +388,16 @@ def test_unregistered_child_is_not_touched(tmp_path: Path) -> None:
 def test_previous_test_registration_does_not_leak_into_next_abort(
     tmp_path: Path,
 ) -> None:
+    """A 登记后**不注销**就正常结束 → B 超时 abort。
+
+    两个断言缺一不可：
+    - A 的进程必须活着 ⇒ 正常结束路径只清表、不终止；
+    - B 的超时归因必须点名 B，且 A 的 pid 仍活 ⇒ A 遗留的登记项没被 B 的 abort 拿去终止。
+
+    旧版探针在 A 里 `unregister(proc)`，条目在 B 之前就没了，表不隔离也不红。
+    本用例钉的是端到端保证（前一用例的登记项进不了后一用例的 abort）；换表与
+    `table.clear()` 是两条实现路径，后者另由
+    `test_clear_drops_entries_without_killing` 单独钉住。"""
     result = _run_probe(
         tmp_path,
         f"""
@@ -320,7 +413,6 @@ def test_previous_test_registration_does_not_leak_into_next_abort(
             )
             pathlib.Path("pids.txt").write_text(str(proc.pid))
             track_subprocess.register(proc)
-            track_subprocess.unregister(proc)
 
         def test_b_times_out(track_subprocess):
             time.sleep(3600)
@@ -345,8 +437,55 @@ def test_previous_test_registration_does_not_leak_into_next_abort(
 
 
 # ---------------------------------------------------------------------------
-# 6. 并发登记/注销：多线程不抛异常、不死锁
+# 5b. 正常结束路径只清表、不终止：直接把「上一用例那张表」拿去 terminate_all 也不能杀
 # ---------------------------------------------------------------------------
+def test_clear_drops_entries_without_killing(tmp_path: Path) -> None:
+    """专钉 `pytest_runtest_protocol` 的 `table.clear()`（Standards P4-2）。
+
+    test_a 把本用例的表对象留在模块全局；test_b 对**那张旧表**调 `terminate_all`
+    （公开 API，不碰私有字段）。`clear()` 生效 ⇒ 旧表已空 ⇒ 进程活着；
+    删掉 `clear()` ⇒ 旧表仍带登记项 ⇒ 这次终止会把它杀掉，父进程断言变红。
+    """
+    result = _run_probe(
+        tmp_path,
+        f"""
+        import pathlib
+        import subprocess
+        import sys
+
+        stale_table = None
+
+        def test_a_finishes_normally(track_subprocess):
+            global stale_table
+            proc = subprocess.Popen(
+                [sys.executable, "-c", { _SLEEP_FOREVER!r }],
+                start_new_session=True,
+            )
+            pathlib.Path("pids.txt").write_text(str(proc.pid))
+            track_subprocess.register(proc)
+            stale_table = track_subprocess
+
+        def test_b_reuses_previous_table():
+            # 前一用例正常结束后，它的表必须已经清空；terminate_all 空表 = 无操作。
+            stale_table.terminate_all("probe::stale-table")
+        """,
+        "-o", "test_timeout=30",
+        timeout=60,
+    )
+
+    try:
+        (pid,) = _read_pids(tmp_path)
+        assert result.returncode == 0, (
+            f"两个用例都应正常结束：stdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert _pid_alive(pid), (
+            f"前一用例登记过的 pid={pid} 被旧表的 terminate_all 杀掉——"
+            "正常结束路径没有清表（table.clear() 缺失或失效）"
+        )
+    finally:
+        if (tmp_path / "pids.txt").exists():
+            for pid in _read_pids(tmp_path):
+                _kill_verified_process(pid)
 def test_concurrent_register_and_unregister_are_thread_safe(
     track_subprocess,
 ) -> None:

@@ -36,8 +36,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="fail when a selected live_services/qiniu test is skipped or not executed",
     )
-    # #1514（并入 #1515）：单测级可归因超时。默认值写在 pyproject 的
-    # `[tool.pytest.ini_options].test_timeout`，这里只登记 ini 键与 marker。
+    # #1514（并入 #1515）：单测级可归因超时。默认值在 pyproject 的
+    # `[tool.pytest.ini_options].test_timeout` 与本处 addini 的 default 各写一次
+    # （两处必须保持一致；只改一处会漂）。
     parser.addini(
         "test_timeout",
         "每个用例的硬超时秒数（须为正有限数）；超时按 thread 方法终止整个进程",
@@ -117,13 +118,20 @@ class _SubprocessTable:
     def register(self, process: subprocess.Popen[object]) -> None:
         """登记一个待清理子进程；不合契约的形态拒绝登记（不抛异常）。"""
         pid = process.pid
-        if pid <= 1 or process.poll() is not None:
+        if pid <= 1:
+            _warn_raw_stderr(f"拒绝登记 pid={pid}：pid 非法（<=1），不追踪")
+            return
+        if process.poll() is not None:
+            _warn_raw_stderr(f"拒绝登记 pid={pid}：进程已退出，不追踪")
             return
         pgid: int | None = None
         if os.name != "nt":
             try:
                 pgid = os.getpgid(pid)
-            except (ProcessLookupError, PermissionError):
+            except (ProcessLookupError, PermissionError) as error:
+                _warn_raw_stderr(
+                    f"拒绝登记 pid={pid}：读进程组失败（{type(error).__name__}），不追踪"
+                )
                 return
             if pgid == os.getpgid(0):
                 _warn_raw_stderr(
@@ -181,31 +189,57 @@ class _SubprocessTable:
         pid = process.pid
         if process.poll() is not None:  # 已退出 = 成功
             return
+        # 单条终止同样要吃整表预算：`deadline` 是整表的硬上限，任何等待都截断到它。
+        remaining = max(0.2, deadline - time.monotonic())
         if os.name == "nt":
             try:
-                subprocess.run(
+                result = subprocess.run(
                     ["taskkill", "/T", "/F", "/PID", str(pid)],
-                    capture_output=True, timeout=10, check=False,
+                    capture_output=True, timeout=min(10.0, remaining), check=False,
                 )
+                if result.returncode != 0 and process.poll() is None:
+                    _warn_raw_stderr(
+                        f"{nodeid}: taskkill pid={pid} rc={result.returncode}，"
+                        "回退 process.kill()"
+                    )
+                    process.kill()
             except (OSError, subprocess.TimeoutExpired) as error:
                 _warn_raw_stderr(
                     f"{nodeid}: taskkill pid={pid} 失败（{type(error).__name__}），"
                     "回退 process.kill()"
                 )
                 process.kill()
+            try:
+                process.wait(timeout=min(self.KILL_WAIT_SECONDS, remaining))
+            except subprocess.TimeoutExpired:
+                _warn_raw_stderr(f"{nodeid}: pid={pid} 终止后仍未回收（放弃等待）")
             return
         group = pgid if pgid is not None else pid
         self._signal_group(group, signal.SIGTERM)
         grace_end = min(time.monotonic() + self.TERM_GRACE_SECONDS, deadline)
         while process.poll() is None and time.monotonic() < grace_end:
             time.sleep(0.05)
-        if process.poll() is not None:
+        # leader 退出 ≠ 组已空：忽略 SIGTERM 的后代仍留在组里。以组内是否还有成员
+        # 决定是否补 SIGKILL，而不是只看 leader 的 `poll()`。组已空时 killpg 会抛
+        # ProcessLookupError ⇒ 视为成功。
+        if not self._group_has_members(group):
             return
         self._signal_group(group, signal.SIGKILL)
         try:
-            process.wait(timeout=self.KILL_WAIT_SECONDS)
+            process.wait(timeout=min(self.KILL_WAIT_SECONDS, remaining))
         except subprocess.TimeoutExpired:
             _warn_raw_stderr(f"{nodeid}: pid={pid} SIGKILL 后仍未回收（放弃等待）")
+
+    @staticmethod
+    def _group_has_members(pgid: int) -> bool:
+        """探测进程组是否还有成员（`killpg(pgid, 0)` 不投递信号）。"""
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:  # 组在，只是无权探测
+            return True
+        return True
 
     @staticmethod
     def _signal_group(pgid: int, sig: int) -> None:
