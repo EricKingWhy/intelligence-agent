@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import math
 import os
+import signal
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import Generator, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -76,6 +79,135 @@ def _raw_stderr() -> int:
         return sys.__stderr__.fileno()
 
 
+def _warn_raw_stderr(message: str) -> None:
+    """把代理/终止告警写到真实 stderr fd（fd 级 capture 会吞掉 `sys.stderr`）。
+
+    告警本身不得变成新的失败源：fd 不可用（极端 capture 形态）时静默放弃。
+    """
+    try:
+        fd = _stderr_fd if _stderr_fd is not None else _raw_stderr()
+        os.write(fd, f"[test-subprocess] {message}\n".encode("utf-8", "backslashreplace"))
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+class _SubprocessTable:
+    """#1702：每用例一份的「已登记子进程」表，看门狗 abort 前按表终止。
+
+    只记**显式登记**项（未登记的进程一律不碰）。登记契约 fail-closed：POSIX 上子进程
+    必须以新会话/进程组启动（`start_new_session=True`），且 `os.getpgid(pid)` 不能等于
+    pytest 自身的进程组——否则 `killpg` 会把 runner 一起杀掉，故拒绝登记并告警，绝不
+    对同组 pid 做 killpg。
+
+    看门狗线程与用例主线程并发读写同一张表，故内部状态一律持锁。
+    """
+
+    #: SIGTERM 后等进程退出的宽限（秒）；超时改投 SIGKILL。
+    TERM_GRACE_SECONDS = 2.0
+    #: 终止整张表的总预算（秒）；到点放弃剩余条目并记日志（abort 不能被拖住）。
+    TERM_BUDGET_SECONDS = 5.0
+    #: SIGKILL 后等回收的上限（秒）。
+    KILL_WAIT_SECONDS = 1.0
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        #: pid -> (Popen, pgid)；pgid 只在 POSIX 上非 None。
+        self._entries: dict[int, tuple[subprocess.Popen[object], int | None]] = {}
+
+    def register(self, process: subprocess.Popen[object]) -> None:
+        """登记一个待清理子进程；不合契约的形态拒绝登记（不抛异常）。"""
+        pid = process.pid
+        if pid <= 1 or process.poll() is not None:
+            return
+        pgid: int | None = None
+        if os.name != "nt":
+            try:
+                pgid = os.getpgid(pid)
+            except (ProcessLookupError, PermissionError):
+                return
+            if pgid == os.getpgid(0):
+                _warn_raw_stderr(
+                    f"拒绝登记 pid={pid}：pgid={pgid} 与 pytest 自身同组，"
+                    "killpg 会连 runner 一起杀；请用 start_new_session=True 启动"
+                )
+                return
+        with self._lock:
+            self._entries.setdefault(pid, (process, pgid))
+
+    def unregister(self, process: subprocess.Popen[object]) -> None:
+        """注销；未登记或重复注销静默返回（幂等）。"""
+        with self._lock:
+            self._entries.pop(process.pid, None)
+
+    def clear(self) -> None:
+        """丢弃全部登记项但**不终止**进程：用例正常结束走这里。"""
+        with self._lock:
+            self._entries.clear()
+
+    def terminate_all(self, nodeid: str) -> None:
+        """终止表中全部子进程：best-effort、有界、永不抛出（`_abort` 调用）。"""
+        deadline = time.monotonic() + self.TERM_BUDGET_SECONDS
+        with self._lock:
+            entries = list(self._entries.values())
+        for index, (process, pgid) in enumerate(entries):
+            if time.monotonic() >= deadline:
+                _warn_raw_stderr(
+                    f"{nodeid}: 终止子进程总预算 {self.TERM_BUDGET_SECONDS:g}s 用完，"
+                    f"放弃剩余 {len(entries) - index} 个条目"
+                )
+                return
+            try:
+                self._terminate_one(nodeid, process, pgid, deadline)
+            except Exception as error:  # noqa: BLE001 — best-effort：只记日志，不阻塞退出
+                _warn_raw_stderr(
+                    f"{nodeid}: 终止 pid={process.pid} 失败："
+                    f"{type(error).__name__}: {error}"
+                )
+
+    def _terminate_one(
+        self,
+        nodeid: str,
+        process: subprocess.Popen[object],
+        pgid: int | None,
+        deadline: float,
+    ) -> None:
+        pid = process.pid
+        if process.poll() is not None:  # 已退出 = 成功
+            return
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(pid)],
+                    capture_output=True, timeout=10, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                _warn_raw_stderr(
+                    f"{nodeid}: taskkill pid={pid} 失败（{type(error).__name__}），"
+                    "回退 process.kill()"
+                )
+                process.kill()
+            return
+        group = pgid if pgid is not None else pid
+        self._signal_group(group, signal.SIGTERM)
+        grace_end = min(time.monotonic() + self.TERM_GRACE_SECONDS, deadline)
+        while process.poll() is None and time.monotonic() < grace_end:
+            time.sleep(0.05)
+        if process.poll() is not None:
+            return
+        self._signal_group(group, signal.SIGKILL)
+        try:
+            process.wait(timeout=self.KILL_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _warn_raw_stderr(f"{nodeid}: pid={pid} SIGKILL 后仍未回收（放弃等待）")
+
+    @staticmethod
+    def _signal_group(pgid: int, sig: int) -> None:
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            pass  # 组已空（进程已退出）= 成功
+
+
 def _effective_timeout(item: pytest.Item) -> tuple[float, str]:
     marker = item.get_closest_marker("test_timeout")
     if marker is not None:
@@ -120,8 +252,13 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         _effective_timeout(item)
 
 
-def _abort(item: pytest.Item, timeout: float, reason: str) -> None:
-    """超时点：点 nodeid + 全线程栈 + 原因，然后硬退出。
+def _abort(
+    item: pytest.Item,
+    timeout: float,
+    reason: str,
+    table: _SubprocessTable | None = None,
+) -> None:
+    """超时点：点 nodeid + 全线程栈 + 原因，终止已登记子进程，然后硬退出。
 
     为什么是 ``os._exit`` 而不是抛异常：挂死多半发生在 ``await`` / 阻塞 IO 里，
     异常抛不进那段栈；``pytest-timeout`` 的 ``thread`` 方法同样是终止整个进程
@@ -146,7 +283,17 @@ def _abort(item: pytest.Item, timeout: float, reason: str) -> None:
         )
         faulthandler.dump_traceback(file=fd, all_threads=True)
     finally:
-        os._exit(1)
+        # #1702：归因写完后按表终止已登记子进程（best-effort、有界、本身不抛）。
+        # 嵌套 finally 保证任何异常/超时下 os._exit(1) 都跑到。
+        try:
+            if table is not None:
+                table.terminate_all(item.nodeid)
+        finally:
+            os._exit(1)
+
+
+#: 当前用例的子进程登记表（#1702）；每用例在 protocol 进入时换新，正常结束清空。
+_subprocess_table = _SubprocessTable()
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -154,10 +301,13 @@ def pytest_runtest_protocol(
     item: pytest.Item,
 ) -> Generator[None, object, object]:
     """包住 setup+call+teardown：挂死在任何阶段都归因到该用例。"""
-    global _dog
+    global _dog, _subprocess_table
 
     timeout, reason = _effective_timeout(item)
-    _dog = threading.Timer(timeout, _abort, args=(item, timeout, reason))
+    # #1702：每用例换新表，上一用例的登记项不会活到本用例的 abort 里。
+    table = _SubprocessTable()
+    _subprocess_table = table
+    _dog = threading.Timer(timeout, _abort, args=(item, timeout, reason, table))
     _dog.daemon = True
     _dog.start()
     try:
@@ -166,6 +316,20 @@ def pytest_runtest_protocol(
         if _dog is not None:
             _dog.cancel()
             _dog = None
+        # 正常结束只清空、不终止：登记制只管 abort 路径。
+        table.clear()
+
+
+@pytest.fixture
+def track_subprocess() -> _SubprocessTable:
+    """#1702：当前用例的子进程登记表，供测试登记/注销外部子进程。
+
+    用法：`track_subprocess.register(popen)` / `track_subprocess.unregister(popen)`。
+    子进程必须以 `start_new_session=True` 启动，否则登记被拒并告警（见
+    `_SubprocessTable`）。用例正常结束时表被清空但**不杀进程**；只有看门狗 abort
+    会按表终止。
+    """
+    return _subprocess_table
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
