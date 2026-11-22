@@ -63,7 +63,7 @@ def _pid_alive(pid: int) -> bool:
         )
         return str(pid) in result.stdout
     result = subprocess.run(
-        ["ps", "-o", "pid=", "-p", str(pid)],
+        ["ps", "-o", "pid=,ppid=,pgid=", "-p", str(pid)],
         capture_output=True, text=True, check=False,
     )
     return result.returncode == 0 and result.stdout.strip() != ""

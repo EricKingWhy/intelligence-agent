@@ -80,7 +80,7 @@ def _raw_stderr() -> int:
 
 
 def _warn_raw_stderr(message: str) -> None:
-    """把代理/终止告警写到真实 stderr fd（fd 级 capture 会吞掉 `sys.stderr`）。
+    """把登记/终止告警写到真实 stderr fd（fd 级 capture 会吞掉 `sys.stderr`）。
 
     告警本身不得变成新的失败源：fd 不可用（极端 capture 形态）时静默放弃。
     """
@@ -147,8 +147,15 @@ class _SubprocessTable:
     def terminate_all(self, nodeid: str) -> None:
         """终止表中全部子进程：best-effort、有界、永不抛出（`_abort` 调用）。"""
         deadline = time.monotonic() + self.TERM_BUDGET_SECONDS
-        with self._lock:
+        # 取快照带超时：临界区只有纯 dict 操作、不可能长期持有，但 abort 路径的
+        # 硬要求是 `finally` 的 `os._exit(1)` 必到——绝不为了锁把退出堵死。
+        if not self._lock.acquire(timeout=1.0):
+            _warn_raw_stderr(f"{nodeid}: 取登记表锁超时，放弃终止已登记子进程")
+            return
+        try:
             entries = list(self._entries.values())
+        finally:
+            self._lock.release()
         for index, (process, pgid) in enumerate(entries):
             if time.monotonic() >= deadline:
                 _warn_raw_stderr(
