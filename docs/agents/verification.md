@@ -581,9 +581,55 @@ Windows 可复跑命令（PowerShell，仓库根；`.venv\Scripts\python.exe`）
 二者不可共存——`parser.addini` 重复注册是静默覆盖、无告警；装 pytest-timeout
 前须先移除本机制。
 
-**孤儿子进程**：`os._exit` 不跑 teardown，fixture 派生的外部子进程（如测试起
-的服务器进程）不会被回收、会成为孤儿残留，由 CI job 结束时清理；如需进程级
-回收（看门狗 abort 前终止已登记的子进程），另开专项票做子进程追踪，不在本票范围。
+**孤儿子进程（#1702，登记制）**：`os._exit` 不跑 teardown，所以超时点必须在
+退出前自己收拾已登记的外部子进程，不能指望 teardown 或 CI job 兜底。机制在
+`tests/conftest.py`：`_SubprocessTable` + `track_subprocess` 夹具 + `_abort` 里的
+终止调用。边界与数值如下。
+
+- **只管已登记项**：注册表只记测试代码显式登记过的 `Popen`；未登记进程一律不碰，
+  也不做进程树扫描。这是刻意的范围收敛，不是遗漏。
+- **spawn 前置契约**：POSIX 上子进程必须 `start_new_session=True` 启动（自成会话 /
+  进程组）。登记时读 `os.getpgid(pid)`；若它等于 pytest 自身的组（`os.getpgid(0)`），
+  **拒绝登记**并往真实 stderr fd 写一条 `[test-subprocess] 拒绝登记 …` 告警——
+  对同组 pid 做 `killpg` 会把 runner 自己一起杀掉。既有反例
+  `tests/host_service/test_serve_subprocess.py::_spawn_serve`（不带 `start_new_session`）
+  因此**不能**登记，仍走它自己的 `_terminate`。
+- **登记表生命周期**：`pytest_runtest_protocol` 进入时换新表，正常结束（含失败、
+  skip）只清空不终止。跨用例不串扰：前一用例的登记项不会活到后一用例的 abort。
+- **终止语义**：POSIX 先 `killpg(pgid, SIGTERM)`，宽限 **2.0s**（轮询 `poll()`），
+  宽限后**不以 leader 是否存活为条件**——只要 `killpg(pgid, 0)` 探测到组内还有成员
+  （忽略 SIGTERM 的后代常见于此）就补 `killpg(pgid, SIGKILL)`，再等 **1.0s** 回收；
+  按组收，所以**同一进程组内的后代一并终止**。Windows 走 `taskkill /T /F /PID`
+  （`subprocess.run`，timeout 取 `min(10, 剩余预算)`），rc≠0 且进程仍存活、或抛
+  `OSError`/超时，都记 `[test-subprocess]` 日志并回退 `process.kill()`，随后同样等
+  `min(1.0s, 剩余预算)` 回收。
+- **有界与 best-effort**：整张表的总预算是 **5.0s**，到点放弃剩余条目并记日志；
+  单条内的每次等待都按剩余预算截断，所以 Windows 分支也不会单条突破总预算。任何
+  `ProcessLookupError` / `PermissionError` / 超时都只往真实 stderr fd 写一条
+  `[test-subprocess]` 日志（带 nodeid 与失败原因），继续处理下一个，绝不抛出，
+  也绝不阻止 `finally` 里的 `os._exit(1)`。已退出 / 查无此进程视为成功。
+  登记侧同样可归因：pid 非法、进程已退出、读进程组失败、与 pytest 同组，四种拒绝
+  各写一条 `[test-subprocess] 拒绝登记 …`。
+- **顺序**（AC1）：写 nodeid + `faulthandler` 全线程栈 → 终止登记表内全部子进程 →
+  `finally: os._exit(1)`。
+- **不承诺**：`setsid` 另起会话、脱离进程组的后代（#549 SB-02 的 killpg 盲区）不在
+  本机制承诺内；根治需要 cgroup / namespace，另票评估。xdist 下每个 worker 进程
+  有自己的注册表，语义不变。
+- **与 #1534 的分工**：#1534 只做 fixture 自身的 teardown 回收（正常返回 / 启动失败 /
+  端口占用路径）；超时触发后 watchdog abort 路径的回收归 #1702，即本节。
+
+回归锁：`tests/test_per_test_timeout_subprocess.py`（孤儿终止、同组后代、忽略 SIGTERM
+的后代、注册/注销、重复终止幂等、未登记不受影响、跨用例不串扰、正常结束只清表不杀、
+并发登记/注销、同组
+拒绝登记），全部
+走父进程 harness——触发超时的进程已被 `os._exit(1)` 打死，进程内断言没有意义。
+
+Windows 手工复跑（PowerShell，仓库根；`.venv\Scripts\python.exe`）：
+`$env:PYTHONUTF8=1; .venv\Scripts\python.exe -m pytest tests\test_per_test_timeout.py tests\test_pytest_deadline.py tests\test_per_test_timeout_subprocess.py -q -p no:randomly --basetemp=$env:TEMP\pptt`
+期望 `13 + 1 + 10 = 24 passed`。其中「同组后代」「忽略 SIGTERM 的后代」「拒绝登记」
+三条用例带 `sys.platform == "win32"` 早退（Windows 无 POSIX 进程组语义）；Windows
+侧的终止主路径是 `taskkill /T /F`，需真机取证后才能把本节从「未取证」改成实测。
+**读数状态：无 Windows 落盘读数**。
 
 **默认值**：`pyproject.toml` `[tool.pytest.ini_options]` 里 `test_timeout = "300"`。
 实测依据（2026-11-07，Gate-1 与 Windows venv；2026-11-09 补本机 Linux 读数）：
