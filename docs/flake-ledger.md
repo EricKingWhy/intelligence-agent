@@ -229,3 +229,82 @@ Kubernetes SIG Testing 的 flaky-tests 政策：**零容忍 + 隔离（quarantin
     AC1① 命中 `DIV.project-dialog-head`、AC1② `.palette-input` 计数 1≠0、
     AC1③ 与 AC4③ 面板被自关（`element(s) not found`）。
     读数：`~/workspace/ticket-takeover-drafts/evidence-1706/spec-defect-timing-*.log`。
+
+---
+
+### 7.3 `tests/live_gate/test_live_gate_runner.py` 五条节点（teardown 卫生失败）
+
+- **F1 名称 / 签名 / 触发命令 / 树**
+  - 名称（五条，都在同一文件、同一 blob）：`test_stub_scenario_is_a_seam_and_forbids_pass`（A）、
+    `test_run_failure_keeps_running_the_remaining_attempts`（B）、
+    `test_three_passes_produce_pass_and_evidence_under_out_dir`（C）、
+    `test_injected_failure_caps_verdict_at_fail_and_keeps_other_attempts`（D）、
+    `test_host_paths_are_redacted_and_traces_still_validate`（E）。
+  - 签名：`attempts` 列表**某一次 attempt** 的判定为 FAIL 而期望 PASS ——
+    `At index <N> diff: <Verdict.FAIL: 'FAIL'> != <Verdict.PASS: 'PASS'>`（A/B/D），
+    或总判定 `assert <Verdict.FAIL: 'FAIL'> is <Verdict.PASS: 'PASS'>`（C，`:214`），
+    或 `assert ['sandbox_deleted'] in ([], ['worktree_clean'])`（E，`:502`）。`N` 实测 0/1/2 都出现过。
+    11 份红 run 里 7 份是同一次全量里多条节点同时红（最多 5 条），4 份只有 1 条；每个 run 只有一条 pytest 汇总行（不是重跑叠加）。
+  - 触发命令：CI 侧为 nightly `gate-nightly` 与 `gate1` 的 pytest-full + coverage 车道，以及 PR 侧
+    `coverage-ratchet`（`src/**` 改动时触发，非必需检查；同族红已两次：41536257217 attempt1、42674181715 attempt1）；
+    单文件隔离跑为 `cd <repo> && PYTHONPATH=src .venv/bin/python -m pytest tests/live_gate/test_live_gate_runner.py -q -p no:randomly`
+    （隔离跑通常全绿，19 用例通过；同目录 287 用例）。
+  - 树（失败树，`tests/live_gate/test_live_gate_runner.py` blob 全为 `16682dcb7b…`、
+    `evaluation/live_gate/runner.py` 全为 `46811a66bd…`、`evaluation/live_gate/workspace.py` 全为 `6f2bd6c0f3…`）：
+    `ae4b8de7c`（2026-10-26）、`2b04fa767`（2026-10-29..11-01）、`6734c369a`（11-03）、`b39f44ba9`（11-03..11-05）、
+    `2468e5af4`（11-08）、`fb6b37f4e`（11-09）、`69e33fe1b`（11-09..11-13）、`4ec0d9f7f`（11-14）、
+    `d554cbf28`（11-20）、`43ae25fb1`（11-22）。
+  - 读数落盘：`~/workspace/ticket-1656/junit/pytest-<run>.xml`（11 份红 run 里 10 份有 junit；40383559809 的 junit 已被 GitHub 过期，
+    改用 `junit/run-40383559809-excerpt.txt` 的 `--log` 原文）、`evidence/pytest-42565212662.xml`、
+    逐条核对在 `~/workspace/ticket-1656/evidence-check.md`（在协作机 home 下，**不入库**）。
+    ⚠ junit **不含** `system-out`（0 个 `<system-out` 元素），`board_projection` 的 traceback 只能从 `gh run view --log` 取。
+- **根因（部分机械、部分未 pin）**
+  - 机械部分（实读代码）：`evaluation/live_gate/runner.py:409` 的
+    `status=Verdict.PASS if (outcome.ok and not hygiene) else Verdict.FAIL`，`hygiene` 非空 ⇔
+    `workspace.teardown()` 后 `root.exists()` 仍为真（`workspace.py:102-122`）；
+    `_force_remove`（`workspace.py:65-91`）逐项吞 `OSError`，最后只以 `root.exists()` 为判据，
+    **没有任何「等后台写者结束」的步骤**；证据级 `deleted=all(...)`（`runner.py:593`）使任一次 attempt 的残留
+    直接翻掉整份证据，validator 因此报 `sandbox_deleted` FAIL（`validator.py:296-305`）。
+    替身场景 `run_failures=()` 时三次 `outcome.ok` 全 True，且失败行号落在 attempts 列表断言 / 总判定断言上
+    （只有 B 的 `stub.ran`（`:328`）在失败行（`:329`）之前；A `:273` / C `:217` / D `:246` 的 `stub.ran` 在失败断言之后，执行不到），
+    ⇒ 在本轮现场里，失败只来自「一次性临时根目录没删干净」。
+  - 候选写者：`src/agent_harness/session/session.py:988-1007` 的 `_defer_board_projection` 用
+    `loop.run_in_executor(None, …)` **fire-and-forget**（不 await、无 barrier）；
+    `board_projection.py:799` 的 `path.parent.is_dir()` 与 `:812` `mkstemp` 之间是 TOCTOU，
+    `:821` `os.replace` 在目录被删后抛 `FileNotFoundError`（现场：`-a3-` / `-a2-` 的 session 目录）。
+  - **未 pin**：具体是哪条线程/哪一步留下残留未证实；11 份红 run 里**有 4 份完全没有 sidecar 报错**
+    （41336038410 / 43646631860 / 45065210687 / 42565212662，后者四节点同红却零报错）
+    ⇒ sidecar 写者既不能排除、也不能单独确认为充分原因。`_STAT_POOL`（`store.py:222-233`）只做 `os.stat`、不写盘，
+    已机械排除。残留形态（tempfile 残留 vs 重建目录）亦未证实。
+  - 跟踪票：**#1713**（P2 bug 票，与本条目同批落，2026-11-28 已开票）。
+  - 频次（口径 C，11 份红 run）：A 6 / B 5 / C 5 / D 7 / E 6；本条目五条节点在 6 臂（#1648 的 A/B）之外另计。
+  - 本条是 **pytest 节点**，不是 e2e spec；§7 抬头「两条 spec 均不在 PR 车道」只描述 §7.1/§7.2。
+    本条节点确实在 PR 侧 `coverage-ratchet`（**非必需检查**）里跑，且已两次在该车道红
+    （run 41536257217 attempt1、42674181715 attempt1）。读数落盘位置也见本条目 F1，不适用抬头的 `~/1500-evidence/`。
+- **F2 同树隔离重跑 ≥2 次全绿**
+  - 历史上 #1648 轮在终态 HEAD、venv bin 前置 PATH 下隔离重跑 **≥10 轮全绿（每轮 287 passed）**
+    （`~/workspace/ticket-1648/logs/1648-phaseB-lgloop.log` 逐轮 `N/N: 287 passed`）；
+    本轮未重跑（任务书禁止跑全量/自研探针）。
+  - 注意：F2 只是「能复跑成绿」，**不能**用来否定 §2 第 1 条 —— 同树也有红读数。
+- **F3 零文件交集**
+  - `git diff --name-status` 与本条目五条节点相关提交无交集不适用（本条不是由某张 PR 引入的）；
+    可机械给出的等价证明是 blob 恒等：`tests/live_gate/test_live_gate_runner.py` 在全部失败树 + `origin/main`
+    都是 `16682dcb7b…`，`evaluation/live_gate/runner.py` 都是 `46811a66bd…`，`workspace.py` 都是 `6f2bd6c0f3…`
+    ⇒ 这些节点在整段观测窗口内**代码未变**，失败不是某个分支的 diff 引起的。
+- **F4 基线对照**
+  - 基线同签名红：**是**。C `:214` 在 `2b04fa767`（`#1643` 的 pre-fix base，2026-10-29）上就红
+    （run 41336038410，2026-11-01）；更早的红在 `ae4b8de7c`（2026-10-27，run 40383559809）。
+    `git merge-base --is-ancestor 5449a9e62 <该树>` 均为**非零** ⇒ `#1643` 的串行化改动当时尚未合入，
+    `board_projection` 的 `FileNotFoundError` 早于它存在。
+  - ⇒ `#1643` **不是引入者**（已 merged 2026-11-02），本条目**不阻塞** #1643。
+- **F5 处置**
+  - **§2 第 1 条命中**：同签名（C `:214`）**同树 `69e33fe1b` 上 3 次内再现 2 次**
+    （42716144174 / 42894620989），同树另有 2 次 live_gate 0 失败（43302998763 / 43501307727，
+    这两个 run 的 conclusion 仍是 failure，红在 `playwright e2e（Chromium）` job）。
+    ⇒ 按 §2 第 1 条**不得登记为 flake**；同签名累计：C 5 次 / A 6 次 / D 7 次 / B 5 次 / E 6 次（11 份红 run）
+    ⇒ 按 F5 应开票指派 owner。
+  - 本轮结论：**不登记为 flake、不移出必需路径**；按「既有红 + 真 bug」承接，P2 bug 票 **#1713** 跟踪根因。
+  - 用户裁决：2026-11-27 13:35 选**选项 1**（改按 flake 立案记录 + 同步开 P2 bug 票）；
+    按该裁决开票（本条目由 #1656 派工落地）。
+  - **该条不构成准入**：本节沿用 §7 开头的口径 —— 本节条目只把读数落盘、供协调员按 F1–F5 接手，
+    **不得**读成「已登记 flake、可放上必需路径」。
